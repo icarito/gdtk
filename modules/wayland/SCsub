@@ -1,0 +1,18 @@
+#!/usr/bin/env python
+
+Import("env")
+Import("env_modules")
+
+env_wayland = env_modules.Clone()
+
+# wlr/types/wlr_xdg_shell.h incluye "xdg-shell-protocol.h": el generado vive aqui.
+env_wayland.Prepend(CPPPATH=[Dir(".").abspath])
+
+env_wayland.Append(CPPDEFINES=["WLR_USE_UNSTABLE"])
+env_wayland.ParseConfig("pkg-config wlroots-0.19 --cflags")
+
+# Las libs van al env del link final (el módulo es una librería estática).
+env.ParseConfig("pkg-config wlroots-0.19 wayland-server xkbcommon pixman-1 --libs")
+
+env_wayland.add_source_files(env.modules_sources, "*.c")
+env_wayland.add_source_files(env.modules_sources, "*.cpp")

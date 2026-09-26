@@ -1,0 +1,462 @@
+#include "wayland_compositor.h"
+
+#include "wl_server.h"
+
+#include "core/class_db.h"
+#include "core/image.h"
+#include "core/list.h"
+#include "core/map.h"
+#include "core/os/keyboard.h"
+#include "core/os/os.h"
+
+#include <string.h>
+
+// Codigos evdev (linux/input-event-codes.h) sin incluir ese header: choca con los
+// KEY_* de core/os/keyboard.h.
+enum {
+	EVDEV_KEY_ESC = 1,
+	EVDEV_KEY_1 = 2,
+	EVDEV_KEY_2 = 3,
+	EVDEV_KEY_3 = 4,
+	EVDEV_KEY_4 = 5,
+	EVDEV_KEY_5 = 6,
+	EVDEV_KEY_6 = 7,
+	EVDEV_KEY_7 = 8,
+	EVDEV_KEY_8 = 9,
+	EVDEV_KEY_9 = 10,
+	EVDEV_KEY_0 = 11,
+	EVDEV_KEY_MINUS = 12,
+	EVDEV_KEY_EQUAL = 13,
+	EVDEV_KEY_BACKSPACE = 14,
+	EVDEV_KEY_TAB = 15,
+	EVDEV_KEY_LEFTBRACE = 26,
+	EVDEV_KEY_RIGHTBRACE = 27,
+	EVDEV_KEY_ENTER = 28,
+	EVDEV_KEY_LEFTCTRL = 29,
+	EVDEV_KEY_A = 30,
+	EVDEV_KEY_S = 31,
+	EVDEV_KEY_D = 32,
+	EVDEV_KEY_F = 33,
+	EVDEV_KEY_G = 34,
+	EVDEV_KEY_H = 35,
+	EVDEV_KEY_J = 36,
+	EVDEV_KEY_K = 37,
+	EVDEV_KEY_L = 38,
+	EVDEV_KEY_Z = 44,
+	EVDEV_KEY_X = 45,
+	EVDEV_KEY_C = 46,
+	EVDEV_KEY_V = 47,
+	EVDEV_KEY_B = 48,
+	EVDEV_KEY_N = 49,
+	EVDEV_KEY_M = 50,
+	EVDEV_KEY_Q = 16,
+	EVDEV_KEY_W = 17,
+	EVDEV_KEY_E = 18,
+	EVDEV_KEY_R = 19,
+	EVDEV_KEY_T = 20,
+	EVDEV_KEY_Y = 21,
+	EVDEV_KEY_U = 22,
+	EVDEV_KEY_I = 23,
+	EVDEV_KEY_O = 24,
+	EVDEV_KEY_P = 25,
+	EVDEV_KEY_SEMICOLON = 39,
+	EVDEV_KEY_APOSTROPHE = 40,
+	EVDEV_KEY_BACKSLASH = 43,
+	EVDEV_KEY_COMMA = 51,
+	EVDEV_KEY_DOT = 52,
+	EVDEV_KEY_SLASH = 53,
+	EVDEV_KEY_LEFTSHIFT = 42,
+	EVDEV_KEY_LEFTALT = 56,
+	EVDEV_KEY_SPACE = 57,
+	EVDEV_KEY_HOME = 102,
+	EVDEV_KEY_UP = 103,
+	EVDEV_KEY_LEFT = 105,
+	EVDEV_KEY_RIGHT = 106,
+	EVDEV_KEY_END = 107,
+	EVDEV_KEY_DOWN = 108,
+	EVDEV_KEY_DELETE = 111,
+	EVDEV_BTN_LEFT = 0x110,
+	EVDEV_BTN_RIGHT = 0x111,
+	EVDEV_BTN_MIDDLE = 0x112,
+};
+
+// Los codigos evdev de las letras siguen el orden fisico QWERTY, no el alfabetico.
+static uint32_t _letter_to_evdev(uint32_t p_scancode) {
+	switch (p_scancode) {
+		case KEY_Q: return EVDEV_KEY_Q;
+		case KEY_W: return EVDEV_KEY_W;
+		case KEY_E: return EVDEV_KEY_E;
+		case KEY_R: return EVDEV_KEY_R;
+		case KEY_T: return EVDEV_KEY_T;
+		case KEY_Y: return EVDEV_KEY_Y;
+		case KEY_U: return EVDEV_KEY_U;
+		case KEY_I: return EVDEV_KEY_I;
+		case KEY_O: return EVDEV_KEY_O;
+		case KEY_P: return EVDEV_KEY_P;
+		case KEY_A: return EVDEV_KEY_A;
+		case KEY_S: return EVDEV_KEY_S;
+		case KEY_D: return EVDEV_KEY_D;
+		case KEY_F: return EVDEV_KEY_F;
+		case KEY_G: return EVDEV_KEY_G;
+		case KEY_H: return EVDEV_KEY_H;
+		case KEY_J: return EVDEV_KEY_J;
+		case KEY_K: return EVDEV_KEY_K;
+		case KEY_L: return EVDEV_KEY_L;
+		case KEY_Z: return EVDEV_KEY_Z;
+		case KEY_X: return EVDEV_KEY_X;
+		case KEY_C: return EVDEV_KEY_C;
+		case KEY_V: return EVDEV_KEY_V;
+		case KEY_B: return EVDEV_KEY_B;
+		case KEY_N: return EVDEV_KEY_N;
+		case KEY_M: return EVDEV_KEY_M;
+		default: return 0;
+	}
+}
+
+static uint32_t _scancode_to_evdev(uint32_t p_scancode) {
+	if (p_scancode == 0) {
+		return 0;
+	}
+	uint32_t letter = _letter_to_evdev(p_scancode);
+	if (letter != 0) {
+		return letter;
+	}
+	if (p_scancode >= KEY_1 && p_scancode <= KEY_9) {
+		return EVDEV_KEY_1 + (p_scancode - KEY_1);
+	}
+	if (p_scancode == KEY_0) {
+		return EVDEV_KEY_0;
+	}
+	switch (p_scancode) {
+		case KEY_SPACE:
+			return EVDEV_KEY_SPACE;
+		case KEY_ENTER:
+		case KEY_KP_ENTER:
+			return EVDEV_KEY_ENTER;
+		case KEY_BACKSPACE:
+			return EVDEV_KEY_BACKSPACE;
+		case KEY_TAB:
+			return EVDEV_KEY_TAB;
+		case KEY_ESCAPE:
+			return EVDEV_KEY_ESC;
+		case KEY_LEFT:
+			return EVDEV_KEY_LEFT;
+		case KEY_RIGHT:
+			return EVDEV_KEY_RIGHT;
+		case KEY_UP:
+			return EVDEV_KEY_UP;
+		case KEY_DOWN:
+			return EVDEV_KEY_DOWN;
+		case KEY_HOME:
+			return EVDEV_KEY_HOME;
+		case KEY_END:
+			return EVDEV_KEY_END;
+		case KEY_DELETE:
+			return EVDEV_KEY_DELETE;
+		case KEY_SHIFT:
+			return EVDEV_KEY_LEFTSHIFT;
+		case KEY_CONTROL:
+			return EVDEV_KEY_LEFTCTRL;
+		case KEY_ALT:
+			return EVDEV_KEY_LEFTALT;
+		case KEY_MINUS:
+			return EVDEV_KEY_MINUS;
+		case KEY_EQUAL:
+			return EVDEV_KEY_EQUAL;
+		case KEY_BRACKETLEFT:
+			return EVDEV_KEY_LEFTBRACE;
+		case KEY_BRACKETRIGHT:
+			return EVDEV_KEY_RIGHTBRACE;
+		case KEY_SEMICOLON:
+			return EVDEV_KEY_SEMICOLON;
+		case KEY_APOSTROPHE:
+			return EVDEV_KEY_APOSTROPHE;
+		case KEY_COMMA:
+			return EVDEV_KEY_COMMA;
+		case KEY_PERIOD:
+			return EVDEV_KEY_DOT;
+		case KEY_SLASH:
+			return EVDEV_KEY_SLASH;
+		case KEY_BACKSLASH:
+			return EVDEV_KEY_BACKSLASH;
+		default:
+			return 0;
+	}
+}
+
+void WaylandCompositor::_cb_added(void *p_ud, int p_id) {
+	static_cast<WaylandCompositor *>(p_ud)->_on_added(p_id);
+}
+
+void WaylandCompositor::_cb_removed(void *p_ud, int p_id) {
+	static_cast<WaylandCompositor *>(p_ud)->_on_removed(p_id);
+}
+
+void WaylandCompositor::_cb_frame(void *p_ud, int p_id, const unsigned char *p_rgba, int p_w, int p_h) {
+	static_cast<WaylandCompositor *>(p_ud)->_on_frame(p_id, p_rgba, p_w, p_h);
+}
+
+void WaylandCompositor::_cb_title(void *p_ud, int p_id, const char *p_title) {
+	static_cast<WaylandCompositor *>(p_ud)->_on_title(p_id, p_title);
+}
+
+void WaylandCompositor::_on_added(int p_id) {
+	Toplevel t;
+	toplevels.insert(p_id, t);
+	emit_signal("toplevel_added", p_id);
+}
+
+void WaylandCompositor::_on_removed(int p_id) {
+	toplevels.erase(p_id);
+	emit_signal("toplevel_removed", p_id);
+}
+
+void WaylandCompositor::_on_frame(int p_id, const unsigned char *p_rgba, int p_w, int p_h) {
+	commit_count++;
+	if (p_rgba == NULL || p_w <= 0 || p_h <= 0) {
+		return;
+	}
+
+	int size = p_w * p_h * 4;
+	PoolVector<uint8_t> data;
+	data.resize(size);
+	{
+		PoolVector<uint8_t>::Write w = data.write();
+		memcpy(w.ptr(), p_rgba, size);
+	}
+	Ref<Image> img = memnew(Image(p_w, p_h, false, Image::FORMAT_RGBA8, data));
+
+	Map<int, Toplevel>::Element *e = toplevels.find(p_id);
+	if (e == NULL) {
+		Toplevel t;
+		e = toplevels.insert(p_id, t);
+	}
+	Ref<ImageTexture> tex = e->get().texture;
+	if (tex.is_null() || tex->get_width() != p_w || tex->get_height() != p_h) {
+		tex.instance();
+		tex->create_from_image(img, 0);
+		e->get().texture = tex;
+	} else {
+		tex->set_data(img);
+	}
+}
+
+void WaylandCompositor::_on_title(int p_id, const char *p_title) {
+	Map<int, Toplevel>::Element *e = toplevels.find(p_id);
+	if (e == NULL) {
+		Toplevel t;
+		e = toplevels.insert(p_id, t);
+	}
+	e->get().title = String::utf8(p_title != NULL ? p_title : "");
+}
+
+void WaylandCompositor::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("start"), &WaylandCompositor::start);
+	ClassDB::bind_method(D_METHOD("launch", "cmd", "args"), &WaylandCompositor::launch, DEFVAL(PoolStringArray()));
+	ClassDB::bind_method(D_METHOD("get_texture", "id"), &WaylandCompositor::get_texture);
+	ClassDB::bind_method(D_METHOD("get_title", "id"), &WaylandCompositor::get_title);
+	ClassDB::bind_method(D_METHOD("get_ids"), &WaylandCompositor::get_ids);
+	ClassDB::bind_method(D_METHOD("set_size", "id", "size"), &WaylandCompositor::set_size);
+	ClassDB::bind_method(D_METHOD("close", "id"), &WaylandCompositor::close);
+	ClassDB::bind_method(D_METHOD("focus", "id"), &WaylandCompositor::focus);
+	ClassDB::bind_method(D_METHOD("pointer_motion", "id", "pos"), &WaylandCompositor::pointer_motion);
+	ClassDB::bind_method(D_METHOD("pointer_button", "button_index", "pressed"), &WaylandCompositor::pointer_button);
+	ClassDB::bind_method(D_METHOD("pointer_axis", "dy"), &WaylandCompositor::pointer_axis);
+	ClassDB::bind_method(D_METHOD("key", "event"), &WaylandCompositor::key);
+
+	ClassDB::bind_method(D_METHOD("set_default_size", "size"), &WaylandCompositor::set_default_size);
+	ClassDB::bind_method(D_METHOD("get_default_size"), &WaylandCompositor::get_default_size);
+	ADD_PROPERTY(PropertyInfo(Variant::VECTOR2, "default_size"), "set_default_size", "get_default_size");
+
+	ClassDB::bind_method(D_METHOD("get_commit_count"), &WaylandCompositor::get_commit_count);
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "commit_count"), "", "get_commit_count");
+
+	ADD_SIGNAL(MethodInfo("toplevel_added", PropertyInfo(Variant::INT, "id")));
+	ADD_SIGNAL(MethodInfo("toplevel_removed", PropertyInfo(Variant::INT, "id")));
+}
+
+void WaylandCompositor::_notification(int p_what) {
+	switch (p_what) {
+		case NOTIFICATION_PROCESS: {
+			if (server != NULL) {
+				wl_server_dispatch(server);
+				wl_server_frame_done(server);
+			}
+		} break;
+		default:
+			break;
+	}
+}
+
+WaylandCompositor::WaylandCompositor() {
+	server = NULL;
+	default_size = Vector2(1024, 700);
+	commit_count = 0;
+}
+
+WaylandCompositor::~WaylandCompositor() {
+	if (server != NULL) {
+		wl_server_destroy(server);
+		server = NULL;
+	}
+}
+
+String WaylandCompositor::start() {
+	if (server != NULL) {
+		return String(wl_server_socket(server));
+	}
+	wl_server_callbacks cb;
+	memset(&cb, 0, sizeof(cb));
+	cb.ud = this;
+	cb.added = &WaylandCompositor::_cb_added;
+	cb.removed = &WaylandCompositor::_cb_removed;
+	cb.frame = &WaylandCompositor::_cb_frame;
+	cb.title = &WaylandCompositor::_cb_title;
+
+	server = wl_server_create(cb, (int)default_size.x, (int)default_size.y);
+	if (server == NULL) {
+		ERR_PRINT("WaylandCompositor: no se pudo crear el servidor wayland");
+		return String();
+	}
+	set_process(true);
+	return String(wl_server_socket(server));
+}
+
+int WaylandCompositor::launch(const String &p_cmd, const PoolStringArray &p_args) {
+	if (server == NULL || p_cmd.empty()) {
+		return -1;
+	}
+	List<String> args;
+	args.push_back("-u");
+	args.push_back("DISPLAY");
+	args.push_back("WAYLAND_DISPLAY=" + String(wl_server_socket(server)));
+	args.push_back("GDK_BACKEND=wayland");
+	args.push_back("GSK_RENDERER=cairo");
+	args.push_back("LIBGL_ALWAYS_SOFTWARE=1");
+	args.push_back("SDL_VIDEODRIVER=wayland");
+	args.push_back(p_cmd);
+	for (int i = 0; i < p_args.size(); i++) {
+		args.push_back(p_args[i]);
+	}
+	OS::ProcessID pid = 0;
+	Error err = OS::get_singleton()->execute("env", args, false, &pid);
+	if (err != OK) {
+		ERR_PRINT("WaylandCompositor: fallo al lanzar " + p_cmd);
+		return -1;
+	}
+	return (int)pid;
+}
+
+Ref<Texture> WaylandCompositor::get_texture(int p_id) const {
+	const Map<int, Toplevel>::Element *e = toplevels.find(p_id);
+	if (e == NULL) {
+		return Ref<Texture>();
+	}
+	return e->get().texture;
+}
+
+String WaylandCompositor::get_title(int p_id) const {
+	const Map<int, Toplevel>::Element *e = toplevels.find(p_id);
+	if (e == NULL) {
+		return String();
+	}
+	return e->get().title;
+}
+
+Array WaylandCompositor::get_ids() const {
+	Array ids;
+	for (const Map<int, Toplevel>::Element *e = toplevels.front(); e != NULL; e = e->next()) {
+		ids.push_back(e->key());
+	}
+	return ids;
+}
+
+void WaylandCompositor::set_size(int p_id, const Vector2 &p_size) {
+	if (server != NULL) {
+		wl_server_set_size(server, p_id, (int)p_size.x, (int)p_size.y);
+	}
+}
+
+void WaylandCompositor::close(int p_id) {
+	if (server != NULL) {
+		wl_server_close(server, p_id);
+	}
+}
+
+void WaylandCompositor::focus(int p_id) {
+	if (server != NULL) {
+		wl_server_focus(server, p_id);
+	}
+}
+
+void WaylandCompositor::pointer_motion(int p_id, const Vector2 &p_pos) {
+	if (server != NULL) {
+		wl_server_pointer_motion(server, p_id, p_pos.x, p_pos.y,
+				(uint32_t)OS::get_singleton()->get_ticks_msec());
+	}
+}
+
+void WaylandCompositor::pointer_button(int p_button_index, bool p_pressed) {
+	if (server == NULL) {
+		return;
+	}
+	uint32_t t = (uint32_t)OS::get_singleton()->get_ticks_msec();
+	if (p_button_index == BUTTON_WHEEL_UP || p_button_index == BUTTON_WHEEL_DOWN) {
+		if (p_pressed) {
+			wl_server_pointer_axis(server, t, p_button_index == BUTTON_WHEEL_UP ? -10.0 : 10.0);
+		}
+		return;
+	}
+	uint32_t btn = 0;
+	switch (p_button_index) {
+		case BUTTON_LEFT:
+			btn = EVDEV_BTN_LEFT;
+			break;
+		case BUTTON_RIGHT:
+			btn = EVDEV_BTN_RIGHT;
+			break;
+		case BUTTON_MIDDLE:
+			btn = EVDEV_BTN_MIDDLE;
+			break;
+		default:
+			return;
+	}
+	wl_server_pointer_button(server, t, btn, p_pressed ? 1 : 0);
+}
+
+void WaylandCompositor::pointer_axis(double p_dy) {
+	if (server != NULL) {
+		wl_server_pointer_axis(server, (uint32_t)OS::get_singleton()->get_ticks_msec(), p_dy);
+	}
+}
+
+void WaylandCompositor::key(const Ref<InputEventKey> &p_event) {
+	if (server == NULL || p_event.is_null()) {
+		return;
+	}
+	uint32_t scancode = p_event->get_physical_scancode();
+	if (scancode == 0) {
+		scancode = p_event->get_scancode();
+	}
+	uint32_t evdev = _scancode_to_evdev(scancode);
+	if (evdev == 0) {
+		return;
+	}
+	wl_server_key(server, (uint32_t)OS::get_singleton()->get_ticks_msec(), evdev,
+			p_event->is_pressed() ? 1 : 0);
+}
+
+void WaylandCompositor::set_default_size(const Vector2 &p_size) {
+	default_size = p_size;
+	if (server != NULL) {
+		wl_server_set_default_size(server, (int)p_size.x, (int)p_size.y);
+	}
+}
+
+Vector2 WaylandCompositor::get_default_size() const {
+	return default_size;
+}
+
+int WaylandCompositor::get_commit_count() const {
+	return commit_count;
+}
