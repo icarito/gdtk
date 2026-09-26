@@ -126,6 +126,29 @@ void ImGuiCanvas::_process_frame(float p_delta) {
 			continue;
 		}
 
+		// Vertices are shared by every cmd of the list; Vector is COW so passing them per cmd is free.
+		int vtx_count = cmd_list->VtxBuffer.Size;
+		Vector<Point2> points;
+		Vector<Point2> uvs;
+		Vector<Color> colors;
+		points.resize(vtx_count);
+		uvs.resize(vtx_count);
+		colors.resize(vtx_count);
+		Point2 *points_ptr = points.ptrw();
+		Point2 *uvs_ptr = uvs.ptrw();
+		Color *colors_ptr = colors.ptrw();
+		for (int v = 0; v < vtx_count; v++) {
+			const ImDrawVert &vert = cmd_list->VtxBuffer[v];
+			points_ptr[v] = Point2(vert.pos.x, vert.pos.y);
+			uvs_ptr[v] = Point2(vert.uv.x, vert.uv.y);
+			ImU32 c = vert.col;
+			colors_ptr[v] = Color(
+					((c >> IM_COL32_R_SHIFT) & 0xFF) / 255.0f,
+					((c >> IM_COL32_G_SHIFT) & 0xFF) / 255.0f,
+					((c >> IM_COL32_B_SHIFT) & 0xFF) / 255.0f,
+					((c >> IM_COL32_A_SHIFT) & 0xFF) / 255.0f);
+		}
+
 		for (int j = 0; j < cmd_list->CmdBuffer.Size; j++) {
 			const ImDrawCmd &cmd = cmd_list->CmdBuffer[j];
 			if (cmd.UserCallback != nullptr || cmd.ElemCount == 0) {
@@ -140,28 +163,6 @@ void ImGuiCanvas::_process_frame(float p_delta) {
 			vs->canvas_item_set_custom_rect(ci, true, clip);
 			vs->canvas_item_set_clip(ci, true);
 			vs->canvas_item_set_draw_index(ci, draw_index++);
-
-			int vtx_count = cmd_list->VtxBuffer.Size;
-			Vector<Point2> points;
-			Vector<Point2> uvs;
-			Vector<Color> colors;
-			points.resize(vtx_count);
-			uvs.resize(vtx_count);
-			colors.resize(vtx_count);
-			Point2 *points_ptr = points.ptrw();
-			Point2 *uvs_ptr = uvs.ptrw();
-			Color *colors_ptr = colors.ptrw();
-			for (int v = 0; v < vtx_count; v++) {
-				const ImDrawVert &vert = cmd_list->VtxBuffer[v];
-				points_ptr[v] = Point2(vert.pos.x, vert.pos.y);
-				uvs_ptr[v] = Point2(vert.uv.x, vert.uv.y);
-				ImU32 c = vert.col;
-				colors_ptr[v] = Color(
-						((c >> IM_COL32_R_SHIFT) & 0xFF) / 255.0f,
-						((c >> IM_COL32_G_SHIFT) & 0xFF) / 255.0f,
-						((c >> IM_COL32_B_SHIFT) & 0xFF) / 255.0f,
-						((c >> IM_COL32_A_SHIFT) & 0xFF) / 255.0f);
-			}
 
 			Vector<int> indices;
 			indices.resize(cmd.ElemCount);
@@ -373,12 +374,14 @@ void ImGuiCanvas::_input(const Ref<InputEvent> &p_event) {
 
 	Ref<InputEventScreenTouch> st = p_event;
 	if (st.is_valid() && st->get_index() == 0) {
+		io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
 		io.AddMousePosEvent(st->get_position().x, st->get_position().y);
 		io.AddMouseButtonEvent(0, st->is_pressed());
 	}
 
 	Ref<InputEventScreenDrag> sd = p_event;
 	if (sd.is_valid() && sd->get_index() == 0) {
+		io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
 		io.AddMousePosEvent(sd->get_position().x, sd->get_position().y);
 	}
 
@@ -415,6 +418,7 @@ ImGuiCanvas::ImGuiCanvas() {
 	ImGuiIO &io = ImGui::GetIO();
 	io.SetClipboardTextFn = _imgui_set_clipboard;
 	io.GetClipboardTextFn = _imgui_get_clipboard;
+	io.IniFilename = nullptr; // cwd is not writable on Android
 
 	want_text_input = false;
 	scale = 1.0f;
