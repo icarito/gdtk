@@ -1,0 +1,22 @@
+#!/usr/bin/env python
+
+Import("env")
+Import("env_modules")
+
+env_imgui = env_modules.Clone()
+
+thirdparty_dir = Dir("thirdparty/imgui").abspath
+env_imgui.Prepend(CPPPATH=[thirdparty_dir])
+
+thirdparty_sources = [
+    thirdparty_dir + "/imgui.cpp",
+    thirdparty_dir + "/imgui_draw.cpp",
+    thirdparty_dir + "/imgui_tables.cpp",
+    thirdparty_dir + "/imgui_widgets.cpp",
+]
+
+env_thirdparty = env_imgui.Clone()
+env_thirdparty.disable_warnings()
+env_thirdparty.add_source_files(env.modules_sources, thirdparty_sources)
+
+env_imgui.add_source_files(env.modules_sources, "*.cpp")

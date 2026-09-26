@@ -1,0 +1,6 @@
+demo/.import/
+demo/imgui.ini
+*.png
+*.o
+__pycache__/
+kilo_run.log

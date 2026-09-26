@@ -1,0 +1,41 @@
+# gdtk — toolkit UI inmediato para Godot 3 (fork godot-box3d-3)
+
+Objetivo: UIs propias y ligeras (cliente XMPP móvil, shell tipo Sugar) sobre el
+fork Godot 3.6 `godot-box3d-3`, usando Dear ImGui como capa de widgets.
+
+## Factibilidad (resumen, sep 2026)
+
+| Pieza | Veredicto | Nota |
+|---|---|---|
+| ImGui dentro de Godot 3 | Viable | Módulo C++ (`custom_modules`), render por `VisualServer.canvas_item_add_triangle_array`, un canvas item hijo por `ImDrawCmd` para el scissor (`canvas_item_set_custom_rect` + `set_clip`). Funciona igual en GLES2/GLES3/FRT. |
+| Teclado en pantalla Android/iOS | Viable, barato | `io.WantTextInput` → `OS.show_virtual_keyboard()`; Godot ya entrega el texto como `InputEventKey.unicode`. |
+| IME CJK / emoji color | Riesgo alto | ImGui no tiene preedit/composición; atlas CJK pesa (Noto CJK ≈ decenas de MB de atlas si no se usa carga dinámica, ImGui ≥1.92). Emoji a color requiere FreeType + `ImGuiFreeTypeBuilderFlags_LoadColor`. Para chat multilenguaje serio: `LineEdit` de Godot para el campo de entrada, ImGui para el resto. |
+| Wayland (cliente) | Ya resuelto | El fork trae FRT/SDL2 con EGL nativo en Wayland. |
+| Shell tipo Sugar (kiosk) | Viable | Godot a pantalla completa bajo `cage` (o `gamescope`); actividades = escenas dentro del mismo proceso. Sin logind/DRM propios. |
+| Godot como compositor Wayland | Investigación | `gdwlroots` (Godot 3, usado por Simula) embebe wlroots: surfaces como texturas. Hay que ser dueño de DRM master, seat (libseat/logind), XWayland, y perseguir la API inestable de wlroots. Hacerlo después del kiosk. |
+| XMPP | Viable | Nativo: libstrophe (C, TLS+SCRAM, cross-compila fácil para NDK/iOS) como módulo. Pure-GDScript sobre `StreamPeerSSL` sólo para prototipo. Background: Android necesita foreground service; iOS sólo push (XEP-0357 + APNs) — código nativo fuera de Godot en ambos. |
+
+Alternativas a ImGui evaluadas: Nuklear/microui (mismos problemas de IME, menos
+widgets), RmlUi (HTML/CSS, más pesado), Clay (sólo layout). ImGui gana por
+ecosistema y porque el problema de texto es igual en todas.
+
+## Arquitectura propuesta
+
+```
+Godot 3.6 fork (FRT/SDL2, Wayland) + modules/imgui  ← este repo
+  └─ nodo ImGuiCanvas (Node2D): contexto ImGui, input, render vía VisualServer
+      └─ GDScript llama API inmediata en la señal `imgui_frame`
+Fase 2: modules/xmpp (libstrophe) → señales message_received / send_message()
+Fase 3: shell Sugar bajo `cage`; luego gdwlroots si hace falta embeber apps externas
+```
+
+## POC
+
+Ver `SPEC.md`. Compilar:
+
+```sh
+cd ~/Proyectos/godot3-box3d/godot
+scons -j8 platform=x11 target=release_debug tools=yes progress=no extra_suffix=gdtk \
+  custom_modules=/home/icarito/Proyectos/godot3-box3d/godot-box3d-3,/run/media/icarito/DATA/icarito/Proyectos/gdtk/modules
+bin/godot.x11.opt.tools.64.gdtk --path /run/media/icarito/DATA/icarito/Proyectos/gdtk/demo
+```
