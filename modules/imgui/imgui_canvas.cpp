@@ -57,13 +57,14 @@ static ImGuiKey _godot_key_to_imgui(uint32_t p_key) {
 }
 
 void ImGuiCanvas::_bind_methods() {
-	ClassDB::bind_method(D_METHOD("begin", "title"), &ImGuiCanvas::begin);
+	ClassDB::bind_method(D_METHOD("begin", "title", "flags"), &ImGuiCanvas::begin, DEFVAL(0));
 	ClassDB::bind_method(D_METHOD("end"), &ImGuiCanvas::end);
-	ClassDB::bind_method(D_METHOD("set_next_window_pos", "pos"), &ImGuiCanvas::set_next_window_pos);
-	ClassDB::bind_method(D_METHOD("set_next_window_size", "size"), &ImGuiCanvas::set_next_window_size);
+	ClassDB::bind_method(D_METHOD("set_next_window_pos", "pos", "always"), &ImGuiCanvas::set_next_window_pos, DEFVAL(false));
+	ClassDB::bind_method(D_METHOD("set_next_window_size", "size", "always"), &ImGuiCanvas::set_next_window_size, DEFVAL(false));
+	ClassDB::bind_method(D_METHOD("set_cursor_pos", "pos"), &ImGuiCanvas::set_cursor_pos);
 	ClassDB::bind_method(D_METHOD("text", "s"), &ImGuiCanvas::text);
 	ClassDB::bind_method(D_METHOD("text_wrapped", "s"), &ImGuiCanvas::text_wrapped);
-	ClassDB::bind_method(D_METHOD("button", "label"), &ImGuiCanvas::button);
+	ClassDB::bind_method(D_METHOD("button", "label", "size"), &ImGuiCanvas::button, DEFVAL(Vector2()));
 	ClassDB::bind_method(D_METHOD("same_line"), &ImGuiCanvas::same_line);
 	ClassDB::bind_method(D_METHOD("separator"), &ImGuiCanvas::separator);
 	ClassDB::bind_method(D_METHOD("checkbox", "label", "value"), &ImGuiCanvas::checkbox);
@@ -77,7 +78,17 @@ void ImGuiCanvas::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_imgui_scale"), &ImGuiCanvas::get_scale);
 	ADD_PROPERTY(PropertyInfo(Variant::REAL, "imgui_scale"), "set_imgui_scale", "get_imgui_scale");
 
+	ClassDB::bind_method(D_METHOD("set_frame_rounding", "rounding"), &ImGuiCanvas::set_frame_rounding);
+	ClassDB::bind_method(D_METHOD("get_frame_rounding"), &ImGuiCanvas::get_frame_rounding);
+	ADD_PROPERTY(PropertyInfo(Variant::REAL, "frame_rounding"), "set_frame_rounding", "get_frame_rounding");
+
 	ClassDB::bind_method(D_METHOD("_input", "event"), &ImGuiCanvas::_input);
+
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "WINDOW_NO_DECORATION", ImGuiWindowFlags_NoDecoration);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "WINDOW_NO_BACKGROUND", ImGuiWindowFlags_NoBackground);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "WINDOW_NO_MOVE", ImGuiWindowFlags_NoMove);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "WINDOW_NO_SAVED_SETTINGS", ImGuiWindowFlags_NoSavedSettings);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "WINDOW_NO_BRING_TO_FRONT_ON_FOCUS", ImGuiWindowFlags_NoBringToFrontOnFocus);
 
 	ADD_SIGNAL(MethodInfo("imgui_frame"));
 }
@@ -212,6 +223,7 @@ void ImGuiCanvas::_notification(int p_what) {
 			io.Fonts->SetTexID((ImTextureID)(intptr_t)&font_texture_rid);
 
 			io.FontGlobalScale = scale;
+			ImGui::GetStyle().FrameRounding = frame_rounding;
 			ImGui::GetStyle().ScaleAllSizes(scale);
 
 			set_process(true);
@@ -224,23 +236,28 @@ void ImGuiCanvas::_notification(int p_what) {
 	}
 }
 
-bool ImGuiCanvas::begin(const String &p_title) {
+bool ImGuiCanvas::begin(const String &p_title, int p_flags) {
 	ImGui::SetCurrentContext(context);
-	return ImGui::Begin(p_title.utf8().get_data());
+	return ImGui::Begin(p_title.utf8().get_data(), nullptr, (ImGuiWindowFlags)p_flags);
 }
 void ImGuiCanvas::end() {
 	ImGui::SetCurrentContext(context);
 	ImGui::End();
 }
 
-void ImGuiCanvas::set_next_window_pos(const Vector2 &p_pos) {
+void ImGuiCanvas::set_next_window_pos(const Vector2 &p_pos, bool p_always) {
 	ImGui::SetCurrentContext(context);
-	ImGui::SetNextWindowPos(ImVec2(p_pos.x, p_pos.y), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowPos(ImVec2(p_pos.x, p_pos.y), p_always ? ImGuiCond_Always : ImGuiCond_FirstUseEver);
 }
 
-void ImGuiCanvas::set_next_window_size(const Vector2 &p_size) {
+void ImGuiCanvas::set_next_window_size(const Vector2 &p_size, bool p_always) {
 	ImGui::SetCurrentContext(context);
-	ImGui::SetNextWindowSize(ImVec2(p_size.x, p_size.y), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSize(ImVec2(p_size.x, p_size.y), p_always ? ImGuiCond_Always : ImGuiCond_FirstUseEver);
+}
+
+void ImGuiCanvas::set_cursor_pos(const Vector2 &p_pos) {
+	ImGui::SetCurrentContext(context);
+	ImGui::SetCursorPos(ImVec2(p_pos.x, p_pos.y));
 }
 
 void ImGuiCanvas::text(const String &p_text) {
@@ -255,9 +272,9 @@ void ImGuiCanvas::text_wrapped(const String &p_text) {
 	ImGui::PopTextWrapPos();
 }
 
-bool ImGuiCanvas::button(const String &p_label) {
+bool ImGuiCanvas::button(const String &p_label, const Vector2 &p_size) {
 	ImGui::SetCurrentContext(context);
-	return ImGui::Button(p_label.utf8().get_data());
+	return ImGui::Button(p_label.utf8().get_data(), ImVec2(p_size.x, p_size.y));
 }
 
 void ImGuiCanvas::same_line() {
@@ -333,6 +350,14 @@ void ImGuiCanvas::set_scale(float p_scale) {
 
 float ImGuiCanvas::get_scale() const {
 	return scale;
+}
+
+void ImGuiCanvas::set_frame_rounding(float p_rounding) {
+	frame_rounding = p_rounding;
+}
+
+float ImGuiCanvas::get_frame_rounding() const {
+	return frame_rounding;
 }
 
 void ImGuiCanvas::_input(const Ref<InputEvent> &p_event) {
@@ -422,6 +447,7 @@ ImGuiCanvas::ImGuiCanvas() {
 
 	want_text_input = false;
 	scale = 1.0f;
+	frame_rounding = 0.0f;
 }
 
 ImGuiCanvas::~ImGuiCanvas() {

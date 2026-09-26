@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=gdtk (Sugar-like)
+Comment=Sugar-like shell sobre Godot/ImGui bajo cage
+Exec=/run/media/icarito/DATA/icarito/Proyectos/gdtk/session/gdtk-session
+Type=Application
+DesktopNames=gdtk

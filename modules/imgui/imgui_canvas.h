@@ -15,6 +15,7 @@ class ImGuiCanvas : public Node2D {
 	Vector<RID> canvas_items;
 	bool want_text_input;
 	float scale;
+	float frame_rounding;
 
 	void _process_frame(float p_delta);
 	RID _get_canvas_item(int p_index);
@@ -24,13 +25,14 @@ protected:
 	virtual void _notification(int p_what);
 
 public:
-	bool begin(const String &p_title);
+	bool begin(const String &p_title, int p_flags = 0);
 	void end();
-	void set_next_window_pos(const Vector2 &p_pos);
-	void set_next_window_size(const Vector2 &p_size);
+	void set_next_window_pos(const Vector2 &p_pos, bool p_always = false);
+	void set_next_window_size(const Vector2 &p_size, bool p_always = false);
+	void set_cursor_pos(const Vector2 &p_pos);
 	void text(const String &p_text);
 	void text_wrapped(const String &p_text);
-	bool button(const String &p_label);
+	bool button(const String &p_label, const Vector2 &p_size = Vector2());
 	void same_line();
 	void separator();
 	bool checkbox(const String &p_label, bool p_value);
@@ -42,6 +44,9 @@ public:
 
 	void set_scale(float p_scale);
 	float get_scale() const;
+
+	void set_frame_rounding(float p_rounding);
+	float get_frame_rounding() const;
 
 	void _input(const Ref<InputEvent> &p_event);
 

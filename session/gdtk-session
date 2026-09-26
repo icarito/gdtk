@@ -1,0 +1,4 @@
+#!/bin/sh
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+: "${GDTK_GODOT:=/home/icarito/Proyectos/godot3-box3d/godot/bin/godot.frt.opt.tools.x86_64.gdtk}"
+exec cage -s -- "$GDTK_GODOT" --path "$HERE/shell" "$@"

@@ -1,0 +1,7 @@
+[gd_scene load_steps=2 format=2]
+
+[ext_resource path="res://shell.gd" type="Script" id=1]
+
+[node name="ImGuiCanvas" type="ImGuiCanvas"]
+script = ExtResource( 1 )
+frame_rounding = 12.0
