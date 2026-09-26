@@ -6,6 +6,8 @@
 #include "scene/main/node.h"
 #include "scene/resources/texture.h"
 
+#include <stdint.h>
+
 struct wl_server;
 
 class WaylandCompositor : public Node {
@@ -19,17 +21,23 @@ class WaylandCompositor : public Node {
 	wl_server *server;
 	Vector2 default_size;
 	int commit_count;
+	int dmabuf_commits;
+	int shm_commits;
 	Map<int, Toplevel> toplevels;
 
 	static void _cb_added(void *p_ud, int p_id);
 	static void _cb_removed(void *p_ud, int p_id);
-	static void _cb_frame(void *p_ud, int p_id, const unsigned char *p_rgba, int p_w, int p_h);
+	static void _cb_frame(void *p_ud, int p_id, const unsigned char *p_data, int p_w, int p_h, uint32_t p_format, int p_stride);
+	static void _cb_dmabuf(void *p_ud, int p_id, int p_w, int p_h);
 	static void _cb_title(void *p_ud, int p_id, const char *p_title);
 
 	void _on_added(int p_id);
 	void _on_removed(int p_id);
-	void _on_frame(int p_id, const unsigned char *p_rgba, int p_w, int p_h);
+	void _on_frame(int p_id, const unsigned char *p_data, int p_w, int p_h, uint32_t p_format, int p_stride);
+	void _on_dmabuf(int p_id, int p_w, int p_h);
 	void _on_title(int p_id, const char *p_title);
+
+	Map<int, Toplevel>::Element *_toplevel_entry(int p_id);
 
 protected:
 	static void _bind_methods();
@@ -57,6 +65,9 @@ public:
 	void set_default_size(const Vector2 &p_size);
 	Vector2 get_default_size() const;
 	int get_commit_count() const;
+	int get_dmabuf_commits() const;
+	int get_shm_commits() const;
+	String get_dmabuf_state() const;
 };
 
 #endif // WAYLAND_COMPOSITOR_H

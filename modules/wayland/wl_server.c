@@ -2,22 +2,28 @@
 
 #include "wl_server.h"
 
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
 #include <drm_fourcc.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
 #include <wlr/backend/headless.h>
 #include <wlr/interfaces/wlr_keyboard.h>
-#include <wlr/render/pixman.h>
-#include <wlr/render/wlr_renderer.h>
-#include <wlr/render/wlr_texture.h>
+#include <wlr/render/dmabuf.h>
+#include <wlr/render/drm_format_set.h>
+#include <wlr/types/wlr_buffer.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_keyboard.h>
-#include <wlr/types/wlr_output.h>
+#include <wlr/types/wlr_linux_dmabuf_v1.h>
 #include <wlr/types/wlr_seat.h>
+#include <wlr/types/wlr_shm.h>
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
@@ -33,6 +39,10 @@ typedef struct toplevel {
 	bool mapped;
 	bool want_focus;
 
+	// buffer dmabuf/shm vigente, retenido con wlr_buffer_lock mientras Godot lo
+	// samplea; se suelta al llegar uno nuevo o en destroy.
+	struct wlr_buffer *buffer;
+
 	struct wl_listener commit;
 	struct wl_listener map;
 	struct wl_listener unmap;
@@ -44,13 +54,27 @@ struct wl_server {
 	struct wl_display *display;
 	struct wl_event_loop *loop;
 	struct wlr_backend *backend;
-	struct wlr_renderer *renderer;
 	struct wlr_compositor *compositor;
 	struct wlr_subcompositor *subcompositor;
 	struct wlr_data_device_manager *data_device_manager;
 	struct wlr_xdg_shell *xdg_shell;
 	struct wlr_seat *seat;
 	struct wlr_keyboard keyboard;
+
+	// Todo lo EGL/GL vive aqui y se resuelve con eglGetProcAddress: no se
+	// linkea libGL/libGLES, solo egl.
+	EGLDisplay egl_dpy;
+	PFNEGLCREATEIMAGEKHRPROC eglCreateImageKHR;
+	PFNEGLDESTROYIMAGEKHRPROC eglDestroyImageKHR;
+	PFNEGLQUERYDMABUFFORMATSEXTPROC eglQueryDmaBufFormatsEXT;
+	PFNEGLQUERYDMABUFMODIFIERSEXTPROC eglQueryDmaBufModifiersEXT;
+	PFNGLBINDTEXTUREPROC glBindTexture;
+	PFNGLGETINTEGERVPROC glGetIntegerv;
+	PFNGLTEXPARAMETERIPROC glTexParameteri;
+	PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES;
+	bool dmabuf_enabled;
+	const char *dmabuf_reason;
+	struct wlr_linux_dmabuf_v1 *linux_dmabuf;
 
 	wl_server_callbacks cb;
 	struct wl_listener new_toplevel;
@@ -61,9 +85,6 @@ struct wl_server {
 	const char *socket_name;
 	struct wlr_surface *pointer_surface;
 	int pointer_id;
-
-	unsigned char *frame_buf;
-	size_t frame_cap;
 };
 
 static toplevel *toplevel_find(struct wl_server *s, int id) {
@@ -74,6 +95,211 @@ static toplevel *toplevel_find(struct wl_server *s, int id) {
 		}
 	}
 	return NULL;
+}
+
+// Atributos EGL de import por plano (hasta 4, como WLR_DMABUF_MAX_PLANES).
+static const EGLint dmabuf_plane_fd[4] = {
+	EGL_DMA_BUF_PLANE0_FD_EXT, EGL_DMA_BUF_PLANE1_FD_EXT,
+	EGL_DMA_BUF_PLANE2_FD_EXT, EGL_DMA_BUF_PLANE3_FD_EXT,
+};
+static const EGLint dmabuf_plane_offset[4] = {
+	EGL_DMA_BUF_PLANE0_OFFSET_EXT, EGL_DMA_BUF_PLANE1_OFFSET_EXT,
+	EGL_DMA_BUF_PLANE2_OFFSET_EXT, EGL_DMA_BUF_PLANE3_OFFSET_EXT,
+};
+static const EGLint dmabuf_plane_pitch[4] = {
+	EGL_DMA_BUF_PLANE0_PITCH_EXT, EGL_DMA_BUF_PLANE1_PITCH_EXT,
+	EGL_DMA_BUF_PLANE2_PITCH_EXT, EGL_DMA_BUF_PLANE3_PITCH_EXT,
+};
+static const EGLint dmabuf_plane_mod_lo[4] = {
+	EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT, EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT,
+	EGL_DMA_BUF_PLANE2_MODIFIER_LO_EXT, EGL_DMA_BUF_PLANE3_MODIFIER_LO_EXT,
+};
+static const EGLint dmabuf_plane_mod_hi[4] = {
+	EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT, EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT,
+	EGL_DMA_BUF_PLANE2_MODIFIER_HI_EXT, EGL_DMA_BUF_PLANE3_MODIFIER_HI_EXT,
+};
+
+// Arma la lista EGL de import de un dmabuf (todos sus planos). En esta GPU
+// (Intel Iris Xe) Mesa asigna XRGB8888/ARGB8888 con modificadores con planos
+// auxiliares CCS, por eso no alcanza con aceptar n_planes == 1.
+static void dmabuf_egl_attrs(const struct wlr_dmabuf_attributes *attribs, EGLint *attrs) {
+	int i = 0;
+	attrs[i++] = EGL_WIDTH;
+	attrs[i++] = attribs->width;
+	attrs[i++] = EGL_HEIGHT;
+	attrs[i++] = attribs->height;
+	attrs[i++] = EGL_LINUX_DRM_FOURCC_EXT;
+	attrs[i++] = (EGLint)attribs->format;
+	int n = attribs->n_planes;
+	if (n > 4) {
+		n = 4;
+	}
+	for (int p = 0; p < n; p++) {
+		attrs[i++] = dmabuf_plane_fd[p];
+		attrs[i++] = attribs->fd[p];
+		attrs[i++] = dmabuf_plane_offset[p];
+		attrs[i++] = (EGLint)attribs->offset[p];
+		attrs[i++] = dmabuf_plane_pitch[p];
+		attrs[i++] = (EGLint)attribs->stride[p];
+		if (attribs->modifier != DRM_FORMAT_MOD_INVALID) {
+			attrs[i++] = dmabuf_plane_mod_lo[p];
+			attrs[i++] = (EGLint)(attribs->modifier & 0xffffffffu);
+			attrs[i++] = dmabuf_plane_mod_hi[p];
+			attrs[i++] = (EGLint)(attribs->modifier >> 32);
+		}
+	}
+	attrs[i++] = EGL_NONE;
+}
+
+// Solo aceptamos dmabuf que EGL pueda importar. Si falla, el cliente recibe
+// `failed` y cae a shm.
+static bool check_dmabuf(struct wlr_dmabuf_attributes *attribs, void *data) {
+	struct wl_server *s = data;
+	if (s->eglCreateImageKHR == NULL || attribs->n_planes < 1 || attribs->n_planes > 4) {
+		return false;
+	}
+	EGLint attrs[64];
+	dmabuf_egl_attrs(attribs, attrs);
+	EGLImageKHR image = s->eglCreateImageKHR(s->egl_dpy, EGL_NO_CONTEXT,
+			EGL_LINUX_DMA_BUF_EXT, NULL, attrs);
+	if (image == EGL_NO_IMAGE_KHR) {
+		return false;
+	}
+	s->eglDestroyImageKHR(s->egl_dpy, image);
+	return true;
+}
+
+// Llena `set` con los format+modifier que EGL puede importar; omite los
+// external_only y usa DRM_FORMAT_MOD_INVALID cuando no hay modifiers.
+static bool fill_formats(struct wl_server *s, struct wlr_drm_format_set *set) {
+	EGLint num_formats = 0;
+	if (!s->eglQueryDmaBufFormatsEXT(s->egl_dpy, 0, NULL, &num_formats) ||
+			num_formats <= 0) {
+		return false;
+	}
+	EGLint *formats = malloc((size_t)num_formats * sizeof(EGLint));
+	if (formats == NULL) {
+		return false;
+	}
+	if (!s->eglQueryDmaBufFormatsEXT(s->egl_dpy, num_formats, formats, &num_formats)) {
+		free(formats);
+		return false;
+	}
+
+	bool any = false;
+	for (EGLint i = 0; i < num_formats; i++) {
+		EGLint num_mods = 0;
+		if (!s->eglQueryDmaBufModifiersEXT(s->egl_dpy, formats[i], 0, NULL, NULL, &num_mods)) {
+			num_mods = 0;
+		}
+		if (num_mods <= 0) {
+			if (wlr_drm_format_set_add(set, (uint32_t)formats[i], DRM_FORMAT_MOD_INVALID)) {
+				any = true;
+			}
+			continue;
+		}
+		EGLuint64KHR *mods = malloc((size_t)num_mods * sizeof(EGLuint64KHR));
+		EGLBoolean *external_only = malloc((size_t)num_mods * sizeof(EGLBoolean));
+		if (mods == NULL || external_only == NULL) {
+			free(mods);
+			free(external_only);
+			continue;
+		}
+		if (s->eglQueryDmaBufModifiersEXT(s->egl_dpy, formats[i], num_mods, mods,
+				external_only, &num_mods)) {
+			for (EGLint j = 0; j < num_mods; j++) {
+				if (external_only[j]) {
+					continue;
+				}
+				if (wlr_drm_format_set_add(set, (uint32_t)formats[i], (uint64_t)mods[j])) {
+					any = true;
+				}
+			}
+		}
+		free(mods);
+		free(external_only);
+	}
+	free(formats);
+	return any;
+}
+
+// Anuncia linux-dmabuf con feedback armado a mano (main_device = render node).
+// Si falta EGL, extensiones, funciones o el render node: solo shm, con motivo.
+static void setup_dmabuf(struct wl_server *s) {
+	s->dmabuf_enabled = false;
+	s->dmabuf_reason = "sin EGL (GLX/x11)";
+
+	if (getenv("GDTK_FORCE_SHM") != NULL) {
+		s->dmabuf_reason = "forzado";
+		return;
+	}
+
+	s->egl_dpy = eglGetCurrentDisplay();
+	if (s->egl_dpy == EGL_NO_DISPLAY) {
+		return;
+	}
+
+	const char *exts = eglQueryString(s->egl_dpy, EGL_EXTENSIONS);
+	if (exts == NULL ||
+			strstr(exts, "EGL_EXT_image_dma_buf_import") == NULL ||
+			strstr(exts, "EGL_EXT_image_dma_buf_import_modifiers") == NULL) {
+		s->dmabuf_reason = "sin EGL_EXT_image_dma_buf_import(_modifiers)";
+		return;
+	}
+
+	s->eglCreateImageKHR = (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
+	s->eglDestroyImageKHR = (PFNEGLDESTROYIMAGEKHRPROC)eglGetProcAddress("eglDestroyImageKHR");
+	s->eglQueryDmaBufFormatsEXT = (PFNEGLQUERYDMABUFFORMATSEXTPROC)eglGetProcAddress("eglQueryDmaBufFormatsEXT");
+	s->eglQueryDmaBufModifiersEXT = (PFNEGLQUERYDMABUFMODIFIERSEXTPROC)eglGetProcAddress("eglQueryDmaBufModifiersEXT");
+	s->glBindTexture = (PFNGLBINDTEXTUREPROC)eglGetProcAddress("glBindTexture");
+	s->glGetIntegerv = (PFNGLGETINTEGERVPROC)eglGetProcAddress("glGetIntegerv");
+	s->glTexParameteri = (PFNGLTEXPARAMETERIPROC)eglGetProcAddress("glTexParameteri");
+	s->glEGLImageTargetTexture2DOES = (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress("glEGLImageTargetTexture2DOES");
+	if (s->eglCreateImageKHR == NULL || s->eglDestroyImageKHR == NULL ||
+			s->eglQueryDmaBufFormatsEXT == NULL || s->eglQueryDmaBufModifiersEXT == NULL ||
+			s->glBindTexture == NULL || s->glGetIntegerv == NULL ||
+			s->glTexParameteri == NULL || s->glEGLImageTargetTexture2DOES == NULL) {
+		s->dmabuf_reason = "faltan funciones EGL/GL";
+		return;
+	}
+
+	const char *node = getenv("GDTK_DRM_RENDER_NODE");
+	if (node == NULL) {
+		node = "/dev/dri/renderD128";
+	}
+	struct stat st;
+	if (stat(node, &st) != 0) {
+		s->dmabuf_reason = "sin render node";
+		return;
+	}
+
+	struct wlr_linux_dmabuf_feedback_v1 feedback = {0};
+	struct wlr_linux_dmabuf_feedback_v1_tranche *tranche =
+			wlr_linux_dmabuf_feedback_add_tranche(&feedback);
+	if (tranche == NULL) {
+		s->dmabuf_reason = "sin memoria (feedback)";
+		return;
+	}
+	feedback.main_device = st.st_rdev;
+	tranche->target_device = st.st_rdev;
+	if (!fill_formats(s, &tranche->formats)) {
+		wlr_linux_dmabuf_feedback_v1_finish(&feedback);
+		s->dmabuf_reason = "sin formatos dmabuf";
+		return;
+	}
+
+	// wlr_linux_dmabuf_v1_create copia el feedback; finish libera nuestros
+	// wlr_drm_format_set (no volver a llamar wlr_drm_format_set_finish: double free).
+	s->linux_dmabuf = wlr_linux_dmabuf_v1_create(s->display, 4, &feedback);
+	wlr_linux_dmabuf_feedback_v1_finish(&feedback);
+	if (s->linux_dmabuf == NULL) {
+		s->dmabuf_reason = "wlr_linux_dmabuf_v1_create fallo";
+		return;
+	}
+	wlr_linux_dmabuf_v1_set_check_dmabuf_callback(s->linux_dmabuf, check_dmabuf, s);
+
+	s->dmabuf_enabled = true;
+	s->dmabuf_reason = "on";
 }
 
 static void handle_toplevel_set_title(struct wl_listener *listener, void *data) {
@@ -109,37 +335,44 @@ static void handle_toplevel_commit(struct wl_listener *listener, void *data) {
 		return;
 	}
 
-	struct wlr_texture *tex = wlr_surface_get_texture(surface);
-	if (tex == NULL) {
-		return;
-	}
-	int w = (int)tex->width;
-	int h = (int)tex->height;
-	if (w <= 0 || h <= 0) {
+	// current.buffer != NULL solo cuando este commit trae buffer nuevo. El
+	// handler de commit corre antes de que wlroots lo suelte (ver wlr_surface.c),
+	// asi que es valido leerlo aqui.
+	struct wlr_buffer *buf = surface->current.buffer;
+	if (buf == NULL) {
 		return;
 	}
 
-	size_t need = (size_t)w * (size_t)h * 4;
-	if (need > s->frame_cap) {
-		unsigned char *nb = realloc(s->frame_buf, need);
-		if (nb == NULL) {
-			return;
+	if (buf != t->buffer) {
+		wlr_buffer_lock(buf);
+		if (t->buffer != NULL) {
+			wlr_buffer_unlock(t->buffer);
 		}
-		s->frame_buf = nb;
-		s->frame_cap = need;
+		t->buffer = buf;
 	}
 
-	struct wlr_texture_read_pixels_options opts = {
-		.data = s->frame_buf,
-		.format = DRM_FORMAT_ABGR8888,
-		.stride = (uint32_t)(w * 4),
-		.dst_x = 0,
-		.dst_y = 0,
-		.src_box = { 0, 0, 0, 0 },
-	};
-	if (wlr_texture_read_pixels(tex, &opts) && s->cb.frame != NULL) {
-		s->cb.frame(s->cb.ud, t->id, s->frame_buf, w, h);
+	struct wlr_dmabuf_attributes attribs;
+	if (s->dmabuf_enabled && wlr_buffer_get_dmabuf(buf, &attribs)) {
+		if (s->cb.dmabuf != NULL) {
+			s->cb.dmabuf(s->cb.ud, t->id, attribs.width, attribs.height);
+		}
+		return;
 	}
+
+	// Camino shm: puntero directo al buffer del cliente, sin copia en C. El C++
+	// convierte a RGBA8 durante la llamada.
+	void *ptr = NULL;
+	uint32_t format = 0;
+	size_t stride = 0;
+	if (!wlr_buffer_begin_data_ptr_access(buf, WLR_BUFFER_DATA_PTR_ACCESS_READ,
+			&ptr, &format, &stride)) {
+		return;
+	}
+	if (s->cb.frame != NULL) {
+		s->cb.frame(s->cb.ud, t->id, (const unsigned char *)ptr, buf->width, buf->height,
+				format, (int)stride);
+	}
+	wlr_buffer_end_data_ptr_access(buf);
 }
 
 static void handle_toplevel_map(struct wl_listener *listener, void *data) {
@@ -153,6 +386,13 @@ static void handle_toplevel_map(struct wl_listener *listener, void *data) {
 static void handle_toplevel_unmap(struct wl_listener *listener, void *data) {
 	toplevel *t = wl_container_of(listener, t, unmap);
 	t->mapped = false;
+}
+
+static void toplevel_release_buffer(toplevel *t) {
+	if (t->buffer != NULL) {
+		wlr_buffer_unlock(t->buffer);
+		t->buffer = NULL;
+	}
 }
 
 static void handle_toplevel_destroy(struct wl_listener *listener, void *data) {
@@ -170,6 +410,8 @@ static void handle_toplevel_destroy(struct wl_listener *listener, void *data) {
 		s->pointer_id = 0;
 		s->pointer_surface = NULL;
 	}
+
+	toplevel_release_buffer(t);
 
 	int id = t->id;
 	free(t);
@@ -223,6 +465,7 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 	s->next_id = 1;
 	s->pointer_id = 0;
 	s->pointer_surface = NULL;
+	s->egl_dpy = EGL_NO_DISPLAY;
 	wl_list_init(&s->toplevels);
 
 	s->display = wl_display_create();
@@ -237,15 +480,10 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 		goto fail;
 	}
 
-	// ponytail: pixman, no gles2; el renderer GL de wlroots hace eglMakeCurrent en
-	// el hilo principal y rompe el contexto GL de Godot.
-	s->renderer = wlr_pixman_renderer_create();
-	if (s->renderer == NULL) {
-		wlr_log(WLR_ERROR, "wl_server: no se pudo crear el renderer pixman");
-		goto fail;
-	}
-
-	s->compositor = wlr_compositor_create(s->display, 5, s->renderer);
+	// ponytail: sin renderer en wlroots (NULL); los clientes usan la GPU y
+	// nosotros leemos el buffer. wl_shm explicito con los dos formatos que
+	// sabemos convertir.
+	s->compositor = wlr_compositor_create(s->display, 5, NULL);
 	s->subcompositor = wlr_subcompositor_create(s->display);
 	s->data_device_manager = wlr_data_device_manager_create(s->display);
 	s->xdg_shell = wlr_xdg_shell_create(s->display, 3);
@@ -254,8 +492,13 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 		wlr_log(WLR_ERROR, "wl_server: fallo al crear globals de wlroots");
 		goto fail;
 	}
-	if (!wlr_renderer_init_wl_shm(s->renderer, s->display)) {
-		wlr_log(WLR_ERROR, "wl_server: fallo wlr_renderer_init_wl_shm");
+
+	static const uint32_t shm_formats[] = {
+		DRM_FORMAT_ARGB8888,
+		DRM_FORMAT_XRGB8888,
+	};
+	if (wlr_shm_create(s->display, 2, shm_formats, 2) == NULL) {
+		wlr_log(WLR_ERROR, "wl_server: fallo wlr_shm_create");
 		goto fail;
 	}
 
@@ -300,6 +543,9 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 		wlr_log(WLR_ERROR, "wl_server: no se pudo arrancar el backend");
 		goto fail;
 	}
+
+	setup_dmabuf(s);
+	wlr_log(WLR_INFO, "wl_server: dmabuf %s", s->dmabuf_reason);
 
 	return s;
 
@@ -433,6 +679,54 @@ void wl_server_key(wl_server *s, uint32_t time_ms, uint32_t evdev_key, int press
 	wlr_seat_keyboard_notify_key(s->seat, time_ms, evdev_key, ev.state);
 }
 
+int wl_server_dmabuf_enabled(wl_server *s) {
+	return s != NULL && s->dmabuf_enabled;
+}
+
+const char *wl_server_dmabuf_reason(wl_server *s) {
+	if (s == NULL || s->dmabuf_reason == NULL) {
+		return "sin servidor";
+	}
+	return s->dmabuf_reason;
+}
+
+void wl_server_bind_dmabuf(wl_server *s, int id, unsigned int texid) {
+	if (s == NULL || !s->dmabuf_enabled || s->egl_dpy == EGL_NO_DISPLAY) {
+		return;
+	}
+	toplevel *t = toplevel_find(s, id);
+	if (t == NULL || t->buffer == NULL) {
+		return;
+	}
+	struct wlr_dmabuf_attributes attribs;
+	if (!wlr_buffer_get_dmabuf(t->buffer, &attribs)) {
+		return;
+	}
+
+	EGLint attrs[64];
+	dmabuf_egl_attrs(&attribs, attrs);
+	EGLImageKHR image = s->eglCreateImageKHR(s->egl_dpy, EGL_NO_CONTEXT,
+			EGL_LINUX_DMA_BUF_EXT, NULL, attrs);
+	if (image == EGL_NO_IMAGE_KHR) {
+		return;
+	}
+
+	GLint prev = 0;
+	s->glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev);
+	s->glBindTexture(GL_TEXTURE_2D, (GLuint)texid);
+	s->glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, (GLeglImageOES)image);
+	// El camino shm recibe estos parametros en texture_set_data; al importar el
+	// EGLImage hay que ponerlos a mano o el filtro minimo por defecto
+	// (mipmap-incomplete, sin mipmaps) devuelve negro.
+	s->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	s->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	s->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	s->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	s->glBindTexture(GL_TEXTURE_2D, (GLuint)prev);
+	s->eglDestroyImageKHR(s->egl_dpy, image);
+	// ponytail: sync implicita (Mesa/Intel); explicit sync (linux-drm-syncobj) si hay tearing.
+}
+
 void wl_server_destroy(wl_server *s) {
 	if (s == NULL) {
 		return;
@@ -458,19 +752,16 @@ void wl_server_destroy(wl_server *s) {
 		wl_list_remove(&t->set_title.link);
 		wl_list_remove(&t->destroy.link);
 		wl_list_remove(&t->link);
+		toplevel_release_buffer(t);
 		free(t);
 	}
 
 	if (s->backend != NULL) {
 		wlr_backend_destroy(s->backend);
 	}
-	if (s->renderer != NULL) {
-		wlr_renderer_destroy(s->renderer);
-	}
 	if (s->display != NULL) {
 		wl_display_destroy(s->display);
 	}
 
-	free(s->frame_buf);
 	free(s);
 }

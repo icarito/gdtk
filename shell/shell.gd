@@ -367,5 +367,6 @@ func _capture(path):
 	var err = image.save_png(path)
 	if err != OK:
 		printerr("screenshot: no se pudo guardar ", path, " (error ", err, ")")
-	print("commit_count=", compositor.commit_count)
+	print("commit_count=", compositor.commit_count, " dmabuf_commits=", compositor.dmabuf_commits, " shm_commits=", compositor.shm_commits)
+	print("dmabuf: ", compositor.dmabuf_state)
 	get_tree().quit()

@@ -8,7 +8,9 @@
 #include "core/map.h"
 #include "core/os/keyboard.h"
 #include "core/os/os.h"
+#include "servers/visual_server.h"
 
+#include <drm_fourcc.h>
 #include <string.h>
 
 // Codigos evdev (linux/input-event-codes.h) sin incluir ese header: choca con los
@@ -192,8 +194,12 @@ void WaylandCompositor::_cb_removed(void *p_ud, int p_id) {
 	static_cast<WaylandCompositor *>(p_ud)->_on_removed(p_id);
 }
 
-void WaylandCompositor::_cb_frame(void *p_ud, int p_id, const unsigned char *p_rgba, int p_w, int p_h) {
-	static_cast<WaylandCompositor *>(p_ud)->_on_frame(p_id, p_rgba, p_w, p_h);
+void WaylandCompositor::_cb_frame(void *p_ud, int p_id, const unsigned char *p_data, int p_w, int p_h, uint32_t p_format, int p_stride) {
+	static_cast<WaylandCompositor *>(p_ud)->_on_frame(p_id, p_data, p_w, p_h, p_format, p_stride);
+}
+
+void WaylandCompositor::_cb_dmabuf(void *p_ud, int p_id, int p_w, int p_h) {
+	static_cast<WaylandCompositor *>(p_ud)->_on_dmabuf(p_id, p_w, p_h);
 }
 
 void WaylandCompositor::_cb_title(void *p_ud, int p_id, const char *p_title) {
@@ -211,26 +217,58 @@ void WaylandCompositor::_on_removed(int p_id) {
 	emit_signal("toplevel_removed", p_id);
 }
 
-void WaylandCompositor::_on_frame(int p_id, const unsigned char *p_rgba, int p_w, int p_h) {
+Map<int, WaylandCompositor::Toplevel>::Element *WaylandCompositor::_toplevel_entry(int p_id) {
+	Map<int, Toplevel>::Element *e = toplevels.find(p_id);
+	if (e == NULL) {
+		Toplevel t;
+		e = toplevels.insert(p_id, t);
+	}
+	return e;
+}
+
+void WaylandCompositor::_on_frame(int p_id, const unsigned char *p_data, int p_w, int p_h, uint32_t p_format, int p_stride) {
 	commit_count++;
-	if (p_rgba == NULL || p_w <= 0 || p_h <= 0) {
+	shm_commits++;
+	if (p_data == NULL || p_w <= 0 || p_h <= 0 || p_stride < p_w * 4) {
 		return;
 	}
+
+	// wl_shm ARGB8888/XRGB8888 (little-endian: bytes B,G,R,A) a Image::FORMAT_RGBA8.
+	bool swap_rb = p_format == DRM_FORMAT_ARGB8888 || p_format == DRM_FORMAT_XRGB8888;
+	bool has_alpha = p_format == DRM_FORMAT_ARGB8888 || p_format == DRM_FORMAT_ABGR8888;
 
 	int size = p_w * p_h * 4;
 	PoolVector<uint8_t> data;
 	data.resize(size);
 	{
 		PoolVector<uint8_t>::Write w = data.write();
-		memcpy(w.ptr(), p_rgba, size);
+		uint8_t *dst = w.ptr();
+		for (int y = 0; y < p_h; y++) {
+			const unsigned char *src = p_data + (size_t)y * (size_t)p_stride;
+			uint8_t *d = dst + (size_t)y * (size_t)p_w * 4;
+			for (int x = 0; x < p_w; x++) {
+				uint8_t c0 = src[0];
+				uint8_t c1 = src[1];
+				uint8_t c2 = src[2];
+				uint8_t c3 = src[3];
+				if (swap_rb) {
+					d[0] = c2;
+					d[1] = c1;
+					d[2] = c0;
+				} else {
+					d[0] = c0;
+					d[1] = c1;
+					d[2] = c2;
+				}
+				d[3] = has_alpha ? c3 : 255;
+				src += 4;
+				d += 4;
+			}
+		}
 	}
 	Ref<Image> img = memnew(Image(p_w, p_h, false, Image::FORMAT_RGBA8, data));
 
-	Map<int, Toplevel>::Element *e = toplevels.find(p_id);
-	if (e == NULL) {
-		Toplevel t;
-		e = toplevels.insert(p_id, t);
-	}
+	Map<int, Toplevel>::Element *e = _toplevel_entry(p_id);
 	Ref<ImageTexture> tex = e->get().texture;
 	if (tex.is_null() || tex->get_width() != p_w || tex->get_height() != p_h) {
 		tex.instance();
@@ -239,6 +277,24 @@ void WaylandCompositor::_on_frame(int p_id, const unsigned char *p_rgba, int p_w
 	} else {
 		tex->set_data(img);
 	}
+}
+
+void WaylandCompositor::_on_dmabuf(int p_id, int p_w, int p_h) {
+	commit_count++;
+	dmabuf_commits++;
+	if (p_w <= 0 || p_h <= 0 || server == NULL) {
+		return;
+	}
+
+	Map<int, Toplevel>::Element *e = _toplevel_entry(p_id);
+	Ref<ImageTexture> tex = e->get().texture;
+	if (tex.is_null() || tex->get_width() != p_w || tex->get_height() != p_h) {
+		tex.instance();
+		tex->create(p_w, p_h, Image::FORMAT_RGBA8, 0);
+		e->get().texture = tex;
+	}
+	wl_server_bind_dmabuf(server, p_id,
+			(unsigned int)VS::get_singleton()->texture_get_texid(tex->get_rid()));
 }
 
 void WaylandCompositor::_on_title(int p_id, const char *p_title) {
@@ -271,6 +327,15 @@ void WaylandCompositor::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_commit_count"), &WaylandCompositor::get_commit_count);
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "commit_count"), "", "get_commit_count");
 
+	ClassDB::bind_method(D_METHOD("get_dmabuf_commits"), &WaylandCompositor::get_dmabuf_commits);
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "dmabuf_commits"), "", "get_dmabuf_commits");
+
+	ClassDB::bind_method(D_METHOD("get_shm_commits"), &WaylandCompositor::get_shm_commits);
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "shm_commits"), "", "get_shm_commits");
+
+	ClassDB::bind_method(D_METHOD("get_dmabuf_state"), &WaylandCompositor::get_dmabuf_state);
+	ADD_PROPERTY(PropertyInfo(Variant::STRING, "dmabuf_state"), "", "get_dmabuf_state");
+
 	ADD_SIGNAL(MethodInfo("toplevel_added", PropertyInfo(Variant::INT, "id")));
 	ADD_SIGNAL(MethodInfo("toplevel_removed", PropertyInfo(Variant::INT, "id")));
 }
@@ -292,6 +357,8 @@ WaylandCompositor::WaylandCompositor() {
 	server = NULL;
 	default_size = Vector2(1024, 700);
 	commit_count = 0;
+	dmabuf_commits = 0;
+	shm_commits = 0;
 }
 
 WaylandCompositor::~WaylandCompositor() {
@@ -311,6 +378,7 @@ String WaylandCompositor::start() {
 	cb.added = &WaylandCompositor::_cb_added;
 	cb.removed = &WaylandCompositor::_cb_removed;
 	cb.frame = &WaylandCompositor::_cb_frame;
+	cb.dmabuf = &WaylandCompositor::_cb_dmabuf;
 	cb.title = &WaylandCompositor::_cb_title;
 
 	server = wl_server_create(cb, (int)default_size.x, (int)default_size.y);
@@ -331,8 +399,12 @@ int WaylandCompositor::launch(const String &p_cmd, const PoolStringArray &p_args
 	args.push_back("DISPLAY");
 	args.push_back("WAYLAND_DISPLAY=" + String(wl_server_socket(server)));
 	args.push_back("GDK_BACKEND=wayland");
-	args.push_back("GSK_RENDERER=cairo");
-	args.push_back("LIBGL_ALWAYS_SOFTWARE=1");
+	// Con dmabuf disponible los clientes usan la GPU de verdad; si el server
+	// quedo en modo solo-shm, forzamos el fallback software como antes.
+	if (!wl_server_dmabuf_enabled(server)) {
+		args.push_back("GSK_RENDERER=cairo");
+		args.push_back("LIBGL_ALWAYS_SOFTWARE=1");
+	}
 	args.push_back("SDL_VIDEODRIVER=wayland");
 	args.push_back(p_cmd);
 	for (int i = 0; i < p_args.size(); i++) {
@@ -459,4 +531,22 @@ Vector2 WaylandCompositor::get_default_size() const {
 
 int WaylandCompositor::get_commit_count() const {
 	return commit_count;
+}
+
+int WaylandCompositor::get_dmabuf_commits() const {
+	return dmabuf_commits;
+}
+
+int WaylandCompositor::get_shm_commits() const {
+	return shm_commits;
+}
+
+String WaylandCompositor::get_dmabuf_state() const {
+	if (server == NULL) {
+		return String("off (sin servidor)");
+	}
+	if (wl_server_dmabuf_enabled(server)) {
+		return String("on");
+	}
+	return String("off (") + String(wl_server_dmabuf_reason(server)) + String(")");
 }
