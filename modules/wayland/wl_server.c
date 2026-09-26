@@ -441,7 +441,7 @@ void wl_server_destroy(wl_server *s) {
 	// Evitar callbacks hacia Godot mientras se desmonta la escena.
 	memset(&s->cb, 0, sizeof(s->cb));
 
-	if (s->xdg_shell != NULL) {
+	if (s->new_toplevel.notify != NULL) {
 		wl_list_remove(&s->new_toplevel.link);
 	}
 

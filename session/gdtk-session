@@ -1,4 +1,9 @@
 #!/bin/sh
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
-: "${GDTK_GODOT:=/home/icarito/Proyectos/godot3-box3d/godot/bin/godot.frt.opt.tools.x86_64.gdtk}"
-exec cage -s -- "$GDTK_GODOT" --path "$HERE/shell" "$@"
+# Instalado: binario junto al shell (bin/godot-gdtk); en desarrollo: el build del árbol de Godot.
+if [ -z "$GDTK_GODOT" ]; then
+	GDTK_GODOT="$HERE/bin/godot-gdtk"
+	[ -x "$GDTK_GODOT" ] || GDTK_GODOT=/home/icarito/Proyectos/godot3-box3d/godot/bin/godot.frt.opt.tools.x86_64.gdtk
+fi
+# GDTK_VIDEO_DRIVER=GLES2 en GPUs sin GL 3.3 (p.ej. Intel GM45).
+exec cage -s -- "$GDTK_GODOT" ${GDTK_VIDEO_DRIVER:+--video-driver "$GDTK_VIDEO_DRIVER"} --path "$HERE/shell" "$@"

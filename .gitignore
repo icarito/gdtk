@@ -4,3 +4,4 @@ demo/imgui.ini
 *.o
 __pycache__/
 kilo_run.log
+kilo_*.log
