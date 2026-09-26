@@ -1,0 +1,13 @@
+#!/bin/sh
+# Sesión X11: Godot a pantalla completa directo sobre el X que arranca el display manager,
+# sin window manager. El lápiz Wacom llega como puntero vía xf86-input-wacom (cage no maneja tabletas).
+# Las apps Wayland siguen viéndose dentro del shell (su compositor embebido no depende del display).
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -z "$GDTK_GODOT" ]; then
+	GDTK_GODOT="$HERE/bin/godot-gdtk"
+	[ -x "$GDTK_GODOT" ] || GDTK_GODOT=/home/icarito/Proyectos/godot3-box3d/godot/bin/godot.frt.opt.tools.x86_64.gdtk
+fi
+export SDL_VIDEODRIVER=x11
+# EGL en vez de GLX: el compositor embebido necesita EGL para importar dmabuf (zero-copy).
+export SDL_VIDEO_X11_FORCE_EGL=1 SDL_VIDEO_FORCE_EGL=1
+exec "$GDTK_GODOT" ${GDTK_VIDEO_DRIVER:+--video-driver "$GDTK_VIDEO_DRIVER"} --fullscreen --path "$HERE/shell" "$@"
