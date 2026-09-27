@@ -1,0 +1,1 @@
+{"ui":"imgui","mode":"dynamic","n":100,"frames":600,"metrics":{"frame_ms":{"mean":0.525505,"p95":0.76},"process_ms":{"mean":0,"p95":0},"draw_calls":{"mean":0,"p95":0},"items_2d":{"mean":1,"p95":1},"draw_2d":{"mean":1,"p95":1},"mem_static":{"mean":20136427.04,"p95":20371192},"nodes":{"mean":3,"p95":3}}}

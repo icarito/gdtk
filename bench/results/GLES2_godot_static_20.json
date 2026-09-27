@@ -1,0 +1,1 @@
+{"ui":"godot","mode":"static","n":20,"frames":600,"metrics":{"frame_ms":{"mean":0.197687,"p95":0.272},"process_ms":{"mean":0,"p95":0},"draw_calls":{"mean":0,"p95":0},"items_2d":{"mean":2,"p95":2},"draw_2d":{"mean":89,"p95":89},"mem_static":{"mean":20387599.04,"p95":20622364},"nodes":{"mean":85,"p95":85}}}
