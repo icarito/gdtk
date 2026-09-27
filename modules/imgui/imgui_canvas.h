@@ -6,6 +6,7 @@
 #include "core/math/vector2.h"
 #include "core/math/vector3.h"
 #include "core/pool_vector.h"
+#include "core/set.h"
 #include "scene/2d/node_2d.h"
 #include "scene/resources/texture.h"
 
@@ -28,6 +29,11 @@ class ImGuiCanvas : public Node2D {
 	bool want_text_input;
 	float scale;
 	float frame_rounding;
+
+	// Teclas pulsadas desde el ultimo frame. El control remoto inyecta press y
+	// release seguidos, y ImGui::IsKeyPressed puede perderse si ambos caen en el
+	// mismo frame; con este latch is_key_pressed sigue detectando la pulsacion.
+	Set<uint32_t> frame_pressed_keys;
 
 	// Texturas de imagen vivas durante el frame (ImTextureID = puntero al RID).
 	Vector<RID *> frame_texture_rids;
@@ -103,6 +109,7 @@ public:
 	int input_int(const String &p_label, int p_v, int p_step = 1, int p_step_fast = 100);
 	String input_text(const String &p_label, const String &p_value);
 	Dictionary input_text_enter(const String &p_label, const String &p_value);
+	void set_keyboard_focus_here();
 	String input_text_multiline(const String &p_label, const String &p_value, const Vector2 &p_size);
 	Color color_edit3(const String &p_label, const Color &p_color);
 	Color color_edit4(const String &p_label, const Color &p_color);
@@ -152,6 +159,7 @@ public:
 	bool is_item_edited();
 	bool is_mouse_clicked(int p_button);
 	bool is_mouse_double_clicked();
+	bool is_key_pressed(int p_key);
 	Vector2 get_mouse_pos();
 
 	// Graficos nativos
@@ -189,6 +197,7 @@ public:
 	bool implot3d_begin_plot(const String &p_title, const Vector2 &p_size = Vector2(-1, 0), int p_flags = 0);
 	void implot3d_end_plot();
 	void implot3d_setup_axes(const String &p_x, const String &p_y, const String &p_z);
+	void implot3d_setup_axes_flags(const String &p_x, const String &p_y, const String &p_z, int p_flags);
 	void implot3d_plot_line(const String &p_label, const PoolRealArray &p_xs, const PoolRealArray &p_ys, const PoolRealArray &p_zs);
 	void implot3d_plot_scatter(const String &p_label, const PoolRealArray &p_xs, const PoolRealArray &p_ys, const PoolRealArray &p_zs);
 	void implot3d_plot_surface(const String &p_label, const PoolRealArray &p_xs, const PoolRealArray &p_ys, const PoolRealArray &p_zs, int p_x_count, int p_y_count);
@@ -206,6 +215,10 @@ public:
 
 	void set_scale(float p_scale);
 	float get_scale() const;
+
+	// Indica si el modulo se compilo con una capacidad opcional (implot,
+	// implot3d, demos). Los metodos de la capacidad ausente no se bindean.
+	bool has_feature(const String &p_feature) const;
 
 	void set_frame_rounding(float p_rounding);
 	float get_frame_rounding() const;

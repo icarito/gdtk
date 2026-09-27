@@ -70,6 +70,9 @@ int PieMenu::draw(const String &p_id, const PoolStringArray &p_items, float p_sc
 	ImU32 col_idle = ImGui::GetColorU32(ImGuiCol_Button);
 	ImU32 col_hover = ImGui::GetColorU32(ImGuiCol_ButtonHovered);
 	ImU32 col_text = ImGui::GetColorU32(ImGuiCol_Text);
+	ImU32 col_border = ImGui::GetColorU32(ImGuiCol_Border);
+	const ImVec2 center(center_x, center_y);
+	const ImDrawListFlags saved_flags = draw_list->Flags;
 
 	float step = (IM_PI * 2.0f) / (float)count;
 	for (int i = 0; i < count; i++) {
@@ -77,11 +80,21 @@ int PieMenu::draw(const String &p_id, const PoolStringArray &p_items, float p_sc
 		float a1 = a0 + step;
 		ImU32 col = (i == hovered) ? col_hover : col_idle;
 
-		draw_list->PathLineTo(_pie_polar(center_x, center_y, a0, outer));
-		draw_list->PathArcTo(ImVec2(center_x, center_y), outer, a0, a1, 32);
-		draw_list->PathLineTo(_pie_polar(center_x, center_y, a1, inner));
-		draw_list->PathArcTo(ImVec2(center_x, center_y), inner, a1, a0, 32);
+		// Sector convexo: arco exterior (a0->a1) + arco interior invertido
+		// (a1->a0); el cierre implicito de PathFillConvex es la arista radial.
+		// El relleno sin anti-aliasing evita las costuras de la triangulacion en
+		// abanico que se veian como lineas finas cruzando el anillo.
+		draw_list->Flags = saved_flags & ~ImDrawListFlags_AntiAliasedFill;
+		draw_list->PathArcTo(center, outer, a0, a1, 32);
+		draw_list->PathArcTo(center, inner, a1, a0, 32);
 		draw_list->PathFillConvex(col);
+
+		// Borde cerrado del sector, sin AA para no solapar el relleno vecino.
+		draw_list->Flags = saved_flags & ~ImDrawListFlags_AntiAliasedLines;
+		draw_list->PathArcTo(center, outer, a0, a1, 32);
+		draw_list->PathArcTo(center, inner, a1, a0, 32);
+		draw_list->PathStroke(col_border, ImDrawFlags_Closed, 1.0f);
+		draw_list->Flags = saved_flags;
 
 		float mid_angle = (a0 + a1) * 0.5f;
 		ImVec2 mid = _pie_polar(center_x, center_y, mid_angle, (inner + outer) * 0.5f);
@@ -90,7 +103,7 @@ int PieMenu::draw(const String &p_id, const PoolStringArray &p_items, float p_sc
 		draw_list->AddText(ImVec2(mid.x - text_size.x * 0.5f, mid.y - text_size.y * 0.5f), col_text, label.get_data());
 	}
 
-	draw_list->AddCircle(ImVec2(center_x, center_y), outer, col_text, 64, 1.0f);
+	draw_list->AddCircle(center, outer, col_text, 64, 1.0f);
 
 	if (ImGui::IsMouseReleased(0) || ImGui::IsMouseReleased(1)) {
 		int result = hovered;

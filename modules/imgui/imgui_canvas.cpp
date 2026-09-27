@@ -9,8 +9,12 @@
 #include "servers/visual_server.h"
 
 #include "imgui.h"
+#ifdef IMGUI_MODULE_IMPLOT
 #include "implot.h"
+#endif
+#ifdef IMGUI_MODULE_IMPLOT3D
 #include "implot3d.h"
+#endif
 
 #include <string.h>
 
@@ -50,6 +54,30 @@ static ImGuiKey _godot_key_to_imgui(uint32_t p_key) {
 			return ImGuiKey_Enter;
 		case KEY_ESCAPE:
 			return ImGuiKey_Escape;
+		case KEY_F1:
+			return ImGuiKey_F1;
+		case KEY_F2:
+			return ImGuiKey_F2;
+		case KEY_F3:
+			return ImGuiKey_F3;
+		case KEY_F4:
+			return ImGuiKey_F4;
+		case KEY_F5:
+			return ImGuiKey_F5;
+		case KEY_F6:
+			return ImGuiKey_F6;
+		case KEY_F7:
+			return ImGuiKey_F7;
+		case KEY_F8:
+			return ImGuiKey_F8;
+		case KEY_F9:
+			return ImGuiKey_F9;
+		case KEY_F10:
+			return ImGuiKey_F10;
+		case KEY_F11:
+			return ImGuiKey_F11;
+		case KEY_F12:
+			return ImGuiKey_F12;
 		default:
 			break;
 	}
@@ -142,6 +170,7 @@ void ImGuiCanvas::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("input_int", "label", "v", "step", "step_fast"), &ImGuiCanvas::input_int, DEFVAL(1), DEFVAL(100));
 	ClassDB::bind_method(D_METHOD("input_text", "label", "value"), &ImGuiCanvas::input_text);
 	ClassDB::bind_method(D_METHOD("input_text_enter", "label", "value"), &ImGuiCanvas::input_text_enter);
+	ClassDB::bind_method(D_METHOD("set_keyboard_focus_here"), &ImGuiCanvas::set_keyboard_focus_here);
 	ClassDB::bind_method(D_METHOD("input_text_multiline", "label", "value", "size"), &ImGuiCanvas::input_text_multiline);
 	ClassDB::bind_method(D_METHOD("color_edit3", "label", "color"), &ImGuiCanvas::color_edit3);
 	ClassDB::bind_method(D_METHOD("color_edit4", "label", "color"), &ImGuiCanvas::color_edit4);
@@ -191,6 +220,7 @@ void ImGuiCanvas::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_item_edited"), &ImGuiCanvas::is_item_edited);
 	ClassDB::bind_method(D_METHOD("is_mouse_clicked", "button"), &ImGuiCanvas::is_mouse_clicked);
 	ClassDB::bind_method(D_METHOD("is_mouse_double_clicked"), &ImGuiCanvas::is_mouse_double_clicked);
+	ClassDB::bind_method(D_METHOD("is_key_pressed", "key"), &ImGuiCanvas::is_key_pressed);
 	ClassDB::bind_method(D_METHOD("get_mouse_pos"), &ImGuiCanvas::get_mouse_pos);
 
 	// Graficos nativos
@@ -208,12 +238,19 @@ void ImGuiCanvas::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("pop_style_var", "n"), &ImGuiCanvas::pop_style_var, DEFVAL(1));
 
 	// Demos
+#ifdef IMGUI_MODULE_DEMOS
 	ClassDB::bind_method(D_METHOD("show_demo_window"), &ImGuiCanvas::show_demo_window);
+#endif
 	ClassDB::bind_method(D_METHOD("show_metrics_window"), &ImGuiCanvas::show_metrics_window);
+#if defined(IMGUI_MODULE_DEMOS) && defined(IMGUI_MODULE_IMPLOT)
 	ClassDB::bind_method(D_METHOD("implot_show_demo_window"), &ImGuiCanvas::implot_show_demo_window);
+#endif
+#if defined(IMGUI_MODULE_DEMOS) && defined(IMGUI_MODULE_IMPLOT3D)
 	ClassDB::bind_method(D_METHOD("implot3d_show_demo_window"), &ImGuiCanvas::implot3d_show_demo_window);
+#endif
 
 	// ImPlot
+#ifdef IMGUI_MODULE_IMPLOT
 	ClassDB::bind_method(D_METHOD("implot_begin_plot", "title", "size", "flags"), &ImGuiCanvas::implot_begin_plot, DEFVAL(Vector2(-1, 0)), DEFVAL(0));
 	ClassDB::bind_method(D_METHOD("implot_end_plot"), &ImGuiCanvas::implot_end_plot);
 	ClassDB::bind_method(D_METHOD("implot_setup_axes", "x_label", "y_label", "x_flags", "y_flags"), &ImGuiCanvas::implot_setup_axes, DEFVAL(0), DEFVAL(0));
@@ -223,14 +260,18 @@ void ImGuiCanvas::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("implot_plot_bars", "label", "values", "bar_size"), &ImGuiCanvas::implot_plot_bars, DEFVAL(0.67f));
 	ClassDB::bind_method(D_METHOD("implot_plot_shaded", "label", "xs", "ys", "y_ref"), &ImGuiCanvas::implot_plot_shaded, DEFVAL(0.0f));
 	ClassDB::bind_vararg_method(METHOD_FLAGS_DEFAULT, "implot_plot_heatmap", &ImGuiCanvas::_implot_plot_heatmap_vararg, MethodInfo("implot_plot_heatmap"));
+#endif
 
 	// ImPlot3D
+#ifdef IMGUI_MODULE_IMPLOT3D
 	ClassDB::bind_method(D_METHOD("implot3d_begin_plot", "title", "size", "flags"), &ImGuiCanvas::implot3d_begin_plot, DEFVAL(Vector2(-1, 0)), DEFVAL(0));
 	ClassDB::bind_method(D_METHOD("implot3d_end_plot"), &ImGuiCanvas::implot3d_end_plot);
 	ClassDB::bind_method(D_METHOD("implot3d_setup_axes", "x", "y", "z"), &ImGuiCanvas::implot3d_setup_axes);
+	ClassDB::bind_method(D_METHOD("implot3d_setup_axes_flags", "x", "y", "z", "flags"), &ImGuiCanvas::implot3d_setup_axes_flags);
 	ClassDB::bind_method(D_METHOD("implot3d_plot_line", "label", "xs", "ys", "zs"), &ImGuiCanvas::implot3d_plot_line);
 	ClassDB::bind_method(D_METHOD("implot3d_plot_scatter", "label", "xs", "ys", "zs"), &ImGuiCanvas::implot3d_plot_scatter);
 	ClassDB::bind_vararg_method(METHOD_FLAGS_DEFAULT, "implot3d_plot_surface", &ImGuiCanvas::_implot3d_plot_surface_vararg, MethodInfo("implot3d_plot_surface"));
+#endif
 
 	// Menu radial
 	ClassDB::bind_method(D_METHOD("open_pie_menu", "id"), &ImGuiCanvas::open_pie_menu);
@@ -308,9 +349,29 @@ void ImGuiCanvas::_bind_methods() {
 	ClassDB::bind_integer_constant(get_class_static(), StringName(), "STYLE_VAR_ITEM_SPACING", ImGuiStyleVar_ItemSpacing);
 
 	// ImPlot
+#ifdef IMGUI_MODULE_IMPLOT
 	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_AXIS_X1", ImAxis_X1);
 	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_AXIS_Y1", ImAxis_Y1);
 	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_AXIS_AUTOFIT", ImPlotAxisFlags_AutoFit);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_AXIS_NO_DECORATIONS", ImPlotAxisFlags_NoDecorations);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_FLAGS_NONE", ImPlotFlags_None);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_FLAGS_NO_TITLE", ImPlotFlags_NoTitle);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_FLAGS_NO_LEGEND", ImPlotFlags_NoLegend);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_FLAGS_NO_MOUSE_TEXT", ImPlotFlags_NoMouseText);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_FLAGS_NO_INPUTS", ImPlotFlags_NoInputs);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_FLAGS_NO_MENUS", ImPlotFlags_NoMenus);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_FLAGS_NO_BOX_SELECT", ImPlotFlags_NoBoxSelect);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_FLAGS_NO_FRAME", ImPlotFlags_NoFrame);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_FLAGS_CANVAS_ONLY", ImPlotFlags_CanvasOnly);
+#endif
+#ifdef IMGUI_MODULE_IMPLOT3D
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT3D_AXIS_NONE", ImPlot3DAxisFlags_None);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT3D_AXIS_AUTOFIT", ImPlot3DAxisFlags_AutoFit);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT3D_FLAGS_NONE", ImPlot3DFlags_None);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT3D_FLAGS_NO_CLIP", ImPlot3DFlags_NoClip);
+#endif
+
+	ClassDB::bind_method(D_METHOD("has_feature", "feature"), &ImGuiCanvas::has_feature);
 
 	ADD_SIGNAL(MethodInfo("imgui_frame"));
 }
@@ -324,8 +385,34 @@ RID ImGuiCanvas::_get_canvas_item(int p_index) {
 
 void ImGuiCanvas::_set_contexts() {
 	ImGui::SetCurrentContext(context);
+#ifdef IMGUI_MODULE_IMPLOT
 	ImPlot::SetCurrentContext(implot_context);
+#endif
+#ifdef IMGUI_MODULE_IMPLOT3D
 	ImPlot3D::SetCurrentContext(implot3d_context);
+#endif
+}
+
+bool ImGuiCanvas::has_feature(const String &p_feature) const {
+#ifdef IMGUI_MODULE_IMPLOT
+	if (p_feature == "implot") {
+		return true;
+	}
+#endif
+#ifdef IMGUI_MODULE_IMPLOT3D
+	if (p_feature == "implot3d") {
+		return true;
+	}
+#endif
+#ifdef IMGUI_MODULE_DEMOS
+	if (p_feature == "demos") {
+		return true;
+	}
+#endif
+	if (p_feature == "log") {
+		return true;
+	}
+	return false;
 }
 
 void ImGuiCanvas::_process_frame(float p_delta) {
@@ -345,6 +432,10 @@ void ImGuiCanvas::_process_frame(float p_delta) {
 	ImGui::NewFrame();
 	emit_signal("imgui_frame");
 	ImGui::Render();
+
+	// El latch de teclas solo vale para el frame en que se pulso (is_key_pressed
+	// ya se consulto en imgui_frame).
+	frame_pressed_keys.clear();
 
 	if (io.WantTextInput != want_text_input) {
 		want_text_input = io.WantTextInput;
@@ -790,6 +881,11 @@ String ImGuiCanvas::input_text(const String &p_label, const String &p_value) {
 	return String::utf8(buffer);
 }
 
+void ImGuiCanvas::set_keyboard_focus_here() {
+	_set_contexts();
+	ImGui::SetKeyboardFocusHere();
+}
+
 Dictionary ImGuiCanvas::input_text_enter(const String &p_label, const String &p_value) {
 	_set_contexts();
 	char buffer[1024];
@@ -1053,6 +1149,18 @@ bool ImGuiCanvas::is_mouse_double_clicked() {
 	return ImGui::IsMouseDoubleClicked(0);
 }
 
+bool ImGuiCanvas::is_key_pressed(int p_key) {
+	_set_contexts();
+	if (frame_pressed_keys.has((uint32_t)p_key)) {
+		return true;
+	}
+	ImGuiKey key = _godot_key_to_imgui((uint32_t)p_key);
+	if (key == ImGuiKey_None) {
+		return false;
+	}
+	return ImGui::IsKeyPressed(key);
+}
+
 Vector2 ImGuiCanvas::get_mouse_pos() {
 	_set_contexts();
 	ImVec2 v = ImGui::GetIO().MousePos;
@@ -1175,27 +1283,35 @@ void ImGuiCanvas::pop_style_var(int p_n) {
 
 // --- Demos ---
 
+#ifdef IMGUI_MODULE_DEMOS
 void ImGuiCanvas::show_demo_window() {
 	_set_contexts();
 	ImGui::ShowDemoWindow();
 }
+#endif
 
 void ImGuiCanvas::show_metrics_window() {
 	_set_contexts();
 	ImGui::ShowMetricsWindow();
 }
 
+#if defined(IMGUI_MODULE_DEMOS) && defined(IMGUI_MODULE_IMPLOT)
 void ImGuiCanvas::implot_show_demo_window() {
 	_set_contexts();
 	ImPlot::ShowDemoWindow();
 }
+#endif
 
+#if defined(IMGUI_MODULE_DEMOS) && defined(IMGUI_MODULE_IMPLOT3D)
 void ImGuiCanvas::implot3d_show_demo_window() {
 	_set_contexts();
 	ImPlot3D::ShowDemoWindow();
 }
+#endif
 
 // --- ImPlot ---
+
+#ifdef IMGUI_MODULE_IMPLOT
 
 bool ImGuiCanvas::implot_begin_plot(const String &p_title, const Vector2 &p_size, int p_flags) {
 	_set_contexts();
@@ -1270,7 +1386,11 @@ Variant ImGuiCanvas::_implot_plot_heatmap_vararg(const Variant **p_args, int p_a
 	return Variant();
 }
 
+#endif // IMGUI_MODULE_IMPLOT
+
 // --- ImPlot3D ---
+
+#ifdef IMGUI_MODULE_IMPLOT3D
 
 bool ImGuiCanvas::implot3d_begin_plot(const String &p_title, const Vector2 &p_size, int p_flags) {
 	_set_contexts();
@@ -1285,6 +1405,12 @@ void ImGuiCanvas::implot3d_end_plot() {
 void ImGuiCanvas::implot3d_setup_axes(const String &p_x, const String &p_y, const String &p_z) {
 	_set_contexts();
 	ImPlot3D::SetupAxes(p_x.utf8().get_data(), p_y.utf8().get_data(), p_z.utf8().get_data());
+}
+
+void ImGuiCanvas::implot3d_setup_axes_flags(const String &p_x, const String &p_y, const String &p_z, int p_flags) {
+	_set_contexts();
+	ImPlot3DAxisFlags flags = (ImPlot3DAxisFlags)p_flags;
+	ImPlot3D::SetupAxes(p_x.utf8().get_data(), p_y.utf8().get_data(), p_z.utf8().get_data(), flags, flags, flags);
 }
 
 void ImGuiCanvas::implot3d_plot_line(const String &p_label, const PoolRealArray &p_xs, const PoolRealArray &p_ys, const PoolRealArray &p_zs) {
@@ -1331,6 +1457,8 @@ Variant ImGuiCanvas::_implot3d_plot_surface_vararg(const Variant **p_args, int p
 	implot3d_plot_surface(label, xs, ys, zs, x_count, y_count);
 	return Variant();
 }
+
+#endif // IMGUI_MODULE_IMPLOT3D
 
 // --- Menu radial ---
 
@@ -1413,6 +1541,9 @@ void ImGuiCanvas::_input(const Ref<InputEvent> &p_event) {
 	Ref<InputEventKey> k = p_event;
 	if (k.is_valid()) {
 		uint32_t key = k->get_scancode();
+		if (k->is_pressed() && !k->is_echo()) {
+			frame_pressed_keys.insert(key);
+		}
 		if (key == KEY_CONTROL) {
 			io.AddKeyEvent(ImGuiMod_Ctrl, k->is_pressed());
 		} else if (key == KEY_SHIFT) {
@@ -1440,10 +1571,16 @@ ImGuiCanvas::ImGuiCanvas() {
 	context = ImGui::CreateContext();
 	ImGui::SetCurrentContext(context);
 
+	implot_context = nullptr;
+	implot3d_context = nullptr;
+#ifdef IMGUI_MODULE_IMPLOT
 	implot_context = ImPlot::CreateContext();
 	ImPlot::SetCurrentContext(implot_context);
+#endif
+#ifdef IMGUI_MODULE_IMPLOT3D
 	implot3d_context = ImPlot3D::CreateContext();
 	ImPlot3D::SetCurrentContext(implot3d_context);
+#endif
 	ImGui::SetCurrentContext(context);
 
 	ImGuiIO &io = ImGui::GetIO();
@@ -1476,16 +1613,20 @@ ImGuiCanvas::~ImGuiCanvas() {
 	}
 
 	ImGui::SetCurrentContext(context);
+#ifdef IMGUI_MODULE_IMPLOT
 	if (implot_context != nullptr) {
 		ImPlot::SetCurrentContext(implot_context);
 		ImPlot::DestroyContext(implot_context);
 		implot_context = nullptr;
 	}
+#endif
+#ifdef IMGUI_MODULE_IMPLOT3D
 	if (implot3d_context != nullptr) {
 		ImPlot3D::SetCurrentContext(implot3d_context);
 		ImPlot3D::DestroyContext(implot3d_context);
 		implot3d_context = nullptr;
 	}
+#endif
 	if (context != nullptr) {
 		ImGui::SetCurrentContext(context);
 		ImGui::DestroyContext(context);

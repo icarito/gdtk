@@ -116,7 +116,20 @@
 // Your renderer backend will need to support it (most example renderer backends support both 16/32-bit indices).
 // Another way to allow large meshes while keeping 16-bit indices is to handle ImDrawCmd::VtxOffset in your renderer.
 // Read about ImGuiBackendFlags_RendererHasVtxOffset for details.
-//#define ImDrawIdx unsigned int
+// gdtk: el backend de ImGuiCanvas no maneja ImDrawCmd::VtxOffset, asi que una
+// drawlist de mas de 65535 vertices se parte y se corrompe (bandas en ImPlot3D).
+// Con indices de 32 bits ImGui no parte la drawlist. El backend ya convierte
+// cada indice a `int` al construir el Vector<int> de canvas_item_add_triangle_array.
+#define ImDrawIdx unsigned int
+
+// gdtk: los bindings solo pasan PoolRealArray (float). Cuando las demos estan
+// apagadas se limita el conjunto de plantillas numericas de ImPlot/ImPlot3D a
+// float/double para reducir mucho el tamano del modulo. Con demos activadas no
+// se limita: las demos vendoreadas instancian tipos enteros.
+#ifdef IMGUI_MODULE_LIMIT_NUMERIC_TYPES
+#define IMPLOT_CUSTOM_NUMERIC_TYPES (float)(double)
+#define IMPLOT3D_CUSTOM_NUMERIC_TYPES (float)(double)
+#endif
 
 //---- Override ImDrawCallback signature (will need to modify renderer backends accordingly)
 //struct ImDrawList;

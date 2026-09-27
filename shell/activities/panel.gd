@@ -35,6 +35,12 @@ var show_implot_demo = false
 var show_implot3d_demo = false
 var show_metrics = false
 
+# El modulo imgui puede compilarse sin ImPlot/ImPlot3D/demos (SPEC-hud B):
+# se detecta en runtime para que el Panel tolere la ausencia.
+var has_implot = false
+var has_implot3d = false
+var has_demos = false
+
 
 func cleanup():
 	if viewport != null and is_instance_valid(viewport):
@@ -152,12 +158,13 @@ func _menu_bar(ui, vp):
 	if ui.begin("##panel_menu", flags):
 		if ui.begin_menu_bar():
 			if ui.begin_menu("Ver"):
-				if ui.menu_item("Demo ImGui"):
-					show_demo = not show_demo
-				if ui.menu_item("Demo ImPlot"):
-					show_implot_demo = not show_implot_demo
-				if ui.menu_item("Demo ImPlot3D"):
-					show_implot3d_demo = not show_implot3d_demo
+				if has_demos:
+					if ui.menu_item("Demo ImGui"):
+						show_demo = not show_demo
+					if has_implot and ui.menu_item("Demo ImPlot"):
+						show_implot_demo = not show_implot_demo
+					if has_implot3d and ui.menu_item("Demo ImPlot3D"):
+						show_implot3d_demo = not show_implot3d_demo
 				if ui.menu_item("Metricas"):
 					show_metrics = not show_metrics
 				ui.separator()
@@ -181,7 +188,7 @@ func _menu_bar(ui, vp):
 
 func _scene_window(ui):
 	ui.set_next_window_pos(Vector2(16, 80))
-	ui.set_next_window_size(Vector2(600, 400))
+	ui.set_next_window_size(Vector2(600, 380))
 	if ui.begin("Escena"):
 		if viewport_texture != null:
 			ui.image(viewport_texture, Vector2(560, 300))
@@ -220,8 +227,8 @@ func _reset():
 
 
 func _performance_window(ui):
-	ui.set_next_window_pos(Vector2(16, 492))
-	ui.set_next_window_size(Vector2(600, 212))
+	ui.set_next_window_pos(Vector2(16, 472))
+	ui.set_next_window_size(Vector2(600, 232))
 	if ui.begin("Rendimiento"):
 		if ui.begin_tab_bar("##perf"):
 			if ui.begin_tab_item("ImPlot"):
@@ -234,16 +241,27 @@ func _performance_window(ui):
 					for i in range(count):
 						xs[i] = i
 						fps[i] = fps_history[i]
-					if ui.implot_begin_plot("FPS", Vector2(-1, 70)):
-						ui.implot_setup_axes("frames", "fps", ui.IMPLOT_AXIS_AUTOFIT, ui.IMPLOT_AXIS_AUTOFIT)
-						ui.implot_plot_shaded("FPS", xs, fps, 0.0)
-						ui.implot_plot_line("FPS", xs, fps)
-						ui.implot_end_plot()
-					if ui.implot_begin_plot("Frame time (ms)", Vector2(-1, 70)):
-						ui.implot_setup_axes("frames", "ms", ui.IMPLOT_AXIS_AUTOFIT, ui.IMPLOT_AXIS_AUTOFIT)
-						ui.implot_plot_shaded("ms", xs, frame_history)
-						ui.implot_plot_line("ms", xs, frame_history)
-						ui.implot_end_plot()
+					# Alto suficiente para que el area de datos no quede en cero:
+					# cada plot ocupa el alto disponible (>= 160 px) y medio ancho.
+					var avail = ui.get_content_region_avail()
+					var plot_h = max(avail.y - 4.0, 160.0)
+					var plot_w = max((avail.x - 8.0) * 0.5, 120.0)
+					if has_implot:
+						if ui.implot_begin_plot("FPS", Vector2(plot_w, plot_h)):
+							ui.implot_setup_axes("frames", "fps", ui.IMPLOT_AXIS_AUTOFIT, ui.IMPLOT_AXIS_AUTOFIT)
+							ui.implot_plot_shaded("FPS", xs, fps, 0.0)
+							ui.implot_plot_line("FPS", xs, fps)
+							ui.implot_end_plot()
+						ui.same_line()
+						if ui.implot_begin_plot("Frame time (ms)", Vector2(plot_w, plot_h)):
+							ui.implot_setup_axes("frames", "ms", ui.IMPLOT_AXIS_AUTOFIT, ui.IMPLOT_AXIS_AUTOFIT)
+							ui.implot_plot_shaded("ms", xs, frame_history)
+							ui.implot_plot_line("ms", xs, frame_history)
+							ui.implot_end_plot()
+					else:
+						ui.plot_lines("FPS", fps, "", 0.0, 0.0, Vector2(plot_w, plot_h))
+						ui.same_line()
+						ui.plot_lines("Frame time (ms)", frame_history, "", 0.0, 0.0, Vector2(plot_w, plot_h))
 				ui.end_tab_item()
 			if ui.begin_tab_item("Barras"):
 				var mem = Performance.get_monitor(Performance.MEMORY_STATIC) / 1048576.0
@@ -253,10 +271,13 @@ func _performance_window(ui):
 				values.push_back(mem)
 				values.push_back(objects)
 				values.push_back(draws)
-				if ui.implot_begin_plot("Recursos", Vector2(-1, 140)):
-					ui.implot_setup_axes("", "valor", ui.IMPLOT_AXIS_AUTOFIT, ui.IMPLOT_AXIS_AUTOFIT)
-					ui.implot_plot_bars("recursos", values)
-					ui.implot_end_plot()
+				if has_implot:
+					if ui.implot_begin_plot("Recursos", Vector2(-1, 140)):
+						ui.implot_setup_axes("", "valor", ui.IMPLOT_AXIS_AUTOFIT, ui.IMPLOT_AXIS_AUTOFIT)
+						ui.implot_plot_bars("recursos", values)
+						ui.implot_end_plot()
+				else:
+					ui.plot_histogram("Recursos", values, "", 0.0, 0.0, Vector2(-1, 140))
 				ui.same_line()
 				ui.text("mem %.1f MB  obj/100 %.0f  draws %.0f" % [mem, objects, draws])
 				ui.end_tab_item()
@@ -290,6 +311,10 @@ func _3d_window(ui):
 	ui.set_next_window_pos(Vector2(628, 332))
 	ui.set_next_window_size(Vector2(340, 372))
 	if ui.begin("3D"):
+		if not has_implot3d:
+			ui.text_wrapped("ImPlot3D no esta compilado en este binario (imgui_implot3d=no).")
+			ui.end()
+			return
 		var n = SURFACE_N
 		var xs = PoolRealArray()
 		var ys = PoolRealArray()
@@ -306,8 +331,8 @@ func _3d_window(ui):
 				xs[idx] = x
 				ys[idx] = y
 				zs[idx] = sin(x * t) * cos(y * t)
-		if ui.implot3d_begin_plot("Superficie", Vector2(-1, 170)):
-			ui.implot3d_setup_axes("x", "y", "z")
+		if ui.implot3d_begin_plot("Superficie", Vector2(-1, 170), ui.IMPLOT3D_FLAGS_NO_CLIP):
+			ui.implot3d_setup_axes_flags("x", "y", "z", ui.IMPLOT3D_AXIS_AUTOFIT)
 			ui.implot3d_plot_surface("superficie", xs, ys, zs, n, n)
 			ui.implot3d_end_plot()
 
@@ -324,7 +349,7 @@ func _3d_window(ui):
 			hy[k] = sin(a) * 1.2
 			hz[k] = -2.0 + 4.0 * float(k) / float(hn - 1)
 		if ui.implot3d_begin_plot("Helice", Vector2(-1, 170)):
-			ui.implot3d_setup_axes("x", "y", "z")
+			ui.implot3d_setup_axes_flags("x", "y", "z", ui.IMPLOT3D_AXIS_AUTOFIT)
 			ui.implot3d_plot_line("helice", hx, hy, hz)
 			ui.implot3d_end_plot()
 	ui.end()
@@ -333,6 +358,10 @@ func _3d_window(ui):
 func draw(ui):
 	if viewport == null or not is_instance_valid(viewport):
 		_setup_3d(ui)
+
+	has_implot = ui.has_method("implot_begin_plot")
+	has_implot3d = ui.has_method("implot3d_begin_plot")
+	has_demos = ui.has_method("show_demo_window")
 
 	_process_3d()
 	_sample_history()
@@ -364,11 +393,11 @@ func draw(ui):
 	elif choice == 6:
 		_reset()
 
-	if show_demo:
+	if show_demo and ui.has_method("show_demo_window"):
 		ui.show_demo_window()
-	if show_implot_demo:
+	if show_implot_demo and has_implot and ui.has_method("implot_show_demo_window"):
 		ui.implot_show_demo_window()
-	if show_implot3d_demo:
+	if show_implot3d_demo and has_implot3d and ui.has_method("implot3d_show_demo_window"):
 		ui.implot3d_show_demo_window()
-	if show_metrics:
+	if show_metrics and ui.has_method("show_metrics_window"):
 		ui.show_metrics_window()
