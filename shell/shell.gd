@@ -400,7 +400,7 @@ func _draw_activity():
 func _activate(index):
 	var activity = ACTIVITIES[index]
 	if activity.has("quit") and activity.quit:
-		get_tree().quit()
+		recovery.quit(self)
 		return
 	if activity.has("script"):
 		_release_activity()

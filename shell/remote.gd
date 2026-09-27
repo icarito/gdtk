@@ -238,7 +238,7 @@ func _handle_line(conn, line):
 			shell.recovery.call_deferred("restart", shell)
 		"quit":
 			_reply(conn, id, true)
-			get_tree().quit()
+			shell.recovery.quit(shell)
 		_:
 			_fail(conn, id, -32601, "method not found: " + method)
 

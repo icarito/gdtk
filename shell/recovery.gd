@@ -38,6 +38,15 @@ func restart(shell):
 	shell.get_tree().quit(EXIT_RESTART)
 
 
+# Salida pedida por el usuario: la marca le dice al supervisor que termine la sesión aunque
+# el motor se caiga al cerrarse (pasa en tengu: free() inválido en el teardown).
+static func quit(shell):
+	var f = File.new()
+	if f.open(state_path().get_base_dir().plus_file("gdtk-quit"), File.WRITE) == OK:
+		f.close()
+	shell.get_tree().quit()
+
+
 # Al arrancar: aviso si venimos de una caída y, fuera del modo seguro, estado a restaurar.
 func load(shell):
 	var crash = OS.get_environment("GDTK_LAST_CRASH")

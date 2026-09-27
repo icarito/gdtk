@@ -6,6 +6,7 @@
 # ponytail: no detecta cuelgues (proceso vivo pero congelado): para eso gdtk_restart_shell force=true.
 LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/gdtk"
 RUN="${XDG_RUNTIME_DIR:-/tmp}"
+QUIT="$RUN/gdtk-quit"     # el shell la crea al pedir Salir: termina aunque el cierre se caiga
 FLAG="$RUN/gdtk-restart"  # el MCP lo crea antes de matar un shell colgado: no cuenta como caída
 mkdir -p "$LOGDIR"
 pid=""
@@ -15,7 +16,7 @@ say() { echo "[supervisor] $*"; echo "$(date '+%F %T') $*" >>"$LOGDIR/supervisor
 fails=0
 while :; do
 	[ -f "$LOGDIR/shell.log" ] && mv -f "$LOGDIR/shell.log" "$LOGDIR/shell.prev.log"
-	rm -f "$FLAG"
+	rm -f "$FLAG" "$QUIT"
 	safe=""
 	if [ "$fails" -ge 2 ]; then
 		safe="--video-driver GLES2"; export GDTK_SAFE="$fails"
@@ -35,8 +36,9 @@ while :; do
 	pid=""
 	wait; rm -f "$fifo" "$RUN/gdtk-shell.pid"
 
-	if [ "$rc" -eq 0 ]; then
-		exit 0
+	if [ "$rc" -eq 0 ] || [ -f "$QUIT" ]; then
+		[ "$rc" -eq 0 ] || say "salida pedida; el cierre terminó con rc=$rc"
+		rm -f "$QUIT"; exit 0
 	elif [ "$rc" -eq 75 ] || [ -f "$FLAG" ]; then
 		say "reinicio pedido (rc=$rc)"; fails=0; unset GDTK_LAST_CRASH
 		continue
