@@ -22,7 +22,7 @@ ecosistema y porque el problema de texto es igual en todas.
 ## Arquitectura propuesta
 
 ```
-Godot 3.6 fork (FRT/SDL2, Wayland) + modules/imgui  ← este repo
+Godot 3.6 fork (FRT/SDL2, Wayland, módulo `imgui`) + este repo (`modules/wayland`, shell, demos)
   └─ nodo ImGuiCanvas (Node2D): contexto ImGui, input, render vía VisualServer
       └─ GDScript llama API inmediata en la señal `imgui_frame`
 Fase 2: modules/xmpp (libstrophe) → señales message_received / send_message()
@@ -40,7 +40,7 @@ compartida entre árboles y ramas.
 ```sh
 cd ~/Proyectos/godot3-box3d/godot-dev
 scons -j8 platform=frt arch=x86_64 target=release_debug tools=yes frt_desktop_gl=yes production=yes \
-  lto=none use_static_cpp=no extra_suffix=gdtk \
+  lto=none use_static_cpp=no extra_suffix=gdtk imgui_implot3d=yes \
   custom_modules=$HOME/Proyectos/godot3-box3d/godot-box3d-3,/run/media/icarito/DATA/icarito/Proyectos/gdtk/modules
 ./run_shell.sh; ./run_compositor.sh; tests/control_test.sh   # verificación
 ./deploy.sh icarito@192.168.18.163                            # a la X200 (tengu)

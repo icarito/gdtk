@@ -15,7 +15,7 @@ BIN="$GODOT/bin/godot.frt.opt.tools.x86_64.gdtk"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
 (cd "$GODOT" && scons -j8 platform=frt arch=x86_64 target=release_debug tools=yes frt_desktop_gl=yes \
-	production=yes lto=none use_static_cpp=no progress=no extra_suffix=gdtk \
+	production=yes lto=none use_static_cpp=no progress=no extra_suffix=gdtk imgui_implot3d=yes \
 	custom_modules=/home/icarito/Proyectos/godot3-box3d/godot-box3d-3,"$GDTK/modules")
 objcopy --remove-section=.note.gnu.property "$BIN" "$TMP/godot-gdtk"
 

@@ -38,7 +38,7 @@ Causa (verificada leyendo el código):
 - Build (sólo binarios con sufijo gdtk):
   ```sh
   cd /home/icarito/Proyectos/godot3-box3d/godot
-  scons -j8 platform=frt arch=x86_64 target=release_debug tools=yes frt_desktop_gl=yes production=yes lto=none use_static_cpp=no progress=no extra_suffix=gdtk custom_modules=/home/icarito/Proyectos/godot3-box3d/godot-box3d-3,/run/media/icarito/DATA/icarito/Proyectos/gdtk/modules
+  scons -j8 platform=frt arch=x86_64 target=release_debug tools=yes frt_desktop_gl=yes production=yes lto=none use_static_cpp=no progress=no extra_suffix=gdtk imgui_implot3d=yes custom_modules=/home/icarito/Proyectos/godot3-box3d/godot-box3d-3,/run/media/icarito/DATA/icarito/Proyectos/gdtk/modules
   ```
 
 ## 1. FRT: physical_scancode real

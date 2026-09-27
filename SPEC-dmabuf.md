@@ -63,8 +63,8 @@ Leer antes: `modules/wayland/*`, `shell/shell.gd`.
 ```sh
 cd /home/icarito/Proyectos/godot3-box3d/godot
 M=/home/icarito/Proyectos/godot3-box3d/godot-box3d-3,/run/media/icarito/DATA/icarito/Proyectos/gdtk/modules
-scons -j8 platform=frt arch=x86_64 target=release_debug tools=yes frt_desktop_gl=yes production=yes lto=none progress=no extra_suffix=gdtk custom_modules=$M
-scons -j8 platform=x11 target=release_debug tools=yes progress=no extra_suffix=gdtk custom_modules=$M
+scons -j8 platform=frt arch=x86_64 target=release_debug tools=yes frt_desktop_gl=yes production=yes lto=none progress=no extra_suffix=gdtk imgui_implot3d=yes custom_modules=$M
+scons -j8 platform=x11 target=release_debug tools=yes progress=no extra_suffix=gdtk imgui_implot3d=yes custom_modules=$M
 ```
 
 ## Verificación (obligatoria; `timeout 90` en cada corrida; `SDL_VIDEODRIVER=wayland`)

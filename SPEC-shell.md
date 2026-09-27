@@ -62,9 +62,9 @@ shell/activities/chat.gd   # extends Reference; func draw(ui) — el chat mock d
 cd /home/icarito/Proyectos/godot3-box3d/godot
 M=/home/icarito/Proyectos/godot3-box3d/godot-box3d-3,/run/media/icarito/DATA/icarito/Proyectos/gdtk/modules
 # a) x11 (el de la demo) — incremental
-scons -j8 platform=x11 target=release_debug tools=yes progress=no extra_suffix=gdtk custom_modules=$M
+scons -j8 platform=x11 target=release_debug tools=yes progress=no extra_suffix=gdtk imgui_implot3d=yes custom_modules=$M
 # b) FRT/SDL2 desktop GL (Wayland nativo) — puede tardar (~30 min si recompila todo); usar timeout largo o correrlo en background y esperar
-scons -j8 platform=frt arch=x86_64 target=release_debug tools=yes frt_desktop_gl=yes production=yes lto=none progress=no extra_suffix=gdtk custom_modules=$M
+scons -j8 platform=frt arch=x86_64 target=release_debug tools=yes frt_desktop_gl=yes production=yes lto=none progress=no extra_suffix=gdtk imgui_implot3d=yes custom_modules=$M
 ```
 
 ## 5. Verificación (obligatorio)

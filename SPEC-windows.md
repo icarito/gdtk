@@ -17,7 +17,7 @@ escala 1:1 con `get_geometry`, `view_offset`).
 - Build:
   ```sh
   cd /home/icarito/Proyectos/godot3-box3d/godot
-  scons -j8 platform=frt arch=x86_64 target=release_debug tools=yes frt_desktop_gl=yes production=yes lto=none use_static_cpp=no progress=no extra_suffix=gdtk custom_modules=/home/icarito/Proyectos/godot3-box3d/godot-box3d-3,/run/media/icarito/DATA/icarito/Proyectos/gdtk/modules
+  scons -j8 platform=frt arch=x86_64 target=release_debug tools=yes frt_desktop_gl=yes production=yes lto=none use_static_cpp=no progress=no extra_suffix=gdtk imgui_implot3d=yes custom_modules=/home/icarito/Proyectos/godot3-box3d/godot-box3d-3,/run/media/icarito/DATA/icarito/Proyectos/gdtk/modules
   ```
 - **No** usar `pkill -f`/`pgrep -f` con patrones que aparezcan en tu propia línea de comando (mata tu shell).
 

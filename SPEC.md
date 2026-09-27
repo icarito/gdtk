@@ -82,7 +82,7 @@ Además, si se pasa `--screenshot=<ruta>` en los argumentos de usuario (`OS.get_
 
 ```sh
 cd /home/icarito/Proyectos/godot3-box3d/godot
-scons -j8 platform=x11 target=release_debug tools=yes progress=no extra_suffix=gdtk \
+scons -j8 platform=x11 target=release_debug tools=yes progress=no extra_suffix=gdtk imgui_implot3d=yes \
   custom_modules=/home/icarito/Proyectos/godot3-box3d/godot-box3d-3,/run/media/icarito/DATA/icarito/Proyectos/gdtk/modules
 ```
 

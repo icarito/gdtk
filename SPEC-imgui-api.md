@@ -14,7 +14,7 @@ que lo use todo. Leer antes: `modules/imgui/*`, `shell/shell.gd`, `shell/activit
   ```sh
   export SCONS_CACHE=$HOME/.cache/scons-godot3 SCONS_CACHE_LIMIT=30000
   cd /home/icarito/Proyectos/godot3-box3d/godot-dev
-  scons -j8 platform=frt arch=x86_64 target=release_debug tools=yes frt_desktop_gl=yes production=yes lto=none use_static_cpp=no progress=no extra_suffix=gdtk custom_modules=/home/icarito/Proyectos/godot3-box3d/godot-box3d-3,/run/media/icarito/DATA/icarito/Proyectos/gdtk/modules
+  scons -j8 platform=frt arch=x86_64 target=release_debug tools=yes frt_desktop_gl=yes production=yes lto=none use_static_cpp=no progress=no extra_suffix=gdtk imgui_implot3d=yes custom_modules=/home/icarito/Proyectos/godot3-box3d/godot-box3d-3,/run/media/icarito/DATA/icarito/Proyectos/gdtk/modules
   ```
   Si el link falla con `undefined reference to register_*_types`: borrar
   `modules/modules_enabled.gen.h modules/register_module_types.gen.*` en godot-dev y recompilar.
