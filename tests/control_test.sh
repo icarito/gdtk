@@ -3,7 +3,7 @@
 set -u
 
 GDTK="$(cd "$(dirname "$0")/.." && pwd)"
-export GDTK_GODOT="${GDTK_GODOT:-/home/icarito/Proyectos/godot3-box3d/godot/bin/godot.frt.opt.tools.x86_64.gdtk}"
+export GDTK_GODOT="${GDTK_GODOT:-/home/icarito/Proyectos/godot3-box3d/godot-dev/bin/godot.frt.opt.tools.x86_64.gdtk}"
 export SDL_VIDEODRIVER=wayland
 if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
 	export XDG_RUNTIME_DIR="/run/user/$(id -u)"

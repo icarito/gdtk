@@ -3,7 +3,7 @@
 set -e
 
 GDTK="/run/media/icarito/DATA/icarito/Proyectos/gdtk"
-export GDTK_GODOT="${GDTK_GODOT:-/home/icarito/Proyectos/godot3-box3d/godot/bin/godot.frt.opt.tools.x86_64.gdtk}"
+export GDTK_GODOT="${GDTK_GODOT:-/home/icarito/Proyectos/godot3-box3d/godot-dev/bin/godot.frt.opt.tools.x86_64.gdtk}"
 export SDL_VIDEODRIVER=wayland
 
 # 1) es2gears_wayland: prueba de frame callbacks (dmabuf zero-copy).

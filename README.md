@@ -29,13 +29,19 @@ Fase 2: modules/xmpp (libstrophe) → señales message_received / send_message()
 Fase 3: shell Sugar bajo `cage`; luego gdwlroots si hace falta embeber apps externas
 ```
 
-## POC
+## Build
 
-Ver `SPEC.md`. Compilar:
+gdtk compila en su **propio árbol del motor**, `~/Proyectos/godot3-box3d/godot-dev` (un `git worktree`
+del mismo commit que `godot`, con los parches del fork aplicados). El árbol `godot` queda para Odisea
+y las ramas del fork: así ninguno le cambia los parches al otro y scons no recompila todo al alternar.
+La caché de objetos (`SCONS_CACHE=~/.cache/scons-godot3`, en `~/.zshrc` y en `deploy.sh`) es
+compartida entre árboles y ramas.
 
 ```sh
-cd ~/Proyectos/godot3-box3d/godot
-scons -j8 platform=x11 target=release_debug tools=yes progress=no extra_suffix=gdtk \
-  custom_modules=/home/icarito/Proyectos/godot3-box3d/godot-box3d-3,/run/media/icarito/DATA/icarito/Proyectos/gdtk/modules
-bin/godot.x11.opt.tools.64.gdtk --path /run/media/icarito/DATA/icarito/Proyectos/gdtk/demo
+cd ~/Proyectos/godot3-box3d/godot-dev
+scons -j8 platform=frt arch=x86_64 target=release_debug tools=yes frt_desktop_gl=yes production=yes \
+  lto=none use_static_cpp=no extra_suffix=gdtk \
+  custom_modules=$HOME/Proyectos/godot3-box3d/godot-box3d-3,/run/media/icarito/DATA/icarito/Proyectos/gdtk/modules
+./run_shell.sh; ./run_compositor.sh; tests/control_test.sh   # verificación
+./deploy.sh icarito@192.168.18.163                            # a la X200 (tengu)
 ```

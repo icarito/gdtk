@@ -10,7 +10,7 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 export GDTK_SESSION=x11
 if [ -z "$GDTK_GODOT" ]; then
 	GDTK_GODOT="$HERE/bin/godot-gdtk"
-	[ -x "$GDTK_GODOT" ] || GDTK_GODOT=/home/icarito/Proyectos/godot3-box3d/godot/bin/godot.frt.opt.tools.x86_64.gdtk
+	[ -x "$GDTK_GODOT" ] || GDTK_GODOT=/home/icarito/Proyectos/godot3-box3d/godot-dev/bin/godot.frt.opt.tools.x86_64.gdtk
 fi
 export SDL_VIDEODRIVER=x11
 # EGL en vez de GLX: el compositor embebido necesita EGL para importar dmabuf (zero-copy).

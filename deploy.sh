@@ -8,7 +8,9 @@ set -e
 HOST="$1"; DRIVER="${2:-GLES2}"
 [ -n "$HOST" ] || { echo "uso: $0 usuario@host [GLES2|GLES3]"; exit 1; }
 GDTK="$(cd "$(dirname "$0")" && pwd)"
-GODOT=/home/icarito/Proyectos/godot3-box3d/godot
+# Árbol del motor propio de gdtk (worktree): no comparte objetos ni parches con el de Odisea.
+GODOT=/home/icarito/Proyectos/godot3-box3d/godot-dev
+export SCONS_CACHE="${SCONS_CACHE-$HOME/.cache/scons-godot3}" SCONS_CACHE_LIMIT="${SCONS_CACHE_LIMIT:-30000}"
 BIN="$GODOT/bin/godot.frt.opt.tools.x86_64.gdtk"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 

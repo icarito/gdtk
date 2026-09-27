@@ -5,7 +5,7 @@ export GDTK_SESSION=wayland
 # Instalado: binario junto al shell (bin/godot-gdtk); en desarrollo: el build del árbol de Godot.
 if [ -z "$GDTK_GODOT" ]; then
 	GDTK_GODOT="$HERE/bin/godot-gdtk"
-	[ -x "$GDTK_GODOT" ] || GDTK_GODOT=/home/icarito/Proyectos/godot3-box3d/godot/bin/godot.frt.opt.tools.x86_64.gdtk
+	[ -x "$GDTK_GODOT" ] || GDTK_GODOT=/home/icarito/Proyectos/godot3-box3d/godot-dev/bin/godot.frt.opt.tools.x86_64.gdtk
 fi
 # Dentro de cage hay Xwayland: sin esto SDL puede elegir X11/GLX y pedir GL 3.3 (GLXBadFBConfig en GPUs viejas).
 export SDL_VIDEODRIVER=wayland
