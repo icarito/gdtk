@@ -87,7 +87,9 @@ func _remove_token():
 # no terminaría al salir el cliente).
 func _start_watchdog():
 	var close_fds = "i=3; while [ $i -le 64 ]; do eval \"exec $i>&-\" 2>/dev/null; i=$((i+1)); done; "
-	var loop = "while kill -0 %d 2>/dev/null; do sleep 1; done; rm -f '%s'" % [OS.get_process_id(), token_path]
+	# Sólo borra el token si sigue siendo el nuestro: todas las sesiones usan la misma ruta y el
+	# vigilante de una sesión vieja borraba el token de la nueva.
+	var loop = "while kill -0 %d 2>/dev/null; do sleep 1; done; [ \"$(cat '%s' 2>/dev/null)\" = '%s' ] && rm -f '%s'" % [OS.get_process_id(), token_path, token, token_path]
 	OS.execute("setsid", ["sh", "-c", close_fds + loop], false)
 
 
