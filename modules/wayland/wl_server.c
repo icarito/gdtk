@@ -14,6 +14,7 @@
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
 #include <wlr/backend/headless.h>
+#include <wlr/types/wlr_output.h>
 #include <wlr/interfaces/wlr_keyboard.h>
 #include <wlr/render/dmabuf.h>
 #include <wlr/render/drm_format_set.h>
@@ -67,6 +68,7 @@ struct wl_server {
 	struct wl_display *display;
 	struct wl_event_loop *loop;
 	struct wlr_backend *backend;
+	struct wlr_output *output;
 	struct wlr_compositor *compositor;
 	struct wlr_subcompositor *subcompositor;
 	struct wlr_data_device_manager *data_device_manager;
@@ -546,21 +548,45 @@ static void handle_toplevel_destroy(struct wl_listener *listener, void *data) {
 // Sin el configure inicial GTK4 espera el popup para siempre y su frame clock
 // (compartido con la ventana) congela tambien la ventana principal.
 typedef struct popup {
+	struct wl_server *s;
 	struct wlr_xdg_popup *p;
 	struct wl_listener commit;
+	struct wl_listener reposition;
 	struct wl_listener destroy;
 } popup;
+
+// Reubica el popup dentro de lo visible (reglas del xdg_positioner). La caja va en coords
+// de la surface raíz del toplevel: el contenido visible arranca en su geometry (las sombras
+// CSD quedan fuera) y mide lo que la vista (default_w x default_h).
+static void popup_unconstrain(popup *pp) {
+	struct wlr_xdg_surface *xs = wlr_xdg_surface_try_from_wlr_surface(pp->p->parent);
+	while (xs != NULL && xs->role == WLR_XDG_SURFACE_ROLE_POPUP && xs->popup != NULL) {
+		xs = wlr_xdg_surface_try_from_wlr_surface(xs->popup->parent);
+	}
+	if (xs == NULL || xs->role != WLR_XDG_SURFACE_ROLE_TOPLEVEL) {
+		return;
+	}
+	struct wlr_box box = { xs->geometry.x, xs->geometry.y, pp->s->default_w, pp->s->default_h };
+	wlr_xdg_popup_unconstrain_from_box(pp->p, &box);
+}
 
 static void handle_popup_commit(struct wl_listener *listener, void *data) {
 	popup *pp = wl_container_of(listener, pp, commit);
 	if (pp->p->base->initial_commit) {
+		popup_unconstrain(pp);
 		wlr_xdg_surface_schedule_configure(pp->p->base);
 	}
+}
+
+static void handle_popup_reposition(struct wl_listener *listener, void *data) {
+	popup *pp = wl_container_of(listener, pp, reposition);
+	popup_unconstrain(pp);
 }
 
 static void handle_popup_destroy(struct wl_listener *listener, void *data) {
 	popup *pp = wl_container_of(listener, pp, destroy);
 	wl_list_remove(&pp->commit.link);
+	wl_list_remove(&pp->reposition.link);
 	wl_list_remove(&pp->destroy.link);
 	free(pp);
 }
@@ -572,9 +598,12 @@ static void handle_new_popup(struct wl_listener *listener, void *data) {
 	if (pp == NULL) {
 		return;
 	}
+	pp->s = s;
 	pp->p = p;
 	pp->commit.notify = handle_popup_commit;
 	wl_signal_add(&p->base->surface->events.commit, &pp->commit);
+	pp->reposition.notify = handle_popup_reposition;
+	wl_signal_add(&p->events.reposition, &pp->reposition);
 	pp->destroy.notify = handle_popup_destroy;
 	wl_signal_add(&p->events.destroy, &pp->destroy);
 
@@ -684,6 +713,17 @@ static void handle_new_decoration(struct wl_listener *listener, void *data) {
 	decoration_apply(dd);
 }
 
+static void output_set_size(struct wl_server *s) {
+	struct wlr_output_state state;
+	wlr_output_state_init(&state);
+	wlr_output_state_set_enabled(&state, true);
+	wlr_output_state_set_custom_mode(&state, s->default_w, s->default_h, 60000);
+	if (!wlr_output_commit_state(s->output, &state)) {
+		wlr_log(WLR_ERROR, "wl_server: no se pudo configurar el output %dx%d", s->default_w, s->default_h);
+	}
+	wlr_output_state_finish(&state);
+}
+
 wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h) {
 	struct wl_server *s = calloc(1, sizeof(*s));
 	if (s == NULL) {
@@ -718,6 +758,14 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 	s->subcompositor = wlr_subcompositor_create(s->display);
 	s->data_device_manager = wlr_data_device_manager_create(s->display);
 	s->xdg_shell = wlr_xdg_shell_create(s->display, 3);
+
+	// Un wl_output del tamaño de la vista: GTK3 (Firefox) limita los popups al área del
+	// monitor, y sin ningún output los configuraba a 1x1 y los descartaba.
+	s->output = wlr_headless_add_output(s->backend, s->default_w, s->default_h);
+	if (s->output != NULL) {
+		output_set_size(s);
+		wlr_output_create_global(s->output, s->display);
+	}
 	if (s->compositor == NULL || s->subcompositor == NULL ||
 			s->data_device_manager == NULL || s->xdg_shell == NULL) {
 		wlr_log(WLR_ERROR, "wl_server: fallo al crear globals de wlroots");
@@ -851,6 +899,9 @@ void wl_server_set_default_size(wl_server *s, int w, int h) {
 	}
 	if (h > 0) {
 		s->default_h = h;
+	}
+	if (s->output != NULL && (s->output->width != s->default_w || s->output->height != s->default_h)) {
+		output_set_size(s);
 	}
 }
 
