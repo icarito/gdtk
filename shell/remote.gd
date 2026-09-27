@@ -209,6 +209,10 @@ func _handle_line(conn, line):
 			_reply(conn, id, true)
 		"screenshot":
 			_reply(conn, id, _screenshot(params))
+		"hud_snapshot":
+			_reply(conn, id, _hud_snapshot(params))
+		"hud_command":
+			_reply(conn, id, _hud_command(params))
 		"click":
 			_click(params)
 			_reply(conn, id, true)
@@ -330,6 +334,25 @@ func _screenshot(params):
 		image.resize(max_width, height, Image.INTERPOLATE_BILINEAR)
 	var png = image.save_png_to_buffer()
 	return {"png_base64": Marshalls.raw_to_base64(png)}
+
+
+# SPEC-hud-remote 3: el control remoto expone el colector del HUD y su consola.
+func _hud():
+	return get_node_or_null("/root/DebugHud")
+
+
+func _hud_snapshot(params):
+	var hud = _hud()
+	if hud == null:
+		return {"error": "DebugHud no disponible"}
+	return hud.snapshot(int(params.get("since_frame", -1)))
+
+
+func _hud_command(params):
+	var hud = _hud()
+	if hud == null:
+		return {"output": "DebugHud no disponible"}
+	return {"output": hud.command_output(str(params.get("line", "")))}
 
 
 func _event_mouse_motion(x, y):

@@ -122,6 +122,8 @@ TOOLS = [
     tool("gdtk_scroll", "Scroll the wheel at (x, y); positive dy scrolls down.", {"x": {"type": "number"}, "y": {"type": "number"}, "dy": {"type": "number"}}, ["x", "y", "dy"]),
     tool("gdtk_type", "Type text as synthetic key events.", {"text": {"type": "string"}}, ["text"]),
     tool("gdtk_key", "Press a key or combo such as Enter, Escape, ctrl+c or alt+Tab.", {"combo": {"type": "string"}}, ["combo"]),
+    tool("gdtk_metrics", "Get the debug HUD metrics snapshot: latest values plus min/max/avg of each series. With since_frame only the new samples are returned.", {"since_frame": {"type": "integer"}}),
+    tool("gdtk_console", "Run a HUD console command and return its output (help, fps, vsync, timescale; eval only in debug builds).", {"line": {"type": "string"}}, ["line"]),
 ]
 
 TOOL_METHOD = {
@@ -137,11 +139,40 @@ TOOL_METHOD = {
     "gdtk_scroll": "scroll",
     "gdtk_type": "type",
     "gdtk_key": "key",
+    "gdtk_metrics": "hud_snapshot",
+    "gdtk_console": "hud_command",
 }
 
 
 def tool_result(content, is_error=False):
     return {"content": [content], "isError": is_error}
+
+
+def format_metrics(snapshot):
+    if not isinstance(snapshot, dict):
+        return json.dumps(snapshot)
+    if "error" in snapshot:
+        return "error: %s" % snapshot["error"]
+    latest = snapshot.get("latest") or {}
+    series = snapshot.get("series") or {}
+    profile = snapshot.get("profile") or {}
+    lines = ["frame=%s time=%s render_local=%s driver=%s frt_perf=%s gpu=%s" % (
+        snapshot.get("frame"), snapshot.get("time"), profile.get("render_local"),
+        profile.get("driver"), profile.get("frt_perf"), profile.get("gpu"))]
+    lines.append("logs=%d" % len(snapshot.get("logs") or []))
+    lines.append("%-34s %12s %12s %12s %12s" % ("monitor", "actual", "min", "max", "media"))
+    for name in sorted(latest.keys()):
+        values = [v for v in (series.get(name) or []) if isinstance(v, (int, float))]
+        if values:
+            low = min(values)
+            high = max(values)
+            avg = sum(values) / float(len(values))
+        else:
+            value = latest.get(name, 0.0)
+            low = high = avg = value
+        lines.append("%-34s %12.3f %12.3f %12.3f %12.3f" % (
+            name, latest.get(name, 0.0), low, high, avg))
+    return "\n".join(lines)
 
 
 def handle_tool_call(params):
@@ -158,6 +189,13 @@ def handle_tool_call(params):
 
     if name == "gdtk_screenshot":
         content = {"type": "image", "data": result.get("png_base64", ""), "mimeType": "image/png"}
+    elif name == "gdtk_metrics":
+        content = {"type": "text", "text": format_metrics(result)}
+    elif name == "gdtk_console":
+        if isinstance(result, dict):
+            content = {"type": "text", "text": str(result.get("output", result))}
+        else:
+            content = {"type": "text", "text": str(result)}
     else:
         content = {"type": "text", "text": json.dumps(result)}
 

@@ -3,6 +3,7 @@ extends ImGuiCanvas
 var ACTIVITIES = [
 	{"name": "Chat", "script": "res://activities/chat.gd"},
 	{"name": "Panel", "script": "res://activities/panel.gd"},
+	{"name": "Perfil remoto", "script": "res://activities/remote_profile.gd"},
 	{"name": "Criopod", "script": "res://activities/criopod.gd"},
 	{"name": "Terminal", "wayland": ["alacritty"]},
 	{"name": "Gears", "wayland": ["es2gears_wayland"]},
