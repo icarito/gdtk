@@ -5,6 +5,9 @@ var ACTIVITIES = [
 	{"name": "Terminal", "wayland": ["alacritty"]},
 	{"name": "Gears", "wayland": ["es2gears_wayland"]},
 	{"name": "GTK", "wayland": ["gtk4-widget-factory"]},
+	# Servicio: el botón prende/apaga un proceso en segundo plano (no abre vista).
+	# Deskflow inyecta input vía XTest: sólo tiene sentido en la sesión X11.
+	{"name": "Deskflow", "service": "deskflow-core client --new-instance -s ~/gdtk/deskflow-client.conf", "session": "x11"},
 	{"name": "Salir", "quit": true},
 ]
 
@@ -98,7 +101,10 @@ func _draw_home():
 			var angle = -PI / 2.0 + TAU * float(i) / float(ACTIVITIES.size())
 			var pos = center + Vector2(cos(angle), sin(angle)) * radius - btn_size * 0.5
 			set_cursor_pos(pos)
-			if button(ACTIVITIES[i].name, btn_size):
+			var label = ACTIVITIES[i].name
+			if ACTIVITIES[i].has("service") and _service_running(ACTIVITIES[i].name):
+				label += " *"
+			if button(label + "##" + ACTIVITIES[i].name, btn_size):
 				_activate(i)
 
 		var t = OS.get_time()
@@ -153,6 +159,45 @@ func _activate(index):
 		return
 	if activity.has("wayland"):
 		_open_wayland(activity)
+	if activity.has("service"):
+		_toggle_service(activity)
+
+
+var service_pids = {}
+
+
+func _toggle_service(activity):
+	var name = activity.name
+	if _service_running(name):
+		OS.kill(service_pids[name])
+		service_pids.erase(name)
+		return
+	if activity.has("session") and OS.get_environment("GDTK_SESSION") != activity.session:
+		activity_error = name + ": sólo en la sesión " + activity.session.to_upper()
+		return
+	# Vía sh + & para que el proceso quede colgado de init: si lo lanzara Godot directo, al
+	# morir quedaría zombie y kill -0 lo seguiría dando por vivo.
+	var cmd = activity.service.replace("~/", OS.get_environment("HOME") + "/")
+	var log_path = OS.get_environment("XDG_RUNTIME_DIR").plus_file("gdtk-" + name.to_lower() + ".log")
+	var out = []
+	# Con output, Godot 3 pasa el comando por popen (otro sh, args entre comillas dobles):
+	# sin escapar, ese sh externo expande $! a vacío antes de llegar al nuestro.
+	OS.execute("sh", ["-c", cmd + " >" + log_path + " 2>&1 & echo \\$!"], true, out)
+	var pid = int(String(out[0]).strip_edges()) if out.size() > 0 else 0
+	if pid > 0:
+		service_pids[name] = pid
+		activity_error = ""
+	else:
+		activity_error = name + ": no se pudo lanzar"
+
+
+func _service_running(name):
+	if not service_pids.has(name):
+		return false
+	if OS.execute("sh", ["-c", "kill -0 " + str(service_pids[name])], true) != 0:
+		service_pids.erase(name)
+		return false
+	return true
 
 
 func _open_by_name(name):

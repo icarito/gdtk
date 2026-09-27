@@ -78,6 +78,7 @@ struct wl_server {
 
 	wl_server_callbacks cb;
 	struct wl_listener new_toplevel;
+	struct wl_listener new_popup;
 	struct wl_list toplevels;
 	int next_id;
 	int default_w, default_h;
@@ -421,6 +422,43 @@ static void handle_toplevel_destroy(struct wl_listener *listener, void *data) {
 	}
 }
 
+// Popups (tooltips, menús): sólo se configuran, no se dibujan todavía.
+// Sin el configure inicial GTK4 espera el popup para siempre y su frame clock
+// (compartido con la ventana) congela también la ventana principal.
+// ponytail: popups invisibles; dibujarlos = componer su surface en popup->current.geometry.
+typedef struct popup {
+	struct wlr_xdg_popup *p;
+	struct wl_listener commit;
+	struct wl_listener destroy;
+} popup;
+
+static void handle_popup_commit(struct wl_listener *listener, void *data) {
+	popup *pp = wl_container_of(listener, pp, commit);
+	if (pp->p->base->initial_commit) {
+		wlr_xdg_surface_schedule_configure(pp->p->base);
+	}
+}
+
+static void handle_popup_destroy(struct wl_listener *listener, void *data) {
+	popup *pp = wl_container_of(listener, pp, destroy);
+	wl_list_remove(&pp->commit.link);
+	wl_list_remove(&pp->destroy.link);
+	free(pp);
+}
+
+static void handle_new_popup(struct wl_listener *listener, void *data) {
+	struct wlr_xdg_popup *p = data;
+	popup *pp = calloc(1, sizeof(*pp));
+	if (pp == NULL) {
+		return;
+	}
+	pp->p = p;
+	pp->commit.notify = handle_popup_commit;
+	wl_signal_add(&p->base->surface->events.commit, &pp->commit);
+	pp->destroy.notify = handle_popup_destroy;
+	wl_signal_add(&p->events.destroy, &pp->destroy);
+}
+
 static void handle_new_toplevel(struct wl_listener *listener, void *data) {
 	struct wl_server *s = wl_container_of(listener, s, new_toplevel);
 	struct wlr_xdg_toplevel *tl = data;
@@ -532,6 +570,8 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 
 	s->new_toplevel.notify = handle_new_toplevel;
 	wl_signal_add(&s->xdg_shell->events.new_toplevel, &s->new_toplevel);
+	s->new_popup.notify = handle_new_popup;
+	wl_signal_add(&s->xdg_shell->events.new_popup, &s->new_popup);
 
 	s->socket_name = wl_display_add_socket_auto(s->display);
 	if (s->socket_name == NULL) {
@@ -569,6 +609,10 @@ void wl_server_dispatch(wl_server *s) {
 	wl_display_flush_clients(s->display);
 }
 
+static void send_frame_done_iter(struct wlr_surface *surface, int sx, int sy, void *data) {
+	wlr_surface_send_frame_done(surface, data);
+}
+
 void wl_server_frame_done(wl_server *s) {
 	if (s == NULL) {
 		return;
@@ -577,8 +621,10 @@ void wl_server_frame_done(wl_server *s) {
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	toplevel *t;
 	wl_list_for_each(t, &s->toplevels, link) {
-		if (t->mapped && t->tl->base->surface != NULL) {
-			wlr_surface_send_frame_done(t->tl->base->surface, &now);
+		if (t->mapped) {
+			// Todo el árbol (subsurfaces y popups): un frame callback sin respuesta
+			// en cualquiera de ellos congela el frame clock de GTK4.
+			wlr_xdg_surface_for_each_surface(t->tl->base, send_frame_done_iter, &now);
 		}
 	}
 }
@@ -737,6 +783,9 @@ void wl_server_destroy(wl_server *s) {
 
 	if (s->new_toplevel.notify != NULL) {
 		wl_list_remove(&s->new_toplevel.link);
+	}
+	if (s->new_popup.notify != NULL) {
+		wl_list_remove(&s->new_popup.link);
 	}
 
 	if (s->display != NULL) {

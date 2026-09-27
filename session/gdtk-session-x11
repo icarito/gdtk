@@ -3,6 +3,7 @@
 # sin window manager. El lápiz Wacom llega como puntero vía xf86-input-wacom (cage no maneja tabletas).
 # Las apps Wayland siguen viéndose dentro del shell (su compositor embebido no depende del display).
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
+export GDTK_SESSION=x11
 if [ -z "$GDTK_GODOT" ]; then
 	GDTK_GODOT="$HERE/bin/godot-gdtk"
 	[ -x "$GDTK_GODOT" ] || GDTK_GODOT=/home/icarito/Proyectos/godot3-box3d/godot/bin/godot.frt.opt.tools.x86_64.gdtk

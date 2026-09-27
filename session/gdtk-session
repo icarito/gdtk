@@ -1,5 +1,6 @@
 #!/bin/sh
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
+export GDTK_SESSION=wayland
 # Instalado: binario junto al shell (bin/godot-gdtk); en desarrollo: el build del árbol de Godot.
 if [ -z "$GDTK_GODOT" ]; then
 	GDTK_GODOT="$HERE/bin/godot-gdtk"
