@@ -10,19 +10,22 @@ HOST="$1"; DRIVER="${2:-GLES2}"
 GDTK="$(cd "$(dirname "$0")" && pwd)"
 # Árbol del motor propio de gdtk (worktree): no comparte objetos ni parches con el de Odisea.
 GODOT=/home/icarito/Proyectos/godot3-box3d/godot-dev
+# Fork con el módulo imgui (no toda rama del fork lo trae): FORK=/ruta ./deploy.sh ...
+FORK="${FORK:-/home/icarito/Proyectos/godot3-box3d/godot-box3d-3}"
 export SCONS_CACHE="${SCONS_CACHE-$HOME/.cache/scons-godot3}" SCONS_CACHE_LIMIT="${SCONS_CACHE_LIMIT:-30000}"
 BIN="$GODOT/bin/godot.frt.opt.tools.x86_64.gdtk"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
 (cd "$GODOT" && scons -j8 platform=frt arch=x86_64 target=release_debug tools=yes frt_desktop_gl=yes \
 	production=yes lto=none use_static_cpp=no progress=no extra_suffix=gdtk imgui_implot3d=yes \
-	custom_modules=/home/icarito/Proyectos/godot3-box3d/godot-box3d-3,"$GDTK/modules")
+	custom_modules="$FORK","$GDTK/modules")
+grep -q ImGuiCanvas "$BIN" || { echo "el binario no trae ImGuiCanvas: $FORK sin módulo imgui"; exit 1; }
 objcopy --remove-section=.note.gnu.property "$BIN" "$TMP/godot-gdtk"
 
 ssh "$HOST" 'mkdir -p ~/gdtk/bin ~/gdtk/session'
 RHOME="$(ssh "$HOST" 'echo $HOME')"  # Exec= de un .desktop no expande variables
 rsync -a "$TMP/godot-gdtk" "$HOST:gdtk/bin/"
-rsync -a --exclude '*crash*' --exclude '.import' "$GDTK/shell" "$HOST:gdtk/"
+rsync -a --exclude '*crash*' --exclude '.import' "$GDTK/shell" "$GDTK/addons" "$HOST:gdtk/"  # shell/addons -> ../addons
 rsync -a "$GDTK/mcp" "$HOST:gdtk/"
 rsync -a "$GDTK/session/gdtk-session" "$GDTK/session/gdtk-session-x11" "$GDTK/session/keyboard.sh" "$HOST:gdtk/session/"
 desktop() { # desktop <archivo> <nombre> <script>
