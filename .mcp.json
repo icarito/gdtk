@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "gdtk": {
+      "type": "stdio",
+      "command": "ssh",
+      "args": [
+        "-T",
+        "icarito@192.168.18.163",
+        "python3",
+        "gdtk/mcp/gdtk_mcp.py"
+      ],
+      "env": {}
+    }
+  }
+}
