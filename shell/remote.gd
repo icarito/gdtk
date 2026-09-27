@@ -285,6 +285,8 @@ func _state():
 		"activities": activities,
 		"holo_screen": holo_screen,
 		"holo_points": holo_points,
+		# Frame: items con su posición en pantalla (vacío si no se dibujó).
+		"frame": {"visible": shell.frame.drawn, "items": shell.frame.items_layout},
 	}
 
 

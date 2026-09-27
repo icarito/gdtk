@@ -13,7 +13,7 @@ frame_rounding = 12.0
 script = ExtResource( 2 )
 
 [node name="ViewLayer" type="CanvasLayer" parent="."]
-layer = 1
+layer = -1
 
 [node name="View" type="Control" parent="ViewLayer"]
 visible = false

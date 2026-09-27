@@ -8,7 +8,7 @@ export SDL_VIDEODRIVER=wayland
 if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
 	export XDG_RUNTIME_DIR="/run/user/$(id -u)"
 fi
-TOKEN="$XDG_RUNTIME_DIR/gdtk-control.token"
+TOKEN="$XDG_RUNTIME_DIR/gdtk-control${GDTK_CONTROL_PORT:+-$GDTK_CONTROL_PORT}.token"
 LOG="$GDTK/kilo_control_test.log"
 
 SHELL_PID=""
