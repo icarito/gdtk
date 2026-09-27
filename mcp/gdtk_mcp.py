@@ -32,7 +32,13 @@ def runtime_dir():
 
 
 def token_path():
-    return os.path.join(runtime_dir(), "gdtk-control.token")
+    # Con GDTK_CONTROL_PORT definido el shell nombra el token con el puerto (ver
+    # shell/remote.gd): una prueba en otro puerto no pisa el de la sesión real.
+    if os.environ.get("GDTK_CONTROL_PORT"):
+        name = "gdtk-control-%d.token" % control_port()
+    else:
+        name = "gdtk-control.token"
+    return os.path.join(runtime_dir(), name)
 
 
 def read_token():

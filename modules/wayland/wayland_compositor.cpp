@@ -64,20 +64,64 @@ enum {
 	EVDEV_KEY_P = 25,
 	EVDEV_KEY_SEMICOLON = 39,
 	EVDEV_KEY_APOSTROPHE = 40,
+	EVDEV_KEY_GRAVE = 41,
 	EVDEV_KEY_BACKSLASH = 43,
 	EVDEV_KEY_COMMA = 51,
 	EVDEV_KEY_DOT = 52,
 	EVDEV_KEY_SLASH = 53,
 	EVDEV_KEY_LEFTSHIFT = 42,
+	EVDEV_KEY_RIGHTSHIFT = 54,
 	EVDEV_KEY_LEFTALT = 56,
+	EVDEV_KEY_RIGHTCTRL = 97,
 	EVDEV_KEY_SPACE = 57,
+	EVDEV_KEY_CAPSLOCK = 58,
+	EVDEV_KEY_F1 = 59,
+	EVDEV_KEY_F2 = 60,
+	EVDEV_KEY_F3 = 61,
+	EVDEV_KEY_F4 = 62,
+	EVDEV_KEY_F5 = 63,
+	EVDEV_KEY_F6 = 64,
+	EVDEV_KEY_F7 = 65,
+	EVDEV_KEY_F8 = 66,
+	EVDEV_KEY_F9 = 67,
+	EVDEV_KEY_F10 = 68,
+	EVDEV_KEY_F11 = 87,
+	EVDEV_KEY_F12 = 88,
+	EVDEV_KEY_NUMLOCK = 69,
+	EVDEV_KEY_SCROLLLOCK = 70,
+	EVDEV_KEY_KP7 = 71,
+	EVDEV_KEY_KP8 = 72,
+	EVDEV_KEY_KP9 = 73,
+	EVDEV_KEY_KPSUBTRACT = 74,
+	EVDEV_KEY_KP4 = 75,
+	EVDEV_KEY_KP5 = 76,
+	EVDEV_KEY_KP6 = 77,
+	EVDEV_KEY_KPADD = 78,
+	EVDEV_KEY_KP1 = 79,
+	EVDEV_KEY_KP2 = 80,
+	EVDEV_KEY_KP3 = 81,
+	EVDEV_KEY_KP0 = 82,
+	EVDEV_KEY_KPPERIOD = 83,
+	EVDEV_KEY_102ND = 86,
+	EVDEV_KEY_KPENTER = 96,
+	EVDEV_KEY_KPDIVIDE = 98,
+	EVDEV_KEY_SYSRQ = 99,
+	EVDEV_KEY_RIGHTALT = 100,
 	EVDEV_KEY_HOME = 102,
 	EVDEV_KEY_UP = 103,
+	EVDEV_KEY_PAGEUP = 104,
 	EVDEV_KEY_LEFT = 105,
 	EVDEV_KEY_RIGHT = 106,
 	EVDEV_KEY_END = 107,
 	EVDEV_KEY_DOWN = 108,
+	EVDEV_KEY_PAGEDOWN = 109,
+	EVDEV_KEY_INSERT = 110,
 	EVDEV_KEY_DELETE = 111,
+	EVDEV_KEY_KPASTERISK = 55,
+	EVDEV_KEY_PAUSE = 119,
+	EVDEV_KEY_LEFTMETA = 125,
+	EVDEV_KEY_RIGHTMETA = 126,
+	EVDEV_KEY_COMPOSE = 127,
 	EVDEV_BTN_LEFT = 0x110,
 	EVDEV_BTN_RIGHT = 0x111,
 	EVDEV_BTN_MIDDLE = 0x112,
@@ -116,6 +160,11 @@ static uint32_t _letter_to_evdev(uint32_t p_scancode) {
 	}
 }
 
+// Traduce el physical_scancode de Godot (posicion fisica de la tecla, mapa US)
+// a evdev. Convencion acordada con FRT para teclas sin constante propia en
+// Godot 3 (ver map_key_sdl2_scancode en platform/frt/sdl2_godot_map.h):
+//   KEY_HYPER_R = RALT (AltGr)        -> KEY_RIGHTALT
+//   KEY_HYPER_L = NONUSBACKSLASH (<> ISO) -> KEY_102ND
 static uint32_t _scancode_to_evdev(uint32_t p_scancode) {
 	if (p_scancode == 0) {
 		return 0;
@@ -134,8 +183,9 @@ static uint32_t _scancode_to_evdev(uint32_t p_scancode) {
 		case KEY_SPACE:
 			return EVDEV_KEY_SPACE;
 		case KEY_ENTER:
-		case KEY_KP_ENTER:
 			return EVDEV_KEY_ENTER;
+		case KEY_KP_ENTER:
+			return EVDEV_KEY_KPENTER;
 		case KEY_BACKSPACE:
 			return EVDEV_KEY_BACKSPACE;
 		case KEY_TAB:
@@ -154,14 +204,54 @@ static uint32_t _scancode_to_evdev(uint32_t p_scancode) {
 			return EVDEV_KEY_HOME;
 		case KEY_END:
 			return EVDEV_KEY_END;
+		case KEY_INSERT:
+			return EVDEV_KEY_INSERT;
 		case KEY_DELETE:
 			return EVDEV_KEY_DELETE;
+		case KEY_PAGEUP:
+			return EVDEV_KEY_PAGEUP;
+		case KEY_PAGEDOWN:
+			return EVDEV_KEY_PAGEDOWN;
 		case KEY_SHIFT:
 			return EVDEV_KEY_LEFTSHIFT;
 		case KEY_CONTROL:
 			return EVDEV_KEY_LEFTCTRL;
 		case KEY_ALT:
 			return EVDEV_KEY_LEFTALT;
+		case KEY_CAPSLOCK:
+			return EVDEV_KEY_CAPSLOCK;
+		case KEY_NUMLOCK:
+			return EVDEV_KEY_NUMLOCK;
+		case KEY_SCROLLLOCK:
+			return EVDEV_KEY_SCROLLLOCK;
+		case KEY_PRINT:
+			return EVDEV_KEY_SYSRQ;
+		case KEY_PAUSE:
+			return EVDEV_KEY_PAUSE;
+		case KEY_F1:
+			return EVDEV_KEY_F1;
+		case KEY_F2:
+			return EVDEV_KEY_F2;
+		case KEY_F3:
+			return EVDEV_KEY_F3;
+		case KEY_F4:
+			return EVDEV_KEY_F4;
+		case KEY_F5:
+			return EVDEV_KEY_F5;
+		case KEY_F6:
+			return EVDEV_KEY_F6;
+		case KEY_F7:
+			return EVDEV_KEY_F7;
+		case KEY_F8:
+			return EVDEV_KEY_F8;
+		case KEY_F9:
+			return EVDEV_KEY_F9;
+		case KEY_F10:
+			return EVDEV_KEY_F10;
+		case KEY_F11:
+			return EVDEV_KEY_F11;
+		case KEY_F12:
+			return EVDEV_KEY_F12;
 		case KEY_MINUS:
 			return EVDEV_KEY_MINUS;
 		case KEY_EQUAL:
@@ -170,6 +260,8 @@ static uint32_t _scancode_to_evdev(uint32_t p_scancode) {
 			return EVDEV_KEY_LEFTBRACE;
 		case KEY_BRACKETRIGHT:
 			return EVDEV_KEY_RIGHTBRACE;
+		case KEY_QUOTELEFT:
+			return EVDEV_KEY_GRAVE;
 		case KEY_SEMICOLON:
 			return EVDEV_KEY_SEMICOLON;
 		case KEY_APOSTROPHE:
@@ -182,6 +274,46 @@ static uint32_t _scancode_to_evdev(uint32_t p_scancode) {
 			return EVDEV_KEY_SLASH;
 		case KEY_BACKSLASH:
 			return EVDEV_KEY_BACKSLASH;
+		case KEY_KP_0:
+			return EVDEV_KEY_KP0;
+		case KEY_KP_1:
+			return EVDEV_KEY_KP1;
+		case KEY_KP_2:
+			return EVDEV_KEY_KP2;
+		case KEY_KP_3:
+			return EVDEV_KEY_KP3;
+		case KEY_KP_4:
+			return EVDEV_KEY_KP4;
+		case KEY_KP_5:
+			return EVDEV_KEY_KP5;
+		case KEY_KP_6:
+			return EVDEV_KEY_KP6;
+		case KEY_KP_7:
+			return EVDEV_KEY_KP7;
+		case KEY_KP_8:
+			return EVDEV_KEY_KP8;
+		case KEY_KP_9:
+			return EVDEV_KEY_KP9;
+		case KEY_KP_PERIOD:
+			return EVDEV_KEY_KPPERIOD;
+		case KEY_KP_DIVIDE:
+			return EVDEV_KEY_KPDIVIDE;
+		case KEY_KP_MULTIPLY:
+			return EVDEV_KEY_KPASTERISK;
+		case KEY_KP_SUBTRACT:
+			return EVDEV_KEY_KPSUBTRACT;
+		case KEY_KP_ADD:
+			return EVDEV_KEY_KPADD;
+		case KEY_SUPER_L:
+			return EVDEV_KEY_LEFTMETA;
+		case KEY_SUPER_R:
+			return EVDEV_KEY_RIGHTMETA;
+		case KEY_MENU:
+			return EVDEV_KEY_COMPOSE;
+		case KEY_HYPER_R:
+			return EVDEV_KEY_RIGHTALT;
+		case KEY_HYPER_L:
+			return EVDEV_KEY_102ND;
 		default:
 			return 0;
 	}

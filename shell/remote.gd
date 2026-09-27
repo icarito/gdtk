@@ -22,8 +22,18 @@ func _ready():
 		printerr("Remote: XDG_RUNTIME_DIR no está definido; no se abre el servidor")
 		return
 
+	var port = DEFAULT_PORT
+	var env_port = OS.get_environment("GDTK_CONTROL_PORT")
+	if env_port != "":
+		port = int(env_port)
+
 	token = Crypto.new().generate_random_bytes(16).hex_encode()
+	# Con GDTK_CONTROL_PORT definido el token lleva el puerto en el nombre: una
+	# prueba en otro puerto no pisa el token de una sesión real (sin la variable
+	# se conserva el nombre de siempre).
 	token_path = runtime_dir.plus_file("gdtk-control.token")
+	if env_port != "":
+		token_path = runtime_dir.plus_file("gdtk-control-%d.token" % port)
 	var file = File.new()
 	var err = file.open(token_path, File.WRITE)
 	if err != OK:
@@ -33,11 +43,6 @@ func _ready():
 	file.store_string(token)
 	file.close()
 	_start_watchdog()
-
-	var port = DEFAULT_PORT
-	var env_port = OS.get_environment("GDTK_CONTROL_PORT")
-	if env_port != "":
-		port = int(env_port)
 
 	server = TCP_Server.new()
 	var lerr = server.listen(port, "127.0.0.1")
