@@ -55,6 +55,10 @@ var dialog_boxes = {}
 # la actividad dinamica (en `added` todavia no se conocen).
 var unmanaged = []
 
+# Home: anillo de actividades o grilla de apps instaladas (Tab alterna).
+var apps = preload("res://apps.gd").new()
+var apps_view = false
+
 
 func _ready():
 	connect("imgui_frame", self, "_imgui_frame")
@@ -274,6 +278,11 @@ func _root_of(id):
 
 
 func _draw_home():
+	if is_key_pressed(KEY_TAB):
+		apps_view = not apps_view
+	if apps_view:
+		_draw_apps()
+		return
 	var vp = get_viewport_rect().size
 	set_next_window_pos(Vector2.ZERO, true)
 	set_next_window_size(vp, true)
@@ -305,10 +314,44 @@ func _draw_home():
 		set_cursor_pos(Vector2(vp.x - 100.0, vp.y - 45.0))
 		text(clock)
 
+		set_cursor_pos(Vector2(vp.x - 110.0, 10.0))
+		if button("Apps", Vector2(100, 32)):
+			apps_view = true
+
 		if activity_error != "":
 			set_cursor_pos(Vector2(20.0, vp.y - 45.0))
 			text(activity_error)
 	end()
+
+
+func _draw_apps():
+	var vp = get_viewport_rect().size
+	set_next_window_pos(Vector2.ZERO, true)
+	set_next_window_size(vp, true)
+	if begin("##apps", WINDOW_NO_DECORATION | WINDOW_NO_BACKGROUND | WINDOW_NO_MOVE | WINDOW_NO_SAVED_SETTINGS | WINDOW_NO_BRING_TO_FRONT_ON_FOCUS):
+		if button("Anillo"):
+			apps_view = false
+		same_line()
+		var app = apps.draw(self)
+		if activity_error != "":
+			text(activity_error)
+		if app != null:
+			_launch_app(app)
+	end()
+
+
+# Una app de la grilla se abre como actividad wayland dinámica: sale en el
+# anillo mientras viva su ventana (ver _on_toplevel_removed).
+func _launch_app(app):
+	apps.query = ""
+	var i = _activity_named(app.name)
+	if i < 0:
+		ACTIVITIES.append({"name": app.name, "wayland": ["sh", "-c", "exec " + app.exec], "dynamic": true})
+		i = ACTIVITIES.size() - 1
+	_activate(i)
+	# Si no se pudo lanzar, no queda colgada en el anillo.
+	if pending_wayland == "" and not wayland_ids.has(app.name) and ACTIVITIES[i].get("dynamic", false):
+		ACTIVITIES.remove(i)
 
 
 func _draw_activity():
@@ -672,6 +715,16 @@ func _view_hit_test(pos):
 			var geo = _dialog_geo(d)
 			return {"id": d, "pos": pos - rect.position + geo.position, "dialog": d}
 	return {"id": root, "pos": pos - view_offset, "dialog": 0}
+
+
+# Teclear en el Home lleva a la búsqueda de apps (` queda para el DebugHud).
+# En _input (Godot 3 lo llama también en ImGuiCanvas): con el puntero sobre el
+# home ImGui marca todo como manejado y a _unhandled_input no llega nada.
+func _input(event):
+	if current_activity == null and not apps.search_active and event is InputEventKey and event.pressed \
+			and event.unicode >= 32 and not (event.control or event.alt or event.meta) and event.scancode != KEY_QUOTELEFT:
+		apps_view = true
+		apps.type(char(event.unicode))
 
 
 func _unhandled_input(event):
