@@ -2,6 +2,7 @@
 
 #include "core/class_db.h"
 #include "core/image.h"
+#include "core/os/file_access.h"
 #include "core/os/input_event.h"
 #include "core/os/keyboard.h"
 #include "core/os/os.h"
@@ -259,6 +260,8 @@ void ImGuiCanvas::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("implot_plot_scatter", "label", "xs", "ys"), &ImGuiCanvas::implot_plot_scatter);
 	ClassDB::bind_method(D_METHOD("implot_plot_bars", "label", "values", "bar_size"), &ImGuiCanvas::implot_plot_bars, DEFVAL(0.67f));
 	ClassDB::bind_method(D_METHOD("implot_plot_shaded", "label", "xs", "ys", "y_ref"), &ImGuiCanvas::implot_plot_shaded, DEFVAL(0.0f));
+	ClassDB::bind_method(D_METHOD("implot_push_style_color", "idx", "color"), &ImGuiCanvas::implot_push_style_color);
+	ClassDB::bind_method(D_METHOD("implot_pop_style_color", "n"), &ImGuiCanvas::implot_pop_style_color, DEFVAL(1));
 	ClassDB::bind_vararg_method(METHOD_FLAGS_DEFAULT, "implot_plot_heatmap", &ImGuiCanvas::_implot_plot_heatmap_vararg, MethodInfo("implot_plot_heatmap"));
 #endif
 
@@ -284,6 +287,23 @@ void ImGuiCanvas::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_frame_rounding", "rounding"), &ImGuiCanvas::set_frame_rounding);
 	ClassDB::bind_method(D_METHOD("get_frame_rounding"), &ImGuiCanvas::get_frame_rounding);
 	ADD_PROPERTY(PropertyInfo(Variant::REAL, "frame_rounding"), "set_frame_rounding", "get_frame_rounding");
+
+	ClassDB::bind_method(D_METHOD("set_update_hz", "hz"), &ImGuiCanvas::set_update_hz);
+	ClassDB::bind_method(D_METHOD("get_update_hz"), &ImGuiCanvas::get_update_hz);
+	ADD_PROPERTY(PropertyInfo(Variant::REAL, "update_hz", PROPERTY_HINT_RANGE, "0,240,0.1"), "set_update_hz", "get_update_hz");
+
+	ClassDB::bind_method(D_METHOD("set_input_hz", "hz"), &ImGuiCanvas::set_input_hz);
+	ClassDB::bind_method(D_METHOD("get_input_hz"), &ImGuiCanvas::get_input_hz);
+	ADD_PROPERTY(PropertyInfo(Variant::REAL, "input_hz", PROPERTY_HINT_RANGE, "0,240,0.1"), "set_input_hz", "get_input_hz");
+
+	ClassDB::bind_method(D_METHOD("request_redraw"), &ImGuiCanvas::request_redraw);
+
+	ClassDB::bind_method(D_METHOD("add_font", "path", "size_px"), &ImGuiCanvas::add_font);
+	ClassDB::bind_method(D_METHOD("push_font", "idx"), &ImGuiCanvas::push_font);
+	ClassDB::bind_method(D_METHOD("pop_font"), &ImGuiCanvas::pop_font);
+	ClassDB::bind_method(D_METHOD("set_default_font", "idx"), &ImGuiCanvas::set_default_font);
+
+	ClassDB::bind_method(D_METHOD("get_cursor_screen_pos"), &ImGuiCanvas::get_cursor_screen_pos);
 
 	ClassDB::bind_method(D_METHOD("_input", "event"), &ImGuiCanvas::_input);
 
@@ -347,6 +367,7 @@ void ImGuiCanvas::_bind_methods() {
 	ClassDB::bind_integer_constant(get_class_static(), StringName(), "STYLE_VAR_WINDOW_ROUNDING", ImGuiStyleVar_WindowRounding);
 	ClassDB::bind_integer_constant(get_class_static(), StringName(), "STYLE_VAR_FRAME_PADDING", ImGuiStyleVar_FramePadding);
 	ClassDB::bind_integer_constant(get_class_static(), StringName(), "STYLE_VAR_ITEM_SPACING", ImGuiStyleVar_ItemSpacing);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "STYLE_VAR_WINDOW_PADDING", ImGuiStyleVar_WindowPadding);
 
 	// ImPlot
 #ifdef IMGUI_MODULE_IMPLOT
@@ -354,6 +375,15 @@ void ImGuiCanvas::_bind_methods() {
 	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_AXIS_Y1", ImAxis_Y1);
 	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_AXIS_AUTOFIT", ImPlotAxisFlags_AutoFit);
 	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_AXIS_NO_DECORATIONS", ImPlotAxisFlags_NoDecorations);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_AXIS_NO_TICK_LABELS", ImPlotAxisFlags_NoTickLabels);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_AXIS_NO_GRID_LINES", ImPlotAxisFlags_NoGridLines);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_COL_LINE", ImPlotCol_Line);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_COL_PLOT_BG", ImPlotCol_PlotBg);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_COL_FRAME_BG", ImPlotCol_FrameBg);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_COL_AXIS_GRID", ImPlotCol_AxisGrid);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_COL_AXIS_TEXT", ImPlotCol_AxisText);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_COL_LEGEND_BG", ImPlotCol_LegendBg);
+	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_COL_TITLE_TEXT", ImPlotCol_TitleText);
 	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_FLAGS_NONE", ImPlotFlags_None);
 	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_FLAGS_NO_TITLE", ImPlotFlags_NoTitle);
 	ClassDB::bind_integer_constant(get_class_static(), StringName(), "IMPLOT_FLAGS_NO_LEGEND", ImPlotFlags_NoLegend);
@@ -374,6 +404,7 @@ void ImGuiCanvas::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("has_feature", "feature"), &ImGuiCanvas::has_feature);
 
 	ADD_SIGNAL(MethodInfo("imgui_frame"));
+	ADD_SIGNAL(MethodInfo("redrawn"));
 }
 
 RID ImGuiCanvas::_get_canvas_item(int p_index) {
@@ -391,6 +422,29 @@ void ImGuiCanvas::_set_contexts() {
 #ifdef IMGUI_MODULE_IMPLOT3D
 	ImPlot3D::SetCurrentContext(implot3d_context);
 #endif
+}
+
+// Construye (o reconstruye) el atlas de fuentes y sube la textura a VisualServer.
+void ImGuiCanvas::_build_font_texture() {
+	ImGuiIO &io = ImGui::GetIO();
+
+	unsigned char *pixels = nullptr;
+	int width = 0;
+	int height = 0;
+	io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+
+	PoolVector<uint8_t> data;
+	data.resize(width * height * 4);
+	{
+		PoolVector<uint8_t>::Write w = data.write();
+		memcpy(w.ptr(), pixels, width * height * 4);
+	}
+
+	Ref<Image> image = memnew(Image(width, height, false, Image::FORMAT_RGBA8, data));
+	font_texture.instance();
+	font_texture->create_from_image(image, 0);
+	font_texture_rid = font_texture->get_rid();
+	io.Fonts->SetTexID((ImTextureID)(intptr_t)&font_texture_rid);
 }
 
 bool ImGuiCanvas::has_feature(const String &p_feature) const {
@@ -529,23 +583,8 @@ void ImGuiCanvas::_notification(int p_what) {
 			_set_contexts();
 			ImGuiIO &io = ImGui::GetIO();
 
-			unsigned char *pixels = nullptr;
-			int width = 0;
-			int height = 0;
-			io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
-
-			PoolVector<uint8_t> data;
-			data.resize(width * height * 4);
-			{
-				PoolVector<uint8_t>::Write w = data.write();
-				memcpy(w.ptr(), pixels, width * height * 4);
-			}
-
-			Ref<Image> image = memnew(Image(width, height, false, Image::FORMAT_RGBA8, data));
-			font_texture.instance();
-			font_texture->create_from_image(image, 0);
-			font_texture_rid = font_texture->get_rid();
-			io.Fonts->SetTexID((ImTextureID)(intptr_t)&font_texture_rid);
+			_build_font_texture();
+			atlas_ready = true;
 
 			io.FontGlobalScale = scale;
 			ImGui::GetStyle().FrameRounding = frame_rounding;
@@ -556,7 +595,38 @@ void ImGuiCanvas::_notification(int p_what) {
 		} break;
 
 		case NOTIFICATION_PROCESS: {
-			_process_frame(get_process_delta_time());
+			// update_hz <= 0: un frame de ImGui por frame del motor (historico).
+			// update_hz > 0: solo se arma cuando toca por tiempo, cuando algo pidio
+			// request_redraw(), o mientras hay input reciente (a input_hz). En los
+			// frames que no se arma no se toca ningun canvas item: quedan como estan.
+			uint64_t now = OS::get_singleton()->get_ticks_usec();
+			bool build = true;
+			if (update_hz > 0.0f) {
+				build = false;
+				double interval = 1000000.0 / (double)update_hz;
+				if (last_frame_usec == 0 || (double)(now - last_frame_usec) >= interval) {
+					build = true;
+				}
+				if (requested_redraw) {
+					build = true;
+				}
+				if (input_hz > 0.0f && last_input_usec > 0 && (now - last_input_usec) <= 250000ULL) {
+					double input_interval = 1000000.0 / (double)input_hz;
+					if (last_frame_usec == 0 || (double)(now - last_frame_usec) >= input_interval) {
+						build = true;
+					}
+				}
+			}
+			if (build) {
+				requested_redraw = false;
+				float delta = get_process_delta_time();
+				if (last_frame_usec > 0) {
+					delta = (float)((double)(now - last_frame_usec) / 1000000.0);
+				}
+				last_frame_usec = now;
+				_process_frame(delta);
+				emit_signal("redrawn");
+			}
 		} break;
 	}
 }
@@ -779,7 +849,12 @@ void ImGuiCanvas::image(const Ref<Texture> &p_texture, const Vector2 &p_size, co
 	frame_textures.push_back(p_texture);
 	RID *rid = memnew(RID(p_texture->get_rid()));
 	frame_texture_rids.push_back(rid);
-	ImGui::ImageWithBg((ImTextureID)(intptr_t)rid, ImVec2(p_size.x, p_size.y), ImVec2(0, 0), ImVec2(1, 1), ImVec4(0, 0, 0, 0), _to_imvec4(p_tint));
+	// Las texturas de Viewport (render target) se guardan con la V invertida respecto a
+	// una ImageTexture: el canvas las muestrea al reves. Se corrige en las UV al dibujar.
+	bool flip_v = p_texture->is_class("ViewportTexture");
+	ImVec2 uv0(0.0f, flip_v ? 1.0f : 0.0f);
+	ImVec2 uv1(1.0f, flip_v ? 0.0f : 1.0f);
+	ImGui::ImageWithBg((ImTextureID)(intptr_t)rid, ImVec2(p_size.x, p_size.y), uv0, uv1, ImVec4(0, 0, 0, 0), _to_imvec4(p_tint));
 }
 
 bool ImGuiCanvas::image_button(const String &p_id, const Ref<Texture> &p_texture, const Vector2 &p_size) {
@@ -790,7 +865,10 @@ bool ImGuiCanvas::image_button(const String &p_id, const Ref<Texture> &p_texture
 	frame_textures.push_back(p_texture);
 	RID *rid = memnew(RID(p_texture->get_rid()));
 	frame_texture_rids.push_back(rid);
-	return ImGui::ImageButton(p_id.utf8().get_data(), (ImTextureID)(intptr_t)rid, ImVec2(p_size.x, p_size.y));
+	bool flip_v = p_texture->is_class("ViewportTexture");
+	ImVec2 uv0(0.0f, flip_v ? 1.0f : 0.0f);
+	ImVec2 uv1(1.0f, flip_v ? 0.0f : 1.0f);
+	return ImGui::ImageButton(p_id.utf8().get_data(), (ImTextureID)(intptr_t)rid, ImVec2(p_size.x, p_size.y), uv0, uv1, ImVec4(0, 0, 0, 0), ImVec4(1, 1, 1, 1));
 }
 
 // --- Entrada ---
@@ -1363,6 +1441,16 @@ void ImGuiCanvas::implot_plot_shaded(const String &p_label, const PoolRealArray 
 	ImPlot::PlotShaded(p_label.utf8().get_data(), xs.ptr(), ys.ptr(), count, p_y_ref);
 }
 
+void ImGuiCanvas::implot_push_style_color(int p_idx, const Color &p_color) {
+	_set_contexts();
+	ImPlot::PushStyleColor(p_idx, _to_imvec4(p_color));
+}
+
+void ImGuiCanvas::implot_pop_style_color(int p_n) {
+	_set_contexts();
+	ImPlot::PopStyleColor(p_n);
+}
+
 void ImGuiCanvas::implot_plot_heatmap(const String &p_label, const PoolRealArray &p_values, int p_rows, int p_cols, float p_min, float p_max) {
 	_set_contexts();
 	PoolRealArray::Read values = p_values.read();
@@ -1488,10 +1576,108 @@ float ImGuiCanvas::get_frame_rounding() const {
 	return frame_rounding;
 }
 
+// --- Tasa de actualizacion y fuentes (Paso 12) ---
+
+void ImGuiCanvas::set_update_hz(float p_hz) {
+	update_hz = p_hz;
+}
+
+float ImGuiCanvas::get_update_hz() const {
+	return update_hz;
+}
+
+void ImGuiCanvas::set_input_hz(float p_hz) {
+	input_hz = p_hz;
+}
+
+float ImGuiCanvas::get_input_hz() const {
+	return input_hz;
+}
+
+void ImGuiCanvas::request_redraw() {
+	requested_redraw = true;
+}
+
+int ImGuiCanvas::add_font(const String &p_path, float p_size_px) {
+	_set_contexts();
+	if (context == nullptr) {
+		return -1;
+	}
+	// res:// no es una ruta del sistema: se lee el archivo a memoria con FileAccess
+	// (que si entiende res:// y rutas absolutas) y se le pasa el buffer a ImGui.
+	Error err = OK;
+	FileAccess *file = FileAccess::open(p_path, FileAccess::READ, &err);
+	if (file == nullptr) {
+		ERR_PRINT("ImGuiCanvas::add_font: no se pudo abrir " + p_path);
+		return -1;
+	}
+	int len = file->get_len();
+	if (len <= 100) {
+		memdelete(file);
+		ERR_PRINT("ImGuiCanvas::add_font: archivo demasiado corto " + p_path);
+		return -1;
+	}
+	PoolVector<uint8_t> buffer;
+	buffer.resize(len);
+	{
+		PoolVector<uint8_t>::Write w = buffer.write();
+		file->get_buffer(w.ptr(), len);
+	}
+	memdelete(file);
+
+	// El buffer queda vivo mientras el atlas lo use.
+	font_buffers.push_back(buffer);
+	PoolVector<uint8_t>::Read r = font_buffers[font_buffers.size() - 1].read();
+
+	ImFontAtlas *atlas = ImGui::GetIO().Fonts;
+	ImFontConfig cfg;
+	cfg.FontDataOwnedByAtlas = false;
+	ImFont *font = atlas->AddFontFromMemoryTTF((void *)r.ptr(), len, p_size_px, &cfg, atlas->GetGlyphRangesDefault());
+	if (font == nullptr) {
+		return -1;
+	}
+	// AddFont ya invalido el atlas; se reconstruye y se vuelve a subir la textura.
+	_build_font_texture();
+	atlas_ready = true;
+	return atlas->Fonts.Size - 1;
+}
+
+void ImGuiCanvas::push_font(int p_idx) {
+	_set_contexts();
+	ImFontAtlas *atlas = ImGui::GetIO().Fonts;
+	if (p_idx >= 0 && p_idx < atlas->Fonts.Size) {
+		ImGui::PushFont(atlas->Fonts[p_idx]);
+	}
+}
+
+void ImGuiCanvas::pop_font() {
+	_set_contexts();
+	ImGui::PopFont();
+}
+
+void ImGuiCanvas::set_default_font(int p_idx) {
+	_set_contexts();
+	ImFontAtlas *atlas = ImGui::GetIO().Fonts;
+	if (p_idx >= 0 && p_idx < atlas->Fonts.Size) {
+		ImGui::GetIO().FontDefault = atlas->Fonts[p_idx];
+	}
+}
+
+Vector2 ImGuiCanvas::get_cursor_screen_pos() {
+	_set_contexts();
+	ImVec2 v = ImGui::GetCursorScreenPos();
+	return Vector2(v.x, v.y);
+}
+
 void ImGuiCanvas::_input(const Ref<InputEvent> &p_event) {
 	if (context == nullptr || p_event.is_null()) {
 		return;
 	}
+
+	// Marca actividad de input: con update_hz > 0 el proximo frame puede armarse a
+	// input_hz mientras el usuario interactua. Los eventos igual quedan encolados en
+	// ImGui (Add*Event) y se procesan en el siguiente NewFrame armado.
+	last_input_usec = OS::get_singleton()->get_ticks_usec();
 
 	ImGui::SetCurrentContext(context);
 	ImGuiIO &io = ImGui::GetIO();
@@ -1592,6 +1778,14 @@ ImGuiCanvas::ImGuiCanvas() {
 	scale = 1.0f;
 	frame_rounding = 0.0f;
 	window_open = true;
+
+	update_hz = 0.0f;
+	input_hz = 30.0f;
+	last_frame_usec = 0;
+	last_input_usec = 0;
+	requested_redraw = false;
+	atlas_ready = false;
+
 	pie = memnew(PieMenu);
 }
 

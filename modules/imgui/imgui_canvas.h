@@ -30,6 +30,24 @@ class ImGuiCanvas : public Node2D {
 	float scale;
 	float frame_rounding;
 
+	// Paso 12: el contenido del canvas puede armarse a una tasa propia en vez de
+	// cada frame. update_hz <= 0 = cada frame (comportamiento historico); > 0 = solo
+	// cuando toca por tiempo, cuando hubo input reciente (a input_hz) o cuando algo
+	// llama a request_redraw(). Los eventos de input se encolan en ImGui y se
+	// procesan en el siguiente NewFrame armado, sin perderse.
+	float update_hz;
+	float input_hz;
+	uint64_t last_frame_usec;
+	uint64_t last_input_usec;
+	bool requested_redraw;
+	// El atlas se construye en NOTIFICATION_READY; add_font() lo reconstruye y
+	// vuelve a subir la textura si se agrega una fuente despues.
+	bool atlas_ready;
+	// Buffers TTF vivos mientras el atlas los use (FontDataOwnedByAtlas=false).
+	Vector<PoolVector<uint8_t> > font_buffers;
+
+	void _build_font_texture();
+
 	// Teclas pulsadas desde el ultimo frame. El control remoto inyecta press y
 	// release seguidos, y ImGui::IsKeyPressed puede perderse si ambos caen en el
 	// mismo frame; con este latch is_key_pressed sigue detectando la pulsacion.
@@ -191,6 +209,8 @@ public:
 	void implot_plot_scatter(const String &p_label, const PoolRealArray &p_xs, const PoolRealArray &p_ys);
 	void implot_plot_bars(const String &p_label, const PoolRealArray &p_values, float p_bar_size = 0.67f);
 	void implot_plot_shaded(const String &p_label, const PoolRealArray &p_xs, const PoolRealArray &p_ys, float p_y_ref = 0.0f);
+	void implot_push_style_color(int p_idx, const Color &p_color);
+	void implot_pop_style_color(int p_n = 1);
 	void implot_plot_heatmap(const String &p_label, const PoolRealArray &p_values, int p_rows, int p_cols, float p_min = 0.0f, float p_max = 0.0f);
 
 	// ImPlot3D
@@ -222,6 +242,20 @@ public:
 
 	void set_frame_rounding(float p_rounding);
 	float get_frame_rounding() const;
+
+	// Paso 12: tasa de actualizacion y fuentes.
+	void set_update_hz(float p_hz);
+	float get_update_hz() const;
+	void set_input_hz(float p_hz);
+	float get_input_hz() const;
+	void request_redraw();
+
+	int add_font(const String &p_path, float p_size_px);
+	void push_font(int p_idx);
+	void pop_font();
+	void set_default_font(int p_idx);
+
+	Vector2 get_cursor_screen_pos();
 
 	void _input(const Ref<InputEvent> &p_event);
 
