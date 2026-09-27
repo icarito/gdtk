@@ -28,6 +28,12 @@ Causa (verificada leyendo el código):
   `git -C platform/frt diff` **sólo de tus cambios** (hacer `git -C platform/frt stash`/comparar
   contra el estado previo si hace falta: el parche debe aplicar sobre el checkout con los parches
   anteriores ya aplicados, que es como lo usa `scripts/build.sh` del fork). No correr `scripts/build.sh`.
+  **Base para el diff**: copia de los archivos de `platform/frt` ANTES de tus cambios en
+  `/run/media/icarito/DATA/icarito/Proyectos/gdtk/.frt-baseline/` (frt_godot.cc, sdl2_adapter.h,
+  sdl2_godot_map.h, frt.h, platform_config.h, detect.py). Generar el parche con
+  `diff -u` de cada archivo base vs. el editado, con rutas `a/<archivo>` y `b/<archivo>` (formato que
+  aplica `git apply`/`patch -p1` desde `platform/frt`), y comprobarlo con
+  `git -C <copia temporal de platform/frt con la base> apply --check`.
 - No usar `pkill -f`/`pgrep -f` con patrones presentes en tu propia línea de comando.
 - Build (sólo binarios con sufijo gdtk):
   ```sh

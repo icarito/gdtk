@@ -5,3 +5,4 @@ demo/imgui.ini
 __pycache__/
 kilo_run.log
 kilo_*.log
+.frt-baseline/
