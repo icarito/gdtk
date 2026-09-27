@@ -257,12 +257,30 @@ func _state():
 	for activity in _activity_list():
 		activities.append(activity.name)
 
+	# Actividades con escena 3D propia (HoloTerminal de la Criopod): el driver de
+	# verificacion necesita saber donde cae la pantalla en el shell para apuntarle.
+	var holo_screen = null
+	var holo_points = null
+	if shell.activity_instance != null and shell.activity_instance.has_method("screen_rect_in_viewport"):
+		var rect = shell.activity_instance.screen_rect_in_viewport()
+		if rect != null:
+			holo_screen = {"x": rect.position.x, "y": rect.position.y, "w": rect.size.x, "h": rect.size.y}
+		if shell.activity_instance.has_method("holo_points"):
+			holo_points = {}
+			var pts = shell.activity_instance.holo_points()
+			for key in pts:
+				var point = pts[key]
+				if point != null:
+					holo_points[key] = {"x": point.x, "y": point.y}
+
 	return {
 		"view": view,
 		"viewport": [vp.x, vp.y],
 		"wayland_socket": shell.compositor.start(),
 		"windows": windows,
 		"activities": activities,
+		"holo_screen": holo_screen,
+		"holo_points": holo_points,
 	}
 
 
