@@ -21,6 +21,7 @@ ssh "$HOST" 'mkdir -p ~/gdtk/bin ~/gdtk/session'
 RHOME="$(ssh "$HOST" 'echo $HOME')"  # Exec= de un .desktop no expande variables
 rsync -a "$TMP/godot-gdtk" "$HOST:gdtk/bin/"
 rsync -a --exclude '*crash*' --exclude '.import' "$GDTK/shell" "$HOST:gdtk/"
+rsync -a "$GDTK/mcp" "$HOST:gdtk/"
 rsync -a "$GDTK/session/gdtk-session" "$GDTK/session/gdtk-session-x11" "$HOST:gdtk/session/"
 desktop() { # desktop <archivo> <nombre> <script>
 	printf '[Desktop Entry]\nName=%s\nComment=Shell tipo Sugar sobre Godot/ImGui con compositor wlroots embebido\nExec=env GDTK_VIDEO_DRIVER=%s %s/gdtk/session/%s\nType=Application\nDesktopNames=gdtk\n' \

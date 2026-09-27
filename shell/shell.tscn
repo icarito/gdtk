@@ -1,12 +1,16 @@
-[gd_scene load_steps=2 format=2]
+[gd_scene load_steps=3 format=2]
 
 [ext_resource path="res://shell.gd" type="Script" id=1]
+[ext_resource path="res://remote.gd" type="Script" id=2]
 
 [node name="ImGuiCanvas" type="ImGuiCanvas"]
 script = ExtResource( 1 )
 frame_rounding = 12.0
 
 [node name="Compositor" type="WaylandCompositor" parent="."]
+
+[node name="Remote" type="Node" parent="."]
+script = ExtResource( 2 )
 
 [node name="ViewLayer" type="CanvasLayer" parent="."]
 layer = 1

@@ -1,6 +1,6 @@
 extends ImGuiCanvas
 
-const ACTIVITIES = [
+var ACTIVITIES = [
 	{"name": "Chat", "script": "res://activities/chat.gd"},
 	{"name": "Terminal", "wayland": ["alacritty"]},
 	{"name": "Gears", "wayland": ["es2gears_wayland"]},
@@ -19,6 +19,7 @@ onready var view = $ViewLayer/View
 var current_activity = null
 var activity_instance = null
 var activity_error = ""
+var last_launch_pid = -1
 
 var wayland_ids = {}
 var pending_wayland = ""
@@ -191,6 +192,7 @@ func _open_wayland(activity):
 
 	pending_wayland = name
 	var pid = compositor.launch(cmd, args)
+	last_launch_pid = pid
 	if pid < 0:
 		pending_wayland = ""
 		activity_error = "No se pudo lanzar " + cmd
