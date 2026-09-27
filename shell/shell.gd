@@ -5,6 +5,7 @@ var ACTIVITIES = [
 	{"name": "Panel", "script": "res://activities/panel.gd"},
 	{"name": "Perfil remoto", "script": "res://activities/remote_profile.gd"},
 	{"name": "Criopod", "script": "res://activities/criopod.gd"},
+	{"name": "Linterna", "script": "res://activities/flashlight.gd"},
 	{"name": "Terminal", "wayland": ["alacritty"]},
 	{"name": "Gears", "wayland": ["es2gears_wayland"]},
 	{"name": "GTK", "wayland": ["gtk4-widget-factory"]},

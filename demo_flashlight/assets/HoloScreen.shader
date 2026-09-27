@@ -1,0 +1,106 @@
+shader_type spatial;
+// La textura del Viewport llega con el RGB PREMULTIPLICADO por el alfa de la UI pero con el
+// canal alfa saturado a 255 (medido: el azul del theme, (48,106,153) al 62%, sale
+// (30,66,95,255)). O sea: el alfa esta perdido, pero el BRILLO todavia lo codifica.
+//
+// Por eso el alfa se reconstruye abajo desde la luminancia, en vez de usar el canal alfa o
+// de irse a blend_add. El aditivo tambien caló el fondo, pero volvia fantasma la tipografia:
+// en aditivo TODO suma luz, tambien las letras.
+//
+// depth_draw_always: la proyeccion tiene que aportar SU profundidad o el desenfoque por
+// distancia del ambiente muestrea el mundo lejano que se ve a traves y lo desenfoca encima.
+render_mode cull_disabled, unshaded, blend_mix, depth_draw_always;
+
+uniform sampler2D texture_albedo : hint_albedo;
+uniform vec4 albedo : hint_color = vec4(1.0, 1.0, 1.0, 1.0);
+uniform float emission_energy = 1.0;
+uniform float alpha_scissor_threshold = 0.0;
+// Opacidad del PANEL de vidrio del holograma. Se aplica al alfa y tambien a la emision:
+// en unshaded la EMISSION se suma aparte del ALBEDO, asi que con emission_energy = 3 la
+// pantalla sale ~4x mas brillante que su color y el fondo que deja pasar el alfa queda
+// tapado por ese brillo. Bajando las dos, el panel se vuelve vidrio de verdad.
+//
+// Ojo: esto NO hace transparente la UI dibujada adentro del viewport. Eso es otro
+// problema, sin resolver: los pixeles no pintados del viewport de los terminales salen
+// negro opaco (los del selector radial del ascensor, con la misma config, salen
+// transparentes).
+// Opacidad del VIDRIO, o sea de la zona sin tinta. No toca las letras.
+uniform float hologram_alpha : hint_range(0.0, 1.0) = 1.0;
+// Brillo a partir del cual un pixel se considera tinta plena y se pinta opaco. Mas bajo =
+// mas cosas de la UI se vuelven solidas.
+uniform float ink_level : hint_range(0.05, 1.0) = 0.45;
+// Separacion tinta/vidrio. MEDIDO (2026-09-19): con render_mode unshaded la EMISSION NO
+// llega a la salida en este renderer —emission_energy 0 y 14 dan la misma imagen—, asi que
+// el comentario de arriba sobre "en unshaded la EMISSION se suma aparte del ALBEDO" es
+// falso. Y como el ALBEDO sale normalizado por la cobertura, el brillo del pixel de la UI
+// se pierde: todo el panel termina del mismo color y solo el ALFA distingue tinta de
+// vidrio. Contra un fondo claro eso es ilegible.
+// Este factor devuelve esa separacion al ALBEDO, que si se dibuja. 0.0 = exactamente el
+// comportamiento historico, que es el default para no tocar ninguna pantalla existente.
+uniform float contrast_boost : hint_range(0.0, 16.0) = 0.0;
+uniform bool flip_h = false;
+uniform bool flip_v = true;
+uniform bool back_flip_h = false;
+uniform bool back_flip_v = false;
+uniform bool aligned_flip_h = false;
+uniform bool aligned_flip_v = true;
+uniform bool flip_h_when_viewed_from_back = false;
+uniform bool flip_v_when_viewed_from_back = true;
+
+// Paso 12: cursor dibujado por el shader, no dentro de la textura del Viewport. Asi el
+// cursor se mueve a la tasa del juego aunque el contenido de la pantalla se re-renderice
+// a 10 Hz. cursor_uv es la esquina superior-izquierda del cursor en el UV ya volteado
+// que se usa para muestrear la textura (el mismo que ve texture_albedo). cursor_uv.x < 0
+// significa "sin cursor". cursor_size_uv lleva el tamano en ese mismo espacio UV.
+uniform vec2 cursor_uv = vec2(-1.0, -1.0);
+uniform vec2 cursor_size_uv = vec2(0.0);
+uniform sampler2D cursor_tex;
+
+void fragment() {
+    vec2 uv = UV;
+    
+    if (FRONT_FACING) {
+        if (flip_h) uv.x = 1.0 - uv.x;
+        if (flip_v) uv.y = 1.0 - uv.y;
+    } else {
+        if (back_flip_h) uv.x = 1.0 - uv.x;
+        if (back_flip_v) uv.y = 1.0 - uv.y;
+    }
+
+    vec3 camera_offset = CAMERA_MATRIX[3].xyz - WORLD_MATRIX[3].xyz;
+    bool viewed_from_back = dot(camera_offset, normalize(WORLD_MATRIX[2].xyz)) < 0.0;
+    if (viewed_from_back) {
+        if (flip_h_when_viewed_from_back) uv.x = 1.0 - uv.x;
+        if (flip_v_when_viewed_from_back) uv.y = 1.0 - uv.y;
+    }
+
+    if (aligned_flip_h) uv.x = 1.0 - uv.x;
+    if (aligned_flip_v) uv.y = 1.0 - uv.y;
+
+    vec4 tex_color = texture(texture_albedo, uv);
+
+    // El cursor es "tinta" como el resto: se mezcla ANTES del calculo de luma/cobertura
+    // para que la reconstruccion de opacidad lo trate igual que el contenido.
+    if (cursor_uv.x >= 0.0 && cursor_size_uv.x > 0.0 && cursor_size_uv.y > 0.0) {
+        vec2 cursor_local = (uv - cursor_uv) / cursor_size_uv;
+        if (cursor_local.x >= 0.0 && cursor_local.x <= 1.0 && cursor_local.y >= 0.0 && cursor_local.y <= 1.0) {
+            vec4 cursor_color = texture(cursor_tex, cursor_local);
+            tex_color = mix(tex_color, vec4(cursor_color.rgb, 1.0), cursor_color.a);
+        }
+    }
+    
+    // Cobertura reconstruida: la tinta (clara) llega a 1 y se pinta OPACA; el fondo del
+    // panel (oscuro) cae a 0 y se ve a traves.
+    float luma = dot(tex_color.rgb, vec3(0.299, 0.587, 0.114));
+    float coverage = clamp(luma / ink_level, 0.0, 1.0);
+    // Como el RGB viene premultiplicado, se des-premultiplica con esa misma cobertura o el
+    // texto saldria lavado, con el color a medio camino del fondo.
+    ALBEDO = (tex_color.rgb / max(coverage, 0.02)) * albedo.rgb * (1.0 + contrast_boost * coverage);
+    // El atenuador solo baja el piso de vidrio; la tinta conserva su opacidad.
+    ALPHA = max(coverage, albedo.a * hologram_alpha);
+    EMISSION = ALBEDO * emission_energy * coverage;
+    
+    if (ALPHA < alpha_scissor_threshold) {
+        discard;
+    }
+}
