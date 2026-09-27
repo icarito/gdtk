@@ -51,6 +51,10 @@ void wl_server_bind_dmabuf(wl_server *s, uint64_t key, unsigned int texid);
 int wl_server_layers(wl_server *s, int id, wl_server_layer *out, int max);
 // Geometría de la ventana (contenido sin sombras CSD) relativa a la surface raíz; 0 si no hay.
 int wl_server_geometry(wl_server *s, int id, int *x, int *y, int *w, int *h);
+// id del toplevel que es `parent` del toplevel `id` (0 si no tiene).
+int wl_server_parent(wl_server *s, int id);
+// app_id del toplevel `id` ("" si no tiene).
+const char *wl_server_app_id(wl_server *s, int id);
 void wl_server_destroy(wl_server *s);
 
 #ifdef __cplusplus

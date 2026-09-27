@@ -240,6 +240,7 @@ func _state():
 			"id": window_id,
 			"title": shell.compositor.get_title(window_id),
 			"activity": activity,
+			"parent": shell.compositor.get_parent_id(window_id),
 		})
 
 	var activities = []

@@ -316,6 +316,8 @@ void WaylandCompositor::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_layers", "id"), &WaylandCompositor::get_layers);
 	ClassDB::bind_method(D_METHOD("get_geometry", "id"), &WaylandCompositor::get_geometry);
 	ClassDB::bind_method(D_METHOD("get_title", "id"), &WaylandCompositor::get_title);
+	ClassDB::bind_method(D_METHOD("get_parent_id", "id"), &WaylandCompositor::get_parent_id);
+	ClassDB::bind_method(D_METHOD("get_app_id", "id"), &WaylandCompositor::get_app_id);
 	ClassDB::bind_method(D_METHOD("get_ids"), &WaylandCompositor::get_ids);
 	ClassDB::bind_method(D_METHOD("set_size", "id", "size"), &WaylandCompositor::set_size);
 	ClassDB::bind_method(D_METHOD("close", "id"), &WaylandCompositor::close);
@@ -488,6 +490,20 @@ String WaylandCompositor::get_title(int p_id) const {
 		return String();
 	}
 	return e->get().title;
+}
+
+int WaylandCompositor::get_parent_id(int p_id) const {
+	if (server == NULL) {
+		return 0;
+	}
+	return wl_server_parent(server, p_id);
+}
+
+String WaylandCompositor::get_app_id(int p_id) const {
+	if (server == NULL) {
+		return String();
+	}
+	return String::utf8(wl_server_app_id(server, p_id));
 }
 
 Array WaylandCompositor::get_ids() const {

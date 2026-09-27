@@ -40,6 +40,17 @@ var type_queue = []
 var type_done_frame = -1
 var tex_ready_frame = -1
 
+# Dialogos: toplevels con padre. No se asignan a ninguna actividad: se dibujan
+# centrados sobre la vista de su ventana raiz, en orden de creacion (el ultimo
+# arriba). El padre puede cambiar por set_parent, se consulta cada frame.
+var dialogs = []
+var focused_dialog = 0
+var dialog_view = null
+var dialog_boxes = {}
+# Toplevels sin padre y sin launch pendiente: esperan app_id/titulo para crear
+# la actividad dinamica (en `added` todavia no se conocen).
+var unmanaged = []
+
 
 func _ready():
 	connect("imgui_frame", self, "_imgui_frame")
@@ -47,6 +58,13 @@ func _ready():
 	compositor.connect("toplevel_removed", self, "_on_toplevel_removed")
 	view.mouse_filter = Control.MOUSE_FILTER_STOP
 	view.connect("gui_input", self, "_on_view_input")
+
+	# Capa de dialogos encima de la vista de la actividad.
+	dialog_view = Control.new()
+	dialog_view.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	dialog_view.rect_clip_content = true
+	dialog_view.visible = false
+	$ViewLayer.add_child(dialog_view)
 
 	for arg in OS.get_cmdline_args():
 		if arg.begins_with("--screenshot="):
@@ -68,6 +86,7 @@ func _ready():
 
 
 func _imgui_frame():
+	_process_unmanaged()
 	if current_activity == null:
 		_draw_home()
 	else:
@@ -76,6 +95,7 @@ func _imgui_frame():
 	var id = _current_wayland_id()
 	if id >= 0:
 		_update_layers(id)
+	_update_dialogs(id)
 
 	frame_count += 1
 	_run_test_logic()
@@ -119,18 +139,126 @@ func _update_layers(id):
 		tex_ready_frame = frame_count
 
 
+func _ensure_premult_material():
+	if premult_material == null:
+		premult_material = CanvasItemMaterial.new()
+		premult_material.blend_mode = CanvasItemMaterial.BLEND_MODE_PREMULT_ALPHA
+
+
 func _ensure_layer_nodes(count):
+	_ensure_premult_material()
 	while view.get_child_count() < count:
 		var child = TextureRect.new()
 		child.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		child.expand = true
 		child.stretch_mode = TextureRect.STRETCH_SCALE
-		if premult_material == null:
-			premult_material = CanvasItemMaterial.new()
-			premult_material.blend_mode = CanvasItemMaterial.BLEND_MODE_PREMULT_ALPHA
 		child.material = premult_material
 		child.visible = false
 		view.add_child(child)
+
+
+# --- Dialogos: capas centradas sobre la vista de su toplevel raiz ---
+
+func _update_dialogs(root_id):
+	if dialog_view == null:
+		return
+	dialog_view.rect_position = Vector2(0.0, BAR_H)
+	dialog_view.rect_size = view.rect_size
+
+	for i in range(dialogs.size() - 1, -1, -1):
+		if not _id_alive(dialogs[i]):
+			dialogs.remove(i)
+	for d in dialog_boxes.keys():
+		if not _id_alive(d):
+			var box = dialog_boxes[d]
+			dialog_boxes.erase(d)
+			if box != null and is_instance_valid(box):
+				box.queue_free()
+
+	var any_visible = false
+	for d in dialogs:
+		var box = dialog_boxes.get(d)
+		if box == null:
+			box = _new_dialog_box(d)
+		var visible = root_id >= 0 and _root_of(d) == root_id
+		box.visible = visible
+		if visible:
+			any_visible = true
+			_layout_dialog(box, d)
+	dialog_view.visible = any_visible and view.visible
+
+
+func _new_dialog_box(d):
+	var box = Control.new()
+	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	box.rect_clip_content = true
+	box.visible = false
+	dialog_view.add_child(box)
+	dialog_boxes[d] = box
+	return box
+
+
+# Centra la geometria del dialogo en la vista (sin sombras: la caja recorta).
+func _layout_dialog(box, d):
+	_ensure_premult_material()
+	var geo = _dialog_geo(d)
+	var layers = compositor.get_layers(d)
+	box.rect_position = view.rect_size * 0.5 - geo.size * 0.5 - geo.position
+	box.rect_size = geo.size
+	while box.get_child_count() < layers.size():
+		var child = TextureRect.new()
+		child.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		child.expand = true
+		child.stretch_mode = TextureRect.STRETCH_SCALE
+		child.material = premult_material
+		child.visible = false
+		box.add_child(child)
+	for i in range(layers.size()):
+		var node = box.get_child(i)
+		var layer = layers[i]
+		var size = layer.rect.size
+		if (size.x <= 0.0 or size.y <= 0.0) and layer.texture != null:
+			size = layer.texture.get_size()
+		node.texture = layer.texture
+		node.rect_position = layer.rect.position - geo.position
+		node.rect_size = size
+		node.visible = layer.texture != null
+	for i in range(layers.size(), box.get_child_count()):
+		box.get_child(i).visible = false
+
+
+func _dialog_geo(d):
+	var geo = compositor.get_geometry(d)
+	if geo.size.x > 0.0 and geo.size.y > 0.0:
+		return geo
+	# Fallback: caja de las capas si el cliente aun no publico geometria.
+	var layers = compositor.get_layers(d)
+	if layers.size() == 0:
+		return geo
+	var mn = Vector2(1e9, 1e9)
+	var mx = Vector2(-1e9, -1e9)
+	for layer in layers:
+		mn.x = min(mn.x, layer.rect.position.x)
+		mn.y = min(mn.y, layer.rect.position.y)
+		mx.x = max(mx.x, layer.rect.position.x + layer.rect.size.x)
+		mx.y = max(mx.y, layer.rect.position.y + layer.rect.size.y)
+	return Rect2(mn, mx - mn)
+
+
+func _dialog_rect(d):
+	var geo = _dialog_geo(d)
+	return Rect2(view.rect_size * 0.5 - geo.size * 0.5 - geo.position, geo.size)
+
+
+func _root_of(id):
+	var guard = 0
+	while id > 0 and guard < 32:
+		var parent = compositor.get_parent_id(id)
+		if parent <= 0:
+			break
+		id = parent
+		guard += 1
+	return id
 
 
 func _draw_home():
@@ -339,43 +467,193 @@ func _id_alive(id):
 
 func _on_toplevel_added(id):
 	print("toplevel_added ", id)
-	if pending_wayland == "":
+	# Un toplevel con padre es un dialogo: no se asigna a ninguna actividad.
+	if compositor.get_parent_id(id) > 0:
+		_add_dialog(id)
 		return
-	var name = pending_wayland
-	pending_wayland = ""
-	wayland_ids[name] = id
+	if pending_wayland != "":
+		var name = pending_wayland
+		pending_wayland = ""
+		wayland_ids[name] = id
+		compositor.focus(id)
+		if current_activity != null and current_activity.has("wayland") and current_activity.name == name:
+			_show_view(id)
+		return
+	# Sin actividad: se creara una dinamica en cuanto llegue app_id/titulo.
+	unmanaged.append(id)
+
+
+func _add_dialog(id):
+	if not dialogs.has(id):
+		dialogs.append(id)
+	focused_dialog = id
 	compositor.focus(id)
-	if current_activity != null and current_activity.has("wayland") and current_activity.name == name:
-		_show_view(id)
+
+
+# Toplevels sueltos: nombre = app_id capitalizado sin dominio, si no el titulo,
+# si no "Ventana <id>". Se crea la actividad, se le asigna el id y se abre
+# (una ventana nueva pasa al frente). El nombre debe ser unico en el anillo.
+func _process_unmanaged():
+	for i in range(unmanaged.size() - 1, -1, -1):
+		var id = unmanaged[i]
+		if not _id_alive(id):
+			unmanaged.remove(i)
+			continue
+		# El padre llega en el commit inicial, despues de `added`: si aparecio,
+		# es un dialogo, no una actividad dinamica.
+		if compositor.get_parent_id(id) > 0:
+			unmanaged.remove(i)
+			_add_dialog(id)
+			continue
+		var app_id = compositor.get_app_id(id)
+		var title = compositor.get_title(id)
+		if app_id == "" and title == "":
+			continue
+		unmanaged.remove(i)
+		if _activity_for_window(id) != "":
+			continue
+		_open_unmanaged_window(id)
+
+
+func _open_unmanaged_window(id):
+	var name = _unique_activity_name(_window_activity_name(id))
+	var cmd = compositor.get_app_id(id)
+	if cmd == "":
+		cmd = name
+	var activity = {"name": name, "wayland": [cmd], "dynamic": true}
+	ACTIVITIES.append(activity)
+	wayland_ids[name] = id
+
+	var vp = get_viewport_rect().size
+	view.rect_position = Vector2(0.0, BAR_H)
+	view.rect_size = Vector2(vp.x, max(vp.y - BAR_H, 1.0))
+	view.rect_clip_content = true
+	compositor.default_size = view.rect_size
+
+	current_activity = activity
+	activity_instance = null
+	activity_error = ""
+	pending_wayland = ""
+	_show_view(id)
+	compositor.focus(id)
+	print("actividad dinamica ", name, " para toplevel ", id)
+
+
+func _activity_for_window(id):
+	for name in wayland_ids.keys():
+		if wayland_ids[name] == id:
+			return name
+	return ""
+
+
+func _window_activity_name(id):
+	var app_id = compositor.get_app_id(id)
+	if app_id != "":
+		var base = app_id
+		var dot = base.rfind(".")
+		if dot >= 0:
+			base = base.substr(dot + 1, base.length() - dot - 1)
+		if base != "":
+			return base.substr(0, 1).to_upper() + base.substr(1, base.length() - 1)
+	var title = compositor.get_title(id)
+	if title != "":
+		return title
+	return "Ventana " + str(id)
+
+
+func _unique_activity_name(name):
+	var candidate = name
+	var n = 2
+	while _activity_named(candidate) >= 0:
+		candidate = name + " " + str(n)
+		n += 1
+	return candidate
+
+
+func _activity_named(name):
+	for i in range(ACTIVITIES.size()):
+		if str(ACTIVITIES[i].get("name", "")) == name:
+			return i
+	return -1
 
 
 func _on_toplevel_removed(id):
 	print("toplevel_removed ", id)
+	var didx = dialogs.find(id)
+	if didx >= 0:
+		dialogs.remove(didx)
+		if dialog_boxes.has(id):
+			var box = dialog_boxes[id]
+			dialog_boxes.erase(id)
+			if box != null and is_instance_valid(box):
+				box.queue_free()
+		if focused_dialog == id:
+			_refocus_dialog()
+		return
+
+	unmanaged.erase(id)
 	var removed_name = ""
 	for name in wayland_ids.keys():
 		if wayland_ids[name] == id:
 			removed_name = name
 			wayland_ids.erase(name)
 			break
-	if removed_name != "" and current_activity != null and current_activity.has("wayland") and current_activity.name == removed_name:
+	if removed_name == "":
+		return
+	# Las actividades dinamicas se van con su ventana; las fijas quedan.
+	var index = _activity_named(removed_name)
+	if index >= 0 and ACTIVITIES[index].get("dynamic", false):
+		ACTIVITIES.remove(index)
+	if current_activity != null and current_activity.has("wayland") and current_activity.name == removed_name:
 		_go_home()
 
 
+# Al cerrarse un dialogo el foco vuelve al que quede arriba: otro dialogo o la raiz.
+func _refocus_dialog():
+	focused_dialog = 0
+	var root = _current_wayland_id()
+	for i in range(dialogs.size() - 1, -1, -1):
+		if _root_of(dialogs[i]) == root:
+			focused_dialog = dialogs[i]
+			break
+	if focused_dialog > 0:
+		compositor.focus(focused_dialog)
+	elif root >= 0:
+		compositor.focus(root)
+
+
 func _on_view_input(event):
-	var id = _current_wayland_id()
-	if id < 0:
-		return
 	if event is InputEventMouseMotion:
-		compositor.pointer_motion(id, _view_pos_to_wayland(id, event.position))
+		var hit = _view_hit_test(event.position)
+		if hit.id < 0:
+			return
+		compositor.pointer_motion(hit.id, hit.pos)
 	elif event is InputEventMouseButton:
-		compositor.pointer_motion(id, _view_pos_to_wayland(id, event.position))
+		var hit = _view_hit_test(event.position)
+		if hit.id < 0:
+			return
+		compositor.pointer_motion(hit.id, hit.pos)
 		compositor.pointer_button(event.button_index, event.pressed)
 		if event.pressed:
-			compositor.focus(id)
+			compositor.focus(hit.id)
+			focused_dialog = hit.dialog
 
 
-func _view_pos_to_wayland(id, pos):
-	return pos - view_offset
+# Hit-test de arriba hacia abajo: el dialogo mas reciente que contenga el
+# puntero; si no, la ventana raiz de la actividad (como antes).
+func _view_hit_test(pos):
+	var root = _current_wayland_id()
+	if root < 0:
+		return {"id": -1, "pos": Vector2.ZERO, "dialog": 0}
+	for i in range(dialogs.size() - 1, -1, -1):
+		var d = dialogs[i]
+		if _root_of(d) != root:
+			continue
+		var rect = _dialog_rect(d)
+		if rect.has_point(pos):
+			var geo = _dialog_geo(d)
+			return {"id": d, "pos": pos - rect.position + geo.position, "dialog": d}
+	return {"id": root, "pos": pos - view_offset, "dialog": 0}
 
 
 func _unhandled_input(event):

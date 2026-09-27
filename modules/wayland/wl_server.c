@@ -985,6 +985,30 @@ int wl_server_geometry(wl_server *s, int id, int *x, int *y, int *w, int *h) {
 	return 1;
 }
 
+int wl_server_parent(wl_server *s, int id) {
+	if (s == NULL) {
+		return 0;
+	}
+	toplevel *t = toplevel_find(s, id);
+	if (t == NULL || t->tl->parent == NULL) {
+		return 0;
+	}
+	// El parent puede ser un toplevel todavia vivo: se busca por su surface raiz.
+	toplevel *p = toplevel_find_surface(s, t->tl->parent->base->surface);
+	return p != NULL ? p->id : 0;
+}
+
+const char *wl_server_app_id(wl_server *s, int id) {
+	if (s == NULL) {
+		return "";
+	}
+	toplevel *t = toplevel_find(s, id);
+	if (t == NULL || t->tl->app_id == NULL) {
+		return "";
+	}
+	return t->tl->app_id;
+}
+
 int wl_server_layers(wl_server *s, int id, wl_server_layer *out, int max) {
 	if (s == NULL || out == NULL || max <= 0) {
 		return 0;
