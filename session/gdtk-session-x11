@@ -18,5 +18,5 @@ export SDL_VIDEO_X11_FORCE_EGL=1 SDL_VIDEO_FORCE_EGL=1
 # Sin window manager nadie aplica el fullscreen de SDL: tamaño y posición explícitos desde xrandr.
 # ponytail: se lee una vez al arrancar; rotar la pantalla (X200 Tablet) no redimensiona la ventana.
 RES="$(xrandr --current 2>/dev/null | awk '/\*/ {print $1; exit}')"
-exec "$GDTK_GODOT" ${GDTK_VIDEO_DRIVER:+--video-driver "$GDTK_VIDEO_DRIVER"} --fullscreen \
+exec "$HERE/session/gdtk-supervisor" "$GDTK_GODOT" ${GDTK_VIDEO_DRIVER:+--video-driver "$GDTK_VIDEO_DRIVER"} --fullscreen \
 	${RES:+--resolution "$RES" --position 0,0} --path "$HERE/shell" "$@"

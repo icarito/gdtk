@@ -110,6 +110,8 @@ def tool(name, description, properties, required=None):
 
 
 TOOLS = [
+    tool("gdtk_restart_shell", "Restart the shell process without ending the session (the supervisor relaunches it). Open activities are saved and reopened; wayland apps are relaunched (they die with the shell). force=true kills a hung shell instead of asking it.", {"force": {"type": "boolean"}}),
+    tool("gdtk_logs", "Read shell logs from disk (works even if the shell is down): which=shell (current run), prev (previous run), crash (latest crash log), supervisor (restart history).", {"which": {"type": "string", "enum": ["shell", "prev", "crash", "supervisor"]}, "lines": {"type": "integer"}}),
     tool("gdtk_state", "Get the shell state: current view, viewport, wayland socket, windows and activities.", {}),
     tool("gdtk_open", "Open an activity from the home ring by name (e.g. Chat).", {"name": {"type": "string"}}, ["name"]),
     tool("gdtk_home", "Go back to the home screen.", {}),
@@ -175,9 +177,65 @@ def format_metrics(snapshot):
     return "\n".join(lines)
 
 
+def log_dir():
+    return os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "gdtk")
+
+
+def read_logs(arguments):
+    which = arguments.get("which", "shell")
+    lines = int(arguments.get("lines") or 200)
+    if which == "crash":
+        crashes = sorted(f for f in os.listdir(log_dir()) if f.startswith("crash-")) if os.path.isdir(log_dir()) else []
+        if not crashes:
+            return "no hay crash logs en %s" % log_dir()
+        path = os.path.join(log_dir(), crashes[-1])
+        header = "crash logs: %s\n" % ", ".join(crashes)
+    else:
+        path = os.path.join(log_dir(), {"shell": "shell.log", "prev": "shell.prev.log", "supervisor": "supervisor.log"}[which])
+        header = ""
+    try:
+        with open(path, "r", errors="replace") as handle:
+            return header + "== %s\n" % path + "".join(handle.readlines()[-lines:])
+    except OSError as exc:
+        return "%s: %s" % (path, exc)
+
+
+def restart_shell(arguments):
+    if not arguments.get("force"):
+        try:
+            call_shell("restart_shell", {})
+            return "reinicio pedido: el shell guarda su estado y el supervisor lo relanza"
+        except ShellError as exc:
+            log("restart suave falló (%s), forzando" % exc)
+    pid_path = os.path.join(runtime_dir(), "gdtk-shell.pid")
+    try:
+        with open(pid_path) as handle:
+            pid = int(handle.read().strip())
+    except (OSError, ValueError) as exc:
+        return "no hay supervisor (%s): ¿la sesión usa gdtk-supervisor?" % exc
+    open(os.path.join(runtime_dir(), "gdtk-restart"), "w").close()  # no cuenta como caída
+    os.kill(pid, 15)
+    for _ in range(30):
+        time.sleep(0.1)
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return "shell %d terminado; el supervisor lo relanza (sin estado guardado)" % pid
+    os.kill(pid, 9)
+    return "shell %d matado con SIGKILL; el supervisor lo relanza" % pid
+
+
+LOCAL_TOOLS = {"gdtk_logs": read_logs, "gdtk_restart_shell": restart_shell}
+
+
 def handle_tool_call(params):
     name = params.get("name", "")
     arguments = params.get("arguments") or {}
+    if name in LOCAL_TOOLS:
+        try:
+            return tool_result({"type": "text", "text": LOCAL_TOOLS[name](arguments)}, False)
+        except Exception as exc:
+            return tool_result({"type": "text", "text": "%s: %s" % (name, exc)}, True)
     if name not in TOOL_METHOD:
         return tool_result({"type": "text", "text": "unknown tool: %s" % name}, True)
     method = TOOL_METHOD[name]

@@ -12,4 +12,5 @@ export SDL_VIDEODRIVER=wayland
 # Sin libdecor: cage no dibuja barras y SDL reservaba 37 px para una que nunca aparecía (franja negra).
 export SDL_VIDEO_WAYLAND_ALLOW_LIBDECOR=0
 # El shell usa GLES2 por defecto (project.godot); GDTK_VIDEO_DRIVER=GLES3 para forzar el otro.
-exec cage -s -- "$GDTK_GODOT" ${GDTK_VIDEO_DRIVER:+--video-driver "$GDTK_VIDEO_DRIVER"} --fullscreen --path "$HERE/shell" "$@"
+# El supervisor relanza el shell si se cae (ver gdtk-supervisor): cage sigue vivo mientras él viva.
+exec cage -s -- "$HERE/session/gdtk-supervisor" "$GDTK_GODOT" ${GDTK_VIDEO_DRIVER:+--video-driver "$GDTK_VIDEO_DRIVER"} --fullscreen --path "$HERE/shell" "$@"

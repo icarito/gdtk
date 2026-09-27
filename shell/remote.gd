@@ -231,6 +231,9 @@ func _handle_line(conn, line):
 		"key":
 			_key(params)
 			_reply(conn, id, true)
+		"restart_shell":
+			_reply(conn, id, true)
+			shell.recovery.call_deferred("restart", shell)
 		"quit":
 			_reply(conn, id, true)
 			get_tree().quit()

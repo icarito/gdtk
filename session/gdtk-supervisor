@@ -1,0 +1,53 @@
+#!/bin/sh
+# Vigila el shell: lo relanza si se cae y, si se cae seguido, lo arranca a prueba de fallos
+# (GLES2, sin restaurar estado). Uso: gdtk-supervisor <godot> [args...]
+# Salida 0 = el usuario salió (termina la sesión); 75 = reinicio pedido (MCP gdtk_restart_shell).
+# Logs en ~/.local/state/gdtk: shell.log (corrida actual), shell.prev.log, crash-*.log.
+# ponytail: no detecta cuelgues (proceso vivo pero congelado): para eso gdtk_restart_shell force=true.
+LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/gdtk"
+RUN="${XDG_RUNTIME_DIR:-/tmp}"
+FLAG="$RUN/gdtk-restart"  # el MCP lo crea antes de matar un shell colgado: no cuenta como caída
+mkdir -p "$LOGDIR"
+pid=""
+trap '[ -n "$pid" ] && kill "$pid" 2>/dev/null; exit 0' HUP INT TERM
+say() { echo "[supervisor] $*"; echo "$(date '+%F %T') $*" >>"$LOGDIR/supervisor.log"; }
+
+fails=0
+while :; do
+	[ -f "$LOGDIR/shell.log" ] && mv -f "$LOGDIR/shell.log" "$LOGDIR/shell.prev.log"
+	rm -f "$FLAG"
+	safe=""
+	if [ "$fails" -ge 2 ]; then
+		safe="--video-driver GLES2"; export GDTK_SAFE="$fails"
+		say "modo a prueba de fallos tras $fails caídas"
+	else
+		unset GDTK_SAFE
+	fi
+	start=$(date +%s)
+	# tee por un fifo: el log queda en disco y la salida sigue llegando a quien lanzó la sesión.
+	fifo="$RUN/gdtk-shell.$$.fifo"; rm -f "$fifo"; mkfifo "$fifo"
+	tee "$LOGDIR/shell.log" <"$fifo" &
+	# shellcheck disable=SC2086
+	"$@" $safe >"$fifo" 2>&1 &
+	pid=$!
+	echo "$pid" >"$RUN/gdtk-shell.pid"
+	wait "$pid"; rc=$?
+	pid=""
+	wait; rm -f "$fifo" "$RUN/gdtk-shell.pid"
+
+	if [ "$rc" -eq 0 ]; then
+		exit 0
+	elif [ "$rc" -eq 75 ] || [ -f "$FLAG" ]; then
+		say "reinicio pedido (rc=$rc)"; fails=0; unset GDTK_LAST_CRASH
+		continue
+	fi
+	crash="$LOGDIR/crash-$(date +%Y%m%d-%H%M%S).log"
+	cp "$LOGDIR/shell.log" "$crash"
+	ls -t "$LOGDIR"/crash-*.log | tail -n +11 | xargs -r rm -f
+	# Caídas seguidas = cada una a menos de 60 s de arrancar; si no, se empieza a contar de nuevo.
+	if [ $(($(date +%s) - start)) -lt 60 ]; then fails=$((fails + 1)); else fails=1; fi
+	say "el shell se cayó (rc=$rc, seguidas=$fails): $crash"
+	export GDTK_LAST_CRASH="$crash"
+	[ "$fails" -ge 5 ] && { say "demasiadas caídas, me rindo"; exit "$rc"; }
+	sleep 1
+done
