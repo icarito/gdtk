@@ -38,6 +38,7 @@ var premult_material = null
 var frame_count = 0
 var screenshot_path = ""
 var open_on_start = ""
+var recovery = preload("res://recovery.gd").new()
 var type_text = ""
 var typed = false
 var type_queue = []
@@ -93,11 +94,13 @@ func _ready():
 	else:
 		print("compositor socket: ", socket)
 
+	recovery.load(self)
 	if open_on_start != "":
 		_open_by_name(open_on_start)
 
 
 func _imgui_frame():
+	recovery.tick(self)
 	_process_unmanaged()
 	if current_activity == null:
 		_draw_home()
@@ -309,12 +312,7 @@ func _draw_home():
 			if button(label + "##" + ACTIVITIES[i].name, btn_size):
 				_activate(i)
 
-		var t = OS.get_time()
-		var clock = "%02d:%02d" % [t.hour, t.minute]
-		set_cursor_pos(Vector2(vp.x - 100.0, vp.y - 45.0))
-		text(clock)
-
-		set_cursor_pos(Vector2(vp.x - 110.0, 10.0))
+		set_cursor_pos(Vector2(vp.x - 110.0, frame.FRAME_H + 10.0))
 		if button("Apps", Vector2(100, 32)):
 			apps_view = true
 
@@ -326,8 +324,9 @@ func _draw_home():
 
 func _draw_apps():
 	var vp = get_viewport_rect().size
-	set_next_window_pos(Vector2.ZERO, true)
-	set_next_window_size(vp, true)
+	# Bajo el Frame, que en el Home está siempre.
+	set_next_window_pos(Vector2(0.0, frame.FRAME_H), true)
+	set_next_window_size(Vector2(vp.x, vp.y - frame.FRAME_H), true)
 	if begin("##apps", WINDOW_NO_DECORATION | WINDOW_NO_BACKGROUND | WINDOW_NO_MOVE | WINDOW_NO_SAVED_SETTINGS | WINDOW_NO_BRING_TO_FRONT_ON_FOCUS):
 		if button("Anillo"):
 			apps_view = false
