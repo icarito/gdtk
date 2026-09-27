@@ -26,7 +26,10 @@ var last_launch_pid = -1
 
 var wayland_ids = {}
 var pending_wayland = ""
-var view_scale = Vector2.ONE
+var view_offset = Vector2.ZERO
+var requested_sizes = {}
+# Los buffers wayland vienen con alfa premultiplicado.
+var premult_material = null
 
 var frame_count = 0
 var screenshot_path = ""
@@ -82,16 +85,21 @@ func _imgui_frame():
 # reusado por indice, en el orden devuelto por el compositor (raiz -> popups).
 func _update_layers(id):
 	var layers = compositor.get_layers(id)
+	var vp = get_viewport_rect().size
+	view.rect_size = Vector2(vp.x, max(vp.y - BAR_H, 1.0))
 
-	var root_size = Vector2.ZERO
-	if layers.size() > 0:
-		root_size = layers[0].rect.size
-		if (root_size.x <= 0.0 or root_size.y <= 0.0) and layers[0].texture != null:
-			root_size = layers[0].texture.get_size()
-	if root_size.x > 0.0 and root_size.y > 0.0 and view.rect_size.x > 0.0 and view.rect_size.y > 0.0:
-		view_scale = Vector2(view.rect_size.x / root_size.x, view.rect_size.y / root_size.y)
-	else:
-		view_scale = Vector2.ONE
+	# 1:1, sin escalar: escalar el buffer (que incluye las sombras CSD) deformaba el texto.
+	# Se desplaza por la geometría para que el contenido quede en el origen de la vista;
+	# las sombras caen fuera y las recorta rect_clip_content.
+	var geo = compositor.get_geometry(id)
+	view_offset = -geo.position
+	# La vista puede cambiar de tamaño después de abrir la ventana (p.ej. --fullscreen se aplica
+	# tras el primer frame): se vuelve a pedir el tamaño. Se compara contra lo pedido, no contra
+	# geo.size, porque hay clientes (alacritty) que redondean a su grilla de celdas.
+	if geo.size != Vector2.ZERO and requested_sizes.get(id) != view.rect_size:
+		requested_sizes[id] = view.rect_size
+		compositor.default_size = view.rect_size
+		compositor.set_size(id, view.rect_size)
 
 	_ensure_layer_nodes(layers.size())
 	for i in range(layers.size()):
@@ -101,8 +109,8 @@ func _update_layers(id):
 		if (size.x <= 0.0 or size.y <= 0.0) and layer.texture != null:
 			size = layer.texture.get_size()
 		node.texture = layer.texture
-		node.rect_position = layer.rect.position * view_scale
-		node.rect_size = size * view_scale
+		node.rect_position = layer.rect.position + view_offset
+		node.rect_size = size
 		node.visible = layer.texture != null
 	for i in range(layers.size(), view.get_child_count()):
 		view.get_child(i).visible = false
@@ -117,6 +125,10 @@ func _ensure_layer_nodes(count):
 		child.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		child.expand = true
 		child.stretch_mode = TextureRect.STRETCH_SCALE
+		if premult_material == null:
+			premult_material = CanvasItemMaterial.new()
+			premult_material.blend_mode = CanvasItemMaterial.BLEND_MODE_PREMULT_ALPHA
+		child.material = premult_material
 		child.visible = false
 		view.add_child(child)
 
@@ -270,6 +282,7 @@ func _open_wayland(activity):
 	var vp = get_viewport_rect().size
 	view.rect_position = Vector2(0.0, BAR_H)
 	view.rect_size = Vector2(vp.x, max(vp.y - BAR_H, 1.0))
+	view.rect_clip_content = true
 	compositor.default_size = view.rect_size
 	view.visible = false
 
@@ -362,9 +375,7 @@ func _on_view_input(event):
 
 
 func _view_pos_to_wayland(id, pos):
-	if view_scale.x <= 0.0 or view_scale.y <= 0.0:
-		return pos
-	return Vector2(pos.x / view_scale.x, pos.y / view_scale.y)
+	return pos - view_offset
 
 
 func _unhandled_input(event):

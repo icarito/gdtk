@@ -26,6 +26,8 @@
 #include <wlr/types/wlr_shm.h>
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_xdg_shell.h>
+#include <wlr/types/wlr_xdg_decoration_v1.h>
+#include <wlr/types/wlr_server_decoration.h>
 #include <wlr/util/log.h>
 #include <xkbcommon/xkbcommon.h>
 
@@ -90,6 +92,7 @@ struct wl_server {
 	wl_server_callbacks cb;
 	struct wl_listener new_toplevel;
 	struct wl_listener new_popup;
+	struct wl_listener new_decoration;
 	struct wl_list toplevels;
 	int next_id;
 	int default_w, default_h;
@@ -629,6 +632,58 @@ static void handle_new_toplevel(struct wl_listener *listener, void *data) {
 	}
 }
 
+// Decoraciones: pedimos server-side a todos y no dibujamos ninguna (la barra la pone el
+// shell). Así alacritty/SDL/Qt no dibujan su propia barra de título. GTK4 lo ignora (CSD siempre).
+typedef struct decoration {
+	struct wlr_xdg_toplevel_decoration_v1 *d;
+	struct wl_listener request_mode;
+	struct wl_listener commit;
+	struct wl_listener destroy;
+} decoration;
+
+static void decoration_apply(decoration *dd) {
+	if (dd->d->toplevel->base->initialized) {
+		wlr_xdg_toplevel_decoration_v1_set_mode(dd->d, WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+	}
+}
+
+static void handle_decoration_request_mode(struct wl_listener *listener, void *data) {
+	decoration *dd = wl_container_of(listener, dd, request_mode);
+	decoration_apply(dd);
+}
+
+static void handle_decoration_commit(struct wl_listener *listener, void *data) {
+	decoration *dd = wl_container_of(listener, dd, commit);
+	// set_mode agenda un configure: sólo válido desde el commit inicial en adelante.
+	if (dd->d->toplevel->base->initial_commit) {
+		decoration_apply(dd);
+	}
+}
+
+static void handle_decoration_destroy(struct wl_listener *listener, void *data) {
+	decoration *dd = wl_container_of(listener, dd, destroy);
+	wl_list_remove(&dd->request_mode.link);
+	wl_list_remove(&dd->commit.link);
+	wl_list_remove(&dd->destroy.link);
+	free(dd);
+}
+
+static void handle_new_decoration(struct wl_listener *listener, void *data) {
+	struct wlr_xdg_toplevel_decoration_v1 *d = data;
+	decoration *dd = calloc(1, sizeof(*dd));
+	if (dd == NULL) {
+		return;
+	}
+	dd->d = d;
+	dd->request_mode.notify = handle_decoration_request_mode;
+	wl_signal_add(&d->events.request_mode, &dd->request_mode);
+	dd->commit.notify = handle_decoration_commit;
+	wl_signal_add(&d->toplevel->base->surface->events.commit, &dd->commit);
+	dd->destroy.notify = handle_decoration_destroy;
+	wl_signal_add(&d->events.destroy, &dd->destroy);
+	decoration_apply(dd);
+}
+
 wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h) {
 	struct wl_server *s = calloc(1, sizeof(*s));
 	if (s == NULL) {
@@ -710,6 +765,16 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 	wl_signal_add(&s->xdg_shell->events.new_toplevel, &s->new_toplevel);
 	s->new_popup.notify = handle_new_popup;
 	wl_signal_add(&s->xdg_shell->events.new_popup, &s->new_popup);
+
+	struct wlr_xdg_decoration_manager_v1 *deco_mgr = wlr_xdg_decoration_manager_v1_create(s->display);
+	if (deco_mgr != NULL) {
+		s->new_decoration.notify = handle_new_decoration;
+		wl_signal_add(&deco_mgr->events.new_toplevel_decoration, &s->new_decoration);
+	}
+	struct wlr_server_decoration_manager *kde_deco = wlr_server_decoration_manager_create(s->display);
+	if (kde_deco != NULL) {
+		wlr_server_decoration_manager_set_default_mode(kde_deco, WLR_SERVER_DECORATION_MANAGER_MODE_SERVER);
+	}
 
 	s->socket_name = wl_display_add_socket_auto(s->display);
 	if (s->socket_name == NULL) {
@@ -907,6 +972,19 @@ static void layer_iterator(struct wlr_surface *surface, int sx, int sy, void *da
 	l->h = surface->current.height;
 }
 
+int wl_server_geometry(wl_server *s, int id, int *x, int *y, int *w, int *h) {
+	toplevel *t = s != NULL ? toplevel_find(s, id) : NULL;
+	if (t == NULL || !t->tl->base->initialized) {
+		return 0;
+	}
+	struct wlr_box *g = &t->tl->base->geometry;
+	*x = g->x;
+	*y = g->y;
+	*w = g->width;
+	*h = g->height;
+	return 1;
+}
+
 int wl_server_layers(wl_server *s, int id, wl_server_layer *out, int max) {
 	if (s == NULL || out == NULL || max <= 0) {
 		return 0;
@@ -971,6 +1049,9 @@ void wl_server_destroy(wl_server *s) {
 	}
 	if (s->new_popup.notify != NULL) {
 		wl_list_remove(&s->new_popup.link);
+	}
+	if (s->new_decoration.notify != NULL) {
+		wl_list_remove(&s->new_decoration.link);
 	}
 
 	if (s->display != NULL) {

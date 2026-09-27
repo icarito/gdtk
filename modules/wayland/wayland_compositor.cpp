@@ -314,6 +314,7 @@ void WaylandCompositor::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("launch", "cmd", "args"), &WaylandCompositor::launch, DEFVAL(PoolStringArray()));
 	ClassDB::bind_method(D_METHOD("get_texture", "id"), &WaylandCompositor::get_texture);
 	ClassDB::bind_method(D_METHOD("get_layers", "id"), &WaylandCompositor::get_layers);
+	ClassDB::bind_method(D_METHOD("get_geometry", "id"), &WaylandCompositor::get_geometry);
 	ClassDB::bind_method(D_METHOD("get_title", "id"), &WaylandCompositor::get_title);
 	ClassDB::bind_method(D_METHOD("get_ids"), &WaylandCompositor::get_ids);
 	ClassDB::bind_method(D_METHOD("set_size", "id", "size"), &WaylandCompositor::set_size);
@@ -471,6 +472,14 @@ Array WaylandCompositor::get_layers(int p_id) {
 		}
 	}
 	return layers;
+}
+
+Rect2 WaylandCompositor::get_geometry(int p_id) const {
+	int x = 0, y = 0, w = 0, h = 0;
+	if (server == NULL || !wl_server_geometry(server, p_id, &x, &y, &w, &h)) {
+		return Rect2();
+	}
+	return Rect2(x, y, w, h);
 }
 
 String WaylandCompositor::get_title(int p_id) const {

@@ -59,6 +59,7 @@ public:
 
 	Ref<Texture> get_texture(int p_id) const;
 	Array get_layers(int p_id);
+	Rect2 get_geometry(int p_id) const;
 	String get_title(int p_id) const;
 	Array get_ids() const;
 

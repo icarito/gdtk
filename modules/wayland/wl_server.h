@@ -49,6 +49,8 @@ void wl_server_bind_dmabuf(wl_server *s, uint64_t key, unsigned int texid);
 // Llena hasta `max` capas del arbol del toplevel `id` en orden de dibujo;
 // devuelve cuantas escribio (0 si el id no existe o no esta mapeado).
 int wl_server_layers(wl_server *s, int id, wl_server_layer *out, int max);
+// Geometría de la ventana (contenido sin sombras CSD) relativa a la surface raíz; 0 si no hay.
+int wl_server_geometry(wl_server *s, int id, int *x, int *y, int *w, int *h);
 void wl_server_destroy(wl_server *s);
 
 #ifdef __cplusplus

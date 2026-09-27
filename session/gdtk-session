@@ -8,5 +8,7 @@ if [ -z "$GDTK_GODOT" ]; then
 fi
 # Dentro de cage hay Xwayland: sin esto SDL puede elegir X11/GLX y pedir GL 3.3 (GLXBadFBConfig en GPUs viejas).
 export SDL_VIDEODRIVER=wayland
+# Sin libdecor: cage no dibuja barras y SDL reservaba 37 px para una que nunca aparecía (franja negra).
+export SDL_VIDEO_WAYLAND_ALLOW_LIBDECOR=0
 # El shell usa GLES2 por defecto (project.godot); GDTK_VIDEO_DRIVER=GLES3 para forzar el otro.
-exec cage -s -- "$GDTK_GODOT" ${GDTK_VIDEO_DRIVER:+--video-driver "$GDTK_VIDEO_DRIVER"} --path "$HERE/shell" "$@"
+exec cage -s -- "$GDTK_GODOT" ${GDTK_VIDEO_DRIVER:+--video-driver "$GDTK_VIDEO_DRIVER"} --fullscreen --path "$HERE/shell" "$@"
