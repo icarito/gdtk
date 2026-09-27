@@ -129,6 +129,9 @@ func draw(ui):
 		elif corner_since > 0 and now - corner_since >= CORNER_MS and not visible:
 			set_visible(true)
 			entered = true
+		if corner_since > 0:
+			# Sin input no hay frames: hay que volver a mirar al cumplirse CORNER_MS.
+			ui.request_redraw()
 	else:
 		corner_since = 0
 	if visible and not home:

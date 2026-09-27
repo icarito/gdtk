@@ -65,6 +65,9 @@ func _ready():
 	connect("imgui_frame", self, "_imgui_frame")
 	compositor.connect("toplevel_added", self, "_on_toplevel_added")
 	compositor.connect("toplevel_removed", self, "_on_toplevel_removed")
+	# Cambios de ventanas: rearmar la UI (el Frame las lista, recovery espera la suya).
+	compositor.connect("toplevel_added", self, "_redraw_on_signal")
+	compositor.connect("toplevel_removed", self, "_redraw_on_signal")
 	view.mouse_filter = Control.MOUSE_FILTER_STOP
 	view.connect("gui_input", self, "_on_view_input")
 	# Hijo después de Remote: su _input corre antes que el de ImGui (F6, Alt+Tab).
@@ -94,12 +97,39 @@ func _ready():
 	else:
 		print("compositor socket: ", socket)
 
+	# Sin redibujo continuo: ImGui se arma sólo con input (a input_hz), con
+	# request_redraw() (commits Wayland, señales, control remoto) o 1 vez/s (reloj).
+	# Los tests con --screenshot cuentan frames: ahí se deja el modo histórico.
+	if screenshot_path == "":
+		update_hz = 1.0
+		input_hz = 60.0
+	# El colector del HUD corría en cada vuelta del loop (60/s) aunque nada cambie.
+	DebugHud.metrics.sample_hz = 4.0
+
 	recovery.load(self)
 	if open_on_start != "":
 		_open_by_name(open_on_start)
 
 
+var last_commits = 0
+
+
+# Un commit Wayland puede traer capas/texturas nuevas (y con dmabuf el VisualServer
+# no se entera de que cambió el contenido): se rearma el frame siguiente.
+func _process(_delta):
+	if compositor.commit_count != last_commits:
+		last_commits = compositor.commit_count
+		request_redraw()
+
+
+func _redraw_on_signal(_id):
+	request_redraw()
+
+
 func _imgui_frame():
+	# Actividades internas animadas (Panel con animación) piden frames continuos.
+	if activity_instance != null and activity_instance.get("animate"):
+		request_redraw()
 	recovery.tick(self)
 	_process_unmanaged()
 	if current_activity == null:

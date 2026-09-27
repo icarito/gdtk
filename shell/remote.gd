@@ -193,6 +193,8 @@ func _handle_line(conn, line):
 		conn.close = true
 		return
 
+	# Lo que pida el control remoto puede cambiar la UI (open, home, cerrar...).
+	shell.request_redraw()
 	match method:
 		"state":
 			_reply(conn, id, _state())
