@@ -12,7 +12,7 @@ func _init():
 
 func draw(ui):
 	var vp = ui.get_viewport_rect().size
-	var hist_h = max(80.0, vp.y - 48.0 - 78.0)
+	var hist_h = max(80.0, vp.y - 78.0)
 	ui.begin_child("##historial", Vector2(0, hist_h))
 	for message in messages:
 		ui.text_wrapped(message)

@@ -12,7 +12,6 @@ var ACTIVITIES = [
 	{"name": "Salir", "quit": true},
 ]
 
-const BAR_H = 48.0
 const TYPE_DELAY = 60
 const SHOT_DELAY = 90
 const SHOT_MAX_FRAMES = 900
@@ -22,6 +21,10 @@ onready var view = $ViewLayer/View
 
 var current_activity = null
 var activity_instance = null
+# Instancias de actividades internas abiertas: se conservan al ir al Home o a otra
+# ventana (el Frame las lista); sólo cerrarlas desde el Frame las descarta.
+var script_instances = {}
+var frame = null
 var activity_error = ""
 var last_launch_pid = -1
 
@@ -59,6 +62,10 @@ func _ready():
 	compositor.connect("toplevel_removed", self, "_on_toplevel_removed")
 	view.mouse_filter = Control.MOUSE_FILTER_STOP
 	view.connect("gui_input", self, "_on_view_input")
+	# Hijo después de Remote: su _input corre antes que el de ImGui (F6, Alt+Tab).
+	frame = preload("res://frame.gd").new()
+	frame.name = "Frame"
+	add_child(frame)
 
 	# Capa de dialogos encima de la vista de la actividad.
 	dialog_view = Control.new()
@@ -97,6 +104,7 @@ func _imgui_frame():
 	if id >= 0:
 		_update_layers(id)
 	_update_dialogs(id)
+	frame.draw(self)
 
 	# HUD de debug global (autoload DebugHud): F1/` lo abren en cualquier actividad.
 	DebugHud.draw(self)
@@ -110,7 +118,7 @@ func _imgui_frame():
 func _update_layers(id):
 	var layers = compositor.get_layers(id)
 	var vp = get_viewport_rect().size
-	view.rect_size = Vector2(vp.x, max(vp.y - BAR_H, 1.0))
+	view.rect_size = vp
 
 	# 1:1, sin escalar: escalar el buffer (que incluye las sombras CSD) deformaba el texto.
 	# Se desplaza por la geometría para que el contenido quede en el origen de la vista;
@@ -166,7 +174,7 @@ func _ensure_layer_nodes(count):
 func _update_dialogs(root_id):
 	if dialog_view == null:
 		return
-	dialog_view.rect_position = Vector2(0.0, BAR_H)
+	dialog_view.rect_position = Vector2.ZERO
 	dialog_view.rect_size = view.rect_size
 
 	for i in range(dialogs.size() - 1, -1, -1):
@@ -304,30 +312,13 @@ func _draw_home():
 
 
 func _draw_activity():
+	# Sin barra fija: la actividad usa toda la pantalla y el Frame va encima.
 	var vp = get_viewport_rect().size
-	set_next_window_pos(Vector2.ZERO, true)
-	set_next_window_size(Vector2(vp.x, BAR_H), true)
-	var bar_flags = WINDOW_NO_DECORATION | WINDOW_NO_MOVE | WINDOW_NO_SAVED_SETTINGS
-	if begin("##bar", bar_flags):
-		if button("Inicio"):
-			_go_home()
-		same_line()
-		var title = ""
-		if current_activity != null:
-			title = current_activity.name
-		var id = _current_wayland_id()
-		if id >= 0:
-			var wtitle = compositor.get_title(id)
-			if wtitle != "":
-				title = wtitle
-		text(title)
-	end()
-
 	if current_activity == null:
 		return
 	if current_activity.has("script") and activity_instance != null and activity_instance.has_method("draw"):
-		set_next_window_pos(Vector2(0.0, BAR_H), true)
-		set_next_window_size(Vector2(vp.x, vp.y - BAR_H), true)
+		set_next_window_pos(Vector2.ZERO, true)
+		set_next_window_size(vp, true)
 		var body_flags = WINDOW_NO_DECORATION | WINDOW_NO_MOVE | WINDOW_NO_SAVED_SETTINGS
 		if begin("##activity", body_flags):
 			activity_instance.draw(self)
@@ -341,7 +332,9 @@ func _activate(index):
 		return
 	if activity.has("script"):
 		_release_activity()
-		activity_instance = load(activity.script).new()
+		if not script_instances.has(activity.name):
+			script_instances[activity.name] = load(activity.script).new()
+		activity_instance = script_instances[activity.name]
 		current_activity = activity
 		activity_error = ""
 		return
@@ -414,8 +407,8 @@ func _open_wayland(activity):
 		return
 
 	var vp = get_viewport_rect().size
-	view.rect_position = Vector2(0.0, BAR_H)
-	view.rect_size = Vector2(vp.x, max(vp.y - BAR_H, 1.0))
+	view.rect_position = Vector2.ZERO
+	view.rect_size = vp
 	view.rect_clip_content = true
 	compositor.default_size = view.rect_size
 	view.visible = false
@@ -460,10 +453,21 @@ func _go_home():
 
 
 # Las actividades tipo script pueden tener recursos propios (p.ej. el viewport
-# 3D del Panel). Se les da la opcion de liberarlos al salir de la actividad.
+# 3D del Panel). Se les da la opcion de liberarlos al salir de la actividad; la
+# instancia (su estado) sigue en script_instances y los recrea al volver.
 func _release_activity():
 	if activity_instance != null and activity_instance.has_method("cleanup"):
 		activity_instance.cleanup()
+
+
+# Cerrar desde el Frame: se descarta la instancia (el Chat pierde su historial).
+func _close_script_activity(name):
+	if current_activity != null and current_activity.name == name:
+		_go_home()
+	var inst = script_instances.get(name)
+	script_instances.erase(name)
+	if inst != null and inst.has_method("cleanup"):
+		inst.cleanup()
 
 
 func _current_wayland_id():
@@ -539,8 +543,8 @@ func _open_unmanaged_window(id):
 	wayland_ids[name] = id
 
 	var vp = get_viewport_rect().size
-	view.rect_position = Vector2(0.0, BAR_H)
-	view.rect_size = Vector2(vp.x, max(vp.y - BAR_H, 1.0))
+	view.rect_position = Vector2.ZERO
+	view.rect_size = vp
 	view.rect_clip_content = true
 	compositor.default_size = view.rect_size
 

@@ -267,6 +267,8 @@ func _state():
 		"wayland_socket": shell.compositor.start(),
 		"windows": windows,
 		"activities": activities,
+		# Frame: items con su posición en pantalla (vacío si no se dibujó).
+		"frame": {"visible": shell.frame.drawn, "items": shell.frame.items_layout},
 	}
 
 
