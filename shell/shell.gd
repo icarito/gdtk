@@ -98,6 +98,9 @@ func _imgui_frame():
 		_update_layers(id)
 	_update_dialogs(id)
 
+	# HUD de debug global (autoload DebugHud): F1/` lo abren en cualquier actividad.
+	DebugHud.draw(self)
+
 	frame_count += 1
 	_run_test_logic()
 
