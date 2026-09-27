@@ -2,6 +2,7 @@ extends ImGuiCanvas
 
 var ACTIVITIES = [
 	{"name": "Chat", "script": "res://activities/chat.gd"},
+	{"name": "Panel", "script": "res://activities/panel.gd"},
 	{"name": "Terminal", "wayland": ["alacritty"]},
 	{"name": "Gears", "wayland": ["es2gears_wayland"]},
 	{"name": "GTK", "wayland": ["gtk4-widget-factory"]},
@@ -336,6 +337,7 @@ func _activate(index):
 		get_tree().quit()
 		return
 	if activity.has("script"):
+		_release_activity()
 		activity_instance = load(activity.script).new()
 		current_activity = activity
 		activity_error = ""
@@ -393,6 +395,7 @@ func _open_by_name(name):
 
 func _open_wayland(activity):
 	var name = activity.name
+	_release_activity()
 	current_activity = activity
 	activity_instance = null
 	activity_error = ""
@@ -440,6 +443,7 @@ func _show_view(id):
 
 
 func _go_home():
+	_release_activity()
 	current_activity = null
 	activity_instance = null
 	pending_wayland = ""
@@ -450,6 +454,13 @@ func _go_home():
 	view.visible = false
 	for i in range(view.get_child_count()):
 		view.get_child(i).visible = false
+
+
+# Las actividades tipo script pueden tener recursos propios (p.ej. el viewport
+# 3D del Panel). Se les da la opcion de liberarlos al salir de la actividad.
+func _release_activity():
+	if activity_instance != null and activity_instance.has_method("cleanup"):
+		activity_instance.cleanup()
 
 
 func _current_wayland_id():

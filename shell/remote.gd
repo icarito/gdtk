@@ -212,6 +212,9 @@ func _handle_line(conn, line):
 		"click":
 			_click(params)
 			_reply(conn, id, true)
+		"mouse_button":
+			_mouse_button(params)
+			_reply(conn, id, true)
 		"move":
 			_move(params)
 			_reply(conn, id, true)
@@ -340,6 +343,17 @@ func _click(params):
 
 func _move(params):
 	event_queue.push_back(_event_mouse_motion(float(params.get("x", 0.0)), float(params.get("y", 0.0))))
+
+
+# Press/release por separado (el click siempre manda los dos juntos): lo necesita
+# el menu radial, que se abre al presionar y elige al soltar.
+func _mouse_button(params):
+	var x = float(params.get("x", 0.0))
+	var y = float(params.get("y", 0.0))
+	var button = int(params.get("button", BUTTON_LEFT))
+	var pressed = bool(params.get("pressed", true))
+	event_queue.push_back(_event_mouse_motion(x, y))
+	event_queue.push_back(_event_mouse_button(x, y, button, pressed, false))
 
 
 func _scroll(params):

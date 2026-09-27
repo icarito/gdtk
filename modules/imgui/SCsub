@@ -6,13 +6,23 @@ Import("env_modules")
 env_imgui = env_modules.Clone()
 
 thirdparty_dir = Dir("thirdparty/imgui").abspath
-env_imgui.Prepend(CPPPATH=[thirdparty_dir])
+implot_dir = Dir("thirdparty/implot").abspath
+implot3d_dir = Dir("thirdparty/implot3d").abspath
+env_imgui.Prepend(CPPPATH=[thirdparty_dir, implot_dir, implot3d_dir])
 
 thirdparty_sources = [
     thirdparty_dir + "/imgui.cpp",
     thirdparty_dir + "/imgui_draw.cpp",
     thirdparty_dir + "/imgui_tables.cpp",
     thirdparty_dir + "/imgui_widgets.cpp",
+    thirdparty_dir + "/imgui_demo.cpp",
+    implot_dir + "/implot.cpp",
+    implot_dir + "/implot_items.cpp",
+    implot_dir + "/implot_demo.cpp",
+    implot3d_dir + "/implot3d.cpp",
+    implot3d_dir + "/implot3d_items.cpp",
+    implot3d_dir + "/implot3d_meshes.cpp",
+    implot3d_dir + "/implot3d_demo.cpp",
 ]
 
 env_thirdparty = env_imgui.Clone()
