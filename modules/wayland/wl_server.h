@@ -9,16 +9,24 @@ extern "C" {
 
 typedef struct wl_server wl_server;
 
+// Una capa del arbol de un toplevel: la surface raiz, una subsurface o un
+// popup. `key` es la identidad estable de la surface (su puntero). x,y son
+// relativos a la raiz y w,h el tamano logico de la surface, en orden de dibujo.
+typedef struct {
+	uint64_t key;
+	int x, y, w, h;
+} wl_server_layer;
+
 typedef struct {
 	void *ud;
 	void (*added)(void *ud, int id);
 	void (*removed)(void *ud, int id);
 	// pixels del buffer shm en el FourCC DRM `format` con `stride` bytes por
 	// linea. Apuntan a la memoria del cliente: validos SOLO durante la llamada.
-	void (*frame)(void *ud, int id, const unsigned char *data, int w, int h, uint32_t format, int stride);
-	// el toplevel tiene un buffer dmabuf: C++ asegura la ImageTexture del
+	void (*frame)(void *ud, int id, uint64_t key, const unsigned char *data, int w, int h, uint32_t format, int stride);
+	// la surface `key` tiene un buffer dmabuf: C++ asegura la ImageTexture del
 	// tamano dado y llama wl_server_bind_dmabuf con su texid.
-	void (*dmabuf)(void *ud, int id, int w, int h);
+	void (*dmabuf)(void *ud, int id, uint64_t key, int w, int h);
 	void (*title)(void *ud, int id, const char *title);
 } wl_server_callbacks;
 
@@ -37,7 +45,10 @@ void wl_server_key(wl_server *s, uint32_t time_ms, uint32_t evdev_key, int press
 // dmabuf: 1 si se anuncio linux-dmabuf con feedback propio; estado/motivo para el reporte.
 int wl_server_dmabuf_enabled(wl_server *s);
 const char *wl_server_dmabuf_reason(wl_server *s);
-void wl_server_bind_dmabuf(wl_server *s, int id, unsigned int texid);
+void wl_server_bind_dmabuf(wl_server *s, uint64_t key, unsigned int texid);
+// Llena hasta `max` capas del arbol del toplevel `id` en orden de dibujo;
+// devuelve cuantas escribio (0 si el id no existe o no esta mapeado).
+int wl_server_layers(wl_server *s, int id, wl_server_layer *out, int max);
 void wl_server_destroy(wl_server *s);
 
 #ifdef __cplusplus

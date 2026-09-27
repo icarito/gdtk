@@ -15,10 +15,7 @@ script = ExtResource( 2 )
 [node name="ViewLayer" type="CanvasLayer" parent="."]
 layer = 1
 
-[node name="View" type="TextureRect" parent="ViewLayer"]
+[node name="View" type="Control" parent="ViewLayer"]
 visible = false
-anchor_right = 0.0
-anchor_bottom = 0.0
-expand = true
-stretch_mode = 1
 mouse_filter = 0
+rect_clip_content = false

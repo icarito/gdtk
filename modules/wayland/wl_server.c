@@ -39,16 +39,27 @@ typedef struct toplevel {
 	bool mapped;
 	bool want_focus;
 
-	// buffer dmabuf/shm vigente, retenido con wlr_buffer_lock mientras Godot lo
-	// samplea; se suelta al llegar uno nuevo o en destroy.
-	struct wlr_buffer *buffer;
-
 	struct wl_listener commit;
 	struct wl_listener map;
 	struct wl_listener unmap;
 	struct wl_listener destroy;
 	struct wl_listener set_title;
 } toplevel;
+
+// Estado por surface del arbol (raiz, subsurfaces, popups). Mantiene retenido
+// con wlr_buffer_lock el ultimo buffer importado para que Godot pueda
+// samplearlo; la identidad es el puntero de la surface (`key`).
+typedef struct surface_state {
+	struct wl_list link;
+	struct wl_server *server;
+	struct wlr_surface *surface;
+	uint64_t key;
+	int id;
+	struct wlr_buffer *buffer;
+	struct wl_listener commit;
+	struct wl_listener destroy;
+	struct wl_listener new_subsurface;
+} surface_state;
 
 struct wl_server {
 	struct wl_display *display;
@@ -83,6 +94,10 @@ struct wl_server {
 	int next_id;
 	int default_w, default_h;
 
+	// Estado por surface de todos los toplevels. Se recorre entero en cada
+	// dispatch para reimportar buffers nuevos; se limpia en events.destroy.
+	struct wl_list surfaces;
+
 	const char *socket_name;
 	struct wlr_surface *pointer_surface;
 	int pointer_id;
@@ -96,6 +111,154 @@ static toplevel *toplevel_find(struct wl_server *s, int id) {
 		}
 	}
 	return NULL;
+}
+
+static toplevel *toplevel_find_surface(struct wl_server *s, struct wlr_surface *surface) {
+	toplevel *t;
+	wl_list_for_each(t, &s->toplevels, link) {
+		if (t->tl->base->surface == surface) {
+			return t;
+		}
+	}
+	return NULL;
+}
+
+static surface_state *surface_state_find(struct wl_server *s, struct wlr_surface *surface) {
+	surface_state *st;
+	wl_list_for_each(st, &s->surfaces, link) {
+		if (st->surface == surface) {
+			return st;
+		}
+	}
+	return NULL;
+}
+
+static surface_state *surface_state_find_key(struct wl_server *s, uint64_t key) {
+	surface_state *st;
+	wl_list_for_each(st, &s->surfaces, link) {
+		if (st->key == key) {
+			return st;
+		}
+	}
+	return NULL;
+}
+
+static void surface_state_release_buffer(surface_state *st) {
+	if (st->buffer != NULL) {
+		wlr_buffer_unlock(st->buffer);
+		st->buffer = NULL;
+	}
+}
+
+static int surface_state_resolve_id(struct wl_server *s, struct wlr_surface *surface, int depth);
+
+// Importa el buffer current de la surface si hay uno. Se llama desde el commit
+// de la surface, unico momento en que wlroots deja valido current.buffer. Los
+// commits sin buffer (ack de configure, frame callbacks) se ignoran para no
+// soltar el ultimo buffer importado.
+static void surface_state_import(surface_state *st) {
+	struct wl_server *s = st->server;
+	if (st->id <= 0) {
+		st->id = surface_state_resolve_id(s, st->surface, 0);
+	}
+	if (st->id <= 0) {
+		return;
+	}
+	struct wlr_buffer *buf = st->surface->current.buffer;
+	if (buf == NULL) {
+		return;
+	}
+	if (buf != st->buffer) {
+		wlr_buffer_lock(buf);
+		if (st->buffer != NULL) {
+			wlr_buffer_unlock(st->buffer);
+		}
+		st->buffer = buf;
+	}
+
+	struct wlr_dmabuf_attributes attribs;
+	if (s->dmabuf_enabled && wlr_buffer_get_dmabuf(buf, &attribs)) {
+		if (s->cb.dmabuf != NULL) {
+			s->cb.dmabuf(s->cb.ud, st->id, st->key, attribs.width, attribs.height);
+		}
+		return;
+	}
+
+	// Camino shm: puntero directo al buffer del cliente, sin copia en C.
+	void *ptr = NULL;
+	uint32_t format = 0;
+	size_t stride = 0;
+	if (!wlr_buffer_begin_data_ptr_access(buf, WLR_BUFFER_DATA_PTR_ACCESS_READ,
+			&ptr, &format, &stride)) {
+		return;
+	}
+	if (s->cb.frame != NULL) {
+		s->cb.frame(s->cb.ud, st->id, st->key, (const unsigned char *)ptr, buf->width,
+				buf->height, format, (int)stride);
+	}
+	wlr_buffer_end_data_ptr_access(buf);
+}
+
+static void handle_surface_commit(struct wl_listener *listener, void *data) {
+	surface_state *st = wl_container_of(listener, st, commit);
+	surface_state_import(st);
+}
+
+static void surface_state_acquire(struct wl_server *s, struct wlr_surface *surface, int id);
+
+// Resuelve el toplevel dueno de una surface subiendo por los popups: un popup
+// no esta en el arbol de subsurfaces, su padre lo referencia xdg_popup.parent.
+static int surface_state_resolve_id(struct wl_server *s, struct wlr_surface *surface, int depth) {
+	if (surface == NULL || depth > 16) {
+		return 0;
+	}
+	surface_state *st = surface_state_find(s, surface);
+	if (st != NULL && st->id > 0) {
+		return st->id;
+	}
+	struct wlr_xdg_surface *xdg = wlr_xdg_surface_try_from_wlr_surface(surface);
+	if (xdg != NULL && xdg->role == WLR_XDG_SURFACE_ROLE_POPUP && xdg->popup != NULL) {
+		return surface_state_resolve_id(s, xdg->popup->parent, depth + 1);
+	}
+	toplevel *t = toplevel_find_surface(s, wlr_surface_get_root_surface(surface));
+	return t != NULL ? t->id : 0;
+}
+
+static void handle_new_subsurface(struct wl_listener *listener, void *data) {
+	surface_state *st = wl_container_of(listener, st, new_subsurface);
+	struct wlr_subsurface *sub = data;
+	if (sub != NULL && sub->surface != NULL &&
+			surface_state_find(st->server, sub->surface) == NULL) {
+		surface_state_acquire(st->server, sub->surface, st->id);
+	}
+}
+
+static void handle_surface_destroy(struct wl_listener *listener, void *data) {
+	surface_state *st = wl_container_of(listener, st, destroy);
+	wl_list_remove(&st->commit.link);
+	wl_list_remove(&st->new_subsurface.link);
+	wl_list_remove(&st->destroy.link);
+	wl_list_remove(&st->link);
+	surface_state_release_buffer(st);
+	free(st);
+}
+
+static void surface_state_acquire(struct wl_server *s, struct wlr_surface *surface, int id) {
+	surface_state *st = calloc(1, sizeof(*st));
+	if (st == NULL) {
+		return;
+	}
+	st->server = s;
+	st->surface = surface;
+	st->key = (uint64_t)(uintptr_t)surface;
+	st->id = id;
+	st->commit.notify = handle_surface_commit;
+	wl_signal_add(&surface->events.commit, &st->commit);
+	st->new_subsurface.notify = handle_new_subsurface;
+	wl_signal_add(&surface->events.new_subsurface, &st->new_subsurface);
+	st->destroy.notify = handle_surface_destroy;
+	wl_signal_add(&surface->events.destroy, &st->destroy);
+	wl_list_insert(s->surfaces.prev, &st->link);
 }
 
 // Atributos EGL de import por plano (hasta 4, como WLR_DMABUF_MAX_PLANES).
@@ -325,55 +488,14 @@ static void toplevel_apply_focus(toplevel *t) {
 static void handle_toplevel_commit(struct wl_listener *listener, void *data) {
 	toplevel *t = wl_container_of(listener, t, commit);
 	struct wl_server *s = t->server;
-	struct wlr_surface *surface = t->tl->base->surface;
 
 	if (t->tl->base->initial_commit) {
 		// ponytail: sin este configure inicial el cliente espera para siempre y nunca mapea
 		wlr_xdg_toplevel_set_size(t->tl, s->default_w, s->default_h);
 		return;
 	}
-	if (!t->mapped) {
-		return;
-	}
-
-	// current.buffer != NULL solo cuando este commit trae buffer nuevo. El
-	// handler de commit corre antes de que wlroots lo suelte (ver wlr_surface.c),
-	// asi que es valido leerlo aqui.
-	struct wlr_buffer *buf = surface->current.buffer;
-	if (buf == NULL) {
-		return;
-	}
-
-	if (buf != t->buffer) {
-		wlr_buffer_lock(buf);
-		if (t->buffer != NULL) {
-			wlr_buffer_unlock(t->buffer);
-		}
-		t->buffer = buf;
-	}
-
-	struct wlr_dmabuf_attributes attribs;
-	if (s->dmabuf_enabled && wlr_buffer_get_dmabuf(buf, &attribs)) {
-		if (s->cb.dmabuf != NULL) {
-			s->cb.dmabuf(s->cb.ud, t->id, attribs.width, attribs.height);
-		}
-		return;
-	}
-
-	// Camino shm: puntero directo al buffer del cliente, sin copia en C. El C++
-	// convierte a RGBA8 durante la llamada.
-	void *ptr = NULL;
-	uint32_t format = 0;
-	size_t stride = 0;
-	if (!wlr_buffer_begin_data_ptr_access(buf, WLR_BUFFER_DATA_PTR_ACCESS_READ,
-			&ptr, &format, &stride)) {
-		return;
-	}
-	if (s->cb.frame != NULL) {
-		s->cb.frame(s->cb.ud, t->id, (const unsigned char *)ptr, buf->width, buf->height,
-				format, (int)stride);
-	}
-	wlr_buffer_end_data_ptr_access(buf);
+	// La importacion de buffers la hace el listener de commit por surface
+	// (surface_state); aqui solo se resuelve el configure inicial.
 }
 
 static void handle_toplevel_map(struct wl_listener *listener, void *data) {
@@ -387,13 +509,6 @@ static void handle_toplevel_map(struct wl_listener *listener, void *data) {
 static void handle_toplevel_unmap(struct wl_listener *listener, void *data) {
 	toplevel *t = wl_container_of(listener, t, unmap);
 	t->mapped = false;
-}
-
-static void toplevel_release_buffer(toplevel *t) {
-	if (t->buffer != NULL) {
-		wlr_buffer_unlock(t->buffer);
-		t->buffer = NULL;
-	}
 }
 
 static void handle_toplevel_destroy(struct wl_listener *listener, void *data) {
@@ -412,8 +527,6 @@ static void handle_toplevel_destroy(struct wl_listener *listener, void *data) {
 		s->pointer_surface = NULL;
 	}
 
-	toplevel_release_buffer(t);
-
 	int id = t->id;
 	free(t);
 
@@ -425,7 +538,10 @@ static void handle_toplevel_destroy(struct wl_listener *listener, void *data) {
 // Popups (tooltips, menús): sólo se configuran, no se dibujan todavía.
 // Sin el configure inicial GTK4 espera el popup para siempre y su frame clock
 // (compartido con la ventana) congela también la ventana principal.
-// ponytail: popups invisibles; dibujarlos = componer su surface en popup->current.geometry.
+// Popups (tooltips, menus): se configuran en su commit inicial y se dibujan
+// como una capa mas via wl_server_layers (wlr_xdg_surface_for_each_surface).
+// Sin el configure inicial GTK4 espera el popup para siempre y su frame clock
+// (compartido con la ventana) congela tambien la ventana principal.
 typedef struct popup {
 	struct wlr_xdg_popup *p;
 	struct wl_listener commit;
@@ -447,6 +563,7 @@ static void handle_popup_destroy(struct wl_listener *listener, void *data) {
 }
 
 static void handle_new_popup(struct wl_listener *listener, void *data) {
+	struct wl_server *s = wl_container_of(listener, s, new_popup);
 	struct wlr_xdg_popup *p = data;
 	popup *pp = calloc(1, sizeof(*pp));
 	if (pp == NULL) {
@@ -457,6 +574,22 @@ static void handle_new_popup(struct wl_listener *listener, void *data) {
 	wl_signal_add(&p->base->surface->events.commit, &pp->commit);
 	pp->destroy.notify = handle_popup_destroy;
 	wl_signal_add(&p->events.destroy, &pp->destroy);
+
+	// El popup pertenece al toplevel de su surface padre: hereda el id para
+	// que sus buffers se agrupen como una capa mas de ese toplevel.
+	if (surface_state_find(s, p->base->surface) == NULL) {
+		int id = 0;
+		surface_state *parent = surface_state_find(s, p->parent);
+		if (parent != NULL) {
+			id = parent->id;
+		} else if (p->parent != NULL) {
+			toplevel *t = toplevel_find_surface(s, wlr_surface_get_root_surface(p->parent));
+			if (t != NULL) {
+				id = t->id;
+			}
+		}
+		surface_state_acquire(s, p->base->surface, id);
+	}
 }
 
 static void handle_new_toplevel(struct wl_listener *listener, void *data) {
@@ -487,6 +620,10 @@ static void handle_new_toplevel(struct wl_listener *listener, void *data) {
 
 	wl_list_insert(s->toplevels.prev, &t->link);
 
+	// Estado de la surface raiz; las subsurfaces se descubren por el signal
+	// new_subsurface de cada surface. Los buffers se importan en su commit.
+	surface_state_acquire(s, surface, t->id);
+
 	if (s->cb.added != NULL) {
 		s->cb.added(s->cb.ud, t->id);
 	}
@@ -505,6 +642,7 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 	s->pointer_surface = NULL;
 	s->egl_dpy = EGL_NO_DISPLAY;
 	wl_list_init(&s->toplevels);
+	wl_list_init(&s->surfaces);
 
 	s->display = wl_display_create();
 	if (s->display == NULL) {
@@ -681,13 +819,25 @@ void wl_server_pointer_motion(wl_server *s, int id, double x, double y, uint32_t
 	if (t == NULL) {
 		return;
 	}
-	struct wlr_surface *surface = t->tl->base->surface;
+	// Hit-test sobre todo el arbol (popups primero). x,y llegan relativos a la
+	// raiz; sub_x,sub_y quedan en coords locales de la surface elegida.
+	double sub_x = 0.0;
+	double sub_y = 0.0;
+	struct wlr_surface *surface = wlr_xdg_surface_surface_at(t->tl->base, x, y, &sub_x, &sub_y);
+	if (surface == NULL) {
+		if (s->pointer_surface != NULL) {
+			s->pointer_surface = NULL;
+			s->pointer_id = 0;
+			wlr_seat_pointer_notify_clear_focus(s->seat);
+		}
+		return;
+	}
 	if (s->pointer_surface != surface) {
 		s->pointer_surface = surface;
 		s->pointer_id = id;
-		wlr_seat_pointer_notify_enter(s->seat, surface, x, y);
+		wlr_seat_pointer_notify_enter(s->seat, surface, sub_x, sub_y);
 	}
-	wlr_seat_pointer_notify_motion(s->seat, time_ms, x, y);
+	wlr_seat_pointer_notify_motion(s->seat, time_ms, sub_x, sub_y);
 	wlr_seat_pointer_notify_frame(s->seat);
 }
 
@@ -736,16 +886,51 @@ const char *wl_server_dmabuf_reason(wl_server *s) {
 	return s->dmabuf_reason;
 }
 
-void wl_server_bind_dmabuf(wl_server *s, int id, unsigned int texid) {
+// --- Layout por surface (todo el arbol del toplevel) ---
+
+struct layer_data {
+	wl_server_layer *out;
+	int max;
+	int count;
+};
+
+static void layer_iterator(struct wlr_surface *surface, int sx, int sy, void *data) {
+	struct layer_data *d = data;
+	if (d->count >= d->max) {
+		return;
+	}
+	wl_server_layer *l = &d->out[d->count++];
+	l->key = (uint64_t)(uintptr_t)surface;
+	l->x = sx;
+	l->y = sy;
+	l->w = surface->current.width;
+	l->h = surface->current.height;
+}
+
+int wl_server_layers(wl_server *s, int id, wl_server_layer *out, int max) {
+	if (s == NULL || out == NULL || max <= 0) {
+		return 0;
+	}
+	toplevel *t = toplevel_find(s, id);
+	if (t == NULL || !t->mapped) {
+		return 0;
+	}
+	struct layer_data d = { out, max, 0 };
+	// Orden raiz -> hojas, que es el orden de dibujo de wlroots.
+	wlr_xdg_surface_for_each_surface(t->tl->base, layer_iterator, &d);
+	return d.count;
+}
+
+void wl_server_bind_dmabuf(wl_server *s, uint64_t key, unsigned int texid) {
 	if (s == NULL || !s->dmabuf_enabled || s->egl_dpy == EGL_NO_DISPLAY) {
 		return;
 	}
-	toplevel *t = toplevel_find(s, id);
-	if (t == NULL || t->buffer == NULL) {
+	surface_state *st = surface_state_find_key(s, key);
+	if (st == NULL || st->buffer == NULL) {
 		return;
 	}
 	struct wlr_dmabuf_attributes attribs;
-	if (!wlr_buffer_get_dmabuf(t->buffer, &attribs)) {
+	if (!wlr_buffer_get_dmabuf(st->buffer, &attribs)) {
 		return;
 	}
 
@@ -801,8 +986,19 @@ void wl_server_destroy(wl_server *s) {
 		wl_list_remove(&t->set_title.link);
 		wl_list_remove(&t->destroy.link);
 		wl_list_remove(&t->link);
-		toplevel_release_buffer(t);
 		free(t);
+	}
+
+	// Red de seguridad: las surface_state normalmente ya se liberaron en
+	// events.destroy al destruir los clientes.
+	surface_state *st, *stmp;
+	wl_list_for_each_safe(st, stmp, &s->surfaces, link) {
+		wl_list_remove(&st->commit.link);
+		wl_list_remove(&st->new_subsurface.link);
+		wl_list_remove(&st->destroy.link);
+		wl_list_remove(&st->link);
+		surface_state_release_buffer(st);
+		free(st);
 	}
 
 	if (s->backend != NULL) {

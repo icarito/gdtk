@@ -6,6 +6,7 @@
 #include "core/image.h"
 #include "core/list.h"
 #include "core/map.h"
+#include "core/math/rect2.h"
 #include "core/os/keyboard.h"
 #include "core/os/os.h"
 #include "servers/visual_server.h"
@@ -194,12 +195,12 @@ void WaylandCompositor::_cb_removed(void *p_ud, int p_id) {
 	static_cast<WaylandCompositor *>(p_ud)->_on_removed(p_id);
 }
 
-void WaylandCompositor::_cb_frame(void *p_ud, int p_id, const unsigned char *p_data, int p_w, int p_h, uint32_t p_format, int p_stride) {
-	static_cast<WaylandCompositor *>(p_ud)->_on_frame(p_id, p_data, p_w, p_h, p_format, p_stride);
+void WaylandCompositor::_cb_frame(void *p_ud, int p_id, uint64_t p_key, const unsigned char *p_data, int p_w, int p_h, uint32_t p_format, int p_stride) {
+	static_cast<WaylandCompositor *>(p_ud)->_on_frame(p_id, p_key, p_data, p_w, p_h, p_format, p_stride);
 }
 
-void WaylandCompositor::_cb_dmabuf(void *p_ud, int p_id, int p_w, int p_h) {
-	static_cast<WaylandCompositor *>(p_ud)->_on_dmabuf(p_id, p_w, p_h);
+void WaylandCompositor::_cb_dmabuf(void *p_ud, int p_id, uint64_t p_key, int p_w, int p_h) {
+	static_cast<WaylandCompositor *>(p_ud)->_on_dmabuf(p_id, p_key, p_w, p_h);
 }
 
 void WaylandCompositor::_cb_title(void *p_ud, int p_id, const char *p_title) {
@@ -226,7 +227,7 @@ Map<int, WaylandCompositor::Toplevel>::Element *WaylandCompositor::_toplevel_ent
 	return e;
 }
 
-void WaylandCompositor::_on_frame(int p_id, const unsigned char *p_data, int p_w, int p_h, uint32_t p_format, int p_stride) {
+void WaylandCompositor::_on_frame(int p_id, uint64_t p_key, const unsigned char *p_data, int p_w, int p_h, uint32_t p_format, int p_stride) {
 	commit_count++;
 	shm_commits++;
 	if (p_data == NULL || p_w <= 0 || p_h <= 0 || p_stride < p_w * 4) {
@@ -269,17 +270,18 @@ void WaylandCompositor::_on_frame(int p_id, const unsigned char *p_data, int p_w
 	Ref<Image> img = memnew(Image(p_w, p_h, false, Image::FORMAT_RGBA8, data));
 
 	Map<int, Toplevel>::Element *e = _toplevel_entry(p_id);
-	Ref<ImageTexture> tex = e->get().texture;
+	Variant vkey((int64_t)p_key);
+	Ref<ImageTexture> tex = e->get().textures[vkey];
 	if (tex.is_null() || tex->get_width() != p_w || tex->get_height() != p_h) {
 		tex.instance();
 		tex->create_from_image(img, 0);
-		e->get().texture = tex;
+		e->get().textures[vkey] = tex;
 	} else {
 		tex->set_data(img);
 	}
 }
 
-void WaylandCompositor::_on_dmabuf(int p_id, int p_w, int p_h) {
+void WaylandCompositor::_on_dmabuf(int p_id, uint64_t p_key, int p_w, int p_h) {
 	commit_count++;
 	dmabuf_commits++;
 	if (p_w <= 0 || p_h <= 0 || server == NULL) {
@@ -287,13 +289,14 @@ void WaylandCompositor::_on_dmabuf(int p_id, int p_w, int p_h) {
 	}
 
 	Map<int, Toplevel>::Element *e = _toplevel_entry(p_id);
-	Ref<ImageTexture> tex = e->get().texture;
+	Variant vkey((int64_t)p_key);
+	Ref<ImageTexture> tex = e->get().textures[vkey];
 	if (tex.is_null() || tex->get_width() != p_w || tex->get_height() != p_h) {
 		tex.instance();
 		tex->create(p_w, p_h, Image::FORMAT_RGBA8, 0);
-		e->get().texture = tex;
+		e->get().textures[vkey] = tex;
 	}
-	wl_server_bind_dmabuf(server, p_id,
+	wl_server_bind_dmabuf(server, p_key,
 			(unsigned int)VS::get_singleton()->texture_get_texid(tex->get_rid()));
 }
 
@@ -310,6 +313,7 @@ void WaylandCompositor::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("start"), &WaylandCompositor::start);
 	ClassDB::bind_method(D_METHOD("launch", "cmd", "args"), &WaylandCompositor::launch, DEFVAL(PoolStringArray()));
 	ClassDB::bind_method(D_METHOD("get_texture", "id"), &WaylandCompositor::get_texture);
+	ClassDB::bind_method(D_METHOD("get_layers", "id"), &WaylandCompositor::get_layers);
 	ClassDB::bind_method(D_METHOD("get_title", "id"), &WaylandCompositor::get_title);
 	ClassDB::bind_method(D_METHOD("get_ids"), &WaylandCompositor::get_ids);
 	ClassDB::bind_method(D_METHOD("set_size", "id", "size"), &WaylandCompositor::set_size);
@@ -421,10 +425,52 @@ int WaylandCompositor::launch(const String &p_cmd, const PoolStringArray &p_args
 
 Ref<Texture> WaylandCompositor::get_texture(int p_id) const {
 	const Map<int, Toplevel>::Element *e = toplevels.find(p_id);
-	if (e == NULL) {
+	if (e == NULL || e->get().root_key == 0) {
 		return Ref<Texture>();
 	}
-	return e->get().texture;
+	Variant vkey((int64_t)e->get().root_key);
+	if (!e->get().textures.has(vkey)) {
+		return Ref<Texture>();
+	}
+	return e->get().textures[vkey];
+}
+
+Array WaylandCompositor::get_layers(int p_id) {
+	Array layers;
+	Map<int, Toplevel>::Element *e = toplevels.find(p_id);
+	if (e == NULL || server == NULL) {
+		return layers;
+	}
+
+	const int MAX_LAYERS = 64;
+	wl_server_layer raw[MAX_LAYERS];
+	int count = wl_server_layers(server, p_id, raw, MAX_LAYERS);
+
+	Dictionary present;
+	for (int i = 0; i < count; i++) {
+		Variant vkey((int64_t)raw[i].key);
+		present[vkey] = true;
+		Dictionary layer;
+		layer["key"] = (int64_t)raw[i].key;
+		layer["texture"] = e->get().textures[vkey];
+		layer["rect"] = Rect2((float)raw[i].x, (float)raw[i].y, (float)raw[i].w, (float)raw[i].h);
+		layers.push_back(layer);
+	}
+
+	// La primera capa es la raiz (for_each_surface va raiz -> hojas).
+	if (count > 0) {
+		e->get().root_key = raw[0].key;
+	}
+
+	// Liberar texturas de surfaces que ya no estan en el arbol (popup cerrado,
+	// subsurface destruida, etc.).
+	Array keys = e->get().textures.keys();
+	for (int i = 0; i < keys.size(); i++) {
+		if (!present.has(keys[i])) {
+			e->get().textures.erase(keys[i]);
+		}
+	}
+	return layers;
 }
 
 String WaylandCompositor::get_title(int p_id) const {

@@ -26,6 +26,7 @@ var last_launch_pid = -1
 
 var wayland_ids = {}
 var pending_wayland = ""
+var view_scale = Vector2.ONE
 
 var frame_count = 0
 var screenshot_path = ""
@@ -71,13 +72,53 @@ func _imgui_frame():
 
 	var id = _current_wayland_id()
 	if id >= 0:
-		var tex = compositor.get_texture(id)
-		view.texture = tex
-		if tex != null and tex_ready_frame < 0:
-			tex_ready_frame = frame_count
+		_update_layers(id)
 
 	frame_count += 1
 	_run_test_logic()
+
+
+# Dibuja todo el arbol de surfaces del toplevel: un TextureRect hijo por capa,
+# reusado por indice, en el orden devuelto por el compositor (raiz -> popups).
+func _update_layers(id):
+	var layers = compositor.get_layers(id)
+
+	var root_size = Vector2.ZERO
+	if layers.size() > 0:
+		root_size = layers[0].rect.size
+		if (root_size.x <= 0.0 or root_size.y <= 0.0) and layers[0].texture != null:
+			root_size = layers[0].texture.get_size()
+	if root_size.x > 0.0 and root_size.y > 0.0 and view.rect_size.x > 0.0 and view.rect_size.y > 0.0:
+		view_scale = Vector2(view.rect_size.x / root_size.x, view.rect_size.y / root_size.y)
+	else:
+		view_scale = Vector2.ONE
+
+	_ensure_layer_nodes(layers.size())
+	for i in range(layers.size()):
+		var node = view.get_child(i)
+		var layer = layers[i]
+		var size = layer.rect.size
+		if (size.x <= 0.0 or size.y <= 0.0) and layer.texture != null:
+			size = layer.texture.get_size()
+		node.texture = layer.texture
+		node.rect_position = layer.rect.position * view_scale
+		node.rect_size = size * view_scale
+		node.visible = layer.texture != null
+	for i in range(layers.size(), view.get_child_count()):
+		view.get_child(i).visible = false
+
+	if tex_ready_frame < 0 and layers.size() > 0 and layers[0].texture != null:
+		tex_ready_frame = frame_count
+
+
+func _ensure_layer_nodes(count):
+	while view.get_child_count() < count:
+		var child = TextureRect.new()
+		child.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		child.expand = true
+		child.stretch_mode = TextureRect.STRETCH_SCALE
+		child.visible = false
+		view.add_child(child)
 
 
 func _draw_home():
@@ -127,7 +168,9 @@ func _draw_activity():
 		if button("Inicio"):
 			_go_home()
 		same_line()
-		var title = current_activity.name
+		var title = ""
+		if current_activity != null:
+			title = current_activity.name
 		var id = _current_wayland_id()
 		if id >= 0:
 			var wtitle = compositor.get_title(id)
@@ -252,7 +295,7 @@ func _show_view(id):
 	type_queue = []
 	type_done_frame = -1
 	view.visible = true
-	view.texture = compositor.get_texture(id)
+	_update_layers(id)
 
 
 func _go_home():
@@ -264,7 +307,8 @@ func _go_home():
 	type_done_frame = -1
 	tex_ready_frame = -1
 	view.visible = false
-	view.texture = null
+	for i in range(view.get_child_count()):
+		view.get_child(i).visible = false
 
 
 func _current_wayland_id():
@@ -318,11 +362,9 @@ func _on_view_input(event):
 
 
 func _view_pos_to_wayland(id, pos):
-	var tex = compositor.get_texture(id)
-	var tex_size = tex.get_size() if tex != null else view.rect_size
-	if view.rect_size.x <= 0.0 or view.rect_size.y <= 0.0:
+	if view_scale.x <= 0.0 or view_scale.y <= 0.0:
 		return pos
-	return pos * tex_size / view.rect_size
+	return Vector2(pos.x / view_scale.x, pos.y / view_scale.y)
 
 
 func _unhandled_input(event):
