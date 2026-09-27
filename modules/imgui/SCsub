@@ -10,20 +10,46 @@ implot_dir = Dir("thirdparty/implot").abspath
 implot3d_dir = Dir("thirdparty/implot3d").abspath
 env_imgui.Prepend(CPPPATH=[thirdparty_dir, implot_dir, implot3d_dir])
 
+with_implot = env.get("imgui_implot", True)
+with_implot3d = env.get("imgui_implot3d", True)
+with_demos = env.get("imgui_demos", True)
+
+# Los defines de capacidad van solo al entorno del modulo: el resto del motor
+# no los ve y no se recompila al cambiar las opciones.
+if with_implot:
+    env_imgui.Append(CPPDEFINES=["IMGUI_MODULE_IMPLOT"])
+if with_implot3d:
+    env_imgui.Append(CPPDEFINES=["IMGUI_MODULE_IMPLOT3D"])
+if with_demos:
+    env_imgui.Append(CPPDEFINES=["IMGUI_MODULE_DEMOS"])
+# Con las demos apagadas se acotan las plantillas numericas de ImPlot/ImPlot3D
+# a float/double (los bindings solo pasan PoolRealArray). Con demos activadas no
+# se acotan porque las demos instancian tipos enteros.
+if (with_implot or with_implot3d) and not with_demos:
+    env_imgui.Append(CPPDEFINES=["IMGUI_MODULE_LIMIT_NUMERIC_TYPES"])
+
 thirdparty_sources = [
     thirdparty_dir + "/imgui.cpp",
     thirdparty_dir + "/imgui_draw.cpp",
     thirdparty_dir + "/imgui_tables.cpp",
     thirdparty_dir + "/imgui_widgets.cpp",
-    thirdparty_dir + "/imgui_demo.cpp",
-    implot_dir + "/implot.cpp",
-    implot_dir + "/implot_items.cpp",
-    implot_dir + "/implot_demo.cpp",
-    implot3d_dir + "/implot3d.cpp",
-    implot3d_dir + "/implot3d_items.cpp",
-    implot3d_dir + "/implot3d_meshes.cpp",
-    implot3d_dir + "/implot3d_demo.cpp",
 ]
+
+if with_demos:
+    thirdparty_sources.append(thirdparty_dir + "/imgui_demo.cpp")
+
+if with_implot:
+    thirdparty_sources.append(implot_dir + "/implot.cpp")
+    thirdparty_sources.append(implot_dir + "/implot_items.cpp")
+    if with_demos:
+        thirdparty_sources.append(implot_dir + "/implot_demo.cpp")
+
+if with_implot3d:
+    thirdparty_sources.append(implot3d_dir + "/implot3d.cpp")
+    thirdparty_sources.append(implot3d_dir + "/implot3d_items.cpp")
+    thirdparty_sources.append(implot3d_dir + "/implot3d_meshes.cpp")
+    if with_demos:
+        thirdparty_sources.append(implot3d_dir + "/implot3d_demo.cpp")
 
 env_thirdparty = env_imgui.Clone()
 env_thirdparty.disable_warnings()
