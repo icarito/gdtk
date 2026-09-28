@@ -70,6 +70,7 @@ func load(shell):
 func tick(shell):
 	if queue.empty() and current == "":
 		return
+	shell.request_redraw()  # hasta terminar de reabrir, aunque no haya input
 	if shell.pending_wayland != "" and OS.get_ticks_msec() - waiting_since < LAUNCH_TIMEOUT_MS:
 		return
 	shell.pending_wayland = ""

@@ -11,6 +11,18 @@ func _init():
 
 
 func draw(ui):
+	var now = OS.get_ticks_msec()
+	var i = 0
+	while i < pending.size():
+		if now >= pending[i].due:
+			messages.append(pending[i].text)
+			scroll_to_bottom = true
+			pending.remove(i)
+		else:
+			i += 1
+	# Sin tick periódico en reposo: la respuesta pendiente pide sus propios frames.
+	if not pending.empty():
+		ui.request_redraw()
 	var vp = ui.get_viewport_rect().size
 	var hist_h = max(80.0, vp.y - 78.0)
 	ui.begin_child("##historial", Vector2(0, hist_h))
@@ -30,16 +42,6 @@ func draw(ui):
 	if ui.button("Enviar") and draft.strip_edges() != "":
 		_send(draft)
 		draft = ""
-
-	var now = OS.get_ticks_msec()
-	var i = 0
-	while i < pending.size():
-		if now >= pending[i].due:
-			messages.append(pending[i].text)
-			scroll_to_bottom = true
-			pending.remove(i)
-		else:
-			i += 1
 
 
 func _send(text):

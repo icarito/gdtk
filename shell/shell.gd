@@ -98,11 +98,13 @@ func _ready():
 		print("compositor socket: ", socket)
 
 	# Sin redibujo continuo: ImGui se arma sólo con input (a input_hz), con
-	# request_redraw() (commits Wayland, señales, control remoto) o 1 vez/s (reloj).
+	# request_redraw() (commits Wayland, señales, control remoto) o al cambiar el minuto (reloj).
 	# Los tests con --screenshot cuentan frames: ahí se deja el modo histórico.
 	if screenshot_path == "":
-		update_hz = 1.0
+		# Nada periódico: el reloj pide su frame justo cuando cambia el minuto.
+		update_hz = 0.001
 		input_hz = 60.0
+		_arm_clock()
 	# El colector del HUD corría en cada vuelta del loop (60/s) aunque nada cambie.
 	DebugHud.metrics.sample_hz = 4.0
 
@@ -118,10 +120,10 @@ func _ready():
 
 var last_commits = 0
 # Loop del motor: sin input, commits ni animación por IDLE_MS, duerme más entre vueltas
-# (60 -> 10 vueltas/s en reposo). El primer evento tras el reposo tarda hasta SLEEP_IDLE.
+# (60 -> 4 vueltas/s en reposo). El primer evento tras el reposo tarda hasta SLEEP_IDLE.
 const IDLE_MS = 3000
 const SLEEP_ACTIVE = 16000
-const SLEEP_IDLE = 100000
+const SLEEP_IDLE = 250000
 var last_activity = 0
 
 
@@ -139,6 +141,16 @@ func _process(_delta):
 		var sleep = SLEEP_IDLE if now - last_activity > IDLE_MS else SLEEP_ACTIVE
 		if OS.low_processor_usage_mode_sleep_usec != sleep:
 			OS.low_processor_usage_mode_sleep_usec = sleep
+
+
+func _arm_clock():
+	var t = OS.get_time()
+	get_tree().create_timer(60.05 - t.second).connect("timeout", self, "_on_minute")
+
+
+func _on_minute():
+	request_redraw()
+	_arm_clock()
 
 
 func _redraw_on_signal(_id):

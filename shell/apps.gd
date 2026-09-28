@@ -274,6 +274,7 @@ func draw(ui):
 		# ProggyClean (fuente por defecto) es monoespaciada: 7 px por carácter.
 		var char_w = 7.0 * ui.get_imgui_scale()
 		var t0 = OS.get_ticks_usec()
+		var more = false
 		for i in range(list.size()):
 			var app = list[i]
 			var cell = Vector2((i % cols) * CELL.x, (i / cols) * CELL.y)
@@ -281,8 +282,11 @@ func draw(ui):
 			var y = ui.get_cursor_screen_pos().y
 			if y > bottom or y + CELL.y < top:
 				continue
-			if not app.icon_tried and OS.get_ticks_usec() - t0 < ICON_BUDGET_USEC:
-				_load_icon(app)
+			if not app.icon_tried:
+				if OS.get_ticks_usec() - t0 < ICON_BUDGET_USEC:
+					_load_icon(app)
+				else:
+					more = true
 			var clicked = false
 			if app.tex != null:
 				clicked = ui.image_button("##" + app.id, app.tex, Vector2(ICON, ICON))
@@ -295,6 +299,8 @@ func draw(ui):
 			var label = app.name if app.name.length() <= 16 else app.name.substr(0, 15) + "."
 			ui.set_cursor_pos(cell + Vector2(max(0.0, (CELL.x - label.length() * char_w) * 0.5), ICON + 14.0))
 			ui.text(label)
+		if more:
+			ui.request_redraw()
 		# El alto del contenido (scroll) lo fija un item al final, no set_cursor_pos.
 		ui.set_cursor_pos(Vector2(0.0, ceil(list.size() / float(cols)) * CELL.y))
 		ui.dummy(Vector2(1, 1))
