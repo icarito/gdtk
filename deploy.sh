@@ -13,12 +13,18 @@ GODOT=/home/icarito/Proyectos/godot3-box3d/godot-dev
 # Fork con el módulo imgui (no toda rama del fork lo trae): FORK=/ruta ./deploy.sh ...
 FORK="${FORK:-/home/icarito/Proyectos/godot3-box3d/godot-box3d-3}"
 export SCONS_CACHE="${SCONS_CACHE-$HOME/.cache/scons-godot3}" SCONS_CACHE_LIMIT="${SCONS_CACHE_LIMIT:-30000}"
-BIN="$GODOT/bin/godot.frt.opt.tools.x86_64.gdtk"
+# Sin editor (tools=no): el shell no importa recursos (sólo .gd/.tscn en texto) y ahorra ~35 MB de binario.
+# release_debug y no release: el HUD/control remoto habilitan eval/quit sólo con OS.is_debug_build().
+# Módulos fuera: ni el shell ni addons/ los usan (sin física, audio Dummy, sin red salvo StreamPeerTCP).
+BIN="$GODOT/bin/godot.frt.opt.debug.x86_64.gdtklite"
+NO_MODULES="bullet csg gridmap enet upnp webrtc websocket webxr mobile_vr gdnative visual_script theora webm
+	vorbis opus ogg stb_vorbis minimp3 gltf jsonrpc camera opensimplex raycast box3d decal"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
-(cd "$GODOT" && scons -j8 platform=frt arch=x86_64 target=release_debug tools=yes frt_desktop_gl=yes \
-	production=yes lto=none use_static_cpp=no progress=no extra_suffix=gdtk imgui_implot3d=yes \
-	custom_modules="$FORK","$GDTK/modules")
+# shellcheck disable=SC2046
+(cd "$GODOT" && scons -j8 platform=frt arch=x86_64 target=release_debug tools=no frt_desktop_gl=yes \
+	production=yes lto=none use_static_cpp=no progress=no extra_suffix=gdtklite imgui_implot3d=yes \
+	custom_modules="$FORK","$GDTK/modules" $(for m in $NO_MODULES; do printf 'module_%s_enabled=no ' "$m"; done))
 grep -q ImGuiCanvas "$BIN" || { echo "el binario no trae ImGuiCanvas: $FORK sin módulo imgui"; exit 1; }
 objcopy --remove-section=.note.gnu.property "$BIN" "$TMP/godot-gdtk"
 

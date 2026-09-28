@@ -37,11 +37,19 @@ y las ramas del fork: así ninguno le cambia los parches al otro y scons no reco
 La caché de objetos (`SCONS_CACHE=~/.cache/scons-godot3`, en `~/.zshrc` y en `deploy.sh`) es
 compartida entre árboles y ramas.
 
+El binario que se despliega es **sin editor** (`tools=no`, `extra_suffix=gdtklite`, sin los módulos
+de `NO_MODULES` en `deploy.sh`: física, audio, red, VR, gltf...); lo compila `deploy.sh`. Para
+desarrollo sigue sirviendo el build con editor:
+
 ```sh
 cd ~/Proyectos/godot3-box3d/godot-dev
-scons -j8 platform=frt arch=x86_64 target=release_debug tools=yes frt_desktop_gl=yes production=yes \
-  lto=none use_static_cpp=no extra_suffix=gdtk imgui_implot3d=yes \
-  custom_modules=$HOME/Proyectos/godot3-box3d/godot-box3d-3,/run/media/icarito/DATA/icarito/Proyectos/gdtk/modules
+# desplegado (lo mismo que hace deploy.sh):
+scons -j8 platform=frt arch=x86_64 target=release_debug tools=no frt_desktop_gl=yes production=yes \
+  lto=none use_static_cpp=no extra_suffix=gdtklite imgui_implot3d=yes \
+  custom_modules=$HOME/Proyectos/godot3-box3d/godot-box3d-3,/run/media/icarito/DATA/icarito/Proyectos/gdtk/modules \
+  $(for m in bullet csg gridmap enet upnp webrtc websocket webxr mobile_vr gdnative visual_script theora webm \
+    vorbis opus ogg stb_vorbis minimp3 gltf jsonrpc camera opensimplex raycast box3d decal; do echo module_${m}_enabled=no; done)
+# desarrollo con editor: tools=yes extra_suffix=gdtk, sin los module_*_enabled=no
 ./run_shell.sh; ./run_compositor.sh; tests/control_test.sh   # verificación
 ./deploy.sh icarito@192.168.18.163                            # a la X200 (tengu)
 ```
