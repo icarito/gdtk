@@ -5,6 +5,7 @@
 #include "scene/main/node.h"
 
 struct eis_server;
+struct remote_pointer;
 struct xkb_context;
 struct xkb_keymap;
 struct xkb_state;
@@ -16,6 +17,7 @@ class RemoteInput : public Node {
 	GDCLASS(RemoteInput, Node);
 
 	eis_server *server;
+	remote_pointer *host; // cursor nativo del compositor anfitrión (si lo expone)
 	xkb_context *xkb;
 	xkb_keymap *keymap;
 	xkb_state *state;

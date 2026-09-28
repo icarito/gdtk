@@ -1011,8 +1011,9 @@ func _make_eis_cursor():
 	return cursor
 
 
-# En X11 se mueve el puntero de verdad; en Wayland el host no deja: cursor dibujado,
-# que se esconde cuando vuelve a moverse el mouse propio.
+# Sólo con un host que no exponga wlr_virtual_pointer: en X11 se mueve el puntero real
+# (warp) y en Wayland el módulo usa el cursor nativo del host (remote_pointer.c), así que
+# este cursor dibujado queda como último recurso y casi nunca se ve.
 func _move_eis_cursor(event):
 	if event.device != RemoteInput.DEVICE_ID:
 		if event is InputEventMouseMotion:

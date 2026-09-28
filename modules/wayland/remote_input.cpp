@@ -1,12 +1,14 @@
 #include "remote_input.h"
 
 #include "eis_server.h"
+#include "remote_pointer.h"
 
 #include "core/class_db.h"
 #include "core/os/input.h"
 #include "core/os/keyboard.h"
 #include "core/os/os.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <xkbcommon/xkbcommon.h>
@@ -45,10 +47,22 @@ Vector2 RemoteInput::_pointer() {
 
 void RemoteInput::_cb_motion(void *p_ud, double p_x, double p_y, int p_absolute) {
 	RemoteInput *self = static_cast<RemoteInput *>(p_ud);
+	Size2 size = OS::get_singleton()->get_window_size();
+	if (remote_pointer_ready(self->host)) {
+		// El host mueve su cursor nativo y entrega el evento al shell como local;
+		// no se inyecta nada (y no hay cursor dibujado: es el mismo del host).
+		Vector2 pos = self->_pointer();
+		pos = p_absolute ? Vector2(p_x, p_y) : pos + Vector2(p_x, p_y);
+		pos.x = CLAMP(pos.x, 0, size.x - 1);
+		pos.y = CLAMP(pos.y, 0, size.y - 1);
+		self->pointer = pos;
+		self->seen = pos;
+		remote_pointer_motion_abs(self->host, (int)pos.x, (int)pos.y, (int)size.x, (int)size.y);
+		return;
+	}
 	Input *input = Input::get_singleton();
 	Vector2 old = self->_pointer();
 	Vector2 pos = p_absolute ? Vector2(p_x, p_y) : old + Vector2(p_x, p_y);
-	Size2 size = OS::get_singleton()->get_window_size();
 	pos.x = CLAMP(pos.x, 0, size.x - 1);
 	pos.y = CLAMP(pos.y, 0, size.y - 1);
 	self->pointer = pos;
@@ -65,6 +79,10 @@ void RemoteInput::_cb_motion(void *p_ud, double p_x, double p_y, int p_absolute)
 
 void RemoteInput::_cb_button(void *p_ud, uint32_t p_button, int p_pressed) {
 	RemoteInput *self = static_cast<RemoteInput *>(p_ud);
+	if (remote_pointer_ready(self->host)) {
+		remote_pointer_button(self->host, p_button, p_pressed);
+		return;
+	}
 	int index = 0;
 	switch (p_button) {
 		case EVDEV_BTN_LEFT: index = BUTTON_LEFT; break;
@@ -120,6 +138,12 @@ void RemoteInput::_cb_scroll(void *p_ud, double p_dx, double p_dy, int p_discret
 	int sx = (int)self->scroll_acc.x;
 	int sy = (int)self->scroll_acc.y;
 	self->scroll_acc -= Vector2(sx, sy);
+	if (remote_pointer_ready(self->host)) {
+		if (sx != 0 || sy != 0) {
+			remote_pointer_scroll(self->host, sx, sy);
+		}
+		return;
+	}
 	if (sy != 0) {
 		self->_wheel(sy > 0 ? BUTTON_WHEEL_DOWN : BUTTON_WHEEL_UP, ABS(sy));
 	}
@@ -224,6 +248,12 @@ String RemoteInput::start() {
 	CharString test = OS::get_singleton()->get_environment("GDTK_EIS_SOCKET").utf8();
 	server = eis_server_create(cb, text, (int)size.x, (int)size.y, test.length() ? test.get_data() : NULL);
 	free(text);
+	// Si el host (sway, cage) expone wlr_virtual_pointer, el puntero va por ahí: se mueve
+	// su cursor nativo y no se dibuja uno propio (ver remote_pointer.c).
+	host = remote_pointer_create();
+	if (remote_pointer_ready(host)) {
+		fprintf(stderr, "RemoteInput: puntero por wlr_virtual_pointer (cursor del host)\n");
+	}
 	set_process(true);
 	return String(eis_server_error(server));
 }
@@ -244,6 +274,7 @@ int RemoteInput::get_client_count() const {
 
 RemoteInput::RemoteInput() {
 	server = NULL;
+	host = NULL;
 	xkb = NULL;
 	keymap = NULL;
 	state = NULL;
@@ -254,6 +285,9 @@ RemoteInput::RemoteInput() {
 RemoteInput::~RemoteInput() {
 	if (server != NULL) {
 		eis_server_destroy(server);
+	}
+	if (host != NULL) {
+		remote_pointer_destroy(host);
 	}
 	if (state != NULL) {
 		xkb_state_unref(state);
