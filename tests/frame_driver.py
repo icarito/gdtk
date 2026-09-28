@@ -9,6 +9,7 @@ PNG en la raíz:
   frame-f6.png      F6 sobre una app: Frame encima, la actual resaltada
   frame-switch.png  clic en otra entrada: cambia y el Frame se oculta
   frame-corner.png  mouse en la esquina superior izquierda ~250 ms
+  frame-edge.png    mouse contra el borde superior (x en el medio) ~250 ms
   frame-closed.png  cerrar una ventana desde su "x"
 """
 
@@ -96,7 +97,35 @@ def main():
 
         key(client, "F6")
         key(client, "Escape")
-        check("Esc oculta el Frame", not frame(client).get("visible"))
+        check("Esc oculta el Frame", wait_for(lambda: not frame(client).get("visible"), 2))
+
+        # Super sola alterna el Frame; Super+tecla es de la app y no lo toca.
+        key(client, "Super_L")
+        check("Super sola muestra el Frame", wait_for(lambda: frame(client).get("visible"), 2))
+        key(client, "Super_L")
+        check("Super sola lo oculta", wait_for(lambda: not frame(client).get("visible"), 2))
+        key(client, "super+a")
+        time.sleep(0.3)
+        check("Super+tecla no muestra el Frame", not frame(client).get("visible"))
+        key(client, "Super_R")
+        check("Super derecha también", wait_for(lambda: frame(client).get("visible"), 2))
+        key(client, "Super_R")
+        wait_for(lambda: not frame(client).get("visible"), 2)
+
+        # Borde superior, x en el medio: el mouse quieto ~250 ms contra el borde.
+        client.call_tool("gdtk_move", {"x": 600, "y": 400})
+        time.sleep(0.3)
+        client.call_tool("gdtk_move", {"x": 640, "y": 0})
+        check("borde superior muestra el Frame", wait_for(lambda: frame(client).get("visible"), 3))
+        shot(client, "frame-edge.png")
+        client.call_tool("gdtk_move", {"x": 600, "y": 400})
+        check("bajar del borde lo oculta", wait_for(lambda: not frame(client).get("visible"), 3))
+        # Clic en el borde antes de cumplirse la espera (pestaña pegada arriba): no se muestra.
+        click(client, 300, 0)
+        time.sleep(0.8)
+        check("clic en el borde no muestra el Frame", not frame(client).get("visible"))
+        client.call_tool("gdtk_move", {"x": 600, "y": 400})
+        time.sleep(0.3)
 
         key(client, "F6")
         gears = item(client, "Gears")

@@ -163,10 +163,16 @@ func _imgui_frame():
 		request_redraw()
 	recovery.tick(self)
 	_process_unmanaged()
+	# Fundido al cambiar de vista (ver frame.transition); 0 = ImGuiStyleVar_Alpha.
+	var fade = frame.transition()
+	if fade < 1.0:
+		push_style_var_float(0, fade)
 	if current_activity == null:
 		_draw_home()
 	else:
 		_draw_activity()
+	if fade < 1.0:
+		pop_style_var()
 
 	var id = _current_wayland_id()
 	if id >= 0:

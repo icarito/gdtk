@@ -453,6 +453,9 @@ func _key(params):
 		return
 	var parts = combo.split("+")
 	var key_name = parts[parts.size() - 1]
+	# Nombres estilo X11 (Super_L, Super_R): Godot los llama "Super L".
+	if key_name.length() > 1:
+		key_name = key_name.replace("_", " ")
 	var code = OS.find_scancode_from_string(key_name)
 	if code == 0:
 		return

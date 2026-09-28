@@ -5,9 +5,19 @@ extends Node
 # los haya lanzado el shell o no) y el reloj. No ocupa espacio: la app usa toda
 # la pantalla y el Frame se dibuja encima (ViewLayer va en layer -1, bajo ImGui).
 #
-# Se muestra con F6 o dejando el mouse en la esquina superior izquierda
-# CORNER_MS; en el Home está siempre. Se oculta al elegir algo, con Esc, con F6
-# o al sacar el mouse (si entró en él después de mostrarse).
+# Se muestra con F6, tocando Super sola (como GNOME/Sugar) o dejando el mouse
+# HOT_MS en la esquina superior izquierda o contra el borde superior; en el Home
+# está siempre. Se oculta al elegir algo, con Esc, con F6/Super o al sacar el
+# mouse (si entró en él después de mostrarse).
+#
+# Super: la pulsación se retiene; si se suelta sin otra tecla ni clic entre medio
+# alterna el Frame y la app no ve nada. Si llega otra tecla (Super+L...), la
+# pulsación retenida se reenvía antes a la app y el combo le llega entero. FRT la
+# entrega como scancode KEY_META (keysym) con physical KEY_SUPER_L/R.
+#
+# Borde: y <= EDGE en cualquier x (Deskflow entrando/saliendo por arriba, o chocar
+# el borde). HOT_MS evita disparos al pasar hacia pestañas/menús pegados arriba, y
+# un clic mientras espera la desarma hasta salir del borde (clic en una pestaña).
 #
 # Alt+Tab / Alt+Shift+Tab ciclan entre lo abierto sin mostrar el Frame. Se eligió
 # Alt+Tab (no Ctrl+Tab, que usan las apps para pestañas): bajo cage en DRM llega
@@ -16,7 +26,11 @@ extends Node
 
 const FRAME_H = 48.0
 const CORNER = 4.0
-const CORNER_MS = 250
+const EDGE = 1.0
+const HOT_MS = 250
+# Entrada/salida del Frame deslizándose desde arriba (ease-out).
+const SLIDE_MS = 130
+const SUPER_KEYS = [KEY_META, KEY_SUPER_L, KEY_SUPER_R]
 const ITEM_W = 200.0
 const CLOSE_W = 28.0
 const PAD = 8.0
@@ -28,6 +42,12 @@ var entered = false
 # 0: armada; >0: ms en que el mouse llegó a la esquina; -1: desarmada hasta salir.
 var corner_since = 0
 var swallowed = {}
+var hot_timer = false
+# Pulsación de Super retenida mientras no se sepa si es un toque solo.
+var super_press = null
+# Deslizamiento: último estado dibujado (visible u Home) y cuándo cambió.
+var shown = false
+var slide_since = 0
 # Layout del último frame dibujado (para el control remoto / tests).
 var items_layout = []
 var drawn = false
@@ -37,6 +57,9 @@ func set_visible(v):
 	visible = v
 	entered = false
 	corner_since = -1
+	# Desde _input (tecla tragada, ImGui no la ve) nadie más pide el frame que lo muestra.
+	shell.request_redraw()
+	shell.last_activity = OS.get_ticks_msec()
 
 
 # Lo que corre, en orden estable: internas (por instancia viva) y ventanas raíz.
@@ -94,10 +117,34 @@ func cycle(step):
 	switch_to(items[at])
 
 
+# Super dejó de ser un toque solo: la app recibe la pulsación retenida.
+func _super_used():
+	if super_press != null and shell._current_wayland_id() >= 0:
+		shell.compositor.key(super_press)
+	super_press = null
+
+
 func _input(event):
+	if event is InputEventMouseButton and event.pressed:
+		_super_used()
+		if corner_since > 0:
+			corner_since = -1
+		return
 	if not (event is InputEventKey):
 		return
 	var code = event.scancode
+	if SUPER_KEYS.has(code) or SUPER_KEYS.has(event.physical_scancode):
+		if event.pressed:
+			super_press = event
+		elif super_press != null:
+			super_press = null
+			set_visible(not visible)
+		else:
+			return  # Suelta tras un combo: va a la app.
+		get_tree().set_input_as_handled()
+		return
+	if event.pressed:
+		_super_used()
 	if not event.pressed:
 		# La suelta de una tecla que nos comimos tampoco va a la app.
 		if swallowed.has(code):
@@ -120,18 +167,27 @@ func _input(event):
 
 # Llamado en cada imgui_frame del shell, después de la vista.
 func draw(ui):
+	# Otra vez tras dibujar la vista: lo que cambió en este frame (un clic que abre
+	# una app, la primera textura) arranca el fundido ya, sin un frame a opacidad plena.
+	transition()
 	var home = shell.current_activity == null
 	var mouse = ui.get_mouse_pos()
 	var now = OS.get_ticks_msec()
-	if mouse.x <= CORNER and mouse.y <= CORNER:
+	# MousePos es -FLT_MAX hasta el primer movimiento: eso no es la esquina.
+	var hot = mouse.y >= 0.0 and (mouse.y <= EDGE or (mouse.x >= 0.0 and mouse.x <= CORNER and mouse.y <= CORNER))
+	if hot:
 		if corner_since == 0:
 			corner_since = now
-		elif corner_since > 0 and now - corner_since >= CORNER_MS and not visible:
-			set_visible(true)
-			entered = true
 		if corner_since > 0:
-			# Sin input no hay frames: hay que volver a mirar al cumplirse CORNER_MS.
-			ui.request_redraw()
+			var left = HOT_MS - (now - corner_since)
+			if left <= 0:
+				if not visible:
+					set_visible(true)
+					entered = true
+			elif not hot_timer:
+				# Sin input no hay frames: un timer pide el que vuelve a mirar al cumplirse HOT_MS.
+				hot_timer = true
+				get_tree().create_timer(left / 1000.0).connect("timeout", self, "_hot_wake")
 	else:
 		corner_since = 0
 	if visible and not home:
@@ -141,12 +197,13 @@ func draw(ui):
 			set_visible(false)
 
 	items_layout = []
-	drawn = visible or home
+	var off = _slide(visible or home, now)
+	drawn = off > -FRAME_H
 	if not drawn:
 		return
 
 	var vp = ui.get_viewport_rect().size
-	ui.set_next_window_pos(Vector2.ZERO, true)
+	ui.set_next_window_pos(Vector2(0.0, off), true)
 	ui.set_next_window_size(Vector2(vp.x, FRAME_H), true)
 	var flags = ui.WINDOW_NO_DECORATION | ui.WINDOW_NO_MOVE | ui.WINDOW_NO_SAVED_SETTINGS | ui.WINDOW_NO_SCROLLBAR
 	var chosen = null
@@ -182,7 +239,7 @@ func draw(ui):
 			if ui.button("x##c" + item.key, Vector2(CLOSE_W - 4.0, 28)):
 				to_close = item
 			items_layout.append({"title": item.title, "id": item.id, "current": current,
-				"x": x, "y": y, "w": w, "close_x": x + w + 2.0})
+				"x": x, "y": y + off, "w": w, "close_x": x + w + 2.0})
 			x += w + CLOSE_W + PAD
 
 		var t = OS.get_time()
@@ -194,3 +251,63 @@ func draw(ui):
 		switch_to(chosen)
 	elif to_close != null:
 		close(to_close)
+
+
+func _hot_wake():
+	hot_timer = false
+	shell.request_redraw()
+
+
+# Desplazamiento vertical del Frame: 0 quieto a la vista, -FRAME_H fuera. Mientras
+# desliza pide frames y mantiene despierto el loop; al terminar deja de pedirlos.
+func _slide(want, now):
+	if want != shown:
+		shown = want
+		# Si cambia a mitad de camino, sigue desde donde está.
+		var done = min(now - slide_since, SLIDE_MS)
+		slide_since = now - (SLIDE_MS - done)
+	var k = clamp(float(now - slide_since) / SLIDE_MS, 0.0, 1.0)
+	if k < 1.0:
+		shell.request_redraw()
+		shell.last_activity = now
+	var p = 1.0 - pow(1.0 - k, 3.0)
+	if not shown:
+		p = 1.0 - p
+	return -FRAME_H * (1.0 - p)
+
+
+# Cambio de vista (Home <-> app, anillo <-> grilla, entre apps): fundido de FADE_MS
+# y, en la vista wayland, zoom leve desde el centro. Devuelve el alfa para ImGui.
+# Sólo toca nodos mientras dura: en reposo no hay nada que redibujar.
+const FADE_MS = 150
+var view_key = ""
+var fade_since = 0
+var fading = false
+
+
+func transition():
+	var now = OS.get_ticks_msec()
+	var key = "home:" + str(shell.apps_view)
+	if shell.current_activity != null:
+		# Una app nueva cambia de clave otra vez al llegar su primera textura.
+		key = shell.current_activity.name + ":" + str(shell.tex_ready_frame >= 0)
+	if key != view_key:
+		view_key = key
+		fade_since = now
+		fading = true
+	if not fading:
+		return 1.0
+	var k = clamp(float(now - fade_since) / FADE_MS, 0.0, 1.0)
+	var a = 1.0 - pow(1.0 - k, 3.0)
+	if k < 1.0:
+		shell.request_redraw()
+		shell.last_activity = now
+	else:
+		fading = false
+	var v = shell.view
+	v.rect_pivot_offset = v.rect_size * 0.5
+	var z = lerp(0.94, 1.0, a)
+	v.rect_scale = Vector2(z, z)
+	# Las capas usan alfa premultiplicado: se escala también el color.
+	v.modulate = Color(a, a, a, a)
+	return a
