@@ -110,6 +110,9 @@ func _ready():
 		_arm_clock()
 	# El colector del HUD corría en cada vuelta del loop (60/s) aunque nada cambie.
 	DebugHud.metrics.sample_hz = 4.0
+	# Ni widget mini ni F1: el HUD completo se abre con Super+F6 (frame.gd).
+	DebugHud.show_mini = false
+	DebugHud.hotkeys = false
 
 	# Las sesiones apagan audio/hidapi de SDL para el shell (hilos que despiertan sin
 	# uso); vacías, las apps que lanza el compositor vuelven a los valores por defecto.
@@ -183,7 +186,7 @@ func _imgui_frame():
 	_update_dialogs(id)
 	frame.draw(self)
 
-	# HUD de debug global (autoload DebugHud): F1/` lo abren en cualquier actividad.
+	# HUD de debug global (autoload DebugHud): Super+F6 lo abre en cualquier actividad (frame.gd).
 	DebugHud.draw(self)
 
 	frame_count += 1
@@ -796,13 +799,13 @@ func _view_hit_test(pos):
 	return {"id": root, "pos": pos - view_offset, "dialog": 0}
 
 
-# Teclear en el Home lleva a la búsqueda de apps (` queda para el DebugHud).
+# Teclear en el Home lleva a la búsqueda de apps.
 # En _input (Godot 3 lo llama también en ImGuiCanvas): con el puntero sobre el
 # home ImGui marca todo como manejado y a _unhandled_input no llega nada.
 func _input(event):
 	last_activity = OS.get_ticks_msec()
 	if current_activity == null and not apps.search_active and event is InputEventKey and event.pressed \
-			and event.unicode >= 32 and not (event.control or event.alt or event.meta) and event.scancode != KEY_QUOTELEFT:
+			and event.unicode >= 32 and not (event.control or event.alt or event.meta):
 		apps_view = true
 		apps.type(char(event.unicode))
 

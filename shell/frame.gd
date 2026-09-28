@@ -9,6 +9,7 @@ extends Node
 # HOT_MS en la esquina superior izquierda o contra el borde superior; en el Home
 # está siempre. Se oculta al elegir algo, con Esc, con F6/Super o al sacar el
 # mouse (si entró en él después de mostrarse).
+# Super+F6 abre y cierra el HUD de debug (ya no hay widget mini ni F1).
 #
 # Super: la pulsación se retiene; si se suelta sin otra tecla ni clic entre medio
 # alterna el Frame y la app no ve nada. Si llega otra tecla (Super+L...), la
@@ -49,6 +50,7 @@ var super_press = null
 var shown = false
 var slide_since = 0
 # Layout del último frame dibujado (para el control remoto / tests).
+var sysmon = preload("res://sysmon.gd").new()
 var items_layout = []
 var drawn = false
 
@@ -117,6 +119,14 @@ func cycle(step):
 	switch_to(items[at])
 
 
+# Monitor del sistema: muestrea sólo con el Frame a la vista; fuera del Home (Frame abierto
+# a pedido) la gráfica avanza sola, en el Home se refresca con el próximo frame.
+func _process(_delta):
+	var home = shell.current_activity == null
+	if (visible or home) and sysmon.tick() and visible and not home:
+		shell.request_redraw()
+
+
 # Super dejó de ser un toque solo: la app recibe la pulsación retenida.
 func _super_used():
 	if super_press != null and shell._current_wayland_id() >= 0:
@@ -141,6 +151,13 @@ func _input(event):
 			set_visible(not visible)
 		else:
 			return  # Suelta tras un combo: va a la app.
+		get_tree().set_input_as_handled()
+		return
+	if event.pressed and code == KEY_F6 and super_press != null:
+		super_press = null
+		DebugHud.toggle()
+		shell.request_redraw()
+		swallowed[code] = true
 		get_tree().set_input_as_handled()
 		return
 	if event.pressed:
@@ -217,11 +234,12 @@ func draw(ui):
 
 		var items = running()
 		var clock_x = vp.x - 70.0
+		var mon_x = clock_x - sysmon.W - PAD * 2.0
 		var x = PAD + 90.0 + PAD * 2.0
 		var w = ITEM_W
 		if items.size() > 0:
 			# ponytail: se achican para caber; con muchísimas no hay scroll.
-			w = clamp((clock_x - x) / items.size() - CLOSE_W - PAD, 60.0, ITEM_W)
+			w = clamp((mon_x - x) / items.size() - CLOSE_W - PAD, 60.0, ITEM_W)
 		for item in items:
 			var current = _is_current(item)
 			var label = item.title
@@ -242,6 +260,7 @@ func draw(ui):
 				"x": x, "y": y + off, "w": w, "close_x": x + w + 2.0})
 			x += w + CLOSE_W + PAD
 
+		sysmon.draw(ui, Vector2(mon_x, y), 28.0)
 		var t = OS.get_time()
 		ui.set_cursor_pos(Vector2(clock_x, y + 5.0))
 		ui.text("%02d:%02d" % [t.hour, t.minute])

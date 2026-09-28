@@ -13,8 +13,12 @@ extends Node
 const DebugMetrics = preload("debug_metrics.gd")
 
 var enabled = true
-# HUD completo abierto (F1 / `). El widget mini siempre se muestra.
+# HUD completo abierto (F1 / ` si hotkeys). El widget mini se muestra si show_mini.
 var visible = false
+var show_mini = true
+var hotkeys = true
+# Sin HUD a la vista no se muestrea, salvo que alguien pida snapshots (control remoto).
+var _snapshot_ms = -100000
 # 0=arriba-izq, 1=arriba-der, 2=abajo-izq, 3=abajo-der.
 var mini_corner = 3
 var scale = 1.0
@@ -104,12 +108,18 @@ func _process(delta):
 		_init_metrics()
 	if not _policy_resolved:
 		_resolve_policy()
-	if metrics.sample_hz > 0.0:
+	var wanted = visible or show_mini or OS.get_ticks_msec() - _snapshot_ms < 5000
+	if not wanted:
+		pass
+	elif metrics.sample_hz > 0.0:
 		var period = 1.0 / metrics.sample_hz
 		_accum += delta
 		if _accum >= period:
 			_accum -= period
 			metrics.sample()
+			# Con el HUD abierto las gráficas avanzan aunque no haya input.
+			if visible and canvas != null and canvas.has_method("request_redraw"):
+				canvas.request_redraw()
 	else:
 		metrics.sample()
 	if remote_source != "":
@@ -146,6 +156,7 @@ func command_output(line):
 
 
 func snapshot(since_frame = -1):
+	_snapshot_ms = OS.get_ticks_msec()
 	return metrics.snapshot(since_frame)
 
 
@@ -227,11 +238,12 @@ func draw(c):
 	canvas = c
 	has_implot = c.has_method("implot_begin_plot")
 
-	if c.is_key_pressed(KEY_F1) or c.is_key_pressed(KEY_QUOTELEFT):
+	if hotkeys and (c.is_key_pressed(KEY_F1) or c.is_key_pressed(KEY_QUOTELEFT)):
 		visible = not visible
 
 	var m = _view_metrics()
-	_draw_mini(c, m)
+	if show_mini:
+		_draw_mini(c, m)
 	if visible:
 		_draw_full(c, m)
 
