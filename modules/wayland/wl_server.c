@@ -36,15 +36,19 @@
 #include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/types/wlr_server_decoration.h>
 #include <wlr/util/log.h>
+#include <wlr/xwayland/xwayland.h>
 #include <xkbcommon/xkbcommon.h>
 
 struct wl_server;
 
+// Una ventana: xdg (tl) o X11 vía Xwayland (xs); exactamente uno de los dos.
 typedef struct toplevel {
 	struct wl_list link;
 	struct wl_server *server;
 	int id;
 	struct wlr_xdg_toplevel *tl;
+	struct wlr_xwayland_surface *xs;
+	bool added; // X: `added` se avisa en el primer map (antes no hay surface)
 	bool mapped;
 	bool want_focus;
 	bool visible; // dibujado en el último frame del shell (ver wl_server_set_visible)
@@ -54,7 +58,26 @@ typedef struct toplevel {
 	struct wl_listener unmap;
 	struct wl_listener destroy;
 	struct wl_listener set_title;
+	// sólo X
+	struct wl_listener associate;
+	struct wl_listener dissociate;
+	struct wl_listener request_configure;
 } toplevel;
+
+// Ventana X override-redirect (menú, tooltip): se dibuja como capa de su dueño, en
+// coords del root X, que coinciden con las de la vista (las ventanas X van en 0,0).
+typedef struct xor_surf {
+	struct wl_list link;
+	struct wl_server *server;
+	struct wlr_xwayland_surface *xs;
+	int owner;
+	bool mapped;
+	struct wl_listener associate;
+	struct wl_listener dissociate;
+	struct wl_listener map;
+	struct wl_listener unmap;
+	struct wl_listener destroy;
+} xor_surf;
 
 // Estado por surface del arbol (raiz, subsurfaces, popups). Mantiene retenido
 // con wlr_buffer_lock el ultimo buffer importado para que Godot pueda
@@ -108,6 +131,10 @@ struct wl_server {
 	struct wl_listener request_set_primary_selection;
 	struct wl_list toplevels;
 	struct wl_list layers;
+	struct wlr_xwayland *xwayland;
+	struct wl_listener new_xsurface;
+	struct wl_list xors;
+	int x_focus_id; // última ventana X enfocada: dueña de los menús sin padre
 	bool throttle; // true tras el primer wl_server_set_visible: frame callbacks sólo a lo visible
 	int next_id;
 	int default_w, default_h;
@@ -134,7 +161,7 @@ static toplevel *toplevel_find(struct wl_server *s, int id) {
 static toplevel *toplevel_find_surface(struct wl_server *s, struct wlr_surface *surface) {
 	toplevel *t;
 	wl_list_for_each(t, &s->toplevels, link) {
-		if (t->tl->base->surface == surface) {
+		if ((t->tl != NULL ? t->tl->base->surface : t->xs->surface) == surface) {
 			return t;
 		}
 	}
@@ -486,19 +513,32 @@ static void setup_dmabuf(struct wl_server *s) {
 
 static void handle_toplevel_set_title(struct wl_listener *listener, void *data) {
 	toplevel *t = wl_container_of(listener, t, set_title);
-	if (t->server->cb.title != NULL) {
-		t->server->cb.title(t->server->cb.ud, t->id, t->tl->title != NULL ? t->tl->title : "");
+	if (t->added && t->server->cb.title != NULL) {
+		const char *title = t->tl != NULL ? t->tl->title : t->xs->title;
+		t->server->cb.title(t->server->cb.ud, t->id, title != NULL ? title : "");
 	}
 }
 
 static void toplevel_apply_focus(toplevel *t) {
 	struct wl_server *s = t->server;
-	if (!t->tl->base->initialized) {
-		return;
+	struct wlr_surface *surface;
+	if (t->tl != NULL) {
+		if (!t->tl->base->initialized) {
+			return;
+		}
+		wlr_xdg_toplevel_set_activated(t->tl, true);
+		surface = t->tl->base->surface;
+	} else {
+		if (t->xs->surface == NULL) {
+			return;
+		}
+		wlr_xwayland_surface_activate(t->xs, true);
+		wlr_xwayland_surface_restack(t->xs, NULL, XCB_STACK_MODE_ABOVE);
+		s->x_focus_id = t->id;
+		surface = t->xs->surface;
 	}
-	wlr_xdg_toplevel_set_activated(t->tl, true);
 	if (t->mapped) {
-		wlr_seat_keyboard_notify_enter(s->seat, t->tl->base->surface,
+		wlr_seat_keyboard_notify_enter(s->seat, surface,
 				s->keyboard.keycodes, s->keyboard.num_keycodes, &s->keyboard.modifiers);
 	}
 }
@@ -519,6 +559,13 @@ static void handle_toplevel_commit(struct wl_listener *listener, void *data) {
 static void handle_toplevel_map(struct wl_listener *listener, void *data) {
 	toplevel *t = wl_container_of(listener, t, map);
 	t->mapped = true;
+	if (!t->added) {
+		t->added = true;
+		if (t->server->cb.added != NULL) {
+			t->server->cb.added(t->server->cb.ud, t->id);
+		}
+		handle_toplevel_set_title(&t->set_title, NULL);
+	}
 	if (t->want_focus) {
 		toplevel_apply_focus(t);
 	}
@@ -529,26 +576,40 @@ static void handle_toplevel_unmap(struct wl_listener *listener, void *data) {
 	t->mapped = false;
 }
 
+static void toplevel_unlink(toplevel *t) {
+	struct wl_listener *all[] = { &t->commit, &t->map, &t->unmap, &t->destroy, &t->set_title,
+		&t->associate, &t->dissociate, &t->request_configure };
+	for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
+		wl_list_remove(&all[i]->link);
+		wl_list_init(&all[i]->link);
+	}
+	wl_list_remove(&t->link);
+}
+
+static void xsurface_orphan(struct wl_server *s, struct wlr_surface *surface);
+
 static void handle_toplevel_destroy(struct wl_listener *listener, void *data) {
 	toplevel *t = wl_container_of(listener, t, destroy);
 	struct wl_server *s = t->server;
 
-	wl_list_remove(&t->commit.link);
-	wl_list_remove(&t->map.link);
-	wl_list_remove(&t->unmap.link);
-	wl_list_remove(&t->set_title.link);
-	wl_list_remove(&t->destroy.link);
-	wl_list_remove(&t->link);
+	toplevel_unlink(t);
+	bool added = t->added;
+	if (t->xs != NULL) {
+		xsurface_orphan(s, t->xs->surface);
+	}
 
 	if (s->pointer_id == t->id) {
 		s->pointer_id = 0;
 		s->pointer_surface = NULL;
 	}
 
+	if (s->x_focus_id == t->id) {
+		s->x_focus_id = 0;
+	}
 	int id = t->id;
 	free(t);
 
-	if (s->cb.removed != NULL) {
+	if (added && s->cb.removed != NULL) {
 		s->cb.removed(s->cb.ud, id);
 	}
 }
@@ -598,6 +659,10 @@ static void handle_popup_reposition(struct wl_listener *listener, void *data) {
 
 static void handle_popup_destroy(struct wl_listener *listener, void *data) {
 	popup *pp = wl_container_of(listener, pp, destroy);
+	surface_state *st = surface_state_find(pp->s, pp->p->base->surface);
+	if (st != NULL && st->id > 0 && pp->s->cb.damage != NULL) {
+		pp->s->cb.damage(pp->s->cb.ud, st->id);
+	}
 	wl_list_remove(&pp->commit.link);
 	wl_list_remove(&pp->reposition.link);
 	wl_list_remove(&pp->destroy.link);
@@ -649,6 +714,10 @@ static void handle_new_toplevel(struct wl_listener *listener, void *data) {
 	t->tl = tl;
 	t->id = s->next_id++;
 	t->mapped = false;
+	t->added = true;
+	wl_list_init(&t->associate.link);
+	wl_list_init(&t->dissociate.link);
+	wl_list_init(&t->request_configure.link);
 
 	struct wlr_surface *surface = tl->base->surface;
 
@@ -887,6 +956,212 @@ static void handle_request_set_primary_selection(struct wl_listener *listener, v
 	wlr_seat_set_primary_selection(s->seat, ev->source, ev->serial);
 }
 
+// --- Xwayland (perezoso: el X arranca con el primer cliente X). Las ventanas X normales
+// van en 0,0 del root con el tamaño de la vista, como las xdg; los diálogos, centrados
+// (así los ve el shell); los override-redirect son capas de su dueño.
+// ponytail: sin decoraciones, sin mover/redimensionar por el cliente, sin ventanas X
+// fuera de la vista.
+
+static toplevel *toplevel_find_xs(struct wl_server *s, struct wlr_xwayland_surface *xs) {
+	toplevel *t;
+	wl_list_for_each(t, &s->toplevels, link) {
+		if (t->xs == xs) {
+			return t;
+		}
+	}
+	return NULL;
+}
+
+// Hit-test de una ventana X: primero sus menús (arriba), después la ventana.
+static struct wlr_surface *xwayland_surface_at(toplevel *t, double x, double y, double *sx, double *sy) {
+	xor_surf *o;
+	wl_list_for_each_reverse(o, &t->server->xors, link) {
+		if (o->mapped && o->owner == t->id && o->xs->surface != NULL) {
+			double ox = x - (o->xs->x - t->xs->x);
+			double oy = y - (o->xs->y - t->xs->y);
+			struct wlr_surface *hit = wlr_surface_surface_at(o->xs->surface, ox, oy, sx, sy);
+			if (hit != NULL) {
+				return hit;
+			}
+		}
+	}
+	return t->xs->surface != NULL ? wlr_surface_surface_at(t->xs->surface, x, y, sx, sy) : NULL;
+}
+
+// Normales: toda la vista en 0,0. Diálogos (con padre): su tamaño, centrados.
+static void xtoplevel_configure(toplevel *t, int w, int h) {
+	struct wl_server *s = t->server;
+
+	if (t->xs->parent == NULL) {
+		wlr_xwayland_surface_configure(t->xs, 0, 0, (uint16_t)s->default_w, (uint16_t)s->default_h);
+		return;
+	}
+	if (w <= 0 || h <= 0) {
+		w = t->xs->width > 0 ? t->xs->width : s->default_w / 2;
+		h = t->xs->height > 0 ? t->xs->height : s->default_h / 2;
+	}
+	wlr_xwayland_surface_configure(t->xs, (int16_t)((s->default_w - w) / 2),
+			(int16_t)((s->default_h - h) / 2), (uint16_t)w, (uint16_t)h);
+}
+
+// Antes de asociar la surface el padre (WM_TRANSIENT_FOR) puede no estar leído: se
+// concede lo pedido y la política se aplica al asociar.
+static void handle_xtoplevel_request_configure(struct wl_listener *listener, void *data) {
+	toplevel *t = wl_container_of(listener, t, request_configure);
+	struct wlr_xwayland_surface_configure_event *ev = data;
+	if (t->xs->surface == NULL) {
+		wlr_xwayland_surface_configure(t->xs, ev->x, ev->y, ev->width, ev->height);
+		return;
+	}
+	xtoplevel_configure(t, ev->width, ev->height);
+}
+
+static void handle_xtoplevel_associate(struct wl_listener *listener, void *data) {
+	toplevel *t = wl_container_of(listener, t, associate);
+	struct wlr_surface *surface = t->xs->surface;
+	wl_signal_add(&surface->events.map, &t->map);
+	wl_signal_add(&surface->events.unmap, &t->unmap);
+	if (surface_state_find(t->server, surface) == NULL) {
+		surface_state_acquire(t->server, surface, t->id);
+	}
+	xtoplevel_configure(t, 0, 0);
+	if (surface->mapped) {
+		handle_toplevel_map(&t->map, NULL);
+	}
+}
+
+// La wl_surface de Xwayland puede sobrevivir a la ventana X: sus commits ya no son de nadie.
+static void xsurface_orphan(struct wl_server *s, struct wlr_surface *surface) {
+	surface_state *st = surface != NULL ? surface_state_find(s, surface) : NULL;
+	if (st != NULL) {
+		st->id = 0;
+	}
+}
+
+static void handle_xtoplevel_dissociate(struct wl_listener *listener, void *data) {
+	toplevel *t = wl_container_of(listener, t, dissociate);
+	xsurface_orphan(t->server, t->xs->surface);
+	wl_list_remove(&t->map.link);
+	wl_list_init(&t->map.link);
+	wl_list_remove(&t->unmap.link);
+	wl_list_init(&t->unmap.link);
+	t->mapped = false;
+}
+
+static void handle_xor_map(struct wl_listener *listener, void *data);
+
+static void handle_xor_associate(struct wl_listener *listener, void *data) {
+	xor_surf *o = wl_container_of(listener, o, associate);
+	wl_signal_add(&o->xs->surface->events.map, &o->map);
+	wl_signal_add(&o->xs->surface->events.unmap, &o->unmap);
+	if (o->xs->surface->mapped) {
+		handle_xor_map(&o->map, NULL);
+	}
+}
+
+static void handle_xor_dissociate(struct wl_listener *listener, void *data) {
+	xor_surf *o = wl_container_of(listener, o, dissociate);
+	xsurface_orphan(o->server, o->xs->surface);
+	wl_list_remove(&o->map.link);
+	wl_list_init(&o->map.link);
+	wl_list_remove(&o->unmap.link);
+	wl_list_init(&o->unmap.link);
+	o->mapped = false;
+}
+
+// Dueño: la ventana X padre si la hay; si no, la última ventana X enfocada.
+static void handle_xor_map(struct wl_listener *listener, void *data) {
+	xor_surf *o = wl_container_of(listener, o, map);
+	struct wl_server *s = o->server;
+	toplevel *p = NULL;
+	for (struct wlr_xwayland_surface *x = o->xs->parent; x != NULL && p == NULL; x = x->parent) {
+		p = toplevel_find_xs(s, x);
+	}
+	o->owner = p != NULL ? p->id : s->x_focus_id;
+	o->mapped = true;
+	// El map llega dentro del commit del primer buffer: se importa ya (un menú quieto no
+	// vuelve a commitear).
+	surface_state *st = surface_state_find(s, o->xs->surface);
+	if (st == NULL) {
+		surface_state_acquire(s, o->xs->surface, o->owner);
+		st = surface_state_find(s, o->xs->surface);
+	}
+	if (st != NULL) {
+		st->id = o->owner;
+		surface_state_import(st);
+	}
+}
+
+static void handle_xor_unmap(struct wl_listener *listener, void *data) {
+	xor_surf *o = wl_container_of(listener, o, unmap);
+	o->mapped = false;
+	if (o->server->cb.damage != NULL) {
+		o->server->cb.damage(o->server->cb.ud, o->owner);
+	}
+}
+
+static void xor_free(xor_surf *o) {
+	struct wl_listener *all[] = { &o->associate, &o->dissociate, &o->map, &o->unmap, &o->destroy };
+	for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
+		wl_list_remove(&all[i]->link);
+	}
+	wl_list_remove(&o->link);
+	free(o);
+}
+
+static void handle_xor_destroy(struct wl_listener *listener, void *data) {
+	xor_surf *o = wl_container_of(listener, o, destroy);
+	xor_free(o);
+}
+
+static void handle_new_xsurface(struct wl_listener *listener, void *data) {
+	struct wl_server *s = wl_container_of(listener, s, new_xsurface);
+	struct wlr_xwayland_surface *xs = data;
+	if (xs->override_redirect) {
+		xor_surf *o = calloc(1, sizeof(*o));
+		if (o == NULL) {
+			return;
+		}
+		o->server = s;
+		o->xs = xs;
+		o->associate.notify = handle_xor_associate;
+		wl_signal_add(&xs->events.associate, &o->associate);
+		o->dissociate.notify = handle_xor_dissociate;
+		wl_signal_add(&xs->events.dissociate, &o->dissociate);
+		o->map.notify = handle_xor_map;
+		wl_list_init(&o->map.link);
+		o->unmap.notify = handle_xor_unmap;
+		wl_list_init(&o->unmap.link);
+		o->destroy.notify = handle_xor_destroy;
+		wl_signal_add(&xs->events.destroy, &o->destroy);
+		wl_list_insert(s->xors.prev, &o->link);
+		return;
+	}
+	toplevel *t = calloc(1, sizeof(*t));
+	if (t == NULL) {
+		return;
+	}
+	t->server = s;
+	t->xs = xs;
+	t->id = s->next_id++;
+	wl_list_init(&t->commit.link);
+	t->map.notify = handle_toplevel_map;
+	wl_list_init(&t->map.link);
+	t->unmap.notify = handle_toplevel_unmap;
+	wl_list_init(&t->unmap.link);
+	t->destroy.notify = handle_toplevel_destroy;
+	wl_signal_add(&xs->events.destroy, &t->destroy);
+	t->set_title.notify = handle_toplevel_set_title;
+	wl_signal_add(&xs->events.set_title, &t->set_title);
+	t->associate.notify = handle_xtoplevel_associate;
+	wl_signal_add(&xs->events.associate, &t->associate);
+	t->dissociate.notify = handle_xtoplevel_dissociate;
+	wl_signal_add(&xs->events.dissociate, &t->dissociate);
+	t->request_configure.notify = handle_xtoplevel_request_configure;
+	wl_signal_add(&xs->events.request_configure, &t->request_configure);
+	wl_list_insert(s->toplevels.prev, &t->link);
+}
+
 static void output_set_size(struct wl_server *s) {
 	struct wlr_output_state state;
 	wlr_output_state_init(&state);
@@ -913,6 +1188,7 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 	wl_list_init(&s->toplevels);
 	wl_list_init(&s->surfaces);
 	wl_list_init(&s->layers);
+	wl_list_init(&s->xors);
 
 	s->display = wl_display_create();
 	if (s->display == NULL) {
@@ -1020,6 +1296,17 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 		wlr_server_decoration_manager_set_default_mode(kde_deco, WLR_SERVER_DECORATION_MANAGER_MODE_SERVER);
 	}
 
+	// GDTK_NO_XWAYLAND=1: sin X (las apps sólo X11 no abren).
+	if (getenv("GDTK_NO_XWAYLAND") == NULL) {
+		s->xwayland = wlr_xwayland_create(s->display, s->compositor, true);
+		if (s->xwayland != NULL) {
+			wlr_xwayland_set_seat(s->xwayland, s->seat);
+			s->new_xsurface.notify = handle_new_xsurface;
+			wl_signal_add(&s->xwayland->events.new_surface, &s->new_xsurface);
+			wlr_log(WLR_INFO, "wl_server: Xwayland (perezoso) en %s", s->xwayland->display_name);
+		}
+	}
+
 	s->socket_name = wl_display_add_socket_auto(s->display);
 	if (s->socket_name == NULL) {
 		wlr_log(WLR_ERROR, "wl_server: no se pudo crear el socket wayland");
@@ -1039,6 +1326,10 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 fail:
 	wl_server_destroy(s);
 	return NULL;
+}
+
+const char *wl_server_xdisplay(wl_server *s) {
+	return s != NULL && s->xwayland != NULL && s->xwayland->display_name != NULL ? s->xwayland->display_name : "";
 }
 
 const char *wl_server_socket(wl_server *s) {
@@ -1071,13 +1362,23 @@ void wl_server_frame_done(wl_server *s) {
 		if (t->mapped && (t->visible || !s->throttle)) {
 			// Todo el árbol (subsurfaces y popups): un frame callback sin respuesta
 			// en cualquiera de ellos congela el frame clock de GTK4.
-			wlr_xdg_surface_for_each_surface(t->tl->base, send_frame_done_iter, &now);
+			if (t->tl != NULL) {
+				wlr_xdg_surface_for_each_surface(t->tl->base, send_frame_done_iter, &now);
+			} else if (t->xs->surface != NULL) {
+				wlr_surface_for_each_surface(t->xs->surface, send_frame_done_iter, &now);
+			}
 		}
 	}
 	layer_surf *l;
 	wl_list_for_each(l, &s->layers, link) {
 		if (l->mapped) {
 			wlr_layer_surface_v1_for_each_surface(l->ls, send_frame_done_iter, &now);
+		}
+	}
+	xor_surf *o;
+	wl_list_for_each(o, &s->xors, link) {
+		if (o->mapped && o->xs->surface != NULL) {
+			wlr_surface_for_each_surface(o->xs->surface, send_frame_done_iter, &now);
 		}
 	}
 }
@@ -1104,8 +1405,10 @@ void wl_server_set_size(wl_server *s, int id, int w, int h) {
 		return;
 	}
 	toplevel *t = toplevel_find(s, id);
-	if (t != NULL && t->tl->base->initialized) {
+	if (t != NULL && t->tl != NULL && t->tl->base->initialized) {
 		wlr_xdg_toplevel_set_size(t->tl, w, h);
+	} else if (t != NULL && t->xs != NULL) {
+		wlr_xwayland_surface_configure(t->xs, 0, 0, (uint16_t)w, (uint16_t)h);
 	}
 }
 
@@ -1135,8 +1438,10 @@ void wl_server_close(wl_server *s, int id) {
 		return;
 	}
 	toplevel *t = toplevel_find(s, id);
-	if (t != NULL && t->tl->base->initialized) {
+	if (t != NULL && t->tl != NULL && t->tl->base->initialized) {
 		wlr_xdg_toplevel_send_close(t->tl);
+	} else if (t != NULL && t->xs != NULL) {
+		wlr_xwayland_surface_close(t->xs);
 	}
 }
 
@@ -1163,8 +1468,10 @@ void wl_server_pointer_motion(wl_server *s, int id, double x, double y, uint32_t
 	struct wlr_surface *surface = NULL;
 	toplevel *t = toplevel_find(s, id);
 	layer_surf *l = t == NULL ? layer_find(s, id) : NULL;
-	if (t != NULL) {
+	if (t != NULL && t->tl != NULL) {
 		surface = wlr_xdg_surface_surface_at(t->tl->base, x, y, &sub_x, &sub_y);
+	} else if (t != NULL) {
+		surface = xwayland_surface_at(t, x, y, &sub_x, &sub_y);
 	} else if (l != NULL && l->mapped) {
 		surface = wlr_layer_surface_v1_surface_at(l->ls, x, y, &sub_x, &sub_y);
 	} else {
@@ -1255,6 +1562,13 @@ static void layer_iterator(struct wlr_surface *surface, int sx, int sy, void *da
 
 int wl_server_geometry(wl_server *s, int id, int *x, int *y, int *w, int *h) {
 	toplevel *t = s != NULL ? toplevel_find(s, id) : NULL;
+	if (t != NULL && t->xs != NULL) {
+		*x = 0;
+		*y = 0;
+		*w = t->xs->width;
+		*h = t->xs->height;
+		return t->xs->surface != NULL;
+	}
 	if (t == NULL || !t->tl->base->initialized) {
 		return 0;
 	}
@@ -1271,6 +1585,10 @@ int wl_server_parent(wl_server *s, int id) {
 		return 0;
 	}
 	toplevel *t = toplevel_find(s, id);
+	if (t != NULL && t->xs != NULL) {
+		toplevel *p = t->xs->parent != NULL ? toplevel_find_xs(s, t->xs->parent) : NULL;
+		return p != NULL ? p->id : 0;
+	}
 	if (t == NULL || t->tl->parent == NULL) {
 		return 0;
 	}
@@ -1284,10 +1602,8 @@ const char *wl_server_app_id(wl_server *s, int id) {
 		return "";
 	}
 	toplevel *t = toplevel_find(s, id);
-	if (t == NULL || t->tl->app_id == NULL) {
-		return "";
-	}
-	return t->tl->app_id;
+	const char *app_id = t == NULL ? NULL : t->tl != NULL ? t->tl->app_id : t->xs->class;
+	return app_id != NULL ? app_id : "";
 }
 
 int wl_server_layers(wl_server *s, int id, wl_server_layer *out, int max) {
@@ -1296,9 +1612,25 @@ int wl_server_layers(wl_server *s, int id, wl_server_layer *out, int max) {
 	}
 	struct layer_data d = { out, max, 0 };
 	toplevel *t = toplevel_find(s, id);
-	if (t != NULL && t->mapped) {
+	if (t != NULL && t->mapped && t->tl != NULL) {
 		// Orden raiz -> hojas, que es el orden de dibujo de wlroots.
 		wlr_xdg_surface_for_each_surface(t->tl->base, layer_iterator, &d);
+		return d.count;
+	}
+	if (t != NULL && t->mapped && t->xs->surface != NULL) {
+		wlr_surface_for_each_surface(t->xs->surface, layer_iterator, &d);
+		// Menús/tooltips X encima, relativos a la ventana dueña.
+		xor_surf *o;
+		wl_list_for_each(o, &s->xors, link) {
+			if (o->mapped && o->owner == id && o->xs->surface != NULL) {
+				int base = d.count;
+				wlr_surface_for_each_surface(o->xs->surface, layer_iterator, &d);
+				for (int i = base; i < d.count; i++) {
+					d.out[i].x += o->xs->x - t->xs->x;
+					d.out[i].y += o->xs->y - t->xs->y;
+				}
+			}
+		}
 		return d.count;
 	}
 	layer_surf *l = t == NULL ? layer_find(s, id) : NULL;
@@ -1379,13 +1711,17 @@ void wl_server_destroy(wl_server *s) {
 		wl_list_remove(&s->new_decoration.link);
 	}
 	struct wl_listener *extra[] = { &s->new_layer, &s->request_activate,
-		&s->request_set_selection, &s->request_set_primary_selection };
+		&s->request_set_selection, &s->request_set_primary_selection, &s->new_xsurface };
 	for (size_t i = 0; i < sizeof(extra) / sizeof(extra[0]); i++) {
 		if (extra[i]->notify != NULL) {
 			wl_list_remove(&extra[i]->link);
 		}
 	}
 
+	if (s->xwayland != NULL) {
+		wlr_xwayland_destroy(s->xwayland);
+		s->xwayland = NULL;
+	}
 	if (s->display != NULL) {
 		wl_display_destroy_clients(s->display);
 	}
@@ -1393,13 +1729,12 @@ void wl_server_destroy(wl_server *s) {
 	// Red de seguridad: los toplevels normalmente ya se liberaron en destroy.
 	toplevel *t, *tmp;
 	wl_list_for_each_safe(t, tmp, &s->toplevels, link) {
-		wl_list_remove(&t->commit.link);
-		wl_list_remove(&t->map.link);
-		wl_list_remove(&t->unmap.link);
-		wl_list_remove(&t->set_title.link);
-		wl_list_remove(&t->destroy.link);
-		wl_list_remove(&t->link);
+		toplevel_unlink(t);
 		free(t);
+	}
+	xor_surf *o, *otmp;
+	wl_list_for_each_safe(o, otmp, &s->xors, link) {
+		xor_free(o);
 	}
 
 	layer_surf *l, *ltmp;

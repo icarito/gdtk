@@ -351,6 +351,10 @@ void WaylandCompositor::_cb_layer(void *p_ud, int p_id, int p_state) {
 	self->emit_signal("layers_changed");
 }
 
+void WaylandCompositor::_cb_damage(void *p_ud, int p_id) {
+	static_cast<WaylandCompositor *>(p_ud)->_count_commit(p_id);
+}
+
 void WaylandCompositor::_cb_activate(void *p_ud, int p_id) {
 	static_cast<WaylandCompositor *>(p_ud)->emit_signal("toplevel_activate", p_id);
 }
@@ -569,6 +573,7 @@ String WaylandCompositor::start() {
 	cb.title = &WaylandCompositor::_cb_title;
 	cb.layer = &WaylandCompositor::_cb_layer;
 	cb.activate = &WaylandCompositor::_cb_activate;
+	cb.damage = &WaylandCompositor::_cb_damage;
 
 	server = wl_server_create(cb, (int)default_size.x, (int)default_size.y);
 	if (server == NULL) {
@@ -593,8 +598,14 @@ int WaylandCompositor::launch(const String &p_cmd, const PoolStringArray &p_args
 		return -1;
 	}
 	List<String> args;
-	args.push_back("-u");
-	args.push_back("DISPLAY");
+	// Las apps sólo X11 van al Xwayland embebido; las demás siguen en Wayland.
+	String xdisplay = String(wl_server_xdisplay(server));
+	if (xdisplay.empty()) {
+		args.push_back("-u");
+		args.push_back("DISPLAY");
+	} else {
+		args.push_back("DISPLAY=" + xdisplay);
+	}
 	args.push_back("WAYLAND_DISPLAY=" + String(wl_server_socket(server)));
 	args.push_back("GDK_BACKEND=wayland");
 	// Chromium/Electron (ozone auto) y Qt5 eligen X11 si la sesión dice x11 (sesión X de

@@ -32,6 +32,8 @@ typedef struct {
 	void (*layer)(void *ud, int id, int state);
 	// xdg-activation: el toplevel `id` pide pasar al frente.
 	void (*activate)(void *ud, int id);
+	// Algo del árbol de `id` desapareció sin commit (menú X o popup cerrado): redibujar.
+	void (*damage)(void *ud, int id);
 } wl_server_callbacks;
 
 // Superficie layer-shell mapeada: rect en coords del output (la vista), capa 0..3
@@ -43,6 +45,8 @@ typedef struct {
 
 wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h);
 const char *wl_server_socket(wl_server *s);
+// DISPLAY del Xwayland embebido ("" si no hay).
+const char *wl_server_xdisplay(wl_server *s);
 void wl_server_dispatch(wl_server *s);
 void wl_server_frame_done(wl_server *s);
 // Toplevels dibujados en el último frame: sólo ellos reciben frame callbacks desde ahora
