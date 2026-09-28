@@ -27,6 +27,9 @@ func save(shell):
 		if alive or shell.script_instances.has(a.name):
 			open.append(a.name)
 	var state = {"open": open, "current": shell.current_activity.name if shell.current_activity != null else ""}
+	# Los servicios (Deskflow) sobreviven al reinicio: sin su pid el anillo no los marca
+	# y el portal de input remoto no los reconoce.
+	state["services"] = shell.service_pids
 	var f = File.new()
 	if f.open(state_path(), File.WRITE) == OK:
 		f.store_string(to_json(state))
@@ -68,6 +71,9 @@ func load(shell):
 	if typeof(state) == TYPE_DICTIONARY:
 		queue = state.get("open", [])
 		current = state.get("current", "")
+		var services = state.get("services", {})
+		for name in services:
+			shell.service_pids[name] = int(services[name])
 
 
 # Cada frame: abre la siguiente actividad cuando la anterior ya tiene ventana.

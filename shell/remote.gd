@@ -277,6 +277,8 @@ func _state():
 		"engine": [Engine.get_idle_frames(), Engine.get_physics_frames(), Engine.get_frames_drawn()],
 		# Frame: items con su posición en pantalla (vacío si no se dibujó).
 		"frame": {"visible": shell.frame.drawn, "items": shell.frame.items_layout},
+		# Input remoto: clientes libei conectados y pedidos esperando el diálogo.
+		"remote_input": {"clients": shell.remote_input.get_client_count(), "requests": shell.input_requests.size()},
 	}
 
 

@@ -7,8 +7,9 @@ var ACTIVITIES = [
 	{"name": "Gears", "wayland": ["es2gears_wayland"]},
 	{"name": "GTK", "wayland": ["gtk4-widget-factory"]},
 	# Servicio: el botón prende/apaga un proceso en segundo plano (no abre vista).
-	# Deskflow inyecta input vía XTest: sólo tiene sentido en la sesión X11.
-	{"name": "Deskflow", "service": "deskflow-core client --new-instance -s ~/gdtk/deskflow-client.conf", "session": "x11"},
+	# Deskflow: en X11 inyecta por XTest; en Wayland (cage, sway) pide el portal RemoteDesktop
+	# y le llega un fd del EIS del shell (RemoteInput): se le da permiso sin preguntar.
+	{"name": "Deskflow", "service": "deskflow-core client --new-instance -s ~/gdtk/deskflow-client.conf"},
 	{"name": "Salir", "quit": true},
 ]
 
@@ -60,6 +61,11 @@ var unmanaged = []
 var apps = preload("res://apps.gd").new()
 var apps_view = false
 
+# Input remoto por libei (Deskflow, lan-mouse): EIS + portal RemoteDesktop en el módulo.
+var remote_input = null
+var input_requests = []  # pedidos de otros procesos esperando el diálogo
+var eis_cursor = null  # sin cursor propio el host (cage/sway) no lo mueve: se dibuja uno
+
 
 func _ready():
 	connect("imgui_frame", self, "_imgui_frame")
@@ -99,6 +105,15 @@ func _ready():
 		printerr(activity_error)
 	else:
 		print("compositor socket: ", socket)
+
+	remote_input = RemoteInput.new()
+	remote_input.name = "RemoteInput"
+	add_child(remote_input)
+	remote_input.connect("access_requested", self, "_on_input_access")
+	var rerr = remote_input.start()
+	if rerr != "":
+		print("RemoteInput: ", rerr)
+	eis_cursor = _make_eis_cursor()
 
 	# Sin redibujo continuo: ImGui se arma sólo con input (a input_hz), con
 	# request_redraw() (commits Wayland, señales, control remoto) o al cambiar el minuto (reloj).
@@ -186,6 +201,7 @@ func _imgui_frame():
 	_update_dialogs(id)
 	frame.draw(self)
 
+	_draw_input_requests()
 	# HUD de debug global (autoload DebugHud): Super+F6 lo abre en cualquier actividad (frame.gd).
 	DebugHud.draw(self)
 
@@ -804,6 +820,8 @@ func _view_hit_test(pos):
 # home ImGui marca todo como manejado y a _unhandled_input no llega nada.
 func _input(event):
 	last_activity = OS.get_ticks_msec()
+	if event is InputEventMouse:
+		_move_eis_cursor(event)
 	if current_activity == null and not apps.search_active and event is InputEventKey and event.pressed \
 			and event.unicode >= 32 and not (event.control or event.alt or event.meta):
 		apps_view = true
@@ -902,3 +920,106 @@ func _capture(path):
 	print("commit_count=", compositor.commit_count, " dmabuf_commits=", compositor.dmabuf_commits, " shm_commits=", compositor.shm_commits)
 	print("dmabuf: ", compositor.dmabuf_state)
 	get_tree().quit()
+
+
+# --- Input remoto (libei) ---
+
+# Permiso: sin preguntar si lo pide un servicio que el usuario prendió desde el anillo
+# (Deskflow) o un hijo suyo; cualquier otro proceso, diálogo. El pid lo da el portal.
+func _on_input_access(id, pid, app_id):
+	var who = _proc_name(pid)
+	if app_id != "":
+		who = app_id + " (" + who + ")"
+	if _from_service(pid):
+		print("RemoteInput: control remoto permitido a ", who)
+		remote_input.respond(id, true)
+		return
+	input_requests.append({"id": id, "who": who})
+	last_activity = OS.get_ticks_msec()
+	request_redraw()
+
+
+func _from_service(pid):
+	var guard = 0
+	while pid > 1 and guard < 32:
+		for name in service_pids:
+			if service_pids[name] == pid and _service_running(name):
+				return true
+		pid = _ppid(pid)
+		guard += 1
+	return false
+
+
+func _ppid(pid):
+	var f = File.new()
+	if f.open("/proc/%d/stat" % pid, File.READ) != OK:
+		return 0
+	var stat = f.get_line()
+	f.close()
+	# pid (comm) estado ppid ...: comm puede tener espacios, se corta tras el último ')'.
+	return int(stat.substr(stat.find_last(")") + 2).split(" ")[1])
+
+
+func _proc_name(pid):
+	var f = File.new()
+	if pid <= 0 or f.open("/proc/%d/comm" % pid, File.READ) != OK:
+		return "proceso desconocido"
+	var comm = f.get_line()
+	f.close()
+	return "%s, pid %d" % [comm, pid]
+
+
+func _draw_input_requests():
+	for i in range(input_requests.size() - 1, -1, -1):
+		if not remote_input.is_pending(input_requests[i].id):
+			input_requests.remove(i)
+	if input_requests.empty():
+		return
+	var req = input_requests[0]
+	var size = Vector2(460, 130)
+	set_next_window_pos(get_viewport_rect().size * 0.5 - size * 0.5, true)
+	set_next_window_size(size, true)
+	set_next_window_bg_alpha(1.0)
+	if begin("Control remoto##eis", WINDOW_NO_COLLAPSE | WINDOW_NO_RESIZE | WINDOW_NO_MOVE | WINDOW_NO_SAVED_SETTINGS):
+		text_wrapped(req.who + " quiere controlar el mouse y el teclado.")
+		spacing()
+		if button("Permitir", Vector2(120, 32)):
+			remote_input.respond(req.id, true)
+		same_line()
+		if button("Denegar", Vector2(120, 32)):
+			remote_input.respond(req.id, false)
+	end()
+
+
+func _make_eis_cursor():
+	var layer = CanvasLayer.new()
+	layer.layer = 128
+	add_child(layer)
+	var arrow = PoolVector2Array([Vector2(0, 0), Vector2(0, 17), Vector2(4, 13), Vector2(7, 20),
+		Vector2(10, 19), Vector2(7, 12), Vector2(12, 12)])
+	var cursor = Polygon2D.new()
+	cursor.polygon = arrow
+	cursor.color = Color.white
+	var outline = Line2D.new()
+	arrow.append(arrow[0])
+	outline.points = arrow
+	outline.width = 1.0
+	outline.default_color = Color.black
+	cursor.add_child(outline)
+	cursor.visible = false
+	layer.add_child(cursor)
+	return cursor
+
+
+# En X11 se mueve el puntero de verdad; en Wayland el host no deja: cursor dibujado,
+# que se esconde cuando vuelve a moverse el mouse propio.
+func _move_eis_cursor(event):
+	if event.device != RemoteInput.DEVICE_ID:
+		if event is InputEventMouseMotion:
+			eis_cursor.visible = false
+		return
+	if OS.get_environment("GDTK_SESSION") == "x11":
+		Input.warp_mouse_position(event.position)
+		return
+	eis_cursor.position = event.position
+	eis_cursor.visible = true

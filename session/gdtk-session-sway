@@ -1,7 +1,7 @@
 #!/bin/sh
 # Sesión de prueba: el shell a pantalla completa sobre sway en vez de cage.
 # Frente a cage suma lápiz y touch (libinput), rotación (tecla de la X200 Tablet) y config de entrada.
-# ponytail: Deskflow no anda en wlroots (no hay portal RemoteDesktop/libei); para eso, gdtk-x11.
+# Deskflow anda por el portal RemoteDesktop propio del shell (libei), igual que en cage/X11.
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 . "$HERE/session/keyboard.sh"
 export GDTK_SESSION=wayland GDTK_HOME="$HERE"

@@ -166,7 +166,7 @@ static uint32_t _letter_to_evdev(uint32_t p_scancode) {
 // Godot 3 (ver map_key_sdl2_scancode en platform/frt/sdl2_godot_map.h):
 //   KEY_HYPER_R = RALT (AltGr)        -> KEY_RIGHTALT
 //   KEY_HYPER_L = NONUSBACKSLASH (<> ISO) -> KEY_102ND
-static uint32_t _scancode_to_evdev(uint32_t p_scancode) {
+uint32_t _scancode_to_evdev(uint32_t p_scancode) { // también la usa remote_input.cpp
 	if (p_scancode == 0) {
 		return 0;
 	}

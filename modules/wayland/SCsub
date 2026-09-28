@@ -19,11 +19,12 @@ if not os.path.exists(_hdr) or os.path.getmtime(_hdr) < os.path.getmtime(_xml):
     subprocess.check_call(["wayland-scanner", "server-header", _xml, _hdr])
 
 env_wayland.Append(CPPDEFINES=["WLR_USE_UNSTABLE"])
-env_wayland.ParseConfig("pkg-config wlroots-0.20 --cflags")
+env_wayland.ParseConfig("pkg-config wlroots-0.20 libeis-1.0 libsystemd --cflags")
 
 # Las libs van al env del link final (el módulo es una librería estática).
 # GL/GLES se resuelven con eglGetProcAddress: solo se linkea egl.
-env.ParseConfig("pkg-config wlroots-0.20 wayland-server xkbcommon pixman-1 --libs")
+# libeis + sd-bus (libsystemd): input remoto y backend del portal RemoteDesktop (remote_input.cpp).
+env.ParseConfig("pkg-config wlroots-0.20 wayland-server xkbcommon pixman-1 libeis-1.0 libsystemd --libs")
 env.ParseConfig("pkg-config egl --libs")
 
 env_wayland.add_source_files(env.modules_sources, "*.c")
