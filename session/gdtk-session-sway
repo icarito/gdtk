@@ -1,0 +1,16 @@
+#!/bin/sh
+# Sesión de prueba: el shell a pantalla completa sobre sway en vez de cage.
+# Frente a cage suma lápiz y touch (libinput), rotación (tecla de la X200 Tablet) y config de entrada.
+# ponytail: Deskflow no anda en wlroots (no hay portal RemoteDesktop/libei); para eso, gdtk-x11.
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+. "$HERE/session/keyboard.sh"
+export GDTK_SESSION=wayland GDTK_HOME="$HERE"
+if [ -z "$GDTK_GODOT" ]; then
+	GDTK_GODOT="$HERE/bin/godot-gdtk"
+	[ -x "$GDTK_GODOT" ] || GDTK_GODOT=/home/icarito/Proyectos/godot3-box3d/godot-dev/bin/godot.frt.opt.debug.x86_64.gdtklite
+fi
+export GDTK_GODOT
+export SDL_VIDEODRIVER=wayland SDL_VIDEO_WAYLAND_ALLOW_LIBDECOR=0
+# Sin audio ni joysticks en el shell: sus hilos despiertan la CPU sin uso (el shell las vacía para las apps).
+export SDL_AUDIODRIVER=dummy SDL_JOYSTICK_HIDAPI=0 SDL_HIDAPI_LIBUSB=0
+exec sway -c "$HERE/session/sway.conf"
