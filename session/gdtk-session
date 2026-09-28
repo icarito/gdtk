@@ -1,6 +1,7 @@
 #!/bin/sh
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 . "$HERE/session/keyboard.sh"
+. "$HERE/session/portal.sh"   # XDG_CURRENT_DESKTOP=gdtk para el portal RemoteDesktop
 export GDTK_SESSION=wayland
 # Instalado: binario junto al shell (bin/godot-gdtk); en desarrollo: el build del árbol de Godot.
 if [ -z "$GDTK_GODOT" ]; then

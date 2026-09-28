@@ -35,7 +35,7 @@ RHOME="$(ssh "$HOST" 'echo $HOME')"  # Exec= de un .desktop no expande variables
 rsync -a "$TMP/godot-gdtk" "$HOST:gdtk/bin/"
 rsync -a --exclude '*crash*' --exclude '.import' "$GDTK/shell" "$GDTK/addons" "$HOST:gdtk/"  # shell/addons -> ../addons
 rsync -a "$GDTK/mcp" "$HOST:gdtk/"
-rsync -a "$GDTK/session/gdtk-session" "$GDTK/session/gdtk-session-x11" "$GDTK/session/keyboard.sh" "$GDTK/session/gdtk-supervisor" "$GDTK/session/gdtk-session-sway" "$GDTK/session/sway.conf" "$HOST:gdtk/session/"
+rsync -a "$GDTK/session/gdtk-session" "$GDTK/session/gdtk-session-x11" "$GDTK/session/keyboard.sh" "$GDTK/session/gdtk-supervisor" "$GDTK/session/gdtk-session-sway" "$GDTK/session/sway.conf" "$GDTK/session/portal.sh" "$HOST:gdtk/session/"
 # Portal RemoteDesktop propio (input remoto libei): el backend lo implementa el shell
 # (modules/wayland/eis_server.c). El frontend xdg-desktop-portal lo enruta sólo en la
 # sesión gdtk (UseIn/DesktopNames), así no toca xfce ni las demás sesiones del host.

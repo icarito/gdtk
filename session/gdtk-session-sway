@@ -4,6 +4,7 @@
 # Deskflow anda por el portal RemoteDesktop propio del shell (libei), igual que en cage/X11.
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 . "$HERE/session/keyboard.sh"
+. "$HERE/session/portal.sh"   # XDG_CURRENT_DESKTOP=gdtk para el portal RemoteDesktop
 export GDTK_SESSION=wayland GDTK_HOME="$HERE"
 if [ -z "$GDTK_GODOT" ]; then
 	GDTK_GODOT="$HERE/bin/godot-gdtk"

@@ -4,6 +4,7 @@
 # Las apps Wayland siguen viéndose dentro del shell (su compositor embebido no depende del display).
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 . "$HERE/session/keyboard.sh"
+. "$HERE/session/portal.sh"   # XDG_CURRENT_DESKTOP=gdtk para el portal RemoteDesktop
 # El X del display manager arranca con su propia distribución: aplicar la de la sesión.
 [ -n "$XKB_DEFAULT_LAYOUT" ] && setxkbmap -layout "$XKB_DEFAULT_LAYOUT" ${XKB_DEFAULT_VARIANT:+-variant "$XKB_DEFAULT_VARIANT"} \
 	${XKB_DEFAULT_MODEL:+-model "$XKB_DEFAULT_MODEL"} ${XKB_DEFAULT_OPTIONS:+-option "" -option "$XKB_DEFAULT_OPTIONS"}
