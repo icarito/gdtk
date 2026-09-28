@@ -35,6 +35,10 @@ func save(shell):
 
 func restart(shell):
 	save(shell)
+	# Marca además del código 75: si el cierre se cae (tengu), no cuenta como caída.
+	var f = File.new()
+	if f.open(state_path().get_base_dir().plus_file("gdtk-restart"), File.WRITE) == OK:
+		f.close()
 	shell.get_tree().quit(EXIT_RESTART)
 
 
