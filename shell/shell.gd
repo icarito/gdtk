@@ -106,20 +106,39 @@ func _ready():
 	# El colector del HUD corría en cada vuelta del loop (60/s) aunque nada cambie.
 	DebugHud.metrics.sample_hz = 4.0
 
+	# Las sesiones apagan audio/hidapi de SDL para el shell (hilos que despiertan sin
+	# uso); vacías, las apps que lanza el compositor vuelven a los valores por defecto.
+	for v in ["SDL_AUDIODRIVER", "SDL_JOYSTICK_HIDAPI", "SDL_HIDAPI_LIBUSB"]:
+		OS.set_environment(v, "")
+
 	recovery.load(self)
 	if open_on_start != "":
 		_open_by_name(open_on_start)
 
 
 var last_commits = 0
+# Loop del motor: sin input, commits ni animación por IDLE_MS, duerme más entre vueltas
+# (60 -> 10 vueltas/s en reposo). El primer evento tras el reposo tarda hasta SLEEP_IDLE.
+const IDLE_MS = 3000
+const SLEEP_ACTIVE = 16000
+const SLEEP_IDLE = 100000
+var last_activity = 0
 
 
 # Un commit Wayland puede traer capas/texturas nuevas (y con dmabuf el VisualServer
 # no se entera de que cambió el contenido): se rearma el frame siguiente.
 func _process(_delta):
+	var now = OS.get_ticks_msec()
 	if compositor.commit_count != last_commits:
 		last_commits = compositor.commit_count
+		last_activity = now
 		request_redraw()
+	if activity_instance != null and activity_instance.get("animate"):
+		last_activity = now
+	if screenshot_path == "":
+		var sleep = SLEEP_IDLE if now - last_activity > IDLE_MS else SLEEP_ACTIVE
+		if OS.low_processor_usage_mode_sleep_usec != sleep:
+			OS.low_processor_usage_mode_sleep_usec = sleep
 
 
 func _redraw_on_signal(_id):
@@ -750,6 +769,7 @@ func _view_hit_test(pos):
 # En _input (Godot 3 lo llama también en ImGuiCanvas): con el puntero sobre el
 # home ImGui marca todo como manejado y a _unhandled_input no llega nada.
 func _input(event):
+	last_activity = OS.get_ticks_msec()
 	if current_activity == null and not apps.search_active and event is InputEventKey and event.pressed \
 			and event.unicode >= 32 and not (event.control or event.alt or event.meta) and event.scancode != KEY_QUOTELEFT:
 		apps_view = true

@@ -194,6 +194,7 @@ func _handle_line(conn, line):
 		return
 
 	# Lo que pida el control remoto puede cambiar la UI (open, home, cerrar...).
+	shell.last_activity = OS.get_ticks_msec()
 	shell.request_redraw()
 	match method:
 		"state":
@@ -272,6 +273,8 @@ func _state():
 		"wayland_socket": shell.compositor.start(),
 		"windows": windows,
 		"activities": activities,
+		# Vueltas del loop, pasos de física y frames dibujados: para medir el reposo.
+		"engine": [Engine.get_idle_frames(), Engine.get_physics_frames(), Engine.get_frames_drawn()],
 		# Frame: items con su posición en pantalla (vacío si no se dibujó).
 		"frame": {"visible": shell.frame.drawn, "items": shell.frame.items_layout},
 	}

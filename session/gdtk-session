@@ -8,6 +8,8 @@ if [ -z "$GDTK_GODOT" ]; then
 	[ -x "$GDTK_GODOT" ] || GDTK_GODOT=/home/icarito/Proyectos/godot3-box3d/godot-dev/bin/godot.frt.opt.tools.x86_64.gdtk
 fi
 # Dentro de cage hay Xwayland: sin esto SDL puede elegir X11/GLX y pedir GL 3.3 (GLXBadFBConfig en GPUs viejas).
+# Sin audio ni joysticks en el shell: sus hilos despiertan la CPU sin uso (el shell las vacía para las apps).
+export SDL_AUDIODRIVER=dummy SDL_JOYSTICK_HIDAPI=0 SDL_HIDAPI_LIBUSB=0
 export SDL_VIDEODRIVER=wayland
 # Sin libdecor: cage no dibuja barras y SDL reservaba 37 px para una que nunca aparecía (franja negra).
 export SDL_VIDEO_WAYLAND_ALLOW_LIBDECOR=0

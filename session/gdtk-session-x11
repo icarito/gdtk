@@ -12,6 +12,8 @@ if [ -z "$GDTK_GODOT" ]; then
 	GDTK_GODOT="$HERE/bin/godot-gdtk"
 	[ -x "$GDTK_GODOT" ] || GDTK_GODOT=/home/icarito/Proyectos/godot3-box3d/godot-dev/bin/godot.frt.opt.tools.x86_64.gdtk
 fi
+# Sin audio ni joysticks en el shell: sus hilos despiertan la CPU sin uso (el shell las vacía para las apps).
+export SDL_AUDIODRIVER=dummy SDL_JOYSTICK_HIDAPI=0 SDL_HIDAPI_LIBUSB=0
 export SDL_VIDEODRIVER=x11
 # EGL en vez de GLX: el compositor embebido necesita EGL para importar dmabuf (zero-copy).
 export SDL_VIDEO_X11_FORCE_EGL=1 SDL_VIDEO_FORCE_EGL=1
