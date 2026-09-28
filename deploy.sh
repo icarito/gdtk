@@ -11,7 +11,9 @@ GDTK="$(cd "$(dirname "$0")" && pwd)"
 # Árbol del motor propio de gdtk (worktree): no comparte objetos ni parches con el de Odisea.
 GODOT=/home/icarito/Proyectos/godot3-box3d/godot-dev
 # Fork con el módulo imgui (no toda rama del fork lo trae): FORK=/ruta ./deploy.sh ...
-FORK="${FORK:-/home/icarito/Proyectos/godot3-box3d/godot-box3d-3}"
+# Default: worktree propio del fork en main (el checkout principal cambia de rama y /tmp se borra).
+# Actualizar: git -C <worktree> checkout --detach main
+FORK="${FORK:-/home/icarito/Proyectos/godot3-box3d/godot-box3d-3-gdtk}"
 export SCONS_CACHE="${SCONS_CACHE-$HOME/.cache/scons-godot3}" SCONS_CACHE_LIMIT="${SCONS_CACHE_LIMIT:-30000}"
 # Sin editor (tools=no): el shell no importa recursos (sólo .gd/.tscn en texto) y ahorra ~35 MB de binario.
 # release_debug y no release: el HUD/control remoto habilitan eval/quit sólo con OS.is_debug_build().
