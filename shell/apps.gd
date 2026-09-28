@@ -13,6 +13,8 @@ const NOISE_CATS = ["gtk", "qt", "kde", "gnome", "xfce"]
 # Acentos combinantes (NFD, p.ej. "Mu\u0301sica"): la fuente no los tiene.
 const COMPOSE = ["aá", "eé", "ií", "oó", "uú", "AÁ", "EÉ", "IÍ", "OÓ", "UÚ"]
 const FOLD = ["áàäâã", "a", "éèëê", "e", "íìïî", "i", "óòöôõ", "o", "úùüû", "u", "ñ", "n", "ç", "c"]
+# Terminal=true: la misma terminal que la actividad Terminal del anillo.
+const TERMINAL = "alacritty -e "
 
 var apps = []
 var query = ""
@@ -23,6 +25,9 @@ var shown_query = ""
 var scanned = false
 var theme_dirs = []
 var field_code = RegEx.new()
+var path_dirs = []
+# pid lanzado desde la grilla -> nombre de la app (ver watch).
+var watching = {}
 
 
 func _init():
@@ -45,6 +50,7 @@ func data_dirs():
 func scan():
 	scanned = true
 	apps = []
+	path_dirs = OS.get_environment("PATH").split(":", false)
 	var desktops = Array(OS.get_environment("XDG_CURRENT_DESKTOP").to_lower().split(":", false))
 	desktops.append("gdtk")
 	# Precedencia: XDG_DATA_HOME y luego XDG_DATA_DIRS en orden; el primer id gana
@@ -98,11 +104,25 @@ func parse(path, desktops):
 				e[line.substr(0, eq).strip_edges()] = line.substr(eq + 1).strip_edges()
 	file.close()
 
-	if e.get("Type", "") != "Application" or e.get("Exec", "") == "":
+	if e.get("Type", "") != "Application":
 		return null
-	for k in ["NoDisplay", "Hidden", "Terminal"]:
+	for k in ["NoDisplay", "Hidden"]:
 		if e.get(k, "") == "true":
 			return null
+	var exec = clean_exec(e.get("Exec", ""))
+	# DBusActivatable sin Exec: se activa por D-Bus (el entorno de activación apunta al compositor).
+	if exec == "" and e.get("DBusActivatable", "") == "true":
+		exec = "gapplication launch " + path.get_file().get_basename()
+	# Sin el ejecutable no abriría nunca: TryExec y el programa de Exec tienen que existir.
+	if exec == "" or not found(e.get("TryExec", _program(exec))):
+		return null
+	var cmd = "exec " + exec
+	if e.get("Terminal", "") == "true":
+		if not found(TERMINAL.split(" ")[0]):
+			return null
+		cmd = "exec " + TERMINAL + exec
+	if e.get("Path", "") != "":
+		cmd = "cd '" + e.Path.replace("'", "'\\''") + "' && " + cmd
 	if e.has("OnlyShowIn") and not _any_in(e.OnlyShowIn, desktops):
 		return null
 	if _any_in(e.get("NotShowIn", ""), desktops):
@@ -118,7 +138,7 @@ func parse(path, desktops):
 		if not c.begins_with("X-") and not c.to_lower() in NOISE_CATS:
 			cats += " " + c
 	return {
-		"id": "", "name": name, "exec": clean_exec(e.Exec), "icon": e.get("Icon", ""),
+		"id": "", "name": name, "exec": exec, "cmd": cmd, "icon": e.get("Icon", ""),
 		"categories": cats, "key": fold(name + cats),
 		"tex": null, "icon_tried": false,
 	}
@@ -134,6 +154,55 @@ func _any_in(list, desktops):
 # Quita los field codes (%f %U %i ...); %% es un % literal.
 func clean_exec(s):
 	return field_code.sub(s.replace("%%", "\u0001"), "", true).replace("\u0001", "%").strip_edges()
+
+
+# Programa de un Exec (sin `env VAR=...` delante ni comillas).
+func _program(exec):
+	if exec.begins_with("\""):
+		return exec.substr(1, exec.find("\"", 1) - 1)
+	for w in exec.split(" ", false):
+		w = w.replace("\"", "").replace("'", "")
+		if w != "env" and not "=" in w:
+			return w
+	return ""
+
+
+func found(program):
+	if program == "":
+		return false
+	if program.is_abs_path():
+		return File.new().file_exists(program)
+	for d in path_dirs:
+		if File.new().file_exists(d.plus_file(program)):
+			return true
+	return false
+
+
+# Si el proceso lanzado termina sin haber abierto ventana, el shell no se queda
+# esperándola: sale del anillo y se avisa (la salida de la app queda en shell.log).
+func watch(shell, name, pid):
+	if pid <= 0 or shell.pending_wayland != name:
+		return
+	watching[pid] = name
+	if not shell.compositor.is_connected("process_exited", self, "_on_exit"):
+		shell.compositor.connect("process_exited", self, "_on_exit", [shell])
+
+
+func _on_exit(pid, code, shell):
+	var name = watching.get(pid, "")
+	watching.erase(pid)
+	if name == "" or shell.pending_wayland != name:
+		return
+	shell.pending_wayland = ""
+	var i = shell._activity_named(name)
+	if i >= 0 and shell.ACTIVITIES[i].get("dynamic", false):
+		shell.ACTIVITIES.remove(i)
+	if shell.current_activity != null and shell.current_activity.name == name:
+		shell._go_home()
+	shell.activity_error = "%s terminó sin abrir ventana (código %d, ver shell.log)" % [name, code]
+	if code == 0:
+		shell.activity_error += "; si ya estaba abierta, lo está en otro display"
+	shell.request_redraw()
 
 
 # Minúsculas y sin tildes, para buscar sin importar mayúsculas ni acentos.

@@ -13,6 +13,7 @@
 
 #include <drm_fourcc.h>
 #include <string.h>
+#include <sys/wait.h>
 
 // Codigos evdev (linux/input-event-codes.h) sin incluir ese header: choca con los
 // KEY_* de core/os/keyboard.h.
@@ -339,6 +340,29 @@ void WaylandCompositor::_cb_title(void *p_ud, int p_id, const char *p_title) {
 	static_cast<WaylandCompositor *>(p_ud)->_on_title(p_id, p_title);
 }
 
+void WaylandCompositor::_cb_layer(void *p_ud, int p_id, int p_state) {
+	WaylandCompositor *self = static_cast<WaylandCompositor *>(p_ud);
+	if (p_state < 0) {
+		self->layer_ids.erase(p_id);
+		self->toplevels.erase(p_id);
+	} else {
+		self->layer_ids.insert(p_id);
+	}
+	self->emit_signal("layers_changed");
+}
+
+void WaylandCompositor::_cb_activate(void *p_ud, int p_id) {
+	static_cast<WaylandCompositor *>(p_ud)->emit_signal("toplevel_activate", p_id);
+}
+
+// Con end_frame en uso, sólo los commits de lo que se dibujó (o de ventanas nuevas que
+// todavía no se dibujaron) piden redibujar: una app de fondo que anima no despierta al shell.
+void WaylandCompositor::_count_commit(int p_id) {
+	if (!throttle || drawn.has(p_id) || !toplevels.has(p_id)) {
+		commit_count++;
+	}
+}
+
 void WaylandCompositor::_on_added(int p_id) {
 	Toplevel t;
 	toplevels.insert(p_id, t);
@@ -360,7 +384,7 @@ Map<int, WaylandCompositor::Toplevel>::Element *WaylandCompositor::_toplevel_ent
 }
 
 void WaylandCompositor::_on_frame(int p_id, uint64_t p_key, const unsigned char *p_data, int p_w, int p_h, uint32_t p_format, int p_stride) {
-	commit_count++;
+	_count_commit(p_id);
 	shm_commits++;
 	if (p_data == NULL || p_w <= 0 || p_h <= 0 || p_stride < p_w * 4) {
 		return;
@@ -414,7 +438,7 @@ void WaylandCompositor::_on_frame(int p_id, uint64_t p_key, const unsigned char 
 }
 
 void WaylandCompositor::_on_dmabuf(int p_id, uint64_t p_key, int p_w, int p_h) {
-	commit_count++;
+	_count_commit(p_id);
 	dmabuf_commits++;
 	if (p_w <= 0 || p_h <= 0 || server == NULL) {
 		return;
@@ -451,6 +475,8 @@ void WaylandCompositor::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_parent_id", "id"), &WaylandCompositor::get_parent_id);
 	ClassDB::bind_method(D_METHOD("get_app_id", "id"), &WaylandCompositor::get_app_id);
 	ClassDB::bind_method(D_METHOD("get_ids"), &WaylandCompositor::get_ids);
+	ClassDB::bind_method(D_METHOD("get_layer_surfaces"), &WaylandCompositor::get_layer_surfaces);
+	ClassDB::bind_method(D_METHOD("end_frame"), &WaylandCompositor::end_frame);
 	ClassDB::bind_method(D_METHOD("set_size", "id", "size"), &WaylandCompositor::set_size);
 	ClassDB::bind_method(D_METHOD("close", "id"), &WaylandCompositor::close);
 	ClassDB::bind_method(D_METHOD("focus", "id"), &WaylandCompositor::focus);
@@ -477,6 +503,9 @@ void WaylandCompositor::_bind_methods() {
 
 	ADD_SIGNAL(MethodInfo("toplevel_added", PropertyInfo(Variant::INT, "id")));
 	ADD_SIGNAL(MethodInfo("toplevel_removed", PropertyInfo(Variant::INT, "id")));
+	ADD_SIGNAL(MethodInfo("toplevel_activate", PropertyInfo(Variant::INT, "id")));
+	ADD_SIGNAL(MethodInfo("layers_changed"));
+	ADD_SIGNAL(MethodInfo("process_exited", PropertyInfo(Variant::INT, "pid"), PropertyInfo(Variant::INT, "code")));
 }
 
 void WaylandCompositor::_notification(int p_what) {
@@ -486,6 +515,7 @@ void WaylandCompositor::_notification(int p_what) {
 				wl_server_dispatch(server);
 				wl_server_frame_done(server);
 			}
+			_reap_children();
 		} break;
 		default:
 			break;
@@ -498,6 +528,24 @@ WaylandCompositor::WaylandCompositor() {
 	commit_count = 0;
 	dmabuf_commits = 0;
 	shm_commits = 0;
+	throttle = false;
+}
+
+// Recoge los hijos lanzados que terminaron (si no, quedan zombies) y avisa con su código.
+void WaylandCompositor::_reap_children() {
+	for (int i = children.size() - 1; i >= 0; i--) {
+		int status = 0;
+		pid_t r = waitpid((pid_t)children[i], &status, WNOHANG);
+		if (r == 0) {
+			continue;
+		}
+		int pid = children[i];
+		children.remove(i);
+		if (r > 0) {
+			int code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+			emit_signal("process_exited", pid, code);
+		}
+	}
 }
 
 WaylandCompositor::~WaylandCompositor() {
@@ -519,6 +567,8 @@ String WaylandCompositor::start() {
 	cb.frame = &WaylandCompositor::_cb_frame;
 	cb.dmabuf = &WaylandCompositor::_cb_dmabuf;
 	cb.title = &WaylandCompositor::_cb_title;
+	cb.layer = &WaylandCompositor::_cb_layer;
+	cb.activate = &WaylandCompositor::_cb_activate;
 
 	server = wl_server_create(cb, (int)default_size.x, (int)default_size.y);
 	if (server == NULL) {
@@ -526,7 +576,16 @@ String WaylandCompositor::start() {
 		return String();
 	}
 	set_process(true);
-	return String(wl_server_socket(server));
+	String socket = String(wl_server_socket(server));
+	// Como sesión (DesktopNames=gdtk): lo que active D-Bus/systemd (notificaciones,
+	// apps DBusActivatable) tiene que conectarse a este compositor y no a otro display.
+	if (OS::get_singleton()->get_environment("XDG_CURRENT_DESKTOP").to_lower().split(":").find("gdtk") >= 0) {
+		List<String> args;
+		args.push_back("--systemd");
+		args.push_back("WAYLAND_DISPLAY=" + socket);
+		OS::get_singleton()->execute("dbus-update-activation-environment", args, true);
+	}
+	return socket;
 }
 
 int WaylandCompositor::launch(const String &p_cmd, const PoolStringArray &p_args) {
@@ -538,6 +597,9 @@ int WaylandCompositor::launch(const String &p_cmd, const PoolStringArray &p_args
 	args.push_back("DISPLAY");
 	args.push_back("WAYLAND_DISPLAY=" + String(wl_server_socket(server)));
 	args.push_back("GDK_BACKEND=wayland");
+	// Chromium/Electron (ozone auto) y Qt5 eligen X11 si la sesión dice x11 (sesión X de
+	// tengu), y sin DISPLAY no abren.
+	args.push_back("XDG_SESSION_TYPE=wayland");
 	// Con dmabuf disponible los clientes usan la GPU de verdad; si el server
 	// quedo en modo solo-shm, forzamos el fallback software como antes.
 	if (!wl_server_dmabuf_enabled(server)) {
@@ -555,6 +617,7 @@ int WaylandCompositor::launch(const String &p_cmd, const PoolStringArray &p_args
 		ERR_PRINT("WaylandCompositor: fallo al lanzar " + p_cmd);
 		return -1;
 	}
+	children.push_back((int)pid);
 	return (int)pid;
 }
 
@@ -581,6 +644,7 @@ Array WaylandCompositor::get_layers(int p_id) {
 	wl_server_layer raw[MAX_LAYERS];
 	int count = wl_server_layers(server, p_id, raw, MAX_LAYERS);
 
+	drawn_collect.insert(p_id);
 	Dictionary present;
 	for (int i = 0; i < count; i++) {
 		Variant vkey((int64_t)raw[i].key);
@@ -641,9 +705,47 @@ String WaylandCompositor::get_app_id(int p_id) const {
 Array WaylandCompositor::get_ids() const {
 	Array ids;
 	for (const Map<int, Toplevel>::Element *e = toplevels.front(); e != NULL; e = e->next()) {
-		ids.push_back(e->key());
+		if (!layer_ids.has(e->key())) {
+			ids.push_back(e->key());
+		}
 	}
 	return ids;
+}
+
+// Layer surfaces mapeadas (notificaciones...), de la capa más baja a la más alta:
+// [{id, layer (0 background..3 overlay), rect (coords de la vista)}].
+Array WaylandCompositor::get_layer_surfaces() {
+	Array out;
+	if (server == NULL) {
+		return out;
+	}
+	const int MAX = 32;
+	wl_server_layer_surface raw[MAX];
+	int n = wl_server_layer_surfaces(server, raw, MAX);
+	for (int i = 0; i < n; i++) {
+		Dictionary d;
+		d["id"] = raw[i].id;
+		d["layer"] = raw[i].layer;
+		d["rect"] = Rect2(raw[i].x, raw[i].y, raw[i].w, raw[i].h);
+		out.push_back(d);
+	}
+	return out;
+}
+
+// Fin de un frame del shell: lo que no se dibujó deja de recibir frame callbacks (la app
+// oculta deja de pintar, como en cualquier compositor) y sus commits no piden redibujo.
+void WaylandCompositor::end_frame() {
+	drawn = drawn_collect;
+	drawn_collect.clear();
+	throttle = true;
+	if (server == NULL) {
+		return;
+	}
+	Vector<int> ids;
+	for (Set<int>::Element *e = drawn.front(); e != NULL; e = e->next()) {
+		ids.push_back(e->get());
+	}
+	wl_server_set_visible(server, ids.ptr(), ids.size());
 }
 
 void WaylandCompositor::set_size(int p_id, const Vector2 &p_size) {

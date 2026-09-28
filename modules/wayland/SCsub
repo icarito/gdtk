@@ -7,6 +7,17 @@ env_wayland = env_modules.Clone()
 
 env_wayland.Prepend(CPPPATH=[Dir(".").abspath])
 
+# wlr_layer_shell_v1.h incluye el header del protocolo, que wlroots no instala: se genera
+# (sólo enums/declaraciones; el código del protocolo ya está en libwlroots).
+import os
+import subprocess
+
+_here = Dir(".").srcnode().abspath
+_xml = os.path.join(_here, "protocols", "wlr-layer-shell-unstable-v1.xml")
+_hdr = os.path.join(_here, "wlr-layer-shell-unstable-v1-protocol.h")
+if not os.path.exists(_hdr) or os.path.getmtime(_hdr) < os.path.getmtime(_xml):
+    subprocess.check_call(["wayland-scanner", "server-header", _xml, _hdr])
+
 env_wayland.Append(CPPDEFINES=["WLR_USE_UNSTABLE"])
 env_wayland.ParseConfig("pkg-config wlroots-0.20 --cflags")
 

@@ -34,6 +34,15 @@ func _init():
 	put(sys + "/applications/g.desktop", "Name=G\nExec=g\nNotShowIn=GNOME;")
 	put(sys + "/applications/m.desktop", "Name=Mu\u0301sica\nExec=m")  # acento NFD
 	put(sys + "/applications/sub/b.desktop", "Name=Bé\nExec=b %f\nIcon=/no/existe.png")
+	put(sys + "/applications/d.desktop", "Name=D\nDBusActivatable=true")
+	put(sys + "/applications/x.desktop", "Name=X\nExec=noexiste")  # sin el programa: oculto
+	put(sys + "/applications/te.desktop", "Name=TE\nExec=foo\nTryExec=noexiste")
+	put(sys + "/applications/q.desktop", "Name=Q\nExec=\"/no/con espacio\" %f")  # programa entre comillas
+	put(sys + "/applications/p.desktop", "Name=P\nExec=env A=1 p\nPath=/tmp/o'k")
+	# Programas falsos en un PATH propio (la grilla oculta lo que no está instalado).
+	for b in ["foo", "m", "b", "t", "p", "alacritty", "gapplication"]:
+		put(root + "/bin/" + b, "")
+	OS.set_environment("PATH", root + "/bin")
 	OS.set_environment("XDG_DATA_HOME", home)
 	OS.set_environment("XDG_DATA_DIRS", sys)
 	OS.set_environment("XDG_CURRENT_DESKTOP", "GNOME")
@@ -43,9 +52,12 @@ func _init():
 	var names = []
 	for a in apps.apps:
 		names.append(a.name)
-	check("filtra, dedupe y ordena: " + str(names), names == ["Bé", "Música", "Único"])
+	check("filtra, dedupe y ordena: " + str(names), names == ["Bé", "D", "Música", "P", "T", "Único"])
 	check("id con subdirectorio", apps.apps[0].id == "sub-b.desktop")
-	check("exec sin field codes: " + apps.apps[2].exec, apps.apps[2].exec == "foo  --x 100%")
+	check("exec sin field codes: " + apps.apps[5].exec, apps.apps[5].exec == "foo  --x 100%")
+	check("DBusActivatable sin Exec: " + apps.apps[1].cmd, apps.apps[1].cmd == "exec gapplication launch d")
+	check("Path=: " + apps.apps[3].cmd, apps.apps[3].cmd == "cd '/tmp/o'\\''k' && exec env A=1 p")
+	check("Terminal=true: " + apps.apps[4].cmd, apps.apps[4].cmd == "exec alacritty -e t")
 	check("icono inexistente", apps.resolve_icon(apps.apps[0].icon) == "")
 	apps.query = "UNI"
 	check("busca sin acentos ni mayúsculas", apps.matches().size() == 1)

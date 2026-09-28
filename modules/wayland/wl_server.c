@@ -22,6 +22,12 @@
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_keyboard.h>
+#include <wlr/types/wlr_layer_shell_v1.h>
+#include <wlr/types/wlr_output_layout.h>
+#include <wlr/types/wlr_primary_selection.h>
+#include <wlr/types/wlr_primary_selection_v1.h>
+#include <wlr/types/wlr_xdg_activation_v1.h>
+#include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_linux_dmabuf_v1.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_shm.h>
@@ -41,6 +47,7 @@ typedef struct toplevel {
 	struct wlr_xdg_toplevel *tl;
 	bool mapped;
 	bool want_focus;
+	bool visible; // dibujado en el último frame del shell (ver wl_server_set_visible)
 
 	struct wl_listener commit;
 	struct wl_listener map;
@@ -95,7 +102,13 @@ struct wl_server {
 	struct wl_listener new_toplevel;
 	struct wl_listener new_popup;
 	struct wl_listener new_decoration;
+	struct wl_listener new_layer;
+	struct wl_listener request_activate;
+	struct wl_listener request_set_selection;
+	struct wl_listener request_set_primary_selection;
 	struct wl_list toplevels;
+	struct wl_list layers;
+	bool throttle; // true tras el primer wl_server_set_visible: frame callbacks sólo a lo visible
 	int next_id;
 	int default_w, default_h;
 
@@ -713,6 +726,167 @@ static void handle_new_decoration(struct wl_listener *listener, void *data) {
 	decoration_apply(dd);
 }
 
+// --- wlr-layer-shell: notificaciones, OSDs, docks. El shell las dibuja encima de todo en
+// su rect (ancla + márgenes sobre la vista). ponytail: sin exclusive zone ni foco de
+// teclado (keyboard_interactivity); alcanza para notificaciones.
+typedef struct layer_surf {
+	struct wl_list link;
+	struct wl_server *s;
+	int id;
+	struct wlr_layer_surface_v1 *ls;
+	bool mapped;
+	int x, y, w, h;
+	struct wl_listener commit;
+	struct wl_listener map;
+	struct wl_listener unmap;
+	struct wl_listener destroy;
+} layer_surf;
+
+static layer_surf *layer_find(struct wl_server *s, int id) {
+	layer_surf *l;
+	wl_list_for_each(l, &s->layers, link) {
+		if (l->id == id) {
+			return l;
+		}
+	}
+	return NULL;
+}
+
+// Tamaño y posición según ancla y márgenes; reconfigura si cambió el tamaño.
+static void layer_arrange(layer_surf *l, bool force) {
+	struct wl_server *s = l->s;
+	struct wlr_layer_surface_v1_state *st = &l->ls->current;
+	int W = s->default_w, H = s->default_h;
+	bool left = st->anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT;
+	bool right = st->anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT;
+	bool top = st->anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP;
+	bool bottom = st->anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM;
+	int w = st->desired_width > 0 ? (int)st->desired_width : W - st->margin.left - st->margin.right;
+	int h = st->desired_height > 0 ? (int)st->desired_height : H - st->margin.top - st->margin.bottom;
+	if (w < 1) {
+		w = 1;
+	}
+	if (h < 1) {
+		h = 1;
+	}
+	// Ancla a un solo lado: pegado a ese borde; a ambos o ninguno: centrado entre márgenes.
+	if (left == right) {
+		l->x = st->margin.left + (W - st->margin.left - st->margin.right - w) / 2;
+	} else {
+		l->x = left ? st->margin.left : W - w - st->margin.right;
+	}
+	if (top == bottom) {
+		l->y = st->margin.top + (H - st->margin.top - st->margin.bottom - h) / 2;
+	} else {
+		l->y = top ? st->margin.top : H - h - st->margin.bottom;
+	}
+	if (force || w != l->w || h != l->h) {
+		l->w = w;
+		l->h = h;
+		wlr_layer_surface_v1_configure(l->ls, (uint32_t)w, (uint32_t)h);
+	}
+}
+
+static void handle_layer_commit(struct wl_listener *listener, void *data) {
+	layer_surf *l = wl_container_of(listener, l, commit);
+	if (l->ls->initialized) {
+		layer_arrange(l, l->ls->initial_commit);
+	}
+}
+
+static void handle_layer_map(struct wl_listener *listener, void *data) {
+	layer_surf *l = wl_container_of(listener, l, map);
+	l->mapped = true;
+	if (l->s->cb.layer != NULL) {
+		l->s->cb.layer(l->s->cb.ud, l->id, 1);
+	}
+}
+
+static void handle_layer_unmap(struct wl_listener *listener, void *data) {
+	layer_surf *l = wl_container_of(listener, l, unmap);
+	l->mapped = false;
+	if (l->s->cb.layer != NULL) {
+		l->s->cb.layer(l->s->cb.ud, l->id, 0);
+	}
+}
+
+static void layer_free(layer_surf *l) {
+	wl_list_remove(&l->commit.link);
+	wl_list_remove(&l->map.link);
+	wl_list_remove(&l->unmap.link);
+	wl_list_remove(&l->destroy.link);
+	wl_list_remove(&l->link);
+	free(l);
+}
+
+static void handle_layer_destroy(struct wl_listener *listener, void *data) {
+	layer_surf *l = wl_container_of(listener, l, destroy);
+	struct wl_server *s = l->s;
+	int id = l->id;
+	if (s->pointer_id == id) {
+		s->pointer_id = 0;
+		s->pointer_surface = NULL;
+	}
+	layer_free(l);
+	if (s->cb.layer != NULL) {
+		s->cb.layer(s->cb.ud, id, -1);
+	}
+}
+
+static void handle_new_layer(struct wl_listener *listener, void *data) {
+	struct wl_server *s = wl_container_of(listener, s, new_layer);
+	struct wlr_layer_surface_v1 *ls = data;
+	if (ls->output == NULL) {
+		if (s->output == NULL) {
+			wlr_layer_surface_v1_destroy(ls);
+			return;
+		}
+		ls->output = s->output;
+	}
+	layer_surf *l = calloc(1, sizeof(*l));
+	if (l == NULL) {
+		wlr_layer_surface_v1_destroy(ls);
+		return;
+	}
+	l->s = s;
+	l->ls = ls;
+	// Mismo espacio de ids que los toplevels: las texturas se guardan igual en C++.
+	l->id = s->next_id++;
+	l->commit.notify = handle_layer_commit;
+	wl_signal_add(&ls->surface->events.commit, &l->commit);
+	l->map.notify = handle_layer_map;
+	wl_signal_add(&ls->surface->events.map, &l->map);
+	l->unmap.notify = handle_layer_unmap;
+	wl_signal_add(&ls->surface->events.unmap, &l->unmap);
+	l->destroy.notify = handle_layer_destroy;
+	wl_signal_add(&ls->events.destroy, &l->destroy);
+	wl_list_insert(s->layers.prev, &l->link);
+	surface_state_acquire(s, ls->surface, l->id);
+}
+
+// xdg-activation: sin validar el token (cualquier cliente puede pedir el frente).
+static void handle_request_activate(struct wl_listener *listener, void *data) {
+	struct wl_server *s = wl_container_of(listener, s, request_activate);
+	struct wlr_xdg_activation_v1_request_activate_event *ev = data;
+	toplevel *t = toplevel_find_surface(s, ev->surface);
+	if (t != NULL && s->cb.activate != NULL) {
+		s->cb.activate(s->cb.ud, t->id);
+	}
+}
+
+// Portapapeles: wlroots sólo cambia la selección si el compositor acepta el pedido.
+static void handle_request_set_selection(struct wl_listener *listener, void *data) {
+	struct wl_server *s = wl_container_of(listener, s, request_set_selection);
+	struct wlr_seat_request_set_selection_event *ev = data;
+	wlr_seat_set_selection(s->seat, ev->source, ev->serial);
+}
+
+static void handle_request_set_primary_selection(struct wl_listener *listener, void *data) {
+	struct wl_server *s = wl_container_of(listener, s, request_set_primary_selection);
+	struct wlr_seat_request_set_primary_selection_event *ev = data;
+	wlr_seat_set_primary_selection(s->seat, ev->source, ev->serial);
+}
+
 static void output_set_size(struct wl_server *s) {
 	struct wlr_output_state state;
 	wlr_output_state_init(&state);
@@ -738,6 +912,7 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 	s->egl_dpy = EGL_NO_DISPLAY;
 	wl_list_init(&s->toplevels);
 	wl_list_init(&s->surfaces);
+	wl_list_init(&s->layers);
 
 	s->display = wl_display_create();
 	if (s->display == NULL) {
@@ -765,6 +940,11 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 	if (s->output != NULL) {
 		output_set_size(s);
 		wlr_output_create_global(s->output, s->display);
+		// xdg-output (tamaño lógico del monitor: Qt/GTK/SDL lo piden) necesita un layout.
+		struct wlr_output_layout *layout = wlr_output_layout_create(s->display);
+		if (layout != NULL && wlr_output_layout_add_auto(layout, s->output) != NULL) {
+			wlr_xdg_output_manager_v1_create(s->display, layout);
+		}
 	}
 	if (s->compositor == NULL || s->subcompositor == NULL ||
 			s->data_device_manager == NULL || s->xdg_shell == NULL) {
@@ -819,6 +999,22 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 		s->new_decoration.notify = handle_new_decoration;
 		wl_signal_add(&deco_mgr->events.new_toplevel_decoration, &s->new_decoration);
 	}
+	struct wlr_layer_shell_v1 *layer_shell = wlr_layer_shell_v1_create(s->display, 4);
+	if (layer_shell != NULL) {
+		s->new_layer.notify = handle_new_layer;
+		wl_signal_add(&layer_shell->events.new_surface, &s->new_layer);
+	}
+	struct wlr_xdg_activation_v1 *activation = wlr_xdg_activation_v1_create(s->display);
+	if (activation != NULL) {
+		s->request_activate.notify = handle_request_activate;
+		wl_signal_add(&activation->events.request_activate, &s->request_activate);
+	}
+	wlr_primary_selection_v1_device_manager_create(s->display);
+	s->request_set_selection.notify = handle_request_set_selection;
+	wl_signal_add(&s->seat->events.request_set_selection, &s->request_set_selection);
+	s->request_set_primary_selection.notify = handle_request_set_primary_selection;
+	wl_signal_add(&s->seat->events.request_set_primary_selection, &s->request_set_primary_selection);
+
 	struct wlr_server_decoration_manager *kde_deco = wlr_server_decoration_manager_create(s->display);
 	if (kde_deco != NULL) {
 		wlr_server_decoration_manager_set_default_mode(kde_deco, WLR_SERVER_DECORATION_MANAGER_MODE_SERVER);
@@ -872,10 +1068,33 @@ void wl_server_frame_done(wl_server *s) {
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	toplevel *t;
 	wl_list_for_each(t, &s->toplevels, link) {
-		if (t->mapped) {
+		if (t->mapped && (t->visible || !s->throttle)) {
 			// Todo el árbol (subsurfaces y popups): un frame callback sin respuesta
 			// en cualquiera de ellos congela el frame clock de GTK4.
 			wlr_xdg_surface_for_each_surface(t->tl->base, send_frame_done_iter, &now);
+		}
+	}
+	layer_surf *l;
+	wl_list_for_each(l, &s->layers, link) {
+		if (l->mapped) {
+			wlr_layer_surface_v1_for_each_surface(l->ls, send_frame_done_iter, &now);
+		}
+	}
+}
+
+void wl_server_set_visible(wl_server *s, const int *ids, int n) {
+	if (s == NULL) {
+		return;
+	}
+	s->throttle = true;
+	toplevel *t;
+	wl_list_for_each(t, &s->toplevels, link) {
+		t->visible = false;
+		for (int i = 0; i < n; i++) {
+			if (ids[i] == t->id) {
+				t->visible = true;
+				break;
+			}
 		}
 	}
 }
@@ -902,6 +1121,12 @@ void wl_server_set_default_size(wl_server *s, int w, int h) {
 	}
 	if (s->output != NULL && (s->output->width != s->default_w || s->output->height != s->default_h)) {
 		output_set_size(s);
+		layer_surf *l;
+		wl_list_for_each(l, &s->layers, link) {
+			if (l->ls->initialized) {
+				layer_arrange(l, false);
+			}
+		}
 	}
 }
 
@@ -931,15 +1156,20 @@ void wl_server_pointer_motion(wl_server *s, int id, double x, double y, uint32_t
 	if (s == NULL) {
 		return;
 	}
-	toplevel *t = toplevel_find(s, id);
-	if (t == NULL) {
-		return;
-	}
 	// Hit-test sobre todo el arbol (popups primero). x,y llegan relativos a la
 	// raiz; sub_x,sub_y quedan en coords locales de la surface elegida.
 	double sub_x = 0.0;
 	double sub_y = 0.0;
-	struct wlr_surface *surface = wlr_xdg_surface_surface_at(t->tl->base, x, y, &sub_x, &sub_y);
+	struct wlr_surface *surface = NULL;
+	toplevel *t = toplevel_find(s, id);
+	layer_surf *l = t == NULL ? layer_find(s, id) : NULL;
+	if (t != NULL) {
+		surface = wlr_xdg_surface_surface_at(t->tl->base, x, y, &sub_x, &sub_y);
+	} else if (l != NULL && l->mapped) {
+		surface = wlr_layer_surface_v1_surface_at(l->ls, x, y, &sub_x, &sub_y);
+	} else {
+		return;
+	}
 	if (surface == NULL) {
 		if (s->pointer_surface != NULL) {
 			s->pointer_surface = NULL;
@@ -1064,14 +1294,34 @@ int wl_server_layers(wl_server *s, int id, wl_server_layer *out, int max) {
 	if (s == NULL || out == NULL || max <= 0) {
 		return 0;
 	}
+	struct layer_data d = { out, max, 0 };
 	toplevel *t = toplevel_find(s, id);
-	if (t == NULL || !t->mapped) {
+	if (t != NULL && t->mapped) {
+		// Orden raiz -> hojas, que es el orden de dibujo de wlroots.
+		wlr_xdg_surface_for_each_surface(t->tl->base, layer_iterator, &d);
+		return d.count;
+	}
+	layer_surf *l = t == NULL ? layer_find(s, id) : NULL;
+	if (l != NULL && l->mapped) {
+		wlr_layer_surface_v1_for_each_surface(l->ls, layer_iterator, &d);
+	}
+	return d.count;
+}
+
+int wl_server_layer_surfaces(wl_server *s, wl_server_layer_surface *out, int max) {
+	if (s == NULL || out == NULL) {
 		return 0;
 	}
-	struct layer_data d = { out, max, 0 };
-	// Orden raiz -> hojas, que es el orden de dibujo de wlroots.
-	wlr_xdg_surface_for_each_surface(t->tl->base, layer_iterator, &d);
-	return d.count;
+	int n = 0;
+	for (int layer = 0; layer <= ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY; layer++) {
+		layer_surf *l;
+		wl_list_for_each(l, &s->layers, link) {
+			if (n < max && l->mapped && (int)l->ls->current.layer == layer) {
+				out[n++] = (wl_server_layer_surface){ l->id, layer, l->x, l->y, l->w, l->h };
+			}
+		}
+	}
+	return n;
 }
 
 void wl_server_bind_dmabuf(wl_server *s, uint64_t key, unsigned int texid) {
@@ -1128,6 +1378,13 @@ void wl_server_destroy(wl_server *s) {
 	if (s->new_decoration.notify != NULL) {
 		wl_list_remove(&s->new_decoration.link);
 	}
+	struct wl_listener *extra[] = { &s->new_layer, &s->request_activate,
+		&s->request_set_selection, &s->request_set_primary_selection };
+	for (size_t i = 0; i < sizeof(extra) / sizeof(extra[0]); i++) {
+		if (extra[i]->notify != NULL) {
+			wl_list_remove(&extra[i]->link);
+		}
+	}
 
 	if (s->display != NULL) {
 		wl_display_destroy_clients(s->display);
@@ -1143,6 +1400,11 @@ void wl_server_destroy(wl_server *s) {
 		wl_list_remove(&t->destroy.link);
 		wl_list_remove(&t->link);
 		free(t);
+	}
+
+	layer_surf *l, *ltmp;
+	wl_list_for_each_safe(l, ltmp, &s->layers, link) {
+		layer_free(l);
 	}
 
 	// Red de seguridad: las surface_state normalmente ya se liberaron en

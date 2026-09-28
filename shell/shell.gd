@@ -65,6 +65,7 @@ func _ready():
 	connect("imgui_frame", self, "_imgui_frame")
 	compositor.connect("toplevel_added", self, "_on_toplevel_added")
 	compositor.connect("toplevel_removed", self, "_on_toplevel_removed")
+	compositor.connect("toplevel_activate", self, "_on_toplevel_activate")
 	# Cambios de ventanas: rearmar la UI (el Frame las lista, recovery espera la suya).
 	compositor.connect("toplevel_added", self, "_redraw_on_signal")
 	compositor.connect("toplevel_removed", self, "_redraw_on_signal")
@@ -74,6 +75,8 @@ func _ready():
 	frame = preload("res://frame.gd").new()
 	frame.name = "Frame"
 	add_child(frame)
+	# Notificaciones y demás layer-shell, encima de todo (después del Frame: su _input va antes).
+	add_child(preload("res://layers.gd").new())
 
 	# Capa de dialogos encima de la vista de la actividad.
 	dialog_view = Control.new()
@@ -412,9 +415,10 @@ func _launch_app(app):
 	apps.query = ""
 	var i = _activity_named(app.name)
 	if i < 0:
-		ACTIVITIES.append({"name": app.name, "wayland": ["sh", "-c", "exec " + app.exec], "dynamic": true})
+		ACTIVITIES.append({"name": app.name, "wayland": ["sh", "-c", app.cmd], "dynamic": true})
 		i = ACTIVITIES.size() - 1
 	_activate(i)
+	apps.watch(self, app.name, last_launch_pid)
 	# Si no se pudo lanzar, no queda colgada en el anillo.
 	if pending_wayland == "" and not wayland_ids.has(app.name) and ACTIVITIES[i].get("dynamic", false):
 		ACTIVITIES.remove(i)
@@ -608,6 +612,15 @@ func _on_toplevel_added(id):
 		return
 	# Sin actividad: se creara una dinamica en cuanto llegue app_id/titulo.
 	unmanaged.append(id)
+
+
+# xdg-activation (p.ej. clic en una notificación): la ventana pasa al frente.
+func _on_toplevel_activate(id):
+	var name = _activity_for_window(_root_of(id))
+	if name != "":
+		_open_by_name(name)
+		compositor.focus(id)
+		request_redraw()
 
 
 func _add_dialog(id):

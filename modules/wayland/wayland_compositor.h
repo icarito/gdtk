@@ -4,6 +4,7 @@
 #include "core/dictionary.h"
 #include "core/os/input_event.h"
 #include "core/pool_vector.h"
+#include "core/set.h"
 #include "scene/main/node.h"
 #include "scene/resources/texture.h"
 
@@ -31,18 +32,30 @@ class WaylandCompositor : public Node {
 	int dmabuf_commits;
 	int shm_commits;
 	Map<int, Toplevel> toplevels;
+	// Ids de layer surfaces (comparten espacio con los toplevels pero no son ventanas).
+	Set<int> layer_ids;
+	// Ids dibujados (get_layers) en el frame en curso y en el último terminado (end_frame).
+	Set<int> drawn_collect;
+	Set<int> drawn;
+	bool throttle;
+	// Procesos lanzados que todavía no se recogieron con waitpid.
+	Vector<int> children;
 
 	static void _cb_added(void *p_ud, int p_id);
 	static void _cb_removed(void *p_ud, int p_id);
 	static void _cb_frame(void *p_ud, int p_id, uint64_t p_key, const unsigned char *p_data, int p_w, int p_h, uint32_t p_format, int p_stride);
 	static void _cb_dmabuf(void *p_ud, int p_id, uint64_t p_key, int p_w, int p_h);
 	static void _cb_title(void *p_ud, int p_id, const char *p_title);
+	static void _cb_layer(void *p_ud, int p_id, int p_state);
+	static void _cb_activate(void *p_ud, int p_id);
 
 	void _on_added(int p_id);
 	void _on_removed(int p_id);
 	void _on_frame(int p_id, uint64_t p_key, const unsigned char *p_data, int p_w, int p_h, uint32_t p_format, int p_stride);
 	void _on_dmabuf(int p_id, uint64_t p_key, int p_w, int p_h);
 	void _on_title(int p_id, const char *p_title);
+	void _count_commit(int p_id);
+	void _reap_children();
 
 	Map<int, Toplevel>::Element *_toplevel_entry(int p_id);
 
@@ -64,6 +77,8 @@ public:
 	int get_parent_id(int p_id) const;
 	String get_app_id(int p_id) const;
 	Array get_ids() const;
+	Array get_layer_surfaces();
+	void end_frame();
 
 	void set_size(int p_id, const Vector2 &p_size);
 	void close(int p_id);
