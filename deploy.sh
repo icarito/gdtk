@@ -36,6 +36,10 @@ rsync -a "$TMP/godot-gdtk" "$HOST:gdtk/bin/"
 rsync -a --exclude '*crash*' --exclude '.import' "$GDTK/shell" "$GDTK/addons" "$HOST:gdtk/"  # shell/addons -> ../addons
 rsync -a "$GDTK/mcp" "$HOST:gdtk/"
 rsync -a "$GDTK/session/gdtk-session" "$GDTK/session/gdtk-session-x11" "$GDTK/session/keyboard.sh" "$GDTK/session/gdtk-supervisor" "$GDTK/session/gdtk-session-sway" "$GDTK/session/sway.conf" "$HOST:gdtk/session/"
+# Portal RemoteDesktop propio (input remoto libei): el backend lo implementa el shell
+# (modules/wayland/eis_server.c). El frontend xdg-desktop-portal lo enruta sólo en la
+# sesión gdtk (UseIn/DesktopNames), así no toca xfce ni las demás sesiones del host.
+rsync -a "$GDTK/session/gdtk.portal" "$GDTK/session/gdtk-portals.conf" "$HOST:gdtk/session/"
 desktop() { # desktop <archivo> <nombre> <script>
 	printf '[Desktop Entry]\nName=%s\nComment=Shell tipo Sugar sobre Godot/ImGui con compositor wlroots embebido\nExec=env GDTK_VIDEO_DRIVER=%s %s/gdtk/session/%s\nType=Application\nDesktopNames=gdtk\n' \
 		"$2" "$DRIVER" "$RHOME" "$3" | ssh "$HOST" "cat > ~/gdtk/session/$1"
@@ -46,3 +50,6 @@ desktop gdtk-sway.desktop "gdtk Wayland (sway, prueba)" gdtk-session-sway
 ssh "$HOST" '~/gdtk/bin/godot-gdtk --version || true'
 ssh "$HOST" 'sudo -n cp ~/gdtk/session/gdtk.desktop ~/gdtk/session/gdtk-sway.desktop /usr/share/wayland-sessions/ && sudo -n cp ~/gdtk/session/gdtk-x11.desktop /usr/share/xsessions/' \
 	|| echo "Instalar con sudo: ~/gdtk/session/gdtk.desktop en /usr/share/wayland-sessions/ y gdtk-x11.desktop en /usr/share/xsessions/"
+# Portal del usuario (sin sudo): xdg-desktop-portal busca *.portal en XDG_DATA_HOME y
+# <desktop>-portals.conf en XDG_CONFIG_HOME; aplica sólo con XDG_CURRENT_DESKTOP=gdtk.
+ssh "$HOST" 'mkdir -p ~/.config/xdg-desktop-portal ~/.local/share/xdg-desktop-portal/portals && cp ~/gdtk/session/gdtk-portals.conf ~/.config/xdg-desktop-portal/ && cp ~/gdtk/session/gdtk.portal ~/.local/share/xdg-desktop-portal/portals/'
