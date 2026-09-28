@@ -191,7 +191,8 @@ func watch(shell, name, pid):
 func _on_exit(pid, code, shell):
 	var name = watching.get(pid, "")
 	watching.erase(pid)
-	if name == "" or shell.pending_wayland != name:
+	# Código 0: lo normal si otro proceso abre la ventana (gapplication, D-Bus, instancia única).
+	if name == "" or shell.pending_wayland != name or code == 0:
 		return
 	shell.pending_wayland = ""
 	var i = shell._activity_named(name)
@@ -200,8 +201,6 @@ func _on_exit(pid, code, shell):
 	if shell.current_activity != null and shell.current_activity.name == name:
 		shell._go_home()
 	shell.activity_error = "%s terminó sin abrir ventana (código %d, ver shell.log)" % [name, code]
-	if code == 0:
-		shell.activity_error += "; si ya estaba abierta, lo está en otro display"
 	shell.request_redraw()
 
 
