@@ -143,6 +143,27 @@ func _input(event):
 	if not (event is InputEventKey):
 		return
 	var code = event.scancode
+	# Exposé abierto: navegar y elegir (Esc cierra).
+	if shell.expose:
+		if not event.pressed:
+			return
+		if code == KEY_ESCAPE:
+			shell._toggle_expose(false)
+		elif code == KEY_LEFT:
+			shell._expose_move(-1)
+		elif code == KEY_RIGHT:
+			shell._expose_move(1)
+		elif code == KEY_UP:
+			shell._expose_move(-shell._tile_cols())
+		elif code == KEY_DOWN:
+			shell._expose_move(shell._tile_cols())
+		elif code == KEY_ENTER or code == KEY_KP_ENTER or code == KEY_SPACE:
+			shell._expose_commit()
+		else:
+			return
+		swallowed[code] = true
+		get_tree().set_input_as_handled()
+		return
 	if SUPER_KEYS.has(code) or SUPER_KEYS.has(event.physical_scancode):
 		if event.pressed:
 			super_press = event
@@ -156,6 +177,14 @@ func _input(event):
 	if event.pressed and code == KEY_F6 and super_press != null:
 		super_press = null
 		DebugHud.toggle()
+		shell.request_redraw()
+		swallowed[code] = true
+		get_tree().set_input_as_handled()
+		return
+	if event.pressed and code == KEY_W and super_press != null:
+		# Super+W: exposé (ver las ventanas y elegir una).
+		super_press = null
+		shell._toggle_expose(true)
 		shell.request_redraw()
 		swallowed[code] = true
 		get_tree().set_input_as_handled()
@@ -176,10 +205,28 @@ func _input(event):
 		set_visible(false)
 	elif code == KEY_TAB and event.alt:
 		cycle(-1 if event.shift else 1)
+	elif event.control and event.alt and not event.shift and _arrow_dir(code) != 0:
+		# Ctrl+Alt+flecha: mover el foco entre tiles.
+		shell._focus_dir(_arrow_dir(code))
+	elif event.control and event.alt and event.shift and _arrow_dir(code) != 0:
+		# Ctrl+Alt+Shift+flecha: intercambiar el tile enfocado con el vecino.
+		shell._swap_dir(_arrow_dir(code))
 	else:
 		return
 	swallowed[code] = true
 	get_tree().set_input_as_handled()
+
+
+func _arrow_dir(code):
+	if code == KEY_LEFT:
+		return -1
+	if code == KEY_RIGHT:
+		return 1
+	if code == KEY_UP:
+		return -2
+	if code == KEY_DOWN:
+		return 2
+	return 0
 
 
 # Llamado en cada imgui_frame del shell, después de la vista.
@@ -308,8 +355,12 @@ func transition():
 	var now = OS.get_ticks_msec()
 	var key = "home:" + str(shell.apps_view)
 	if shell.current_activity != null:
-		# Una app nueva cambia de clave otra vez al llegar su primera textura.
-		key = shell.current_activity.name + ":" + str(shell.tex_ready_frame >= 0)
+		if shell.current_activity.has("wayland") and shell.tile_mode:
+			# En tiling todas las ventanas están a la vista: enfocar otra no re-funde todo.
+			key = "tiles"
+		else:
+			# Una app nueva cambia de clave otra vez al llegar su primera textura.
+			key = shell.current_activity.name + ":" + str(shell.tex_ready_frame >= 0)
 	if key != view_key:
 		view_key = key
 		fade_since = now

@@ -31,7 +31,6 @@ var last_launch_pid = -1
 
 var wayland_ids = {}
 var pending_wayland = ""
-var view_offset = Vector2.ZERO
 var requested_sizes = {}
 # Los buffers wayland vienen con alfa premultiplicado.
 var premult_material = null
@@ -66,6 +65,28 @@ var remote_input = null
 var input_requests = []  # pedidos de otros procesos esperando el diálogo
 var eis_cursor = null  # sin cursor propio el host (cage/sway) no lo mueve: se dibuja uno
 
+# --- Tiling ---
+# Cada ventana raíz vive en un tile, uno al lado del otro (1:1, sin escalar: se pide
+# el tamaño del tile al cliente). `focused_tile` recibe teclado y clics; `tiles` es el
+# orden de layout. `expose` es la vista de miniaturas (las mismas ventanas, escaladas).
+var tiles = []
+var focused_tile = -1
+var tile_mode = false
+var tile_nodes = {}      # id -> Control (contenedor de capas del tile)
+var tile_rects = {}      # id -> Rect2 en coords de la vista
+var tile_anim = {}       # id -> {"from": Vector2, "since": int}
+var tile_fade = {}       # id -> ms en que apareció (fade-in)
+var expose = false
+var expose_sel = 0
+var expose_cards = {}    # id -> Rect2 de la tarjeta en exposé
+var focus_flash = 0      # ms del último cambio de foco (borde que destella)
+var tiles_ui = null
+var expose_bg = null     # fondo oscuro de exposé, detrás de los tiles
+const TILE_GAP = 3.0
+const TILE_ANIM_MS = 150
+const TILE_FADE_MS = 150
+const FOCUS_FLASH_MS = 260
+
 
 func _ready():
 	connect("imgui_frame", self, "_imgui_frame")
@@ -90,6 +111,24 @@ func _ready():
 	dialog_view.rect_clip_content = true
 	dialog_view.visible = false
 	$ViewLayer.add_child(dialog_view)
+
+	# Bordes de foco, títulos y tarjetas de exposé: se dibuja a mano (Control._draw) y no
+	# captura input, así los clics siguen llegando a los tiles (una ventana ImGui sí lo haría).
+	tiles_ui = Control.new()
+	tiles_ui.name = "TilesUI"
+	tiles_ui.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	tiles_ui.rect_clip_content = false
+	tiles_ui.set_script(preload("res://tiles_ui.gd"))
+	tiles_ui.shell = self
+	$ViewLayer.add_child(tiles_ui)
+
+	# Fondo de exposé: detrás de los tiles (View) para no tapar las miniaturas.
+	expose_bg = ColorRect.new()
+	expose_bg.color = Color(0.05, 0.06, 0.08, 0.92)
+	expose_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	expose_bg.visible = false
+	$ViewLayer.add_child(expose_bg)
+	$ViewLayer.move_child(expose_bg, 0)
 
 	for arg in OS.get_cmdline_args():
 		if arg.begins_with("--screenshot="):
@@ -195,10 +234,22 @@ func _imgui_frame():
 	if fade < 1.0:
 		pop_style_var()
 
+	# Tiling: con alguna ventana abierta y una actividad wayland activa se muestran todos
+	# los tiles a la vez; en Home o en una actividad de script, la vista se oculta.
+	tile_mode = current_activity != null and current_activity.has("wayland") and not tiles.empty()
+	if tile_mode:
+		view.visible = true
+		_update_tiles()
+	else:
+		view.visible = false
 	var id = _current_wayland_id()
-	if id >= 0:
-		_update_layers(id)
 	_update_dialogs(id)
+	if tiles_ui != null:
+		tiles_ui.rect_size = get_viewport_rect().size
+		tiles_ui.refresh()
+	if expose_bg != null:
+		expose_bg.rect_size = get_viewport_rect().size
+		expose_bg.visible = expose
 	frame.draw(self)
 
 	_draw_input_requests()
@@ -209,42 +260,260 @@ func _imgui_frame():
 	_run_test_logic()
 
 
-# Dibuja todo el arbol de surfaces del toplevel: un TextureRect hijo por capa,
-# reusado por indice, en el orden devuelto por el compositor (raiz -> popups).
-func _update_layers(id):
-	var layers = compositor.get_layers(id)
+# --- Tiling: varios toplevels a la vez, uno por tile ---
+
+# Hasta 3 ventanas en una fila; con más, grilla de columnas = techo(sqrt(n)).
+func _tile_cols():
+	var n = tiles.size()
+	if n <= 3:
+		return max(n, 1)
+	return int(ceil(sqrt(float(n))))
+
+
+func _compute_tile_layout():
+	tile_rects.clear()
+	var n = tiles.size()
+	if n == 0:
+		return
 	var vp = get_viewport_rect().size
-	view.rect_size = vp
+	var cols = _tile_cols()
+	var rows = int(ceil(float(n) / float(cols)))
+	var gap = TILE_GAP
+	var cw = (vp.x - gap * float(cols + 1)) / float(cols)
+	var ch = (vp.y - gap * float(rows + 1)) / float(rows)
+	for i in range(n):
+		var c = i % cols
+		var r = i / cols
+		tile_rects[tiles[i]] = Rect2(gap + float(c) * (cw + gap), gap + float(r) * (ch + gap), cw, ch)
 
-	# 1:1, sin escalar: escalar el buffer (que incluye las sombras CSD) deformaba el texto.
-	# Se desplaza por la geometría para que el contenido quede en el origen de la vista;
-	# las sombras caen fuera y las recorta rect_clip_content.
-	var geo = compositor.get_geometry(id)
-	view_offset = -geo.position
-	# La vista puede cambiar de tamaño después de abrir la ventana (p.ej. --fullscreen se aplica
-	# tras el primer frame): se vuelve a pedir el tamaño. Se compara contra lo pedido, no contra
-	# geo.size, porque hay clientes (alacritty) que redondean a su grilla de celdas.
-	if geo.size != Vector2.ZERO and requested_sizes.get(id) != view.rect_size:
-		requested_sizes[id] = view.rect_size
-		compositor.default_size = view.rect_size
-		compositor.set_size(id, view.rect_size)
 
-	_ensure_layer_nodes(layers.size())
+# Tarjetas de exposé: grilla centrada de hasta 3 miniaturas por fila.
+func _compute_expose_layout():
+	expose_cards.clear()
+	var n = tiles.size()
+	if n == 0:
+		return
+	var vp = get_viewport_rect().size
+	expose_sel = int(clamp(expose_sel, 0, max(n - 1, 0)))
+	var cols = 3 if n > 3 else n
+	var rows = int(ceil(float(n) / float(cols)))
+	var pad = 28.0
+	var gap = 18.0
+	var cw = (vp.x - pad * 2.0 - gap * float(cols - 1)) / float(cols)
+	var ch = (vp.y - pad * 2.0 - gap * float(rows - 1)) / float(rows)
+	for i in range(n):
+		var c = i % cols
+		var r = i / cols
+		expose_cards[tiles[i]] = Rect2(pad + float(c) * (cw + gap), pad + float(r) * (ch + gap), cw, ch)
+
+
+func _tile_node(id):
+	var node = tile_nodes.get(id)
+	if node == null or not is_instance_valid(node):
+		_ensure_premult_material()
+		node = Control.new()
+		node.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		node.rect_clip_content = true
+		view.add_child(node)
+		tile_nodes[id] = node
+	return node
+
+
+# Un TextureRect por capa del árbol del toplevel, reusado por índice (raíz -> popups).
+func _fill_nodes(box, layers, off):
+	_ensure_premult_material()
+	while box.get_child_count() < layers.size():
+		var t = TextureRect.new()
+		t.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		t.expand = true
+		t.stretch_mode = TextureRect.STRETCH_SCALE
+		t.material = premult_material
+		t.visible = false
+		box.add_child(t)
 	for i in range(layers.size()):
-		var node = view.get_child(i)
+		var node = box.get_child(i)
 		var layer = layers[i]
 		var size = layer.rect.size
 		if (size.x <= 0.0 or size.y <= 0.0) and layer.texture != null:
 			size = layer.texture.get_size()
 		node.texture = layer.texture
-		node.rect_position = layer.rect.position + view_offset
+		node.rect_position = layer.rect.position + off
 		node.rect_size = size
 		node.visible = layer.texture != null
-	for i in range(layers.size(), view.get_child_count()):
-		view.get_child(i).visible = false
+	for i in range(layers.size(), box.get_child_count()):
+		box.get_child(i).visible = false
 
-	if tex_ready_frame < 0 and layers.size() > 0 and layers[0].texture != null:
+
+func _update_tiles():
+	view.rect_size = get_viewport_rect().size
+	compositor.default_size = view.rect_size
+	if expose:
+		_compute_expose_layout()
+	else:
+		_compute_tile_layout()
+	for id in tile_nodes.keys():
+		if not tiles.has(id):
+			var node = tile_nodes[id]
+			tile_nodes.erase(id)
+			tile_rects.erase(id)
+			expose_cards.erase(id)
+			tile_anim.erase(id)
+			tile_fade.erase(id)
+			if node != null and is_instance_valid(node):
+				node.queue_free()
+	var now = OS.get_ticks_msec()
+	for id in tiles:
+		if _id_alive(id):
+			_update_tile(id, now)
+			if expose:
+				compositor.get_layers(id)  # cuenta como dibujado: la miniatura sigue viva
+
+
+func _update_tile(id, now):
+	var node = _tile_node(id)
+	var geo = compositor.get_geometry(id)
+	var layers = compositor.get_layers(id)
+	_fill_nodes(node, layers, -geo.position)
+
+	if expose:
+		# Miniatura: se escala el nodo entero (la app conserva su tamaño de tile) y se centra.
+		var card = expose_cards.get(id, Rect2(Vector2.ZERO, view.rect_size))
+		var size = node.rect_size
+		if size.x <= 0.0 or size.y <= 0.0:
+			size = card.size
+		var s = min(min(card.size.x / max(size.x, 1.0), card.size.y / max(size.y, 1.0)), 1.0)
+		node.rect_scale = Vector2(s, s)
+		node.rect_position = card.position + (card.size - size * s) * 0.5
+		node.modulate = Color(1, 1, 1, 1)
+		return
+
+	var rect = tile_rects.get(id, Rect2(Vector2.ZERO, view.rect_size))
+	# Desliza desde donde estaba a su celda nueva (abrir, reacomodar, intercambiar).
+	var pos = rect.position
+	if tile_anim.has(id):
+		var a = tile_anim[id]
+		var k = clamp(float(now - a.since) / TILE_ANIM_MS, 0.0, 1.0)
+		pos = a.from.linear_interpolate(rect.position, 1.0 - pow(1.0 - k, 3.0))
+		if k >= 1.0:
+			tile_anim.erase(id)
+		else:
+			request_redraw()
+	elif node.rect_position.distance_to(rect.position) > 0.5:
+		tile_anim[id] = {"from": node.rect_position, "since": now}
+		request_redraw()
+	node.rect_scale = Vector2.ONE
+	node.rect_position = pos
+	node.rect_size = rect.size
+	# Fade-in de una ventana recién abierta.
+	var mod = 1.0
+	if tile_fade.has(id):
+		var k = clamp(float(now - tile_fade[id]) / TILE_FADE_MS, 0.0, 1.0)
+		mod = 1.0 - pow(1.0 - k, 3.0)
+		if k >= 1.0:
+			tile_fade.erase(id)
+		else:
+			request_redraw()
+	node.modulate = Color(mod, mod, mod, mod)
+
+	# 1:1 con el tamaño del tile: se le pide al cliente que se ajuste (texto nítido).
+	if geo.size != Vector2.ZERO and requested_sizes.get(id) != rect.size:
+		requested_sizes[id] = rect.size
+		compositor.set_size(id, rect.size)
+	if tex_ready_frame < 0 and id == focused_tile and layers.size() > 0 and layers[0].texture != null:
 		tex_ready_frame = frame_count
+
+
+func _focus_tile(id):
+	if id < 0 or not _id_alive(id):
+		return
+	if not tiles.has(id):
+		tiles.append(id)
+	focused_tile = id
+	focus_flash = OS.get_ticks_msec()
+	var name = _activity_for_window(id)
+	var i = _activity_named(name)
+	if i >= 0:
+		current_activity = ACTIVITIES[i]
+	compositor.focus(id)
+	request_redraw()
+
+
+# Mueve el foco a la celda vecina. dir: -1 izq, 1 der, -2 arriba, 2 abajo (rota en la fila).
+func _focus_dir(dir):
+	if not tile_mode or tiles.empty():
+		return
+	var i = tiles.find(focused_tile)
+	if i < 0:
+		i = 0
+	var n = tiles.size()
+	var cols = _tile_cols()
+	var c = i % cols
+	var r = i / cols
+	var nc = c
+	var nr = r
+	if dir == -1 or dir == 1:
+		nc = posmod(c + dir, cols)
+	else:
+		nr = r + (1 if dir == 2 else -1)
+		if nr < 0:
+			nr = 0
+	var j = nr * cols + nc
+	if j >= 0 and j < n:
+		_focus_tile(tiles[j])
+
+
+# Intercambia el tile enfocado con el vecino en esa dirección (se deslizan al nuevo lugar).
+func _swap_dir(dir):
+	if not tile_mode or tiles.empty():
+		return
+	var i = tiles.find(focused_tile)
+	if i < 0:
+		return
+	var n = tiles.size()
+	var cols = _tile_cols()
+	var c = i % cols
+	var r = i / cols
+	var nc = c
+	var nr = r
+	if dir == -1 or dir == 1:
+		nc = c + dir
+		if nc < 0 or nc >= cols:
+			return
+	else:
+		nr = r + (1 if dir == 2 else -1)
+		if nr < 0:
+			return
+	var j = nr * cols + nc
+	if j < 0 or j >= n or j == i:
+		return
+	var tmp = tiles[i]
+	tiles[i] = tiles[j]
+	tiles[j] = tmp
+	request_redraw()
+
+
+func _toggle_expose(on):
+	expose = on
+	if on:
+		expose_sel = max(tiles.find(focused_tile), 0)
+	request_redraw()
+
+
+func _expose_move(step):
+	if tiles.empty():
+		return
+	expose_sel = posmod(expose_sel + step, tiles.size())
+	request_redraw()
+
+
+func _expose_commit():
+	var id = -1
+	if expose_sel >= 0 and expose_sel < tiles.size():
+		id = tiles[expose_sel]
+	expose = false
+	if id >= 0:
+		_focus_tile(id)
+	request_redraw()
 
 
 func _ensure_premult_material():
@@ -253,22 +522,13 @@ func _ensure_premult_material():
 		premult_material.blend_mode = CanvasItemMaterial.BLEND_MODE_PREMULT_ALPHA
 
 
-func _ensure_layer_nodes(count):
-	_ensure_premult_material()
-	while view.get_child_count() < count:
-		var child = TextureRect.new()
-		child.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		child.expand = true
-		child.stretch_mode = TextureRect.STRETCH_SCALE
-		child.material = premult_material
-		child.visible = false
-		view.add_child(child)
-
-
 # --- Dialogos: capas centradas sobre la vista de su toplevel raiz ---
 
 func _update_dialogs(root_id):
 	if dialog_view == null:
+		return
+	if expose:
+		dialog_view.visible = false
 		return
 	dialog_view.rect_position = Vector2.ZERO
 	dialog_view.rect_size = view.rect_size
@@ -311,7 +571,7 @@ func _layout_dialog(box, d):
 	_ensure_premult_material()
 	var geo = _dialog_geo(d)
 	var layers = compositor.get_layers(d)
-	box.rect_position = view.rect_size * 0.5 - geo.size * 0.5 - geo.position
+	box.rect_position = _dialog_rect(d).position  # centrado sobre el tile de su raíz
 	box.rect_size = geo.size
 	while box.get_child_count() < layers.size():
 		var child = TextureRect.new()
@@ -355,7 +615,8 @@ func _dialog_geo(d):
 
 func _dialog_rect(d):
 	var geo = _dialog_geo(d)
-	return Rect2(view.rect_size * 0.5 - geo.size * 0.5 - geo.position, geo.size)
+	var base = tile_rects.get(_root_of(d), Rect2(Vector2.ZERO, view.rect_size))
+	return Rect2(base.position + base.size * 0.5 - geo.size * 0.5 - geo.position, geo.size)
 
 
 func _root_of(id):
@@ -534,8 +795,7 @@ func _open_wayland(activity):
 		id = wayland_ids[name]
 
 	if id >= 0:
-		_show_view(id)
-		compositor.focus(id)
+		_focus_tile(id)
 		return
 
 	var vp = get_viewport_rect().size
@@ -543,7 +803,6 @@ func _open_wayland(activity):
 	view.rect_size = vp
 	view.rect_clip_content = true
 	compositor.default_size = view.rect_size
-	view.visible = false
 
 	var cmd = activity.wayland[0]
 	var args = PoolStringArray()
@@ -561,15 +820,6 @@ func _open_wayland(activity):
 		print("launched ", cmd, " pid ", pid)
 
 
-func _show_view(id):
-	tex_ready_frame = -1
-	typed = false
-	type_queue = []
-	type_done_frame = -1
-	view.visible = true
-	_update_layers(id)
-
-
 func _go_home():
 	_release_activity()
 	current_activity = null
@@ -579,9 +829,8 @@ func _go_home():
 	type_queue = []
 	type_done_frame = -1
 	tex_ready_frame = -1
-	view.visible = false
-	for i in range(view.get_child_count()):
-		view.get_child(i).visible = false
+	expose = false
+	view.visible = false  # los tiles siguen vivos: se vuelven a ver al enfocar una ventana
 
 
 # Las actividades tipo script pueden tener recursos propios (p.ej. el viewport
@@ -603,11 +852,10 @@ func _close_script_activity(name):
 
 
 func _current_wayland_id():
-	if current_activity == null or not current_activity.has("wayland"):
+	if not tile_mode:
 		return -1
-	var name = current_activity.name
-	if wayland_ids.has(name) and _id_alive(wayland_ids[name]):
-		return wayland_ids[name]
+	if focused_tile >= 0 and _id_alive(focused_tile):
+		return focused_tile
 	return -1
 
 
@@ -625,9 +873,8 @@ func _on_toplevel_added(id):
 		var name = pending_wayland
 		pending_wayland = ""
 		wayland_ids[name] = id
-		compositor.focus(id)
-		if current_activity != null and current_activity.has("wayland") and current_activity.name == name:
-			_show_view(id)
+		_add_tile(id)
+		_focus_tile(id)
 		return
 	# Sin actividad: se creara una dinamica en cuanto llegue app_id/titulo.
 	unmanaged.append(id)
@@ -693,9 +940,16 @@ func _open_unmanaged_window(id):
 	activity_instance = null
 	activity_error = ""
 	pending_wayland = ""
-	_show_view(id)
-	compositor.focus(id)
+	_add_tile(id)
+	_focus_tile(id)
 	print("actividad dinamica ", name, " para toplevel ", id)
+
+
+func _add_tile(id):
+	if not tiles.has(id):
+		tiles.append(id)
+		tile_fade[id] = OS.get_ticks_msec()
+	request_redraw()
 
 
 func _activity_for_window(id):
@@ -763,8 +1017,25 @@ func _on_toplevel_removed(id):
 	var index = _activity_named(removed_name)
 	if index >= 0 and ACTIVITIES[index].get("dynamic", false):
 		ACTIVITIES.remove(index)
-	if current_activity != null and current_activity.has("wayland") and current_activity.name == removed_name:
-		_go_home()
+	# Sale del tiling: cierra su nodo y, si era el enfocado y no estamos en una actividad
+	# de script, pasa el foco al vecino (si estamos en Chat, no se le quita la pantalla).
+	var had_tile = tiles.has(id)
+	tiles.erase(id)
+	if had_tile:
+		request_redraw()
+	var script_active = current_activity != null and not current_activity.has("wayland")
+	if focused_tile == id:
+		focused_tile = -1
+		if not script_active:
+			if tiles.empty():
+				_go_home()
+			else:
+				_focus_tile(tiles[tiles.size() - 1])
+	elif not script_active and current_activity != null and current_activity.name == removed_name:
+		if tiles.empty():
+			_go_home()
+		else:
+			_focus_tile(tiles[tiles.size() - 1])
 
 
 # Al cerrarse un dialogo el foco vuelve al que quede arriba: otro dialogo o la raiz.
@@ -782,6 +1053,13 @@ func _refocus_dialog():
 
 
 func _on_view_input(event):
+	if expose:
+		if event is InputEventMouseButton and event.pressed:
+			var hit = _view_hit_test(event.position)
+			if hit.id >= 0:
+				expose_sel = tiles.find(hit.id)
+				_expose_commit()
+		return
 	if event is InputEventMouseMotion:
 		var hit = _view_hit_test(event.position)
 		if hit.id < 0:
@@ -794,25 +1072,37 @@ func _on_view_input(event):
 		compositor.pointer_motion(hit.id, hit.pos)
 		compositor.pointer_button(event.button_index, event.pressed)
 		if event.pressed:
-			compositor.focus(hit.id)
-			focused_dialog = hit.dialog
+			if hit.dialog > 0:
+				compositor.focus(hit.id)
+				focused_dialog = hit.dialog
+			else:
+				focused_dialog = 0
+				_focus_tile(hit.id)
 
 
-# Hit-test de arriba hacia abajo: el dialogo mas reciente que contenga el
-# puntero; si no, la ventana raiz de la actividad (como antes).
+# Hit-test de arriba hacia abajo: el dialogo mas reciente que contenga el puntero; si no,
+# el tile bajo el puntero (cada ventana tiene su rect). En exposé, la tarjeta.
 func _view_hit_test(pos):
-	var root = _current_wayland_id()
-	if root < 0:
+	if expose:
+		for id in tiles:
+			var card = expose_cards.get(id)
+			if card != null and card.has_point(pos):
+				expose_sel = tiles.find(id)
+				request_redraw()
+				return {"id": id, "pos": Vector2.ZERO, "dialog": 0}
 		return {"id": -1, "pos": Vector2.ZERO, "dialog": 0}
 	for i in range(dialogs.size() - 1, -1, -1):
 		var d = dialogs[i]
-		if _root_of(d) != root:
-			continue
 		var rect = _dialog_rect(d)
 		if rect.has_point(pos):
 			var geo = _dialog_geo(d)
 			return {"id": d, "pos": pos - rect.position + geo.position, "dialog": d}
-	return {"id": root, "pos": pos - view_offset, "dialog": 0}
+	for id in tiles:
+		var r = tile_rects.get(id)
+		if r != null and r.has_point(pos):
+			var geo = compositor.get_geometry(id)
+			return {"id": id, "pos": pos - r.position + geo.position, "dialog": 0}
+	return {"id": -1, "pos": Vector2.ZERO, "dialog": 0}
 
 
 # Teclear en el Home lleva a la búsqueda de apps.
@@ -832,6 +1122,9 @@ func _unhandled_input(event):
 	if current_activity == null or not current_activity.has("wayland"):
 		return
 	if not (event is InputEventKey):
+		return
+	# Con exposé abierto el teclado es para elegir ventana, no para la app.
+	if expose:
 		return
 	var id = _current_wayland_id()
 	if id < 0:

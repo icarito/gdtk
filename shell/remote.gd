@@ -205,6 +205,15 @@ func _handle_line(conn, line):
 		"home":
 			shell._go_home()
 			_reply(conn, id, true)
+		"tile_focus":
+			shell._focus_dir(int(params.get("dir", 0)))
+			_reply(conn, id, true)
+		"tile_swap":
+			shell._swap_dir(int(params.get("dir", 0)))
+			_reply(conn, id, true)
+		"expose":
+			shell._toggle_expose(bool(params.get("on", true)))
+			_reply(conn, id, true)
 		"launch":
 			_launch(conn, id, params)
 		"close_window":
@@ -273,6 +282,10 @@ func _state():
 		"wayland_socket": shell.compositor.start(),
 		"windows": windows,
 		"activities": activities,
+		# Tiling: orden de las ventanas, la enfocada y si exposé está abierto.
+		"tiles": shell.tiles,
+		"focused_tile": shell.focused_tile,
+		"expose": shell.expose,
 		# Vueltas del loop, pasos de física y frames dibujados: para medir el reposo.
 		"engine": [Engine.get_idle_frames(), Engine.get_physics_frames(), Engine.get_frames_drawn()],
 		# Frame: items con su posición en pantalla (vacío si no se dibujó).
