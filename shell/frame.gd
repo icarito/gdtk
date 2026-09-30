@@ -701,6 +701,11 @@ func _input(event):
 			return
 		_gulp(code)
 		return
+	# Vecindario abierto: Esc vuelve al Hogar (aunque el Frame esté a la vista).
+	if event.pressed and code == KEY_ESCAPE and shell.neighborhood_view and not event.echo:
+		shell._close_neighborhood()
+		_gulp(code)
+		return
 	if SUPER_KEYS.has(code) or SUPER_KEYS.has(event.physical_scancode):
 		if event.pressed:
 			super_press = event
@@ -1154,7 +1159,7 @@ func _draw_identity(ui, x, y, side, mouse):
 # Bloque Inicio: tesela cuadrada con el ícono Sugar de hogar y el título corto abajo.
 # Resalta cuando la vista actual es el Hogar (la ranura extra al final de la fila).
 func _draw_home_tile(ui, pos, side):
-	var at_home = shell.current_activity == null
+	var at_home = shell.current_activity == null and not shell.neighborhood_view
 	var b = _tile(ui, pos, side, "go_home", NX_CUR if at_home else NX_FACE)
 	if at_home:
 		_frame_focus(ui, b.rect, NX_FOCUS)
@@ -1169,6 +1174,27 @@ func _draw_home_tile(ui, pos, side):
 		ui.text_colored(NX_TEXT, "H")
 	if title_h > 0.0:
 		_tile_title(ui, pos, side, "Inicio", false)
+	return b.clicked
+
+
+# Bloque Vecindario: tesela U x U con el ícono Sugar de red inalámbrica. Sólo abre la
+# vista (no escanea, no conecta); resalta cuando la vista actual es el Vecindario.
+func _draw_neighborhood_tile(ui, pos, side):
+	var active = shell.neighborhood_view
+	var b = _tile(ui, pos, side, "go_neighborhood", NX_CUR if active else NX_FACE)
+	if active:
+		_frame_focus(ui, b.rect, NX_FOCUS)
+	var title_h = TITLE_H if side >= 76.0 else 0.0
+	var s = clamp(side - title_h - 2.0 * BEVEL - 4.0, ICON_MIN, ICON_MAX)
+	var icon = shell.neighborhood_icon_tex()
+	if icon != null:
+		ui.set_cursor_pos(pos + Vector2((side - s) * 0.5, BEVEL + max(2.0, (side - title_h - s) * 0.5)))
+		ui.image(icon, Vector2(s, s))
+	else:
+		ui.set_cursor_pos(pos + Vector2((side - 7.0 * ui.get_imgui_scale()) * 0.5, (side - 13.0 * ui.get_imgui_scale()) * 0.5))
+		ui.text_colored(NX_TEXT, "V")
+	if title_h > 0.0:
+		_tile_title(ui, pos, side, "Vecindario", false)
 	return b.clicked
 
 
@@ -1315,6 +1341,11 @@ func draw(ui):
 		# Insignia de identidad: bloque cuadrado con la figura XO. Sin acción.
 		_draw_identity(ui, x, y, side, mouse)
 		x += side + PAD
+		# Vecindario: bloque cuadrado que sólo abre la vista del Wi-Fi.
+		if _draw_neighborhood_tile(ui, Vector2(x, y), side):
+			set_visible(false)
+			shell._go_neighborhood()
+		x += side + PAD
 
 		var items = running()
 		# La selección recorre las ventanas y después los applets (y la celda "+").
@@ -1425,7 +1456,7 @@ var fading = false
 
 func transition():
 	var now = OS.get_ticks_msec()
-	var key = "home:" + str(shell.apps_view)
+	var key = "home:" + str(shell.apps_view) + ":" + str(shell.neighborhood_view)
 	if shell.current_activity != null:
 		if shell.current_activity.has("wayland") and shell.tile_mode:
 			# En tiling todas las ventanas están a la vista: enfocar otra no re-funde todo.

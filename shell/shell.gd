@@ -64,6 +64,13 @@ var apps_view = false
 # Íconos XDG del anillo: rasterizar uno o dos por frame (el SVG bloquea el frame).
 var home_icon_loads = 0
 
+# Vecindario: vista espacial del Wi-Fi (shell/neighborhood.gd). El módulo refresca en
+# un hilo; acá sólo se dibuja y se conserva la red elegida en el panel lateral.
+var neighborhood = null
+var neighborhood_view = false
+var nb_selected = ""
+var nb_version = -1
+
 # Input remoto por libei (Deskflow, lan-mouse): EIS + portal RemoteDesktop en el módulo.
 var remote_input = null
 var input_requests = []  # pedidos de otros procesos esperando el diálogo
@@ -174,6 +181,23 @@ const RING_MIN = Color(0.56, 0.59, 0.68, 0.90)  # minimizada: contorno punteado 
 const RING_LABEL = Color(0.90, 0.91, 0.94, 1.0)
 const RING_LABEL_DIM = Color(0.72, 0.74, 0.79, 1.0)
 
+# Vecindario (SPEC-sugar-journal-neighborhood, SPEC-sugar-spatial): radio simbólico del
+# Wi-Fi. Mismo lenguaje sobrio del Hogar; los anillos y nodos van con ImGui draw list.
+const NB_BG_TOP = Color(0.10, 0.11, 0.15, 1.0)
+const NB_BG_BOTTOM = Color(0.04, 0.05, 0.08, 1.0)
+const NB_RING = Color(0.55, 0.60, 0.72, 0.20)
+const NB_RING_NEAR = Color(0.55, 0.85, 0.70, 0.26)
+const NB_NODE_24 = Color(0.35, 0.72, 0.80, 0.96)
+const NB_NODE_5 = Color(0.45, 0.52, 0.92, 0.96)
+const NB_NODE_DIM = Color(0.45, 0.48, 0.58, 0.70)
+const NB_AMBER = Color(0.98, 0.80, 0.36, 1.0)
+const NB_TEXT = Color(0.92, 0.93, 0.96, 1.0)
+const NB_TEXT_DIM = Color(0.62, 0.65, 0.74, 1.0)
+const NB_HOST = Color(0.85, 0.86, 0.90, 0.95)
+const NB_HOST_REACH = Color(0.60, 0.92, 0.62, 1.0)
+const NB_HOST_DESK = Color(0.98, 0.72, 0.30, 1.0)
+const NB_NODE_MIN = 32.0   # radio: 64 px de diámetro mínimo
+
 # Íconos Sugar: los SVG traen un DOCTYPE con entidades &stroke_color;/&fill_color;.
 # Se cargan como texto, se sustituyen por los colores pedidos y se rasterizan a una
 # ImageTexture cacheada (el motor no expone load_svg_from_string en este árbol).
@@ -215,6 +239,11 @@ func home_icon_tex():
 	return _load_sugar_svg("go-home", SUGAR_STROKE, SUGAR_FILL)
 
 
+# Ícono del bloque Vecindario del Frame (Sugar: red inalámbrica).
+func neighborhood_icon_tex():
+	return _load_sugar_svg("network-wireless", SUGAR_STROKE, SUGAR_FILL)
+
+
 func _ready():
 	connect("imgui_frame", self, "_imgui_frame")
 	compositor.connect("toplevel_added", self, "_on_toplevel_added")
@@ -238,6 +267,9 @@ func _ready():
 	frame = Host.sc("res://frame.gd").new()
 	frame.name = "Frame"
 	add_child(frame)
+	# Vecindario: parser/estado del Wi-Fi. El hilo arranca al abrir la vista; este
+	# nodo sigue dueño del resultado en memoria hasta que el shell se recarga.
+	neighborhood = Host.sc("res://neighborhood.gd").new()
 	# Notificaciones y demás layer-shell, encima de todo (después del Frame: su _input va antes).
 	add_child(Host.sc("res://layers.gd").new())
 
@@ -433,6 +465,14 @@ func _process(_delta):
 		request_redraw()
 	if activity_instance != null and activity_instance.get("animate"):
 		last_activity = now
+	# Vecindario: el hilo deja el último resultado; si cambió y la vista está a la
+	# vista, se pide un frame (sin sondeo periódico en reposo).
+	if neighborhood != null and neighborhood.running():
+		neighborhood.poll()
+		if neighborhood.version != nb_version:
+			nb_version = neighborhood.version
+			if neighborhood_view:
+				request_redraw()
 	if screenshot_path == "":
 		var sleep = SLEEP_IDLE if now - last_activity > IDLE_MS else SLEEP_ACTIVE
 		if OS.low_processor_usage_mode_sleep_usec != sleep:
@@ -465,7 +505,10 @@ func _imgui_frame():
 	if fade < 1.0:
 		push_style_var_float(0, fade)
 	if current_activity == null:
-		_draw_home(_home_x(_units()))
+		if neighborhood_view:
+			_draw_neighborhood()
+		else:
+			_draw_home(_home_x(_units()))
 	else:
 		_draw_activity()
 		# Paneo/animación hacia el Hogar: se dibuja deslizándose junto a las ventanas.
@@ -2051,6 +2094,8 @@ func _go_home():
 	release_modifiers()  # no dejar modificadores pegados en la app que sale de foco
 	home_slide_since = -1
 	apps_view = false  # el Hogar muestra siempre la fila de favoritos, no la grilla
+	neighborhood_view = false
+	nb_selected = ""
 	_release_activity()
 	current_activity = null
 	activity_instance = null
@@ -2061,6 +2106,254 @@ func _go_home():
 	tex_ready_frame = -1
 	expose = false
 	view.visible = false  # los tiles siguen vivos: se vuelven a ver al enfocar una ventana
+
+
+# --- Vecindario --------------------------------------------------------------
+
+# Abrir la vista Vecindario desde el bloque del Frame (sin actividad abierta).
+func _go_neighborhood():
+	if current_activity != null or apps_view:
+		_go_home()
+	neighborhood_view = true
+	expose = false
+	if neighborhood != null:
+		neighborhood.start()   # idempotente: el hilo queda vivo mientras el shell viva
+		neighborhood.poll()
+	request_redraw()
+
+
+# Volver al Hogar desde el Vecindario (Esc, el bloque Inicio o el mismo bloque).
+func _close_neighborhood():
+	neighborhood_view = false
+	nb_selected = ""
+	request_redraw()
+
+
+# El hilo de refresco no debe quedar vivo al recargar/cerrar el shell.
+func _exit_tree():
+	if neighborhood != null:
+		neighborhood.stop()
+		neighborhood = null
+
+
+# Conectar una red: siempre por nmtui en la actividad Terminal, sin pasar secretos.
+func _open_nmtui():
+	_close_neighborhood()
+	var name = _unique_activity_name("Terminal")
+	ACTIVITIES.append({"name": name, "wayland": ["alacritty", "-e", "nmtui", "connect"], "dynamic": true})
+	var i = ACTIVITIES.size() - 1
+	_activate(i)
+	if pending_wayland == "" and not wayland_ids.has(name):
+		ACTIVITIES.remove(i)
+
+
+# Encender la radio desde el estado vacío: acción explícita, nunca en silencio.
+func _wifi_radio_on():
+	OS.execute("nmcli", ["radio", "wifi", "on"])
+	request_redraw()
+
+
+func _nb_user():
+	var user = OS.get_environment("USER")
+	if user == "":
+		user = OS.get_environment("LOGNAME")
+	if user == "":
+		user = "user"
+	var host = IP.get_hostname()
+	if host == "":
+		host = OS.get_environment("HOSTNAME")
+	return user + ("@" + host if host != "" else "")
+
+
+func _nb_short(s):
+	var maxc = 14
+	if s.length() > maxc:
+		if maxc > 3:
+			return s.substr(0, maxc - 3) + "..."
+		return s.substr(0, maxc)
+	return s
+
+
+func _nb_text(pos, s, col):
+	set_cursor_pos(pos)
+	text_colored(col, s)
+
+
+func _nb_text_centered(cx, y, s, col):
+	var w = s.length() * 7.0 * get_imgui_scale()
+	_nb_text(Vector2(cx - w * 0.5, y), s, col)
+
+
+func _nb_ring(cx, cy, r, col):
+	if r <= 1.0:
+		return
+	var pts = PoolVector2Array()
+	var seg = 72
+	for i in range(seg):
+		var a = TAU * float(i) / float(seg)
+		pts.append(Vector2(cx + cos(a) * r, cy + sin(a) * r))
+	imgui_draw_polyline(pts, col, 1.0, true)
+
+
+func _nb_selected_net():
+	if nb_selected == "" or neighborhood == null:
+		return null
+	for n in neighborhood.networks:
+		if n.ssid == nb_selected:
+			return n
+	return null
+
+
+# Vista: anillos de RSSI, nodos por red, vecinos de la red local y panel de detalle.
+func _draw_neighborhood(offset = 0.0):
+	_tick_starting(OS.get_ticks_msec())
+	var vp = get_viewport_rect().size
+	set_next_window_pos(Vector2(offset, 0.0), true)
+	set_next_window_size(vp, true)
+	var flags = WINDOW_NO_DECORATION | WINDOW_NO_BACKGROUND | WINDOW_NO_MOVE | WINDOW_NO_SAVED_SETTINGS | WINDOW_NO_SCROLLBAR | WINDOW_NO_BRING_TO_FRONT_ON_FOCUS
+	push_style_var_vec2(STYLE_VAR_WINDOW_PADDING, Vector2.ZERO)
+	if begin("##neighborhood", flags):
+		imgui_draw_rect_filled_multicolor(Rect2(Vector2.ZERO, vp), NB_BG_TOP, NB_BG_TOP, NB_BG_BOTTOM, NB_BG_BOTTOM)
+		var top = frame_bar_h(vp)
+		var panel_w = clamp(vp.x * 0.26, 210.0, 320.0)
+		var radar_w = max(220.0, vp.x - panel_w)
+		var cx = radar_w * 0.5
+		var cy = top + (vp.y - top) * 0.50
+		var R = max(80.0, min(radar_w * 0.5 - 20.0, (vp.y - top) * 0.5 - 64.0))
+		var sel = _nb_selected_net()
+		var nets = neighborhood.networks if neighborhood != null else []
+
+		_nb_text(Vector2(14.0, top + 8.0), "Vecindario", NB_TEXT)
+		_nb_text(Vector2(14.0, top + 26.0), neighborhood.status_line() if neighborhood != null else "", NB_TEXT_DIM)
+		_nb_text(Vector2(14.0, top + 44.0), "Anillos: -60 / -75 / -100 dBm", NB_TEXT_DIM)
+
+		# Anillos concéntricos (tenues) y leyenda de dBm sobre el eje +x.
+		_nb_ring(cx, cy, R * 0.46, NB_RING_NEAR)
+		_nb_ring(cx, cy, R * 0.74, NB_RING)
+		_nb_ring(cx, cy, R * 0.96, NB_RING)
+		_nb_text(Vector2(cx + R * 0.46 + 4.0, cy - 16.0), "-60", NB_TEXT_DIM)
+		_nb_text(Vector2(cx + R * 0.74 + 4.0, cy - 16.0), "-75", NB_TEXT_DIM)
+		_nb_text(Vector2(cx + R * 0.96 + 4.0, cy - 16.0), "-100", NB_TEXT_DIM)
+
+		# El propio equipo: punto central pequeño (no la figura XO del ícono).
+		imgui_draw_circle_filled(Vector2(cx, cy), 5.0, NB_TEXT, 0)
+		_nb_text_centered(cx, cy + 9.0, _nb_user(), NB_TEXT)
+
+		# Estado vacío legible dentro del radar, sin error ni bloqueo.
+		if nets.empty():
+			var line = neighborhood.status_line() if neighborhood != null else "Leyendo Wi-Fi..."
+			_nb_text_centered(cx, cy - 6.0, line, NB_TEXT)
+			if neighborhood != null and neighborhood.status == "off":
+				set_cursor_pos(Vector2(cx - 70.0, cy + 16.0))
+				if button("Encender Wi-Fi", Vector2(140.0, 26.0)):
+					_wifi_radio_on()
+
+		for i in range(nets.size()):
+			var n = nets[i]
+			var pos = Vector2(cx, cy) + Vector2(cos(n.angle), sin(n.angle)) * (n.r_frac * R)
+			var cong = int(n.congestion)
+			var rad = clamp(NB_NODE_MIN + float(cong - 1) * 3.0, NB_NODE_MIN, 58.0)
+			var col = NB_NODE_24 if n.band == "2.4" else NB_NODE_5
+			if n.ring == "lejos":
+				col = col.linear_interpolate(NB_NODE_DIM, 0.45)
+			var halo = clamp(float(cong - 1) * 0.06, 0.0, 0.28)
+			if halo > 0.0:
+				imgui_draw_circle(pos, rad + 8.0 + float(cong) * 2.0, Color(col.r, col.g, col.b, halo), 0, 12.0)
+			imgui_draw_circle_filled(pos, rad, Color(col.r * 0.45, col.g * 0.45, col.b * 0.5, 0.95), 0)
+			var border = NB_AMBER if n.in_use else Color(0.85, 0.88, 0.95, 0.85)
+			var bw = 3.0 if n.in_use else 1.5
+			if n.ssid == nb_selected:
+				border = NB_TEXT
+				bw = 3.5
+			imgui_draw_circle(pos, rad, border, 0, bw)
+			_nb_text_centered(pos.x, pos.y + rad + 3.0, _nb_short(n.ssid), NB_TEXT)
+			_nb_text_centered(pos.x, pos.y + rad + 18.0, str(int(n.dbm)) + " dBm", NB_TEXT_DIM)
+			if n.in_use:
+				_nb_text_centered(pos.x, pos.y - rad - 20.0, "Conectado", NB_AMBER)
+				_nb_hosts_around(pos, n.angle, rad)
+			# Área pulsable del nodo (botón invisible, como el anillo del Hogar).
+			push_style_color(COL_BUTTON, Color(0, 0, 0, 0))
+			push_style_color(COL_BUTTON_HOVERED, Color(1, 1, 1, 0.06))
+			push_style_color(COL_BUTTON_ACTIVE, Color(1, 1, 1, 0.12))
+			push_style_var_float(STYLE_VAR_FRAME_ROUNDING, rad)
+			set_cursor_pos(pos - Vector2(rad, rad))
+			var clicked = button("##nb" + str(i), Vector2(rad * 2.0, rad * 2.0))
+			pop_style_var()
+			pop_style_color(3)
+			if clicked:
+				nb_selected = n.ssid
+		_nb_panel(vp, panel_w, top, sel)
+	end()
+	pop_style_var()
+
+
+# Vecinos de la red local: cuadraditos en un arco alrededor del AP en uso, SIN
+# distancia propia (no se inventa posición: se rotula "sin distancia").
+func _nb_hosts_around(ap, ang, rad):
+	var hosts = neighborhood.hosts.duplicate() if neighborhood != null else []
+	if _service_running("Deskflow"):
+		hosts.append({"ip": "", "mac": "", "dev": "", "state": "deskflow"})
+	if hosts.empty():
+		return
+	var arc_r = rad + 30.0
+	var span = 1.1
+	for i in range(hosts.size()):
+		var h = hosts[i]
+		var t = 0.5 if hosts.size() == 1 else float(i) / float(hosts.size() - 1)
+		var a = ang + (t - 0.5) * span
+		var p = ap + Vector2(cos(a), sin(a)) * arc_r
+		var col = NB_HOST_REACH if h.state == "REACHABLE" else NB_HOST
+		if h.state == "deskflow":
+			col = NB_HOST_DESK
+		imgui_draw_rect_filled(Rect2(p - Vector2(4.0, 4.0), Vector2(8.0, 8.0)), col, 0.0)
+		var label = "Deskflow" if h.state == "deskflow" else (h.ip if h.ip != "" else h.mac)
+		_nb_text_centered(p.x, p.y + 7.0, label, NB_TEXT_DIM)
+	_nb_text_centered(ap.x, ap.y + arc_r + 20.0, "sin distancia", NB_TEXT_DIM)
+
+
+# Panel lateral: detalle de la red elegida y el botón que abre nmtui en Terminal.
+func _nb_panel(vp, pw, top, sel):
+	var x0 = vp.x - pw
+	imgui_draw_rect_filled(Rect2(Vector2(x0, 0.0), Vector2(pw, vp.y)), Color(0.08, 0.09, 0.13, 0.96), 0.0)
+	imgui_draw_rect_filled(Rect2(Vector2(x0, 0.0), Vector2(2.0, vp.y)), Color(0.30, 0.34, 0.45, 1.0), 0.0)
+	var pad = 12.0
+	var y = top + 14.0
+	_nb_text(Vector2(x0 + pad, y), "Detalle", NB_TEXT_DIM)
+	y += 22.0
+	if sel == null:
+		_nb_text(Vector2(x0 + pad, y), "Elegi una red", NB_TEXT)
+		y += 18.0
+		_nb_text(Vector2(x0 + pad, y), "Toca un nodo para ver", NB_TEXT_DIM)
+		y += 16.0
+		_nb_text(Vector2(x0 + pad, y), "SSID, canal y seguridad.", NB_TEXT_DIM)
+		return
+	_nb_text(Vector2(x0 + pad, y), _nb_short(sel.ssid), NB_TEXT)
+	y += 22.0
+	var sec = "abierta" if sel.security == "" else sel.security
+	var rows = [
+		"BSSID " + sel.bssid,
+		"Canal " + str(sel.chan) + "  (" + sel.band + " GHz)",
+		"Freq " + str(sel.freq) + " MHz",
+		"Senal " + str(int(sel.dbm)) + " dBm (" + str(sel["signal"]) + "%)",
+		"Seguridad " + sec,
+		"Radios " + str(sel.radios.size()) + " / " + str(int(sel.congestion)) + " en canal",
+	]
+	for r in rows:
+		_nb_text(Vector2(x0 + pad, y), r, NB_TEXT_DIM)
+		y += 17.0
+	if sel.in_use:
+		y += 4.0
+		_nb_text(Vector2(x0 + pad, y), "Conectado", NB_AMBER)
+		y += 18.0
+	y += 8.0
+	var bw = pw - 2.0 * pad
+	set_cursor_pos(Vector2(x0 + pad, y))
+	if button("Conectar (nmtui)", Vector2(bw, 28.0)):
+		_open_nmtui()
+	y += 34.0
+	set_cursor_pos(Vector2(x0 + pad, y))
+	if button("Cerrar detalle", Vector2(bw, 24.0)):
+		nb_selected = ""
 
 
 # Las actividades tipo script pueden tener recursos propios (p.ej. el viewport
@@ -2410,7 +2703,7 @@ func _input(event):
 			"alt": event.alt, "meta": event.meta}
 	if event is InputEventMouse:
 		_move_eis_cursor(event)
-	if current_activity == null and not apps.search_active and event is InputEventKey and event.pressed \
+	if current_activity == null and not apps.search_active and not neighborhood_view and event is InputEventKey and event.pressed \
 			and event.unicode >= 32 and not (event.control or event.alt or event.meta):
 		apps_view = true
 		apps.type(char(event.unicode))
