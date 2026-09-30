@@ -404,3 +404,12 @@ func at(pos):
 		if tile.rect.has_point(pos):
 			return tile.app
 	return null
+
+
+# Igual que at() pero devuelve la tesela completa (app + rect), para conservar el
+# punto de agarre al arrastrar desde la grilla.
+func at_tile(pos):
+	for tile in tiles:
+		if tile.rect.has_point(pos):
+			return tile
+	return null

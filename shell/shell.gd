@@ -10,7 +10,8 @@ var ACTIVITIES = [
 	# Deskflow: en X11 inyecta por XTest; en Wayland (cage, sway) pide el portal RemoteDesktop
 	# y le llega un fd del EIS del shell (RemoteInput): se le da permiso sin preguntar.
 	{"name": "Deskflow", "service": "deskflow-core client --new-instance -s ~/gdtk/deskflow-client.conf"},
-	{"name": "Salir", "quit": true},
+	# 'Salir' ya no es una actividad del anillo: es una acción de sesión del ícono central
+	# del Hogar (ver _draw_home / popup ##home_session).
 ]
 
 const TYPE_DELAY = 60
@@ -68,6 +69,24 @@ var apps = Host.sc("res://apps.gd").new()
 var apps_view = false
 # Íconos XDG del anillo: rasterizar uno o dos por frame (el SVG bloquea el frame).
 var home_icon_loads = 0
+
+# Favoritos del anillo (SPEC-sugar-home-visual): ids de app fijados por la persona,
+# persistidos en $XDG_CONFIG_HOME/gdtk/ring-favorites.json. El anillo = ACTIVITIES
+# (sin duplicar) + estos favoritos resueltos por `apps`.
+var ring_favorites = []
+var ring_saved = []
+# Layout animado del anillo: posición mostrada por nombre, animación en curso e
+# instante de entrada (fade/escala breve). Se limpia cuando el ítem sale.
+var ring_pos = {}
+var ring_anim = {}
+var ring_intro = {}
+var ring_layout = []      # rects del último dibujo (para el drag con ratón)
+var ring_press = null     # entrada pulsada aún sin arrastrar
+var ring_drag = null      # entrada que se está arrastrando
+var ring_from = Vector2.ZERO
+var ring_grab = Vector2.ZERO
+var ring_suppress = ""     # nombre cuya activación se ignora tras un drag
+var ring_drop = null       # entrada destino resaltada mientras se arrastra
 
 # Vecindario: modelo de Wi-Fi y vista nativa bajo el Frame ImGui.
 var neighborhood = null
@@ -184,6 +203,13 @@ const RING_FOCUS = Color(0.55, 0.80, 1.0, 1.0)
 const RING_MIN = Color(0.56, 0.59, 0.68, 0.90)  # minimizada: contorno punteado atenuado
 const RING_LABEL = Color(0.90, 0.91, 0.94, 1.0)
 const RING_LABEL_DIM = Color(0.72, 0.74, 0.79, 1.0)
+# Favorito cerrado (app fijada al anillo sin ventana viva): contorno más definido
+# que una actividad cerrada, sin fingir "abierto" (SPEC-sugar-home-visual).
+const RING_FAVORITE = Color(0.66, 0.68, 0.76, 0.95)
+# Animación del layout del anillo y de la barra del Frame al reacomodar.
+const LAYOUT_MS = 220
+const RING_INTRO_MS = 260
+const DRAG_PX = 8.0
 
 # Íconos Sugar: los SVG traen un DOCTYPE con entidades &stroke_color;/&fill_color;.
 # Se cargan como texto, se sustituyen por los colores pedidos y se rasterizan a una
@@ -192,7 +218,6 @@ const SUGAR_DIR = "res://icons/sugar/"
 const SUGAR_RASTER = 192  # px del SVG al rasterizar (se dibuja a ~120)
 # Actividades sin ícono XDG con un ícono Sugar razonable (el resto usa inicial).
 const SUGAR_ACTIVITY_ICONS = {
-	"Salir": "application-exit",
 	"Panel": "preferences-system",
 	"Gears": "emblem-busy",
 	"Chat": "document-send",
@@ -255,6 +280,7 @@ func _ready():
 	frame = Host.sc("res://frame.gd").new()
 	frame.name = "Frame"
 	add_child(frame)
+	_load_ring()
 	# Vecindario: parser/estado del Wi-Fi. El hilo arranca al abrir la vista; este
 	# nodo sigue dueño del resultado en memoria hasta que el shell se recarga.
 	neighborhood = Host.sc("res://neighborhood.gd").new()
@@ -1611,7 +1637,8 @@ func _draw_home_bevel(r, face, pressed):
 # `offset` corre el Hogar dentro de la fila de pantallas: 0 en su lugar, ±ancho fuera
 # de vista. Así el paneo lo dibuja deslizándose junto a las ventanas, no de un salto.
 func _draw_home(offset = 0.0):
-	_tick_starting(OS.get_ticks_msec())
+	var now = OS.get_ticks_msec()
+	_tick_starting(now)
 	if is_key_pressed(KEY_TAB):
 		apps_view = not apps_view
 	if apps_view:
@@ -1631,28 +1658,71 @@ func _draw_home(offset = 0.0):
 		var u = grid_unit(vp)
 		var pad = u * 0.125
 		var btn_size = Vector2(u * 1.25, u * 1.25)
-		var layout = _home_layout(vp)
+		var entries = _ring_entries()
+		var layout = _orbit_layout(vp, entries.size())
+		_ring_prune(entries)
+
 		# El equipo propio ocupa el centro de la órbita; las apps quedan alrededor.
+		# El ícono central (figura XO/monitor) ya no es decorativo: abre el menú de
+		# sesión (Salir/Recargar), porque 'Salir' dejó de ser actividad del anillo.
 		var cc = vp * 0.5
 		var monitor = Rect2(cc - Vector2(u * 0.38, u * 0.30), Vector2(u * 0.76, u * 0.54))
-		imgui_draw_rect_filled(monitor, HOME_BLOCK_LIGHT, 2.0)
+		set_cursor_pos(monitor.position)
+		push_style_color(COL_BUTTON, Color(0, 0, 0, 0))
+		push_style_color(COL_BUTTON_HOVERED, Color(0, 0, 0, 0))
+		push_style_color(COL_BUTTON_ACTIVE, Color(0, 0, 0, 0))
+		push_style_var_float(STYLE_VAR_FRAME_ROUNDING, 0.0)
+		var center_clicked = button("##home_center", monitor.size)
+		var center_hover = is_item_hovered()
+		pop_style_var()
+		pop_style_color(3)
+		var monitor_face = HOME_BLOCK_LIGHT
+		if center_hover:
+			monitor_face = monitor_face.linear_interpolate(Color(1, 1, 1, monitor_face.a), 0.10)
+		if center_hover:
+			set_tooltip("Sesión · Salir / Recargar")
+		imgui_draw_rect_filled(monitor, monitor_face, 2.0)
 		imgui_draw_rect_filled(Rect2(monitor.position + Vector2(4, 4), monitor.size - Vector2(8, 10)), HOME_BG_TOP, 0.0)
 		imgui_draw_rect_filled(Rect2(cc + Vector2(-3, u * 0.24), Vector2(6, u * 0.13)), HOME_BLOCK_LIGHT, 0.0)
 		imgui_draw_rect_filled(Rect2(cc + Vector2(-u * 0.21, u * 0.37), Vector2(u * 0.42, 4)), HOME_BLOCK_LIGHT, 0.0)
-		for i in range(ACTIVITIES.size()):
-			var pos = layout[i]
-			var act = ACTIVITIES[i]
-			var label = act.name
-			if act.has("service") and _service_running(act.name):
+		if center_clicked:
+			open_popup("##home_session")
+		if begin_popup("##home_session"):
+			text_disabled("Sesión")
+			if menu_item("Salir"):
+				recovery.quit(self)
+			if menu_item("Recargar el shell"):
+				recovery.restart(self)
+			end_popup()
+
+		# Anillo: ACTIVITIES + favoritos, con reacomodo animado al entrar/salir ítems.
+		ring_layout = []
+		ring_drop = null
+		var mouse = get_mouse_pos()
+		var slide = Vector2(offset, 0.0)
+		for i in range(entries.size()):
+			var e = entries[i]
+			var pos = _ring_show(e.name, layout[i], now)
+			var screen = pos + slide
+			var label = e.name
+			if e.activity != null and e.activity.has("service") and _service_running(e.name):
 				label += " *"
-			if _draw_ring_item(pos, btn_size, _activity_tex(act), label, _activity_state(act), act.name, starting.get(act.name, -1)):
-				# Sólo una actividad wayland CERRADA arranca con pulso: la vista se
-				# queda en Hogar hasta que aparezca su ventana (ver _open_wayland).
-				if act.has("wayland") and _activity_state(act) == "closed":
-					pending_origin = Rect2(pos, btn_size)
-					pending_origin_since = OS.get_ticks_msec()
-					starting[act.name] = OS.get_ticks_msec()
-				_activate(i)
+			var clicked = _draw_ring_item(pos, btn_size, _ring_tex(e), label,
+				_ring_state(e), e.id, starting.get(e.name, -1), _ring_appear(e.name, now))
+			ring_layout.append({"entry": e, "screen": screen, "size": btn_size})
+			if ring_drag != null and e.kind == "favorite" and e.name != ring_drag.name:
+				var d = (mouse - (screen + btn_size * 0.5)).length()
+				if d < btn_size.x * 1.6 and (ring_drop == null or d < ring_drop.dist):
+					ring_drop = {"screen": screen, "size": btn_size, "dist": d, "entry": e}
+			if clicked and ring_suppress != e.name:
+				_ring_activate(e, pos, btn_size)
+		ring_suppress = ""
+
+		# Fantasma del ítem arrastrado, anclado al punto de agarre (no centrado).
+		if ring_drag != null:
+			_draw_ring_ghost(ring_drag, mouse - ring_grab, btn_size)
+			if ring_drop != null:
+				imgui_draw_circle(ring_drop.screen + ring_drop.size * 0.5, ring_drop.size.x * 0.5 + 3.0, RING_FOCUS, 0, 2.5)
 
 		# Bloque Apps: tesela U x U con bisel, como los bloques del Frame.
 		var apps_side = u
@@ -1686,11 +1756,299 @@ func _draw_home(offset = 0.0):
 	pop_style_var()
 
 
+# --- Anillo: entradas, favoritos y layout animado --------------------------------
+
+# Ruta del archivo de favoritos: $XDG_CONFIG_HOME/gdtk/ring-favorites.json
+# (~/.config/gdtk/ring-favorites.json por defecto), mismo patrón que frame-applets.json.
+func _ring_path():
+	var base = OS.get_environment("XDG_CONFIG_HOME")
+	if base == "":
+		base = OS.get_environment("HOME") + "/.config"
+	return base + "/gdtk/ring-favorites.json"
+
+
+func _load_ring():
+	ring_favorites = []
+	ring_saved = []
+	var f = File.new()
+	if f.open(_ring_path(), File.READ) == OK:
+		var txt = f.get_as_text()
+		f.close()
+		var res = JSON.parse(txt)
+		if res.error == OK:
+			var data = res.result
+			var arr = data.get("favorites", []) if typeof(data) == TYPE_DICTIONARY else data
+			if typeof(arr) == TYPE_ARRAY:
+				for v in arr:
+					if typeof(v) == TYPE_STRING and not ring_favorites.has(v):
+						ring_favorites.append(v)
+	ring_saved = ring_favorites.duplicate()
+
+
+# Escritura atómica (tmp + rename); sin cambios reales no toca el archivo.
+func _save_ring():
+	if ring_saved == ring_favorites:
+		return
+	var path = _ring_path()
+	Directory.new().make_dir_recursive(path.get_base_dir())
+	var tmp = path + ".tmp"
+	var w = File.new()
+	if w.open(tmp, File.WRITE) != OK:
+		printerr("shell: no se pudo escribir ", tmp)
+		return
+	w.store_string(JSON.print({"favorites": ring_favorites}))
+	w.close()
+	if Directory.new().rename(tmp, path) != OK:
+		printerr("shell: no se pudo renombrar ", tmp, " a ", path)
+		return
+	ring_saved = ring_favorites.duplicate()
+
+
+# Añade un favorito al anillo (Frame -> Anillo). Sin duplicar por id; el dedup por
+# nombre contra ACTIVITIES se resuelve al armar las entradas.
+func add_ring_favorite(app_id):
+	if app_id == "" or ring_favorites.has(app_id):
+		return
+	ring_favorites.append(app_id)
+	_save_ring()
+	request_redraw()
+
+
+func _app_by_id(id):
+	if not apps.scanned:
+		apps.scan()
+	for a in apps.apps:
+		if a.id == id:
+			return a
+	return null
+
+
+# Entradas del anillo: primeras las actividades de ACTIVITIES (orden fijo), después
+# los favoritos resueltos por `apps`. Sin duplicar por nombre (una app abierta ya
+# figura como actividad dinámica).
+func _ring_entries():
+	var out = []
+	var seen = {}
+	for act in ACTIVITIES:
+		if seen.has(act.name):
+			continue
+		seen[act.name] = true
+		out.append({"kind": "activity", "id": act.name, "name": act.name, "activity": act, "app": null})
+	if not apps.scanned:
+		apps.scan()
+	for id in ring_favorites:
+		var app = _app_by_id(id)
+		if app == null or seen.has(app.name):
+			continue
+		seen[app.name] = true
+		out.append({"kind": "favorite", "id": app.id, "name": app.name, "activity": null, "app": app})
+	return out
+
+
+func _ring_tex(e):
+	if e.kind == "favorite":
+		return _activity_icon_of(e.app)
+	return _activity_tex(e.activity)
+
+
+func _ring_state(e):
+	if e.kind == "favorite":
+		return "favorite"
+	return _activity_state(e.activity)
+
+
+# Posición mostrada por nombre, animada hacia el objetivo con ease-out (~LAYOUT_MS).
+# Entrada nueva: arranca en su destino y se le registra el instante de entrada para
+# el fade/escala; retarget a mitad de camino continúa desde la posición actual.
+func _ring_show(name, target, now):
+	var cur = ring_pos.get(name)
+	if cur == null:
+		ring_pos[name] = target
+		ring_anim.erase(name)
+		ring_intro[name] = now
+		return target
+	var anim = ring_anim.get(name)
+	if anim == null:
+		if cur.distance_to(target) <= 0.5:
+			ring_pos[name] = target
+			return target
+		anim = {"from": cur, "to": target, "since": now}
+		ring_anim[name] = anim
+	elif (anim.to as Vector2).distance_to(target) > 0.5:
+		anim = {"from": cur, "to": target, "since": now}
+		ring_anim[name] = anim
+	var k = clamp(float(now - anim.since) / LAYOUT_MS, 0.0, 1.0)
+	var p = (anim.from as Vector2).linear_interpolate(target, _ease_out(k))
+	ring_pos[name] = p
+	if k >= 1.0:
+		ring_anim.erase(name)
+	else:
+		request_redraw()
+		last_activity = now
+	return p
+
+
+func _ring_appear(name, now):
+	var since = ring_intro.get(name, -1)
+	if since < 0:
+		return 1.0
+	var k = clamp(float(now - since) / RING_INTRO_MS, 0.0, 1.0)
+	if k < 1.0:
+		request_redraw()
+		last_activity = now
+	return _ease_out(k)
+
+
+# Descarta estado de animación de entradas que ya no están en el anillo.
+func _ring_prune(entries):
+	var keep = {}
+	for e in entries:
+		keep[e.name] = true
+	for k in ring_pos.keys():
+		if not keep.has(k):
+			ring_pos.erase(k)
+			ring_anim.erase(k)
+			ring_intro.erase(k)
+
+
+# Ease-out cúbico (sin overshoot): para reacomodos de layout no queremos rebote.
+func _ease_out(k):
+	k = clamp(k, 0.0, 1.0)
+	return 1.0 - pow(1.0 - k, 3.0)
+
+
+# Activar una entrada: favorito -> lanzar la app; actividad -> _activate con el pulso
+# de arranque de las wayland cerradas.
+func _ring_activate(e, pos, size):
+	if e.kind == "favorite":
+		_launch_app(e.app)
+		return
+	var i = _activity_named(e.name)
+	if i < 0:
+		return
+	var act = ACTIVITIES[i]
+	if act.has("wayland") and _activity_state(act) == "closed":
+		pending_origin = Rect2(pos, size)
+		pending_origin_since = OS.get_ticks_msec()
+		starting[act.name] = OS.get_ticks_msec()
+	_activate(i)
+
+
+# Fantasma del arrastre del anillo: placa circular con el ícono, anclado al agarre.
+func _draw_ring_ghost(entry, pos, size):
+	var c = pos + size * 0.5
+	var radius = size.x * 0.5 - 2.0
+	imgui_draw_circle_filled(c + Vector2(2.0, 3.0), radius, Color(0, 0, 0, 0.35), 0)
+	imgui_draw_circle_filled(c, radius, RING_PLATE, 0)
+	imgui_draw_circle(c, radius, RING_FOCUS, 0, 2.5)
+	var tex = _ring_tex(entry)
+	if tex != null:
+		var side = clamp(size.x * 0.56, 64.0, 72.0)
+		set_cursor_pos(c - Vector2(side, side) * 0.5)
+		image(tex, Vector2(side, side))
+	else:
+		var cw = 7.0 * get_imgui_scale()
+		set_cursor_pos(c - Vector2(cw * 0.5, 6.5 * get_imgui_scale()))
+		text_colored(Color(0.95, 0.85, 0.95, 1.0), entry.name.substr(0, 1))
+
+
+# ¿El punto cae en la zona del anillo (Hogar a la vista)? El Frame lo consulta al
+# soltar un app arrastrado para crear un favorito (Frame -> Anillo).
+func is_ring_drop(pos):
+	if current_activity != null or neighborhood_view:
+		return false
+	var vp = get_viewport_rect().size
+	var top = frame_bar_h(vp)
+	return pos.y > top and pos.y < vp.y - top
+
+
+# Entrada del anillo cuyo rect (en pantalla) contiene el punto.
+func _ring_hit(pos):
+	for it in ring_layout:
+		if pos.x >= it.screen.x and pos.x < it.screen.x + it.size.x \
+				and pos.y >= it.screen.y and pos.y < it.screen.y + it.size.y:
+			return it
+	return null
+
+
+# Id del favorito mostrado más cercano al punto (dentro del radio de una tesela),
+# o "" si no hay ninguno cerca. `exclude_id` es el favorito arrastrado, que se salta
+# para que soltarlo sobre sí mismo no lo mande al final. Un favorito arrastrado toma
+# el lugar del más cercano.
+func _favorite_target_near(pos, exclude_id = ""):
+	var best = ""
+	var bd = 1e9
+	var bs = 0.0
+	for it in ring_layout:
+		var e = it.entry
+		if e.kind != "favorite" or e.app.id == exclude_id:
+			continue
+		var d = (pos - (it.screen + it.size * 0.5)).length()
+		if d < bd:
+			bd = d
+			best = e.app.id
+			bs = it.size.x
+	if best != "" and bd > bs * 1.6:
+		return ""
+	return best
+
+
+# Inicio/reanudación del drag del anillo desde _input (el clic normal lo maneja ImGui).
+func _ring_mouse(pressed, pos):
+	if current_activity != null or apps_view or neighborhood_view:
+		ring_press = null
+		ring_drag = null
+		ring_drop = null
+		return
+	if pressed:
+		var hit = _ring_hit(pos)
+		if hit != null:
+			ring_press = hit.entry
+			ring_from = pos
+			ring_grab = pos - hit.screen
+			ring_drag = null
+	else:
+		if ring_drag != null:
+			_finish_ring_drag(pos)
+			ring_suppress = ring_drag.name
+		ring_press = null
+		ring_drag = null
+		ring_drop = null
+		request_redraw()
+
+
+func _finish_ring_drag(pos):
+	var e = ring_drag
+	if e == null:
+		return
+	# Ring -> basurero: borra el favorito (una actividad no se borra).
+	if frame != null and frame.is_trash(pos):
+		if e.kind == "favorite":
+			ring_favorites.erase(e.app.id)
+			_save_ring()
+			request_redraw()
+		return
+	# Reordenar favoritos: el que se suelta sobre otro toma su lugar.
+	if e.kind == "favorite":
+		var target = _favorite_target_near(pos, e.app.id)
+		if target != "":
+			ring_favorites.erase(e.app.id)
+			var at = ring_favorites.find(target)
+			if at < 0:
+				at = ring_favorites.size()
+			ring_favorites.insert(at, e.app.id)
+			_save_ring()
+			request_redraw()
+
+
 # Posiciones de las actividades en órbitas alrededor de la computadora.
 func _home_layout(vp):
-	var n = ACTIVITIES.size()
+	return _orbit_layout(vp, ACTIVITIES.size())
+
+
+func _orbit_layout(vp, n):
 	var out = []
-	if n == 0:
+	if n <= 0:
 		return out
 	var u = grid_unit(vp)
 	var btn = u * 1.25
@@ -1804,7 +2162,10 @@ func _activity_state(activity):
 
 # Botón circular del anillo: placa, borde por estado, ícono XDG/Sugar y etiqueta.
 # `starting_since` >= 0: notificación de arranque, el ícono pulsa (escala y borde).
-func _draw_ring_item(pos, size, tex, label, state, id, starting_since = -1):
+# `appear` (0..1): entrada nueva, escala/fade breve (ver _ring_appear).
+func _draw_ring_item(pos, size, tex, label, state, id, starting_since = -1, appear = 1.0):
+	appear = clamp(appear, 0.0, 1.0)
+	var scale = lerp(0.72, 1.0, appear)
 	set_cursor_pos(pos)
 	var sp = get_cursor_screen_pos()
 	var c = sp + size * 0.5
@@ -1816,7 +2177,7 @@ func _draw_ring_item(pos, size, tex, label, state, id, starting_since = -1):
 		var w = sin(TAU * ph / STARTING_PERIOD_S)
 		pulse = 1.0 + 0.1 * w  # escala 0.9..1.1
 		glow = clamp(0.5 + 0.5 * w, 0.0, 1.0)
-	var radius = base_radius * pulse
+	var radius = base_radius * pulse * scale
 	var border = RING_CLOSED
 	var thickness = 1.5
 	if starting_since >= 0:
@@ -1832,49 +2193,62 @@ func _draw_ring_item(pos, size, tex, label, state, id, starting_since = -1):
 	elif state == "open":
 		border = RING_OPEN
 		thickness = 2.5
+	elif state == "favorite":
+		border = RING_FAVORITE
+		thickness = 2.0
 	if (get_mouse_pos() - c).length() <= radius:
 		border = Color(border.r, border.g, border.b, 1.0)
-	imgui_draw_circle_filled(c, radius, RING_PLATE, 0)
+	var plate = RING_PLATE
+	plate.a *= appear
+	var edge = border
+	edge.a *= appear
+	imgui_draw_circle_filled(c, radius, plate, 0)
 	if starting_since >= 0:
-		imgui_draw_circle(c, radius + 4.0, Color(1.0, 0.85, 0.45, 0.20 + 0.35 * glow), 0, 2.0)
+		imgui_draw_circle(c, radius + 4.0, Color(1.0, 0.85, 0.45, (0.20 + 0.35 * glow) * appear), 0, 2.0)
 	if state == "focused":
-		imgui_draw_circle(c, radius + 3.0, Color(RING_FOCUS.r, RING_FOCUS.g, RING_FOCUS.b, 0.35), 0, 2.0)
-	imgui_draw_circle(c, radius, border, 0, thickness)
+		imgui_draw_circle(c, radius + 3.0, Color(RING_FOCUS.r, RING_FOCUS.g, RING_FOCUS.b, 0.35 * appear), 0, 2.0)
+	imgui_draw_circle(c, radius, edge, 0, thickness)
 	if state == "open":
 		# Señal de abierto además del color.
-		imgui_draw_circle_filled(c + Vector2(radius * 0.72, radius * 0.72), 4.0, RING_OPEN, 0)
+		var dot = RING_OPEN
+		dot.a *= appear
+		imgui_draw_circle_filled(c + Vector2(radius * 0.72, radius * 0.72), 4.0, dot, 0)
 
 	# Área pulsable completa (mismo tamaño que la grilla anterior), sin fondo azul.
 	push_style_color(COL_BUTTON, Color(0, 0, 0, 0))
 	push_style_color(COL_BUTTON_HOVERED, Color(1, 1, 1, 0.05))
 	push_style_color(COL_BUTTON_ACTIVE, Color(1, 1, 1, 0.12))
 	push_style_var_float(STYLE_VAR_FRAME_ROUNDING, base_radius)
-	var clicked = button("##" + id, size)
+	var clicked = button("##ring_" + id, size)
 	pop_style_var()
 	pop_style_color(3)
 
 	var cw = 7.0 * get_imgui_scale()
 	if tex != null:
 		# 64-72 px de ícono dentro del círculo de 1.5U: nunca por debajo de 64.
-		var side = clamp(size.x * 0.56, 64.0, 72.0) * pulse
+		var side = clamp(size.x * 0.56, 64.0, 72.0) * pulse * scale
 		var icon_size = Vector2(side, side)
 		set_cursor_pos(pos + (size - icon_size) * 0.5)
 		image(tex, icon_size)
 	else:
 		set_cursor_pos(pos + Vector2((size.x - cw) * 0.5, (size.y - 13.0 * get_imgui_scale()) * 0.5))
-		text_colored(Color(0.95, 0.85, 0.95, 1.0), id.substr(0, 1))
+		text_colored(Color(0.95, 0.85, 0.95, 1.0), label.substr(0, 1).to_upper())
 
 	if state == "minimized":
 		# Distinto de "abierta" más allá del color: ícono atenuado + contorno punteado.
-		imgui_draw_circle_filled(c, radius, Color(0.05, 0.06, 0.09, 0.45), 0)
+		imgui_draw_circle_filled(c, radius, Color(0.05, 0.06, 0.09, 0.45 * appear), 0)
 		var seg = 18
+		var min_col = RING_MIN
+		min_col.a *= appear
 		for i in range(seg):
 			if i % 2 == 1:
 				var ang = TAU * float(i) / float(seg)
-				imgui_draw_circle_filled(c + Vector2(cos(ang), sin(ang)) * radius, 2.0, RING_MIN, 0)
+				imgui_draw_circle_filled(c + Vector2(cos(ang), sin(ang)) * radius, 2.0, min_col, 0)
 
+	var lab = RING_LABEL if (state != "closed" and state != "minimized") else RING_LABEL_DIM
+	lab.a *= appear
 	set_cursor_pos(pos + Vector2((size.x - label.length() * cw) * 0.5, size.y + 3.0))
-	text_colored(RING_LABEL if (state != "closed" and state != "minimized") else RING_LABEL_DIM, label)
+	text_colored(lab, label)
 	return clicked
 
 
@@ -2634,9 +3008,18 @@ func _input(event):
 	last_activity = OS.get_ticks_msec()
 	if event is InputEventMouseMotion:
 		input_motion_count += 1
+		# Drag del anillo (Hogar): el clic normal lo resuelve ImGui; acá sólo se
+		# detecta el arrastre una vez superado el umbral.
+		if ring_press != null and ring_drag == null and event.position.distance_to(ring_from) > DRAG_PX:
+			ring_drag = ring_press
+			request_redraw()
+		elif ring_drag != null:
+			request_redraw()
 	elif event is InputEventMouseButton:
 		input_button_count += 1
 		input_last_button = {"button": event.button_index, "pressed": event.pressed, "device": event.device, "pos": [event.position.x, event.position.y]}
+		if event.button_index == BUTTON_LEFT:
+			_ring_mouse(event.pressed, event.position)
 	elif event is InputEventScreenTouch:
 		input_touch_count += 1
 	if event is InputEventKey:
