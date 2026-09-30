@@ -1,6 +1,7 @@
 #ifndef REMOTE_INPUT_H
 #define REMOTE_INPUT_H
 
+#include "core/map.h"
 #include "core/os/input_event.h"
 #include "scene/main/node.h"
 
@@ -23,6 +24,10 @@ class RemoteInput : public Node {
 	xkb_state *state;
 	uint32_t evdev_to_godot[256];
 	Vector2 scroll_acc;
+	// Teclas/botones que un cliente dejó apretados: se liberan si se queda sin clientes
+	// (si no, el estado XKB queda con Ctrl/Shift pegados para el próximo cliente).
+	Map<uint32_t, uint8_t> pressed_keys;
+	int last_clients;
 	// Posición y botones propios: Input los actualiza recién al vaciar su buffer de eventos
 	// (fin de vuelta), y varios eventos EIS llegan en la misma vuelta.
 	Vector2 pointer, seen;
@@ -37,6 +42,7 @@ class RemoteInput : public Node {
 	void _set_mods(InputEventWithModifiers *p_event) const;
 	Vector2 _pointer();
 	void _wheel(int p_button, int p_steps);
+	void _release_all();
 
 protected:
 	static void _bind_methods();

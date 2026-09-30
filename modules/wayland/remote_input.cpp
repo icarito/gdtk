@@ -161,6 +161,11 @@ void RemoteInput::_cb_key(void *p_ud, uint32_t p_key, int p_pressed) {
 	xkb_keysym_t sym = xkb_state_key_get_one_sym(self->state, kc);
 	uint32_t unicode = p_pressed ? xkb_state_key_get_utf32(self->state, kc) : 0;
 	xkb_state_update_key(self->state, kc, p_pressed ? XKB_KEY_DOWN : XKB_KEY_UP);
+	if (p_pressed) {
+		self->pressed_keys[p_key] = 1;
+	} else {
+		self->pressed_keys.erase(p_key);
+	}
 
 	uint32_t physical = p_key < 256 ? self->evdev_to_godot[p_key] : 0;
 	// scancode lógico: el carácter de la distribución (Godot usa Latin-1 en mayúscula);
@@ -191,6 +196,33 @@ void RemoteInput::_cb_request(void *p_ud, int p_id, int p_pid, const char *p_app
 	self->emit_signal("access_requested", p_id, p_pid, String::utf8(p_app_id ? p_app_id : ""));
 }
 
+
+// Sin clientes EIS: se sueltan las teclas/botones que quedaron apretados y se limpia el
+// estado XKB. Si no, un cliente que se cortó con Ctrl/Shift apretado deja el modificador
+// pegado para el próximo cliente (todo llega con Ctrl).
+void RemoteInput::_release_all() {
+	if (state == NULL) {
+		return;
+	}
+	Vector<uint32_t> keys;
+	for (Map<uint32_t, uint8_t>::Element *e = pressed_keys.front(); e; e = e->next()) {
+		keys.push_back(e->key());
+	}
+	pressed_keys.clear();
+	for (int i = 0; i < keys.size(); i++) {
+		_cb_key(this, keys[i], 0);
+	}
+	for (int b = 0; b < 5; b++) {
+		if (buttons & (1 << b)) {
+			_cb_button(this, EVDEV_BTN_LEFT + b, 0);
+		}
+	}
+	buttons = 0;
+	scroll_acc = Vector2();
+	xkb_state_unref(state);
+	state = xkb_state_new(keymap);
+}
+
 void RemoteInput::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("start"), &RemoteInput::start);
 	ClassDB::bind_method(D_METHOD("respond", "id", "allow"), &RemoteInput::respond);
@@ -206,6 +238,11 @@ void RemoteInput::_notification(int p_what) {
 		Size2 size = OS::get_singleton()->get_window_size();
 		eis_server_set_size(server, (int)size.x, (int)size.y);
 		eis_server_dispatch(server);
+		int clients = eis_server_clients(server);
+		if (last_clients > 0 && clients == 0) {
+			_release_all();
+		}
+		last_clients = clients;
 	}
 }
 
