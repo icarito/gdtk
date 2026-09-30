@@ -106,6 +106,11 @@ var ghost_layer = null   # capa por encima de apps y Home para el fantasma de ci
 # entrada (escala desde el ícono). Se consume en _add_tile; expira a los pocos segundos.
 var pending_origin = null
 var pending_origin_since = 0
+# Notificación de arranque: nombre de actividad -> ms en que se pidió lanzarla.
+# Mientras siga acá y la actividad no tenga ventana/estado abierto, su ítem pulsa.
+var starting = {}
+# SVG de Sugar ya rasterizados: "nombre|stroke|fill" -> ImageTexture.
+var sugar_icons = {}
 # Animación de transformación (entrar/salir de exposé): id -> {"from_pos", "from_scale", "since"}.
 var view_anim = {}
 # Pantalla completa (Alt+F11): la ventana enfocada ocupa todo y se esconde el Frame.
@@ -149,6 +154,21 @@ const RING_OPEN = Color(0.98, 0.72, 0.30, 0.95)
 const RING_FOCUS = Color(0.55, 0.80, 1.0, 1.0)
 const RING_LABEL = Color(0.90, 0.91, 0.94, 1.0)
 const RING_LABEL_DIM = Color(0.72, 0.74, 0.79, 1.0)
+
+# Íconos Sugar: los SVG traen un DOCTYPE con entidades &stroke_color;/&fill_color;.
+# Se cargan como texto, se sustituyen por la pareja XO y se rasterizan a una
+# ImageTexture cacheada (el motor no expone load_svg_from_string en este árbol).
+const SUGAR_DIR = "res://icons/sugar/"
+const SUGAR_RASTER = 192  # px del SVG al rasterizar (se dibuja a ~120)
+# Actividades sin ícono XDG con un ícono Sugar razonable (el resto usa inicial).
+const SUGAR_ACTIVITY_ICONS = {
+	"Salir": "application-exit",
+	"Panel": "preferences-system",
+	"Gears": "preferences-system",
+}
+# Notificación de arranque estilo Sugar: pulso ~1.2 s hasta que aparece la ventana.
+const STARTING_MAX_MS = 15000
+const STARTING_PERIOD_S = 1.2
 
 
 func _ready():
@@ -1359,6 +1379,7 @@ func _root_of(id):
 
 
 func _draw_home():
+	_tick_starting(OS.get_ticks_msec())
 	if is_key_pressed(KEY_TAB):
 		apps_view = not apps_view
 	if apps_view:
@@ -1391,10 +1412,11 @@ func _draw_home():
 			var label = act.name
 			if act.has("service") and _service_running(act.name):
 				label += " *"
-			if _draw_ring_item(pos, btn_size, _activity_tex(act), label, _activity_state(act), act.name):
+			if _draw_ring_item(pos, btn_size, _activity_tex(act), label, _activity_state(act), act.name, starting.get(act.name, -1)):
 				if act.has("wayland"):
 					pending_origin = Rect2(pos, btn_size)
 					pending_origin_since = OS.get_ticks_msec()
+					starting[act.name] = OS.get_ticks_msec()
 				_activate(i)
 
 		set_cursor_pos(Vector2(vp.x - 110.0, frame.FRAME_H + 10.0))
@@ -1408,16 +1430,91 @@ func _draw_home():
 	pop_style_var()
 
 
-# Centro de Hogar: figura personal con la pareja de colores XO y el nombre debajo.
+# Centro de Hogar: la figura XO clásica de Sugar (computer-xo.svg) y el nombre debajo.
 func _draw_home_center(center, user):
-	var head = center + Vector2(0.0, -46.0)
-	imgui_draw_rect_filled(Rect2(center + Vector2(-38.0, -10.0), Vector2(76.0, 74.0)), XO_STROKE, 38.0)
-	imgui_draw_rect_filled(Rect2(center + Vector2(-30.0, -2.0), Vector2(60.0, 66.0)), XO_FILL, 30.0)
-	imgui_draw_circle_filled(head, 32.0, XO_STROKE, 0)
-	imgui_draw_circle_filled(head, 25.0, XO_FILL, 0)
+	var icon = _load_sugar_svg("computer-xo", XO_STROKE, XO_FILL)
+	var icon_size = Vector2(120.0, 120.0) * get_imgui_scale()
+	if icon != null:
+		set_cursor_pos(center - icon_size * 0.5)
+		image(icon, icon_size)
 	var cw = 7.0 * get_imgui_scale()
-	set_cursor_pos(center + Vector2(-user.length() * cw * 0.5, 72.0))
+	set_cursor_pos(center + Vector2(-user.length() * cw * 0.5, icon_size.y * 0.5 + 12.0))
 	text_colored(Color(0.93, 0.94, 0.97, 1.0), user)
+
+
+# Notificación de arranque: mantiene el pulso mientras la actividad no tenga
+# ventana/estado abierto y lo corta a los STARTING_MAX_MS o al llegar la ventana.
+func _tick_starting(now):
+	for name in starting.keys():
+		if now - starting[name] > STARTING_MAX_MS:
+			starting.erase(name)
+			continue
+		var i = _activity_named(name)
+		if i < 0 or _activity_state(ACTIVITIES[i]) != "closed":
+			starting.erase(name)
+	if not starting.empty():
+		request_redraw()
+
+
+# Rasteriza un SVG de Sugar a ImageTexture cacheada. Reemplaza las entidades
+# &stroke_color;/&fill_color; por los colores XO, quita el DOCTYPE y lo carga.
+func _load_sugar_svg(name, stroke, fill):
+	var key = name + "|" + stroke.to_html(false) + "|" + fill.to_html(false)
+	if sugar_icons.has(key):
+		return sugar_icons[key]
+	var text = _sugar_svg_text(name, stroke, fill)
+	if text == "":
+		return null
+	var img = Image.new()
+	var ok = false
+	if img.has_method("load_svg_from_string"):
+		ok = img.load_svg_from_string(text, 1.0) == OK
+	if not ok and img.has_method("load_svg_from_buffer"):
+		ok = img.load_svg_from_buffer(text.to_utf8(), 1.0) == OK
+	if not ok:
+		# Fallback: este motor no expone load_svg_from_string; se escribe el SVG ya
+		# sustituido en user:// y lo rasteriza el loader SVG del motor.
+		ok = _load_sugar_file(img, key, text)
+	if not ok or img.get_width() == 0:
+		return null
+	var tex = ImageTexture.new()
+	tex.create_from_image(img, Texture.FLAG_FILTER)
+	sugar_icons[key] = tex
+	return tex
+
+
+func _load_sugar_file(img, key, text):
+	var dir = "user://sugar-icons"
+	Directory.new().make_dir_recursive(dir)
+	var path = dir + "/" + key.md5_text() + ".svg"
+	var f = File.new()
+	if f.open(path, File.WRITE) != OK:
+		return false
+	f.store_string(text)
+	f.close()
+	return img.load(path) == OK
+
+
+# Texto del SVG sin DOCTYPE, con width/height agrandados y las entidades ya resueltas.
+func _sugar_svg_text(name, stroke, fill):
+	var f = File.new()
+	if f.open(SUGAR_DIR + name + ".svg", File.READ) != OK:
+		return ""
+	var s = f.get_as_text()
+	f.close()
+	var d = s.find("<!DOCTYPE")
+	if d >= 0:
+		var e = s.find("]>", d)
+		if e < 0:
+			e = s.find(">", d) - 1
+		if e >= d:
+			s = s.substr(0, d) + s.substr(e + 2, s.length() - e - 2)
+	var size = str(SUGAR_RASTER)
+	s = s.replace('height="55px"', 'height="' + size + '"').replace('width="55px"', 'width="' + size + '"')
+	s = s.replace('height="55"', 'height="' + size + '"').replace('width="55"', 'width="' + size + '"')
+	s = s.replace("&stroke_color;", "#" + stroke.to_html(false))
+	s = s.replace("&fill_color;", "#" + fill.to_html(false))
+	return s
 
 
 # Estado de una actividad en el anillo: cerrado / abierto / enfocado.
@@ -1433,15 +1530,28 @@ func _activity_state(activity):
 	return "closed"
 
 
-# Botón circular del anillo: placa, borde por estado, ícono XDG y etiqueta legible.
-func _draw_ring_item(pos, size, tex, label, state, id):
+# Botón circular del anillo: placa, borde por estado, ícono XDG/Sugar y etiqueta.
+# `starting_since` >= 0: notificación de arranque, el ícono pulsa (escala y borde).
+func _draw_ring_item(pos, size, tex, label, state, id, starting_since = -1):
 	set_cursor_pos(pos)
 	var sp = get_cursor_screen_pos()
 	var c = sp + size * 0.5
-	var radius = size.x * 0.5 - 2.0
+	var base_radius = size.x * 0.5 - 2.0
+	var pulse = 1.0
+	var glow = 0.0
+	if starting_since >= 0:
+		var ph = float(OS.get_ticks_msec() - starting_since) / 1000.0
+		var w = sin(TAU * ph / STARTING_PERIOD_S)
+		pulse = 1.0 + 0.1 * w  # escala 0.9..1.1
+		glow = clamp(0.5 + 0.5 * w, 0.0, 1.0)
+	var radius = base_radius * pulse
 	var border = RING_CLOSED
 	var thickness = 1.5
-	if state == "focused":
+	if starting_since >= 0:
+		# Arrancando: además del pulso, borde más grueso y brillante.
+		border = Color(1.0, 0.82, 0.40, 0.5 + 0.5 * glow)
+		thickness = 2.0 + 2.5 * glow
+	elif state == "focused":
 		border = RING_FOCUS
 		thickness = 3.5
 	elif state == "open":
@@ -1450,6 +1560,8 @@ func _draw_ring_item(pos, size, tex, label, state, id):
 	if (get_mouse_pos() - c).length() <= radius:
 		border = Color(border.r, border.g, border.b, 1.0)
 	imgui_draw_circle_filled(c, radius, RING_PLATE, 0)
+	if starting_since >= 0:
+		imgui_draw_circle(c, radius + 4.0, Color(1.0, 0.85, 0.45, 0.20 + 0.35 * glow), 0, 2.0)
 	if state == "focused":
 		imgui_draw_circle(c, radius + 3.0, Color(RING_FOCUS.r, RING_FOCUS.g, RING_FOCUS.b, 0.35), 0, 2.0)
 	imgui_draw_circle(c, radius, border, 0, thickness)
@@ -1461,14 +1573,14 @@ func _draw_ring_item(pos, size, tex, label, state, id):
 	push_style_color(COL_BUTTON, Color(0, 0, 0, 0))
 	push_style_color(COL_BUTTON_HOVERED, Color(1, 1, 1, 0.05))
 	push_style_color(COL_BUTTON_ACTIVE, Color(1, 1, 1, 0.12))
-	push_style_var_float(STYLE_VAR_FRAME_ROUNDING, radius)
+	push_style_var_float(STYLE_VAR_FRAME_ROUNDING, base_radius)
 	var clicked = button("##" + id, size)
 	pop_style_var()
 	pop_style_color(3)
 
 	var cw = 7.0 * get_imgui_scale()
 	if tex != null:
-		var icon_size = size * 0.56
+		var icon_size = size * 0.56 * pulse
 		set_cursor_pos(pos + (size - icon_size) * 0.5)
 		image(tex, icon_size)
 	else:
@@ -1497,7 +1609,15 @@ func _activity_tex(activity):
 		for a in apps.apps:
 			if apps.fold(a.name) == want and _activity_icon_of(a) != null:
 				return a.tex
-	return null
+	# Sin ícono XDG: algunos ítems del anillo tienen uno de Sugar razonable.
+	return _sugar_icon_for(activity.name)
+
+
+func _sugar_icon_for(name):
+	var icon = SUGAR_ACTIVITY_ICONS.get(name, "")
+	if icon == "":
+		return null
+	return _load_sugar_svg(icon, XO_STROKE, XO_FILL)
 
 
 func _activity_icon_of(app):
@@ -1634,6 +1754,7 @@ func _open_wayland(activity):
 
 	if id >= 0:
 		pending_origin = null  # ya existía: no es una entrada nueva
+		starting.erase(name)
 		_focus_tile(id)
 		return
 
@@ -1653,6 +1774,7 @@ func _open_wayland(activity):
 	last_launch_pid = pid
 	if pid < 0:
 		pending_wayland = ""
+		starting.erase(name)
 		activity_error = "No se pudo lanzar " + cmd
 		_go_home()
 	else:
@@ -1712,6 +1834,7 @@ func _on_toplevel_added(id):
 	if pending_wayland != "":
 		var name = pending_wayland
 		pending_wayland = ""
+		starting.erase(name)  # llegó la ventana: se corta la notificación de arranque
 		wayland_ids[name] = id
 		_add_tile(id)
 		_focus_tile(id)
@@ -1863,6 +1986,7 @@ func _on_toplevel_removed(id):
 			break
 	if removed_name == "":
 		return
+	starting.erase(removed_name)
 	# Las actividades dinamicas se van con su ventana; las fijas quedan.
 	var index = _activity_named(removed_name)
 	if index >= 0 and ACTIVITIES[index].get("dynamic", false):
