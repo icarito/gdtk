@@ -31,13 +31,13 @@ func _draw():
 				draw_rect(r, Color(0.26, 0.59, 0.98, 1.0), false, 3.0)
 			else:
 				draw_rect(r, Color(0, 0, 0, 0.45), false, 1.0)
-		elif id == shell.focused_tile and shell._unit_members(id).size() > 1:
+		elif id == shell.focused_tile and shell._unit_members(id).size() > 1 and shell.view.visible:
 			# Borde sólo en pantallas partidas: indica qué mitad tiene el foco.
 			draw_rect(r, Color(0.26, 0.59, 0.98, 0.9), false, 2.0)
 	# Asas de redimensión de la franja enfocada: línea tenue en el borde y asa al pasar.
-	for h in shell.handles:
+	for h in (shell.handles if shell.view.visible or shell.expose else []):
 		draw_line(Vector2(h.x, h.y), Vector2(h.x, h.y + h.h), Color(1, 1, 1, 0.05), 1.0)
-	if shell.hover_handle != null and not shell.expose:
+	if shell.hover_handle != null and not shell.expose and shell.view.visible:
 		var h = shell.hover_handle
 		var cy = h.y + h.h * 0.5
 		draw_line(Vector2(h.x, h.y + h.h * 0.2), Vector2(h.x, h.y + h.h * 0.8), Color(0.26, 0.59, 0.98, 0.85), 2.0)

@@ -52,8 +52,8 @@ const TITLE_H = 14.0     # alto de la línea de título dentro de la tesela
 const TITLE_MAX = 10     # máximo de caracteres del título (se recorta con ...)
 const ICON_MIN = 64.0    # ícono nunca por debajo de 64 px
 const ICON_MAX = 72.0
-const ICON_TILE_MIN = 40.0  # en bloques de ventana el ícono cede ante las mini-teselas
-const MINI = 18.0        # lado de las mini-teselas de minimizar/cerrar
+const ICON_TILE_MIN = 64.0  # en bloques de ventana el ícono nunca baja de 64 px
+const MINI = 14.0        # alto de la franja de minimizar/cerrar (sólo al hover)
 # Applets del borde inferior (SPEC-sugar-frame-applets.md): cada control es un bloque
 # cuadrado U x U de la misma rejilla, reordenable y ocultable. Lista corta de ids
 # estables; sin arquitectura genérica de providers.
@@ -374,9 +374,9 @@ func _frame_focus(ui, r, color):
 	ui.imgui_draw_polyline(p, color, 2.0, true)
 
 
-# Ícono de un ítem del Frame: el de su actividad si está cargado, si no el Sugar
-# disponible; el que llame decide el monograma si devuelve null. Fuerza la carga
-# perezosa de a dos íconos por frame como en el Hogar.
+# Ícono de un ítem del Frame: el de su actividad si está cargado, si no el XDG del
+# programa de la ventana y, en última instancia, un ícono genérico de ventana Sugar.
+# Fuerza la carga perezosa de a dos íconos por frame como en el Hogar.
 func _item_icon(item):
 	if item.id >= 0:
 		for a in shell.ACTIVITIES:
@@ -385,6 +385,9 @@ func _item_icon(item):
 				if tex != null:
 					return tex
 				break
+		var win_tex = shell._window_icon(item.id, item.name)
+		if win_tex != null:
+			return win_tex
 	return shell._sugar_icon_for(item.name)
 
 
@@ -613,7 +616,7 @@ func _input(event):
 				shell.request_redraw()
 				get_tree().set_input_as_handled()
 				return
-			if visible and mouse_pos.y <= _vh():
+			if (visible or shell.current_activity == null) and mouse_pos.y <= _vh():
 				shell._focus_dir(-1 if event.button_index == BUTTON_WHEEL_UP else 1)
 				shell.request_redraw()
 				get_tree().set_input_as_handled()
@@ -732,9 +735,13 @@ func _input(event):
 			_gulp(code)
 			return
 		if code == KEY_LEFT or code == KEY_RIGHT:
-			# Super+←/→: tiling a la mitad izquierda/derecha.
+			# Super+←/→: tiling a la mitad izquierda/derecha. En el Hogar, ← vuelve
+			# a la última pantalla con foco y → no hace nada (Home es la ranura final).
 			super_press = null
-			shell._snap_tile(-1 if code == KEY_LEFT else 1)
+			if shell.current_activity == null:
+				shell._focus_dir(-1 if code == KEY_LEFT else 1)
+			else:
+				shell._snap_tile(-1 if code == KEY_LEFT else 1)
 			shell.request_redraw()
 			_gulp(code)
 			return
@@ -1165,10 +1172,11 @@ func _draw_home_tile(ui, pos, side):
 	return b.clicked
 
 
-# Bloque de ventana: tesela cuadrada con ícono centrado, título corto de una línea y
-# las mini-teselas de minimizar (arriba-izq) y cerrar (arriba-der). Estado por color
-# de cara (foco/actual, destino, selección, minimizada) sin depender del texto.
-# `pos` es local; el bisel/foco usan el rect en pantalla que devuelve _tile.
+# Bloque de ventana: tesela cuadrada con ícono (mínimo 64 px), título corto de una
+# línea y los controles de minimizar/cerrar superpuestos arriba SÓLO al pasar el mouse
+# por el bloque, para no tapar nunca el ícono en reposo (el teclado usa Alt+M/Delete).
+# Estado por color de cara (foco/actual, destino, selección, minimizada) sin depender
+# del texto. `pos` es local; el bisel/foco usan el rect en pantalla que devuelve _tile.
 func _draw_window_tile(ui, pos, side, item, current, is_sel, is_drop, mouse):
 	var face = NX_FACE
 	if current:
@@ -1182,16 +1190,14 @@ func _draw_window_tile(ui, pos, side, item, current, is_sel, is_drop, mouse):
 	var b = _tile(ui, pos, side, "w" + item.key, face)
 	if current:
 		_frame_focus(ui, b.rect, NX_FOCUS)
-	var title_h = TITLE_H if side >= 76.0 else 0.0
-	# Mini-teselas de control de ~18 px pegadas a las esquinas superiores. El ícono cede
-	# tamaño y se corre hacia abajo para no quedar debajo de ellas.
-	var ctrl = MINI
-	var top_h = ctrl + BEVEL + 3.0
-	var avail_w = side - 2.0 * BEVEL - 4.0
-	var avail_h = side - title_h - top_h - 2.0
-	var s = clamp(min(avail_w, avail_h), ICON_TILE_MIN, ICON_MAX)
+	# El ícono manda: mínimo 64 px. Si no caben 64 px + el título, se dibuja arriba
+	# (a ras del bisel) y el título va sobre una banda inferior semitransparente.
+	var inner = side - 2.0 * BEVEL
+	var stack = inner - TITLE_H - 4.0
+	var overlap = stack < ICON_TILE_MIN
+	var s = min(float(ICON_TILE_MIN), inner) if overlap else clamp(stack, ICON_TILE_MIN, ICON_MAX)
 	var tex = _item_icon(item)
-	var iy = top_h + max(0.0, (side - title_h - top_h - s) * 0.5)
+	var iy = BEVEL + 0.5 if overlap else BEVEL + max(0.0, (inner - TITLE_H - s) * 0.5)
 	if tex != null:
 		ui.set_cursor_pos(pos + Vector2((side - s) * 0.5, iy))
 		ui.image(tex, Vector2(s, s))
@@ -1199,24 +1205,33 @@ func _draw_window_tile(ui, pos, side, item, current, is_sel, is_drop, mouse):
 		var mono = item.name.substr(0, 1).to_upper() if item.name != "" else "?"
 		ui.set_cursor_pos(pos + Vector2((side - 7.0 * ui.get_imgui_scale()) * 0.5, iy + s * 0.28))
 		ui.text_colored(NX_TEXT, mono)
-	if title_h > 0.0:
-		# El número de pantalla compartido va como prefijo del título corto.
-		var label = item.title
-		if item.screen > 0:
-			label = str(item.screen) + " " + label
-		_tile_title(ui, pos, side, label, item.minimized)
-	# Mini-teselas de control dentro del bloque; hit manual, encima del cuadrado.
+	# Banda inferior semitransparente cuando el título pisa al ícono: garantiza
+	# legibilidad sin encoger el ícono por debajo de 64 px.
+	if overlap:
+		ui.imgui_draw_rect_filled(Rect2(b.rect.position + Vector2(BEVEL, side - TITLE_H),
+			Vector2(side - 2.0 * BEVEL, TITLE_H - BEVEL)), Color(0.0, 0.0, 0.0, 0.5), 0.0)
+	# El número de pantalla compartido va como prefijo del título corto.
+	var label = item.title
+	if item.screen > 0:
+		label = str(item.screen) + " " + label
+	_tile_title(ui, pos, side, label, item.minimized)
+	# Mini-teselas de control (franja fina): sólo al pasar el mouse por el bloque.
 	var off = b.rect.position - pos
+	var ctrl = MINI
 	var min_loc = pos + Vector2(BEVEL + 1.0, BEVEL + 1.0)
 	var close_loc = pos + Vector2(side - ctrl - BEVEL - 1.0, BEVEL + 1.0)
-	var over_min = _in_rect(mouse, min_loc + off, ctrl)
-	var over_close = _in_rect(mouse, close_loc + off, ctrl)
-	_draw_mini(ui, min_loc, ctrl, "-", over_min and mouse_down)
-	_draw_mini(ui, close_loc, ctrl, "x", over_close and mouse_down)
-	if b.clicked and over_close:
-		return {"clicked": false, "minimize": false, "close": true}
-	if b.clicked and over_min:
-		return {"clicked": false, "minimize": true, "close": false}
+	var hover = b.rect.has_point(mouse)
+	if hover:
+		ui.imgui_draw_rect_filled(Rect2(b.rect.position + Vector2(BEVEL, BEVEL),
+			Vector2(side - 2.0 * BEVEL, ctrl + 2.0)), Color(0.0, 0.0, 0.0, 0.45), 0.0)
+		var over_min = _in_rect(mouse, min_loc + off, ctrl)
+		var over_close = _in_rect(mouse, close_loc + off, ctrl)
+		_draw_mini(ui, min_loc, ctrl, "-", over_min and mouse_down)
+		_draw_mini(ui, close_loc, ctrl, "x", over_close and mouse_down)
+		if b.clicked and over_close:
+			return {"clicked": false, "minimize": false, "close": true}
+		if b.clicked and over_min:
+			return {"clicked": false, "minimize": true, "close": false}
 	return {"clicked": b.clicked, "minimize": false, "close": false}
 
 

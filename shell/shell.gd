@@ -1022,10 +1022,12 @@ func _update_ghosts(now):
 func _focus_tile(id):
 	if id < 0 or not _id_alive(id):
 		return
-	# Enfocar a mano cancela cualquier deslizamiento/hogar en curso.
+	# Enfocar a mano cancela cualquier deslizamiento/hogar en curso y cierra la
+	# grilla de Apps: el flag no debe sobrevivir al volver de la grilla a una app.
 	pan = 0.0
 	pan_active = false
 	home_slide_since = -1
+	apps_view = false
 	# Enfocar una minimizada la restaura (así el teclado puede traerlas de vuelta).
 	if minimized.has(id):
 		minimized.erase(id)
@@ -1860,6 +1862,22 @@ func _activity_tex(activity):
 	return _sugar_icon_for(activity.name)
 
 
+# Ícono de una ventana sin actividad cargada (o cuya actividad no tiene ícono):
+# primero el XDG del programa por el app_id del toplevel; si no hay, el Sugar por
+# nombre; y por último un ícono genérico de ventana Sugar (nunca un monograma suelto).
+func _window_icon(id, name):
+	if id >= 0:
+		var app_id = compositor.get_app_id(id)
+		if app_id != "":
+			var tex = _activity_tex({"name": name, "wayland": [app_id]})
+			if tex != null:
+				return tex
+	var sugar = _sugar_icon_for(name)
+	if sugar != null:
+		return sugar
+	return _load_sugar_svg("document-send", SUGAR_STROKE, SUGAR_FILL)
+
+
 func _sugar_icon_for(name):
 	var icon = SUGAR_ACTIVITY_ICONS.get(name, "")
 	if icon == "":
@@ -2032,6 +2050,7 @@ func _open_wayland(activity):
 func _go_home():
 	release_modifiers()  # no dejar modificadores pegados en la app que sale de foco
 	home_slide_since = -1
+	apps_view = false  # el Hogar muestra siempre la fila de favoritos, no la grilla
 	_release_activity()
 	current_activity = null
 	activity_instance = null
