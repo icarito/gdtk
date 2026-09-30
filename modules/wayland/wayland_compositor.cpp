@@ -126,6 +126,8 @@ enum {
 	EVDEV_BTN_LEFT = 0x110,
 	EVDEV_BTN_RIGHT = 0x111,
 	EVDEV_BTN_MIDDLE = 0x112,
+	EVDEV_BTN_SIDE = 0x113,
+	EVDEV_BTN_EXTRA = 0x114,
 };
 
 // Los codigos evdev de las letras siguen el orden fisico QWERTY, no el alfabetico.
@@ -805,6 +807,12 @@ void WaylandCompositor::pointer_button(int p_button_index, bool p_pressed) {
 			break;
 		case BUTTON_MIDDLE:
 			btn = EVDEV_BTN_MIDDLE;
+			break;
+		case BUTTON_XBUTTON1:
+			btn = EVDEV_BTN_SIDE;
+			break;
+		case BUTTON_XBUTTON2:
+			btn = EVDEV_BTN_EXTRA;
 			break;
 		default:
 			return;

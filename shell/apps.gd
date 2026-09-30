@@ -5,7 +5,6 @@ extends Reference
 # verse en pantalla y con un tope de tiempo por frame (X200: CPU lenta).
 
 const ICON = 64
-const CELL = Vector2(124, 112)
 const ICON_BUDGET_USEC = 8000
 const SIZES = ["64x64", "48x48", "96x96", "128x128", "scalable", "256x256", "32x32", "192x192", "512x512"]
 # Categorías de toolkit/escritorio: ruido al buscar ("gtk" sacaba media grilla).
@@ -30,6 +29,8 @@ var path_dirs = []
 var watching = {}
 # Rect en pantalla del último ícono elegido (para animar la entrada de su ventana).
 var chosen_rect = null
+var tiles = []
+var suppress_click = ""
 
 
 func _init():
@@ -329,6 +330,7 @@ func draw(ui):
 	var list = matches()
 	var chosen = null
 	chosen_rect = null
+	tiles = []
 	if ui.is_key_pressed(KEY_ESCAPE):
 		query = ""
 	elif (ui.is_key_pressed(KEY_ENTER) or ui.is_key_pressed(KEY_KP_ENTER)) and query != "" and list.size() > 0:
@@ -340,7 +342,8 @@ func draw(ui):
 		if query != shown_query:
 			shown_query = query
 			ui.set_scroll_here_y(0.0)
-		var cols = max(1, int(ui.get_content_region_avail().x / CELL.x))
+		var side = ui.grid_unit(ui.get_viewport_rect().size) * 1.5
+		var cols = max(1, int(ui.get_content_region_avail().x / side))
 		var top = ui.get_window_pos().y
 		var bottom = top + ui.get_window_size().y
 		# ProggyClean (fuente por defecto) es monoespaciada: 7 px por carácter.
@@ -349,10 +352,10 @@ func draw(ui):
 		var more = false
 		for i in range(list.size()):
 			var app = list[i]
-			var cell = Vector2((i % cols) * CELL.x, (i / cols) * CELL.y)
-			ui.set_cursor_pos(cell + Vector2((CELL.x - ICON) * 0.5 - 4.0, 4.0))
+			var cell = Vector2((i % cols) * side, (i / cols) * side)
+			ui.set_cursor_pos(cell + Vector2((side - ICON) * 0.5, 4.0))
 			var y = ui.get_cursor_screen_pos().y
-			if y > bottom or y + CELL.y < top:
+			if y > bottom or y + side < top:
 				continue
 			if not app.icon_tried:
 				if OS.get_ticks_usec() - t0 < ICON_BUDGET_USEC:
@@ -361,22 +364,43 @@ func draw(ui):
 					more = true
 			var clicked = false
 			var icon_scr = ui.get_cursor_screen_pos()
-			if app.tex != null:
-				clicked = ui.image_button("##" + app.id, app.tex, Vector2(ICON, ICON))
-			else:
-				clicked = ui.button(app.name.substr(0, 8) + "##" + app.id, Vector2(ICON + 8, ICON + 6))
+			ui.push_style_color(ui.COL_BUTTON, Color(0, 0, 0, 0))
+			ui.push_style_color(ui.COL_BUTTON_HOVERED, Color(0, 0, 0, 0))
+			ui.push_style_color(ui.COL_BUTTON_ACTIVE, Color(0, 0, 0, 0))
+			clicked = ui.button("##" + app.id, Vector2(ICON, ICON))
+			var held = ui.is_item_active()
+			ui.pop_style_color(3)
+			var moving = ui.frame.app_drag != null and ui.frame.app_drag.id == app.id
+			ui._draw_home_bevel(Rect2(icon_scr, Vector2(ICON, ICON)), Color(0.12, 0.13, 0.17, 1.0) if moving else ui.HOME_BLOCK_FACE, held)
+			if not moving:
+				if app.tex != null:
+					ui.set_cursor_pos(cell + Vector2((side - ICON) * 0.5 + 4.0, 8.0))
+					ui.image(app.tex, Vector2(ICON - 8, ICON - 8))
+				else:
+					ui.set_cursor_pos(cell + Vector2((side - ICON) * 0.5 + 5.0, 24.0))
+					ui.text(app.name.substr(0, 7))
+			tiles.append({"app": app, "rect": Rect2(icon_scr, Vector2(ICON, ICON))})
 			if ui.is_item_hovered():
 				ui.set_tooltip(app.name)
-			if clicked:
+			if clicked and app.id != suppress_click:
 				chosen = app
 				chosen_rect = Rect2(icon_scr, Vector2(ICON, ICON))
 			var label = app.name if app.name.length() <= 16 else app.name.substr(0, 15) + "."
-			ui.set_cursor_pos(cell + Vector2(max(0.0, (CELL.x - label.length() * char_w) * 0.5), ICON + 14.0))
-			ui.text(label)
+			if not moving:
+				ui.set_cursor_pos(cell + Vector2(max(0.0, (side - label.length() * char_w) * 0.5), ICON + 14.0))
+				ui.text(label)
 		if more:
 			ui.request_redraw()
 		# El alto del contenido (scroll) lo fija un item al final, no set_cursor_pos.
-		ui.set_cursor_pos(Vector2(0.0, ceil(list.size() / float(cols)) * CELL.y))
+		ui.set_cursor_pos(Vector2(0.0, ceil(list.size() / float(cols)) * side))
 		ui.dummy(Vector2(1, 1))
 	ui.end_child()
+	suppress_click = ""
 	return chosen
+
+
+func at(pos):
+	for tile in tiles:
+		if tile.rect.has_point(pos):
+			return tile.app
+	return null

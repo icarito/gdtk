@@ -8,8 +8,8 @@ set -e
 HOST="$1"; DRIVER="${2:-GLES2}"
 [ -n "$HOST" ] || { echo "uso: $0 usuario@host [GLES2|GLES3]"; exit 1; }
 GDTK="$(cd "$(dirname "$0")" && pwd)"
-# Árbol del motor propio de gdtk (worktree): no comparte objetos ni parches con el de Odisea.
-GODOT=/home/icarito/Proyectos/godot3-box3d/godot-dev
+# Árbol aislado del motor con SlugVector2D; GODOT permite elegir otro checkout.
+GODOT="${GODOT:-/home/icarito/Proyectos/godot3-box3d/godot-gdtk-slug}"
 # Fork con el módulo imgui (no toda rama del fork lo trae): FORK=/ruta ./deploy.sh ...
 # Default: worktree propio del fork en main (el checkout principal cambia de rama y /tmp se borra).
 # Actualizar: git -C <worktree> checkout --detach main
@@ -28,6 +28,7 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 	production=yes lto=none use_static_cpp=no progress=no extra_suffix=gdtklite imgui_implot3d=yes \
 	custom_modules="$FORK","$GDTK/modules" $(for m in $NO_MODULES; do printf 'module_%s_enabled=no ' "$m"; done))
 grep -q ImGuiCanvas "$BIN" || { echo "el binario no trae ImGuiCanvas: $FORK sin módulo imgui"; exit 1; }
+grep -q SlugVector2D "$BIN" || { echo "el binario no trae SlugVector2D"; exit 1; }
 objcopy --remove-section=.note.gnu.property "$BIN" "$TMP/godot-gdtk"
 
 ssh "$HOST" 'mkdir -p ~/gdtk/bin ~/gdtk/session'

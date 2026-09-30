@@ -58,17 +58,11 @@ const MINI = 14.0        # alto de la franja de minimizar/cerrar (sólo al hover
 # cuadrado U x U de la misma rejilla, reordenable y ocultable. Lista corta de ids
 # estables; sin arquitectura genérica de providers.
 const APPLETS = [
-	{"id": "cpu", "name": "CPU", "short": "CPU"},
-	{"id": "memoria", "name": "Memoria", "short": "MEM"},
-	{"id": "swap", "name": "Swap", "short": "SWP"},
+	{"id": "recursos", "name": "CPU · Memoria · Swap", "short": "SYS"},
 	{"id": "reloj", "name": "Reloj", "short": "REL"},
-	{"id": "deskflow", "name": "Deskflow", "short": "DFW"},
-	{"id": "bluetooth", "name": "Bluetooth", "short": "BT"},
 	{"id": "teclado", "name": "Teclado", "short": "TEC"},
 ]
-const APPLET_DEFAULT = ["cpu", "memoria", "swap", "reloj", "deskflow", "bluetooth", "teclado"]
-const DESKFLOW = "Deskflow"
-const DESKFLOW_MS = 1000
+const APPLET_DEFAULT = ["recursos", "reloj", "teclado"]
 
 onready var shell = get_parent()
 
@@ -85,7 +79,6 @@ var shown = false
 var slide_since = 0
 # Layout del último frame dibujado (para el control remoto / tests).
 var sysmon = Host.sc("res://sysmon.gd").new()
-var bluetooth = Host.sc("res://applet_bluetooth.gd").new()
 var keyboard = Host.sc("res://applet_keyboard.gd").new()
 var items_layout = []
 var drawn = false
@@ -108,6 +101,10 @@ var applets_visible = []
 var applets_future = []
 var applets_raw = {}
 var applets_saved_bottom = []
+var pinned_top = []
+var pinned_dock = []
+var pinned_saved_top = []
+var pinned_saved_dock = []
 var applets_dirty = false
 var applets_layout = []    # rects del último dibujo de los applets
 var applets_drawn = false
@@ -117,8 +114,11 @@ var applet_action_want = ""
 var applet_press = null    # id del applet pulsado (aún sin arrastrar)
 var applet_drag = null     # id del applet que se está arrastrando (reordenar)
 var applet_from = Vector2.ZERO
-var deskflow_on = false
-var deskflow_ms = -DESKFLOW_MS
+var app_press = null
+var app_drag = null
+var app_from = Vector2.ZERO
+var pinned_layout = []
+var suppress_pinned_click = ""
 
 
 func _ready():
@@ -152,6 +152,10 @@ func _load_applets():
 	applets_future = []
 	applets_raw = {}
 	applets_saved_bottom = APPLET_DEFAULT.duplicate()
+	pinned_top = []
+	pinned_dock = []
+	pinned_saved_top = []
+	pinned_saved_dock = []
 	var f = File.new()
 	if f.open(_applets_path(), File.READ) == OK:
 		var txt = f.get_as_text()
@@ -159,22 +163,36 @@ func _load_applets():
 		var res = JSON.parse(txt)
 		if res.error == OK and typeof(res.result) == TYPE_DICTIONARY:
 			applets_raw = res.result
-			var bottom = applets_raw.get("bottom", null)
-			if typeof(bottom) == TYPE_ARRAY:
-				var seen = {}
-				applets_visible = []
-				var saved = []
-				for v in bottom:
-					if typeof(v) != TYPE_STRING:
-						continue
-					if _applet_known(v):
-						if not seen.has(v):
-							seen[v] = true
-							applets_visible.append(v)
-					else:
-						applets_future.append(v)
-					saved.append(v)
-				applets_saved_bottom = saved
+			for zone in ["top", "dock"]:
+				var ids = applets_raw.get(zone, [])
+				if typeof(ids) == TYPE_ARRAY:
+					var target = pinned_top if zone == "top" else pinned_dock
+					for id in ids:
+						if typeof(id) == TYPE_STRING and not target.has(id):
+							target.append(id)
+	pinned_saved_top = pinned_top.duplicate()
+	pinned_saved_dock = pinned_dock.duplicate()
+	if not applets_raw.empty():
+		var bottom = applets_raw.get("bottom", null)
+		if typeof(bottom) == TYPE_ARRAY:
+			var seen = {}
+			applets_visible = []
+			var saved = []
+			for v in bottom:
+				if typeof(v) != TYPE_STRING:
+					continue
+				if v in ["cpu", "memoria", "swap"]:
+					v = "recursos"
+				elif v in ["deskflow", "bluetooth"]:
+					continue
+				if _applet_known(v):
+					if not seen.has(v):
+						seen[v] = true
+						applets_visible.append(v)
+				else:
+					applets_future.append(v)
+				saved.append(v)
+			applets_saved_bottom = saved
 	applets_dirty = false
 
 
@@ -193,13 +211,15 @@ func _save_applets():
 	var bottom = applets_visible.duplicate()
 	for id in applets_future:
 		bottom.append(id)
-	if _same_list(bottom, applets_saved_bottom):
+	if _same_list(bottom, applets_saved_bottom) and _same_list(pinned_top, pinned_saved_top) and _same_list(pinned_dock, pinned_saved_dock):
 		applets_dirty = false
 		return
 	var path = _applets_path()
 	var dir = Directory.new()
 	dir.make_dir_recursive(path.get_base_dir())
 	applets_raw["bottom"] = bottom
+	applets_raw["top"] = pinned_top
+	applets_raw["dock"] = pinned_dock
 	var tmp = path + ".tmp"
 	var w = File.new()
 	if w.open(tmp, File.WRITE) != OK:
@@ -211,6 +231,8 @@ func _save_applets():
 		printerr("frame: no se pudo renombrar ", tmp, " a ", path)
 		return
 	applets_saved_bottom = bottom
+	pinned_saved_top = pinned_top.duplicate()
+	pinned_saved_dock = pinned_dock.duplicate()
 	applets_dirty = false
 
 
@@ -218,9 +240,7 @@ func _applet_set_visible(id, v):
 	if v:
 		if not applets_visible.has(id):
 			applets_visible.append(id)
-			if id == "bluetooth":
-				bluetooth.refresh(true)
-			elif id == "teclado":
+			if id == "teclado":
 				keyboard.refresh(true)
 	elif applets_visible.has(id):
 		applets_visible.erase(id)
@@ -243,73 +263,77 @@ func _applet_move(id, dir):
 	shell.request_redraw()
 
 
-func _deskflow_activity():
-	for act in shell.ACTIVITIES:
-		if act.name == DESKFLOW:
-			return act
+func _pinned_app(id):
+	if not shell.apps.scanned:
+		shell.apps.scan()
+	for app in shell.apps.apps:
+		if app.id == id:
+			return app
 	return null
 
 
-# Primaria del applet: Deskflow prende/apaga reusando _toggle_service; el resto no
-# tiene acción en este corte (el tooltip muestra el nombre completo).
+func _pin_app(app, zone, x):
+	pinned_top.erase(app.id)
+	pinned_dock.erase(app.id)
+	var target = pinned_top if zone == "top" else pinned_dock
+	var index = 0
+	for tile in pinned_layout:
+		if tile.zone == zone and tile.app.id != app.id and tile.rect.position.x + tile.rect.size.x * 0.5 < x:
+			index += 1
+	target.insert(index, app.id)
+	_save_applets()
+	shell.request_redraw()
+
+
+func _pinned_at(pos):
+	for tile in pinned_layout:
+		if tile.rect.has_point(pos):
+			return tile.app
+	return null
+
+
+func _draw_pinned(ui, ids, x, side, zone):
+	for id in ids:
+		var app = _pinned_app(id)
+		if app == null:
+			continue
+		var pos = Vector2(x, 0.0)
+		var tile = _draw_app_tile(ui, app, pos, side, "pin_" + zone + id, app_drag != null and app_drag.id == id)
+		pinned_layout.append({"app": app, "rect": tile.rect, "zone": zone})
+		if app_drag == null and tile.rect.has_point(mouse_pos):
+			ui.set_tooltip(app.name + " · arrastrar para mover")
+		if tile.clicked and suppress_pinned_click != id:
+			shell._launch_app(app)
+		x += side + PAD
+	return x
+
+
+func _draw_app_tile(ui, app, pos, side, id, empty = false):
+	var tile = _tile(ui, pos, side, id, NX_BG if empty else NX_FACE)
+	if not empty:
+		var icon = shell._activity_icon_of(app)
+		if icon != null:
+			var icon_side = min(56.0, side - 8.0)
+			ui.set_cursor_pos(pos + Vector2((side - icon_side) * 0.5, 4.0))
+			ui.image(icon, Vector2(icon_side, icon_side))
+		_tile_title(ui, pos, side, app.name, false)
+	return tile
+
+
+# Primaria del applet.
 func _applet_primary(id):
-	if id == DESKFLOW:
-		var act = _deskflow_activity()
-		if act != null:
-			_refresh_deskflow(true)
-			shell._toggle_service(act)
-			deskflow_on = shell._service_running(DESKFLOW)
-			deskflow_ms = OS.get_ticks_msec()
-			shell.request_redraw()
-	elif id == "bluetooth":
-		# Se registra como actividad dinámica para que Blueman use el compositor
-		# embebido y su ventana participe en el mismo espacio que las demás.
-		var i = shell._activity_named("Bluetooth")
-		if i < 0:
-			shell.ACTIVITIES.append({"name": "Bluetooth", "wayland": ["blueman-manager"], "dynamic": true})
-			i = shell.ACTIVITIES.size() - 1
-		shell._activate(i)
-		if not shell._pending_has("Bluetooth") and not shell.wayland_ids.has("Bluetooth") and shell.ACTIVITIES[i].get("dynamic", false):
-			shell.ACTIVITIES.remove(i)
-	elif id == "teclado":
+	if id == "teclado":
 		applet_action_want = "teclado"
 		shell.request_redraw()
-
-
-func _refresh_deskflow(force := false):
-	var now = OS.get_ticks_msec()
-	if not force and now - deskflow_ms < DESKFLOW_MS:
-		return
-	deskflow_ms = now
-	# Una recarga antigua del shell puede perder el PID aunque Deskflow siga vivo.
-	# Reincorporarlo evita mostrar «no» y lanzar un segundo cliente al pulsar.
-	if not shell._service_running(DESKFLOW):
-		var act = _deskflow_activity()
-		if act != null:
-			var out = []
-			var cmd = act.service.replace("~/", OS.get_environment("HOME") + "/")
-			if OS.execute("pgrep", ["-u", OS.get_environment("USER"), "-f", "-x", cmd], true, out) == 0 and out.size() > 0:
-				var pid = int(String(out[0]).strip_edges().split("\n")[0])
-				if pid > 0:
-					shell.service_pids[DESKFLOW] = pid
-	deskflow_on = shell._service_running(DESKFLOW)
 
 
 # Estado y valor textual de cada applet. Sin medición no se estima: "sin dato".
 func _applet_state(id):
 	match id:
-		"cpu":
-			return "activo" if sysmon.has_cpu else "sin_dato"
-		"memoria":
-			return "activo" if sysmon.has_ram else "sin_dato"
-		"swap":
-			return "activo" if sysmon.has_swap else "sin_dato"
+		"recursos":
+			return "activo" if sysmon.has_cpu or sysmon.has_ram else "sin_dato"
 		"reloj":
 			return "activo"
-		"deskflow":
-			return "activo" if deskflow_on else "apagado"
-		"bluetooth":
-			return bluetooth.state
 		"teclado":
 			return keyboard.state
 	return "sin_dato"
@@ -317,19 +341,14 @@ func _applet_state(id):
 
 func _applet_value(id):
 	match id:
-		"cpu":
-			return "%d%%" % int(round(sysmon.cpu_now())) if sysmon.has_cpu else "sin dato"
-		"memoria":
-			return "%d%%" % int(round(sysmon.ram)) if sysmon.has_ram else "sin dato"
-		"swap":
-			return "%d%%" % int(round(sysmon.swap)) if sysmon.has_swap else "sin dato"
+		"recursos":
+			return "CPU %s · MEM %s · SWP %s" % [
+				("%d%%" % int(round(sysmon.cpu_now()))) if sysmon.has_cpu else "sin dato",
+				("%d%%" % int(round(sysmon.ram))) if sysmon.has_ram else "sin dato",
+				("%d%%" % int(round(sysmon.swap))) if sysmon.has_swap else "sin swap"]
 		"reloj":
 			var t = OS.get_time()
 			return "%02d:%02d" % [t.hour, t.minute]
-		"deskflow":
-			return "sí" if deskflow_on else "no"
-		"bluetooth":
-			return bluetooth.value
 		"teclado":
 			return keyboard.value
 	return ""
@@ -337,12 +356,8 @@ func _applet_value(id):
 
 func _applet_pct(id):
 	match id:
-		"cpu":
+		"recursos":
 			return clamp(sysmon.cpu_now() / 100.0, 0.0, 1.0) if sysmon.has_cpu else -1.0
-		"memoria":
-			return clamp(sysmon.ram / 100.0, 0.0, 1.0) if sysmon.has_ram else -1.0
-		"swap":
-			return clamp(sysmon.swap / 100.0, 0.0, 1.0) if sysmon.has_swap else -1.0
 	return -1.0
 
 
@@ -448,7 +463,6 @@ func set_visible(v):
 	corner_since = -1
 	if v:
 		show_until = 0  # mostrado a mano: sin auto-ocultado de Alt+Tab
-		_refresh_deskflow(true)
 	else:
 		sel = -1
 		lifted = null
@@ -562,11 +576,6 @@ func _process(_delta):
 	var home = shell.current_activity == null
 	if visible or home:
 		var changed = sysmon.tick()
-		if changed:
-			# El estado de Deskflow lanza un proceso (kill -0): a lo sumo 1/s.
-			_refresh_deskflow(false)
-		if applets_visible.has("bluetooth"):
-			changed = bluetooth.refresh() or changed
 		if applets_visible.has("teclado"):
 			changed = keyboard.refresh() or changed
 		if changed:
@@ -584,6 +593,11 @@ func _input(event):
 	# Mouse: además del borde/esquina, sigue el arrastre de ítems para tilear.
 	if event is InputEventMouseMotion:
 		mouse_pos = event.position
+		if mouse_down and app_press != null and app_drag == null \
+				and mouse_pos.distance_to(app_from) > DRAG_PX:
+			app_drag = app_press
+		if app_drag != null:
+			shell.request_redraw()
 		# Arrastre de un applet del borde inferior: reordena, nunca mueve ventanas.
 		if mouse_down and applet_press != null and applet_drag == null \
 				and mouse_pos.distance_to(applet_from) > DRAG_PX:
@@ -623,19 +637,23 @@ func _input(event):
 				return
 			return
 		if event.button_index == BUTTON_RIGHT:
-			# Bluetooth ofrece radio/dispositivos; los demás, composición del Frame.
+			# El menú contextual abre la composición del Frame.
 			var right_applet = _applet_at(mouse_pos)
 			if event.pressed and not applet_picker_open and right_applet != null:
-				if right_applet == "bluetooth":
-					applet_action_want = "bluetooth"
-				else:
-					applet_picker_want = true
+				applet_picker_want = true
 				shell.request_redraw()
 				get_tree().set_input_as_handled()
 				return
 		if event.button_index == BUTTON_LEFT:
 			mouse_down = event.pressed
 			if event.pressed:
+				var hit_app = _pinned_at(mouse_pos)
+				if hit_app == null and shell.apps_view:
+					hit_app = shell.apps.at(mouse_pos)
+				if hit_app != null:
+					app_press = hit_app
+					app_from = mouse_pos
+					app_drag = null
 				# Super+arrastre sobre una ventana: la mueve al Frame (reordenar/tilear).
 				if super_press != null and mouse_pos.y > _vh() and shell.focused_tile >= 0:
 					win_drag = {"id": shell.focused_tile}
@@ -659,6 +677,18 @@ func _input(event):
 				drag_from = mouse_pos
 				dragging = null
 			else:
+				if app_drag != null:
+					var zone = "top" if mouse_pos.y <= _vh() else "dock" if mouse_pos.y >= get_viewport().size.y - _vh() else ""
+					if zone != "":
+						_pin_app(app_drag, zone, mouse_pos.x)
+					elif pinned_top.has(app_drag.id) or pinned_dock.has(app_drag.id):
+						pinned_top.erase(app_drag.id)
+						pinned_dock.erase(app_drag.id)
+						_save_applets()
+					shell.apps.suppress_click = app_drag.id
+					suppress_pinned_click = app_drag.id
+				app_drag = null
+				app_press = null
 				if applet_drag != null:
 					_finish_applet_drag()
 				elif applet_press != null:
@@ -1014,7 +1044,10 @@ func _draw_applets(ui, vp, off, mouse):
 		ui.pop_style_var()
 		return
 	# Fondo NeXT de la franja inferior, para que los bloques floten sobre lo mismo.
-	ui.imgui_draw_rect_filled(Rect2(Vector2.ZERO, Vector2(vp.x, side)), NX_BG, 0.0)
+	ui.imgui_draw_rect_filled(Rect2(Vector2(0.0, by), Vector2(vp.x, side)), NX_BG, 0.0)
+	if app_drag != null and mouse.y >= by:
+		ui.imgui_draw_rect_filled(Rect2(Vector2(0.0, by), Vector2(vp.x, 3.0)), NX_SEL, 0.0)
+	_draw_pinned(ui, pinned_dock, PAD, side, "dock")
 	var n = applets_visible.size()
 	var step = side + PAD
 	var total_w = n * step + side + PAD
@@ -1049,16 +1082,6 @@ func _draw_applets(ui, vp, off, mouse):
 	if applet_action_want != "":
 		ui.open_popup("##applet_" + applet_action_want)
 		applet_action_want = ""
-	if ui.begin_popup("##applet_bluetooth"):
-		ui.text_disabled("Bluetooth")
-		if ui.menu_item("Dispositivos…"):
-			_applet_primary("bluetooth")
-		if bluetooth.state == "activo" or bluetooth.state == "apagado":
-			if ui.menu_item("Apagar radio" if bluetooth.state == "activo" else "Encender radio"):
-				bluetooth.toggle_power()
-				shell.request_redraw()
-		ui.text_disabled(bluetooth.detail)
-		ui.end_popup()
 	if ui.begin_popup("##applet_teclado"):
 		ui.text_disabled("Distribución · próxima sesión")
 		for layout in ["es", "latam", "us"]:
@@ -1079,13 +1102,15 @@ func _draw_applets(ui, vp, off, mouse):
 
 # Un applet: bloque cuadrado U x U con bisel; el estado va por color de la barra/
 # etiqueta además del valor textual (nunca sólo color). Tooltip con el nombre completo.
-func _draw_applet(ui, id, pos, scr, side, is_sel, mouse):
+func _draw_applet(ui, id, pos, scr, side, is_sel, mouse, is_ghost = false):
 	var a = _applet_def(id)
 	if a == null:
 		return
 	var state = _applet_state(id)
 	var b = _tile(ui, pos, side, "app_" + id)
 	var rect = b.rect
+	if applet_drag == id and not is_ghost:
+		return
 	if is_sel:
 		_frame_focus(ui, rect, NX_SEL)
 	var line = NX_LIGHT
@@ -1097,17 +1122,22 @@ func _draw_applet(ui, id, pos, scr, side, is_sel, mouse):
 		line = NX_SEL
 	elif state == "error" or state == "no_disponible":
 		line = Color(0.95, 0.55, 0.30, 1.0)
-	# Glifo cuadrado (64 px) hundido: placa oscura con el rótulo corto y el valor.
+	# Placa común: los recursos y el reloj aprovechan toda la celda.
 	var g = min(ICON_MIN, side - 2.0 * BEVEL - 6.0)
 	var gp_scr = scr + Vector2((side - g) * 0.5, BEVEL + 3.0)
 	var gp_loc = pos + Vector2((side - g) * 0.5, BEVEL + 3.0)
 	ui.imgui_draw_rect_filled(Rect2(gp_scr, Vector2(g, g)), Color(0.10, 0.11, 0.14, 1.0), 0.0)
-	ui.set_cursor_pos(gp_loc + Vector2(4.0, 3.0))
-	ui.text_colored(NX_TEXT_DIM, a.short)
 	var v = _applet_value(id)
-	var vw = v.length() * 7.0 * ui.get_imgui_scale()
-	ui.set_cursor_pos(gp_loc + Vector2(max(3.0, (g - vw) * 0.5), g * 0.45))
-	ui.text_colored(NX_TEXT, v)
+	if id == "recursos":
+		_draw_resources(ui, gp_scr, gp_loc, g)
+	elif id == "reloj":
+		_draw_clock(ui, gp_scr, gp_loc, g, v)
+	else:
+		ui.set_cursor_pos(gp_loc + Vector2(4.0, 3.0))
+		ui.text_colored(NX_TEXT_DIM, a.short)
+		var vw = v.length() * 7.0 * ui.get_imgui_scale()
+		ui.set_cursor_pos(gp_loc + Vector2(max(3.0, (g - vw) * 0.5), g * 0.45))
+		ui.text_colored(NX_TEXT, v)
 	var pct = _applet_pct(id)
 	if pct >= 0.0:
 		var bw = (side - 8.0) * clamp(pct, 0.0, 1.0)
@@ -1116,44 +1146,47 @@ func _draw_applet(ui, id, pos, scr, side, is_sel, mouse):
 		ui.begin_tooltip()
 		ui.text(a.name)
 		ui.text_disabled("estado: " + state)
-		if id == "bluetooth":
-			ui.text(bluetooth.detail)
-		elif id == "teclado":
+		if id == "recursos":
+			ui.text(v)
+		if id == "teclado":
 			ui.text(keyboard.detail)
 		ui.end_tooltip()
+
+
+func _draw_resources(ui, scr, loc, size):
+	var line = PoolVector2Array()
+	for i in range(sysmon.cpu.size()):
+		line.append(scr + Vector2(3.0 + (size - 6.0) * float(i + sysmon.HISTORY - sysmon.cpu.size()) / float(sysmon.HISTORY - 1),
+			26.0 - 22.0 * clamp(sysmon.cpu[i], 0.0, 100.0) / 100.0))
+	if line.size() > 1:
+		ui.imgui_draw_polyline(line, Color(0.35, 0.8, 1.0, 1.0), 1.5)
+	ui.set_cursor_pos(loc + Vector2(3.0, 28.0))
+	ui.text_colored(NX_TEXT, "C%s M%s" % [str(int(round(sysmon.cpu_now()))) if sysmon.has_cpu else "--",
+		str(int(round(sysmon.ram))) if sysmon.has_ram else "--"])
+	ui.set_cursor_pos(loc + Vector2(3.0, 43.0))
+	ui.text_colored(NX_TEXT_DIM, "S%02d" % int(round(sysmon.swap)) if sysmon.has_swap else "S --")
+	if sysmon.has_ram:
+		ui.imgui_draw_rect_filled(Rect2(scr + Vector2(28.0, 47.0), Vector2((size - 32.0) * clamp(sysmon.ram / 100.0, 0.0, 1.0), 3.0)), Color(0.5, 0.9, 0.45, 1.0), 0.0)
+
+
+func _draw_clock(ui, scr, loc, size, value):
+	var center = scr + Vector2(size * 0.5, size * 0.40)
+	var radius = min(size * 0.32, 19.0)
+	ui.imgui_draw_circle(center, radius, NX_TEXT_DIM, 32, 1.5)
+	var t = OS.get_time()
+	for hand in [
+		{"angle": TAU * (float(t.hour % 12) + float(t.minute) / 60.0) / 12.0 - PI * 0.5, "length": radius * 0.53, "width": 2.5},
+		{"angle": TAU * float(t.minute) / 60.0 - PI * 0.5, "length": radius * 0.79, "width": 1.5}]:
+		var tip = center + Vector2(cos(hand.angle), sin(hand.angle)) * hand.length
+		ui.imgui_draw_polyline(PoolVector2Array([center, tip]), NX_FOCUS, hand.width)
+	ui.imgui_draw_circle_filled(center, 2.0, NX_SEL, 0)
+	ui.set_cursor_pos(loc + Vector2((size - value.length() * 7.0 * ui.get_imgui_scale()) * 0.5, size - 15.0))
+	ui.text_colored(NX_TEXT, value)
 
 
 func _draw_outline(ui, rect, color):
 	var p = PoolVector2Array([rect.position, Vector2(rect.end.x, rect.position.y), rect.end, Vector2(rect.position.x, rect.end.y)])
 	ui.imgui_draw_polyline(p, color, 2.0, true)
-
-
-func _user_name():
-	var user = OS.get_environment("USER")
-	if user == "":
-		user = OS.get_environment("LOGNAME")
-	if user == "":
-		user = "user"
-	return user
-
-
-# Insignia de identidad en la barra superior: bloque cuadrado U x U con bisel y la
-# figura XO (rasterizada por el shell, ver identity_tex) centrada. El nombre de usuario
-# va en el tooltip (no cabe en la tesela cuadrada). Sin acción por ahora.
-func _draw_identity(ui, x, y, side, mouse):
-	var local = Vector2(x, y)
-	ui.set_cursor_pos(local)
-	var r = Rect2(ui.get_cursor_screen_pos(), Vector2(side, side))
-	_bevel(ui, r, NX_FACE, false)
-	var icon = shell.identity_tex()
-	if icon != null:
-		var s = clamp(side - 2.0 * BEVEL - 8.0, ICON_MIN, ICON_MAX)
-		ui.set_cursor_pos(local + Vector2((side - s) * 0.5, (side - s) * 0.5))
-		ui.image(icon, Vector2(s, s))
-	if mouse.x >= r.position.x and mouse.x < r.end.x and mouse.y >= r.position.y and mouse.y < r.end.y:
-		ui.begin_tooltip()
-		ui.text(_user_name())
-		ui.end_tooltip()
 
 
 # Bloque Inicio: tesela cuadrada con el ícono Sugar de hogar y el título corto abajo.
@@ -1317,7 +1350,8 @@ func draw(ui):
 			entered = true
 		elif entered and mouse.y > bh + 16.0 and mouse.y < vp.y - bh \
 				and dragging == null and lifted == null and win_drag == null \
-				and applet_drag == null and applet_press == null and now > show_until:
+				and applet_drag == null and applet_press == null \
+				and app_drag == null and app_press == null and now > show_until:
 			set_visible(false)
 		elif show_until > 0 and now > show_until:
 			# Frame mostrado por Alt+Tab: se oculta solo al terminar la gracia.
@@ -1325,6 +1359,7 @@ func draw(ui):
 			show_until = 0
 
 	items_layout = []
+	pinned_layout = []
 	var off = _slide(visible or home, now)
 	drawn = off > -bh
 	if not drawn:
@@ -1344,20 +1379,20 @@ func draw(ui):
 	if ui.begin("##frame", flags):
 		# Fondo NeXT de la franja superior.
 		ui.imgui_draw_rect_filled(Rect2(Vector2.ZERO, Vector2(vp.x, bh)), NX_BG, 0.0)
+		if app_drag != null and mouse.y <= bh:
+			ui.imgui_draw_rect_filled(Rect2(Vector2(0.0, off + bh - 3.0), Vector2(vp.x, 3.0)), NX_SEL, 0.0)
 		var y = (bh - side) * 0.5
 		var x = PAD
 		if _draw_home_tile(ui, Vector2(x, y), side):
 			set_visible(false)
 			shell._go_home()
 		x += side + PAD
-		# Insignia de identidad: bloque cuadrado con la figura XO. Sin acción.
-		_draw_identity(ui, x, y, side, mouse)
-		x += side + PAD
 		# Vecindario: bloque cuadrado que sólo abre la vista del Wi-Fi.
 		if _draw_neighborhood_tile(ui, Vector2(x, y), side):
 			set_visible(false)
 			shell._go_neighborhood()
 		x += side + PAD
+		x = _draw_pinned(ui, pinned_top, x, side, "top")
 
 		var items = running()
 		# La selección recorre las ventanas y después los applets (y la celda "+").
@@ -1405,6 +1440,8 @@ func draw(ui):
 					ghost_title = it.title
 					break
 		if ghost_title != "":
+			# Mismo anclaje que el bloque: chip de arrastre pegado al cursor.
+			ui.set_next_window_pos(mouse_pos, true)
 			ui.begin_tooltip()
 			ui.text(ghost_title)
 			ui.end_tooltip()
@@ -1412,6 +1449,7 @@ func draw(ui):
 	ui.pop_style_var()
 
 	_draw_applets(ui, vp, off, mouse)
+	_draw_drag_tile(ui, bh)
 
 	# Cerrar/minimizar tienen prioridad sobre cambiar: las mini-teselas van encima
 	# del bloque cuadrado y pueden compartir el clic en las esquinas.
@@ -1426,6 +1464,25 @@ func draw(ui):
 			shell.request_redraw()
 	elif chosen != null:
 		switch_to(chosen)
+	suppress_pinned_click = ""
+
+
+func _draw_drag_tile(ui, side):
+	if app_drag == null and applet_drag == null:
+		return
+	ui.push_style_var_vec2(ui.STYLE_VAR_WINDOW_PADDING, Vector2.ZERO)
+	# El tooltip por defecto se ancla en MousePos + (16,10) (+ padding): eso era el
+	# corrimiento de ~20 px. Lo forzamos al cursor para que el bloque caiga debajo.
+	ui.set_next_window_pos(mouse_pos - Vector2(side * 0.5, 0.0), true)
+	ui.begin_tooltip()
+	var pos = Vector2.ZERO
+	if app_drag != null:
+		_draw_app_tile(ui, app_drag, pos, side, "drag_app")
+	else:
+		ui.set_cursor_pos(pos)
+		_draw_applet(ui, applet_drag, pos, ui.get_cursor_screen_pos(), side, false, Vector2(-1, -1), true)
+	ui.end_tooltip()
+	ui.pop_style_var()
 
 
 func _hot_wake():

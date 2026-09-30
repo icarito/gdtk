@@ -23,9 +23,8 @@ func _init():
 	check("SSID con \\: y red abierta", nets.size() == 1 and nets[0].ssid == "Café:cito"
 		and nets[0].security == "" and nets[0].chan == 11 and nets[0].ring == "cerca")
 
-	# 20 redes simuladas (2.4 y 5 GHz, señales de -55 a -95 dBm): tras la relajación
-	# por cápsulas (nodo de 64 px + etiqueta debajo) ningún par se solapa. Reproduce
-	# la geometría que arma shell._draw_neighborhood.
+	# 20 redes simuladas (2.4 y 5 GHz, señales de -55 a -95 dBm): verifica
+	# el parser y la relajación por cápsulas del modelo, independiente de la vista.
 	var lines = PoolStringArray()
 	var chans24 = [1, 6, 11, 3]
 	var chans5 = [36, 40, 44, 48, 149, 153, 157, 161]

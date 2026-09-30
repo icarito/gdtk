@@ -69,13 +69,11 @@ var apps_view = false
 # Íconos XDG del anillo: rasterizar uno o dos por frame (el SVG bloquea el frame).
 var home_icon_loads = 0
 
-# Vecindario: vista espacial del Wi-Fi (shell/neighborhood.gd). El módulo refresca en
-# un hilo; acá sólo se dibuja y se conserva la red elegida en el panel lateral.
+# Vecindario: modelo de Wi-Fi y vista nativa bajo el Frame ImGui.
 var neighborhood = null
+var neighborhood_ui = null
 var neighborhood_view = false
-var nb_selected = ""
 var nb_version = -1
-var nb_panel_open = true  # panel de detalle colapsable (necesario en 800x600)
 
 # Input remoto por libei (Deskflow, lan-mouse): EIS + portal RemoteDesktop en el módulo.
 var remote_input = null
@@ -187,26 +185,6 @@ const RING_MIN = Color(0.56, 0.59, 0.68, 0.90)  # minimizada: contorno punteado 
 const RING_LABEL = Color(0.90, 0.91, 0.94, 1.0)
 const RING_LABEL_DIM = Color(0.72, 0.74, 0.79, 1.0)
 
-# Vecindario (SPEC-sugar-journal-neighborhood, SPEC-sugar-spatial): radio simbólico del
-# Wi-Fi. Mismo lenguaje sobrio del Hogar; los anillos y nodos van con ImGui draw list.
-const NB_BG_TOP = Color(0.10, 0.11, 0.15, 1.0)
-const NB_BG_BOTTOM = Color(0.04, 0.05, 0.08, 1.0)
-const NB_RING = Color(0.55, 0.60, 0.72, 0.20)
-const NB_RING_NEAR = Color(0.55, 0.85, 0.70, 0.26)
-const NB_NODE_24 = Color(0.42, 0.58, 0.95, 0.96)  # azulado: 2.4 GHz
-const NB_NODE_5 = Color(0.30, 0.82, 0.78, 0.96)   # turquesa: 5 GHz
-const NB_NODE_DIM = Color(0.45, 0.48, 0.58, 0.70)
-const NB_AMBER = Color(0.98, 0.80, 0.36, 1.0)
-const NB_TEXT = Color(0.92, 0.93, 0.96, 1.0)
-const NB_TEXT_DIM = Color(0.62, 0.65, 0.74, 1.0)
-const NB_HOST = Color(0.85, 0.86, 0.90, 0.95)
-const NB_HOST_REACH = Color(0.60, 0.92, 0.62, 1.0)
-const NB_HOST_DESK = Color(0.98, 0.72, 0.30, 1.0)
-const NB_NODE_MIN = 32.0   # radio: 64 px de diámetro mínimo
-const NB_NODE_SMALL = 24.0 # radio reducido: 48 px si hay demasiadas redes (dBm débil)
-const NB_MANY = 14         # a partir de acá se aprieta y se ocultan etiquetas que no caben
-const NB_WEAK_DBM = -80.0  # "débil" (más atenuada que -80 dBm): candidata a achicarse
-
 # Íconos Sugar: los SVG traen un DOCTYPE con entidades &stroke_color;/&fill_color;.
 # Se cargan como texto, se sustituyen por los colores pedidos y se rasterizan a una
 # ImageTexture cacheada (el motor no expone load_svg_from_string en este árbol).
@@ -279,6 +257,13 @@ func _ready():
 	# Vecindario: parser/estado del Wi-Fi. El hilo arranca al abrir la vista; este
 	# nodo sigue dueño del resultado en memoria hasta que el shell se recarga.
 	neighborhood = Host.sc("res://neighborhood.gd").new()
+	neighborhood_ui = Control.new()
+	neighborhood_ui.name = "NeighborhoodUI"
+	neighborhood_ui.set_script(Host.sc("res://neighborhood_ui.gd"))
+	neighborhood_ui.shell = self
+	neighborhood_ui.model = neighborhood
+	neighborhood_ui.visible = false
+	view_layer.add_child(neighborhood_ui)
 	# Notificaciones y demás layer-shell, encima de todo (después del Frame: su _input va antes).
 	add_child(Host.sc("res://layers.gd").new())
 
@@ -515,7 +500,7 @@ func _imgui_frame():
 		push_style_var_float(0, fade)
 	if current_activity == null:
 		if neighborhood_view:
-			_draw_neighborhood()
+			neighborhood_ui.refresh()
 		else:
 			_draw_home(_home_x(_units()))
 	else:
@@ -535,6 +520,7 @@ func _imgui_frame():
 	tile_mode = current_activity != null and current_activity.has("wayland") and not tiles.empty()
 	var row = tile_mode or (not tiles.empty() and (_home_anim_active() or pan_active))
 	view.visible = row
+	neighborhood_ui.visible = neighborhood_view and current_activity == null
 	if row:
 		_update_tiles()
 	instant_switch = false  # ya se reubicaron sin animación en este frame
@@ -1643,8 +1629,15 @@ func _draw_home(offset = 0.0):
 		home_icon_loads = 2
 		var u = grid_unit(vp)
 		var pad = u * 0.125
-		var btn_size = Vector2(u * 1.5, u * 1.5)
+		var btn_size = Vector2(u * 1.25, u * 1.25)
 		var layout = _home_layout(vp)
+		# El equipo propio ocupa el centro de la órbita; las apps quedan alrededor.
+		var cc = vp * 0.5
+		var monitor = Rect2(cc - Vector2(u * 0.38, u * 0.30), Vector2(u * 0.76, u * 0.54))
+		imgui_draw_rect_filled(monitor, HOME_BLOCK_LIGHT, 2.0)
+		imgui_draw_rect_filled(Rect2(monitor.position + Vector2(4, 4), monitor.size - Vector2(8, 10)), HOME_BG_TOP, 0.0)
+		imgui_draw_rect_filled(Rect2(cc + Vector2(-3, u * 0.24), Vector2(6, u * 0.13)), HOME_BLOCK_LIGHT, 0.0)
+		imgui_draw_rect_filled(Rect2(cc + Vector2(-u * 0.21, u * 0.37), Vector2(u * 0.42, 4)), HOME_BLOCK_LIGHT, 0.0)
 		for i in range(ACTIVITIES.size()):
 			var pos = layout[i]
 			var act = ACTIVITIES[i]
@@ -1692,50 +1685,25 @@ func _draw_home(offset = 0.0):
 	pop_style_var()
 
 
-# Posiciones de los favoritos/actividades: fila(s) horizontales centradas en el
-# área visible (debajo del Frame), sin nada fijo en el medio. Si no entran en una
-# fila, se reparten en dos o más, también centradas. Todo sale de la unidad U y se
-# snap-ea a la rejilla, cuidando el aspect ratio en cualquier resolución.
+# Posiciones de las actividades en órbitas alrededor de la computadora.
 func _home_layout(vp):
 	var n = ACTIVITIES.size()
 	var out = []
 	if n == 0:
 		return out
 	var u = grid_unit(vp)
-	var btn = u * 1.5       # círculo grande: 120 px a U=80
-	var gap = u * 0.5
-	var label_h = u * 0.375
-	var margin = u * 0.5
-	var top = frame_bar_h(vp) if frame != null else 0.0
-	var bottom = vp.y - (frame_bar_h(vp) if frame != null else 0.0)
-	var avail_h = max(u, bottom - top)
-	var avail = vp.x - 2.0 * margin
-	var per_row = int(max(1.0, floor((avail + gap) / (btn + gap))))
-	var rows = int(ceil(float(n) / float(per_row)))
-	var row_h = btn + label_h + gap
-	# Si el bloque no entra entre las barras (p. ej. 800x600 con muchas actividades
-	# abiertas), se encoge el círculo —nunca por debajo de 1 U: el ícono sigue en
-	# >= 64 px— antes que salirse de pantalla.
-	var guard = 0
-	while guard < 8 and rows > 1 and float(rows) * row_h - gap > avail_h:
-		btn = max(u, btn - u * 0.125)
-		per_row = int(max(1.0, floor((avail + gap) / (btn + gap))))
-		rows = int(ceil(float(n) / float(per_row)))
-		row_h = btn + label_h + gap
-		guard += 1
-	var total_h = float(rows) * row_h - gap
-	# Centrado, y luego a la rejilla: el múltiplo de U más cercano al centro.
-	var y0 = top + round(((vp.y - top - total_h) * 0.5) / u) * u
-	y0 = max(y0, top + 2.0)
+	var btn = u * 1.25
+	var top = frame_bar_h(vp)
+	var radius = min(vp.x * 0.32, (vp.y - 2.0 * top - btn - 32.0) * 0.5)
+	var inner_count = min(n, 7)
 	for i in range(n):
-		var r = int(floor(float(i) / float(per_row)))
-		var col = i - r * per_row
-		var count = per_row
-		if r == rows - 1:
-			count = n - per_row * (rows - 1)
-		var row_w = float(count) * btn + float(count - 1) * gap
-		var x0 = round(((vp.x - row_w) * 0.5) / u) * u
-		out.append(Vector2(x0 + float(col) * (btn + gap), y0 + float(r) * row_h))
+		var count = inner_count if i < inner_count else n - inner_count
+		var slot = i if i < inner_count else i - inner_count
+		var r = radius if i < inner_count else radius * 1.45
+		var a = (-PI * 0.5 if i < inner_count else 0.0) + TAU * float(slot) / float(count)
+		var center = vp * 0.5 + Vector2(cos(a) * r, sin(a) * r)
+		out.append(Vector2(clamp(center.x - btn * 0.5, 2.0, vp.x - btn - 2.0),
+			clamp(center.y - btn * 0.5, top + 2.0, vp.y - top - btn - 18.0)))
 	return out
 
 
@@ -1965,10 +1933,10 @@ func _activity_icon_of(app):
 
 func _draw_apps(offset = 0.0):
 	var vp = get_viewport_rect().size
-	# Bajo el Frame, que en el Home está siempre. El alto de la barra sale de la rejilla.
-	var top = frame_bar_h(vp)
-	set_next_window_pos(Vector2(offset, top), true)
-	set_next_window_size(Vector2(vp.x, vp.y - top), true)
+	# Una celda libre a cada lado y sobre/bajo la zona desplazable.
+	var u = grid_unit(vp)
+	set_next_window_pos(Vector2(offset + u, u), true)
+	set_next_window_size(Vector2(vp.x - 2.0 * u, vp.y - 2.0 * u), true)
 	if begin("##apps", WINDOW_NO_DECORATION | WINDOW_NO_BACKGROUND | WINDOW_NO_MOVE | WINDOW_NO_SAVED_SETTINGS | WINDOW_NO_BRING_TO_FRONT_ON_FOCUS):
 		if button("Anillo"):
 			apps_view = false
@@ -2046,7 +2014,8 @@ var service_pids = {}
 func _toggle_service(activity):
 	var name = activity.name
 	if _service_running(name):
-		OS.kill(service_pids[name])
+		for pid in _service_processes(name):
+			OS.kill(pid)
 		service_pids.erase(name)
 		return
 	if activity.has("session") and OS.get_environment("GDTK_SESSION") != activity.session:
@@ -2069,12 +2038,34 @@ func _toggle_service(activity):
 
 
 func _service_running(name):
-	if not service_pids.has(name):
+	if service_pids.has(name) and OS.execute("sh", ["-c", "kill -0 " + str(service_pids[name])], true) == 0:
+		return true
+	service_pids.erase(name)
+	var pids = _service_processes(name)
+	if pids.empty():
 		return false
-	if OS.execute("sh", ["-c", "kill -0 " + str(service_pids[name])], true) != 0:
-		service_pids.erase(name)
-		return false
+	service_pids[name] = pids[0]
 	return true
+
+
+func _service_processes(name):
+	var service = ""
+	for activity in ACTIVITIES:
+		if activity.name == name:
+			service = activity.get("service", "")
+			break
+	if service == "":
+		return []
+	var cmd = service.replace("~/", OS.get_environment("HOME") + "/")
+	var out = []
+	if OS.execute("pgrep", ["-u", OS.get_environment("USER"), "-f", "-x", cmd], true, out) != 0 or out.empty():
+		return []
+	var pids = []
+	for line in String(out[0]).split("\n", false):
+		var pid = int(line.strip_edges())
+		if pid > 0:
+			pids.append(pid)
+	return pids
 
 
 func _open_by_name(name):
@@ -2223,7 +2214,7 @@ func _go_home():
 	home_slide_since = -1
 	apps_view = false  # el Hogar muestra siempre la fila de favoritos, no la grilla
 	neighborhood_view = false
-	nb_selected = ""
+	neighborhood_ui.selected = ""
 	_release_activity()
 	current_activity = null
 	activity_instance = null
@@ -2247,13 +2238,14 @@ func _go_neighborhood():
 	if neighborhood != null:
 		neighborhood.start()   # idempotente: el hilo queda vivo mientras el shell viva
 		neighborhood.poll()
+	neighborhood_ui.refresh(true)
 	request_redraw()
 
 
 # Volver al Hogar desde el Vecindario (Esc, el bloque Inicio o el mismo bloque).
 func _close_neighborhood():
 	neighborhood_view = false
-	nb_selected = ""
+	neighborhood_ui.selected = ""
 	request_redraw()
 
 
@@ -2279,334 +2271,6 @@ func _open_nmtui():
 func _wifi_radio_on():
 	OS.execute("nmcli", ["radio", "wifi", "on"])
 	request_redraw()
-
-
-func _nb_user():
-	var user = OS.get_environment("USER")
-	if user == "":
-		user = OS.get_environment("LOGNAME")
-	if user == "":
-		user = "user"
-	var host = OS.get_environment("HOSTNAME")
-	if host == "":
-		var f = File.new()
-		if f.open("/etc/hostname", File.READ) == OK:
-			host = f.get_as_text().strip_edges()
-			f.close()
-	return user + ("@" + host if host != "" else "")
-
-
-func _nb_short(s):
-	var maxc = 14
-	if s.length() > maxc:
-		if maxc > 3:
-			return s.substr(0, maxc - 3) + "..."
-		return s.substr(0, maxc)
-	return s
-
-
-func _nb_text(pos, s, col):
-	set_cursor_pos(pos)
-	text_colored(col, s)
-
-
-func _nb_text_centered(cx, y, s, col):
-	var w = s.length() * 7.0 * get_imgui_scale()
-	_nb_text(Vector2(cx - w * 0.5, y), s, col)
-
-
-func _nb_ring(cx, cy, r, col):
-	if r <= 1.0:
-		return
-	var pts = PoolVector2Array()
-	var seg = 72
-	for i in range(seg):
-		var a = TAU * float(i) / float(seg)
-		pts.append(Vector2(cx + cos(a) * r, cy + sin(a) * r))
-	imgui_draw_polyline(pts, col, 1.0, true)
-
-
-func _nb_selected_net():
-	if nb_selected == "" or neighborhood == null:
-		return null
-	for n in neighborhood.networks:
-		if n.ssid == nb_selected:
-			return n
-	return null
-
-
-# Vista: anillos de RSSI, nodos por red, vecinos de la red local y panel de detalle.
-func _draw_neighborhood(offset = 0.0):
-	_tick_starting(OS.get_ticks_msec())
-	var vp = get_viewport_rect().size
-	set_next_window_pos(Vector2(offset, 0.0), true)
-	set_next_window_size(vp, true)
-	var flags = WINDOW_NO_DECORATION | WINDOW_NO_BACKGROUND | WINDOW_NO_MOVE | WINDOW_NO_SAVED_SETTINGS | WINDOW_NO_SCROLLBAR | WINDOW_NO_BRING_TO_FRONT_ON_FOCUS
-	push_style_var_vec2(STYLE_VAR_WINDOW_PADDING, Vector2.ZERO)
-	if begin("##neighborhood", flags):
-		imgui_draw_rect_filled_multicolor(Rect2(Vector2.ZERO, vp), NB_BG_TOP, NB_BG_TOP, NB_BG_BOTTOM, NB_BG_BOTTOM)
-		var top = frame_bar_h(vp)
-		var bar = frame_bar_h(vp)
-		var panel_w = clamp(vp.x * 0.26, 200.0, 320.0)
-		var pw = panel_w if nb_panel_open else 30.0
-		var radar_w = max(200.0, vp.x - pw)
-		var sel = _nb_selected_net()
-		var nets = neighborhood.networks if neighborhood != null else []
-
-		# Geometría del radar acotada por las barras del Frame, la cabecera y la
-		# leyenda: en 800x600 ningún nodo ni su etiqueta se sale de pantalla.
-		var head = 64.0
-		var legend_h = 22.0
-		var area_top = top + head
-		var area_bottom = max(area_top + 40.0, vp.y - bar - legend_h)
-
-		# Radio de cada nodo (congestión) y, con muchas redes, se achican los nodos
-		# débiles para que la separación tenga solución real.
-		var node_rad = []
-		var shrink = nets.size() > NB_MANY
-		for n0 in nets:
-			var r0 = clamp(NB_NODE_MIN + float(int(n0.congestion) - 1) * 3.0, NB_NODE_MIN, 58.0)
-			if shrink and float(n0.dbm) <= NB_WEAK_DBM:
-				r0 = NB_NODE_SMALL
-			node_rad.append(r0)
-		var max_rad = NB_NODE_MIN
-		for r1 in node_rad:
-			max_rad = max(max_rad, r1)
-		var cx = radar_w * 0.5
-		var cy = (area_top + area_bottom) * 0.5
-		var R = max(80.0, min(radar_w * 0.5 - 20.0,
-			(area_bottom - area_top) * 0.5 - max_rad - 40.0))
-
-		_nb_text(Vector2(14.0, top + 8.0), "Vecindario", NB_TEXT)
-		_nb_text(Vector2(14.0, top + 26.0), neighborhood.status_line() if neighborhood != null else "", NB_TEXT_DIM)
-		_nb_text(Vector2(14.0, top + 44.0), "Anillos: -60 / -75 / -100 dBm", NB_TEXT_DIM)
-
-		# Anillos concéntricos (tenues) y leyenda de dBm sobre el eje +x.
-		_nb_ring(cx, cy, R * 0.46, NB_RING_NEAR)
-		_nb_ring(cx, cy, R * 0.74, NB_RING)
-		_nb_ring(cx, cy, R * 0.96, NB_RING)
-		_nb_text(Vector2(cx + R * 0.46 + 4.0, cy - 16.0), "-60", NB_TEXT_DIM)
-		_nb_text(Vector2(cx + R * 0.74 + 4.0, cy - 16.0), "-75", NB_TEXT_DIM)
-		_nb_text(Vector2(cx + R * 0.96 + 4.0, cy - 16.0), "-100", NB_TEXT_DIM)
-
-		# El propio equipo: punto central pequeño (no la figura XO del ícono).
-		imgui_draw_circle_filled(Vector2(cx, cy), 5.0, NB_TEXT, 0)
-		_nb_text_centered(cx, cy + 9.0, _nb_user(), NB_TEXT)
-
-		# Estado vacío legible dentro del radar, sin error ni bloqueo.
-		if nets.empty():
-			var line = neighborhood.status_line() if neighborhood != null else "Leyendo Wi-Fi..."
-			_nb_text_centered(cx, cy - 6.0, line, NB_TEXT)
-			if neighborhood != null and neighborhood.status == "off":
-				set_cursor_pos(Vector2(cx - 70.0, cy + 16.0))
-				if button("Encender Wi-Fi", Vector2(140.0, 26.0)):
-					_wifi_radio_on()
-
-		# Posiciones por anillo radial y luego repulsión por cápsulas (neighborhood.gd):
-		# ningún par de nodos+etiquetas se solapa y se conserva el anillo aproximado.
-		var node_pos = []
-		var node_hw = []
-		var node_hh = []
-		for i in range(nets.size()):
-			var n0 = nets[i]
-			node_pos.append(Vector2(cx, cy) + Vector2(cos(n0.angle), sin(n0.angle)) * (n0.r_frac * R))
-			node_hw.append(node_rad[i])
-			node_hh.append(neighborhood.capsule_half_h(node_rad[i]) if neighborhood != null else node_rad[i])
-		if neighborhood != null and node_pos.size() > 1:
-			node_pos = neighborhood.relax_capsules(node_pos, node_hw, node_hh, 2.0, 48, 0.02)
-
-		# Con muchas redes se ocultan las etiquetas que no caben (se muestran en un
-		# tooltip al pasar el ratón), para que el texto no pise otros nodos.
-		var hide_label = []
-		var cw = 7.0 * get_imgui_scale()
-		for i in range(nets.size()):
-			var hidden = false
-			if shrink:
-				var lw = max(22.0, float(_nb_short(nets[i].ssid).length()) * cw) * 0.5
-				var lc = node_pos[i] + Vector2(0.0, node_rad[i] + 12.0)
-				var lh = 13.0
-				if lc.x - lw < 4.0 or lc.x + lw > radar_w - 2.0 \
-						or lc.y + lh > area_bottom + 6.0:
-					hidden = true
-				for j in range(nets.size()):
-					if hidden or j == i:
-						continue
-					if abs(lc.x - node_pos[j].x) < lw + node_rad[j] \
-							and abs(lc.y - node_pos[j].y) < lh + node_rad[j]:
-						hidden = true
-			hide_label.append(hidden)
-
-		var hovered_tip = -1
-		for i in range(nets.size()):
-			var n = nets[i]
-			var pos = node_pos[i]
-			var rad = node_rad[i]
-			var cong = int(n.congestion)
-			var col = NB_NODE_24 if n.band == "2.4" else NB_NODE_5
-			if n.ring == "lejos":
-				col = col.linear_interpolate(NB_NODE_DIM, 0.45)
-			var halo = clamp(float(cong - 1) * 0.06, 0.0, 0.28)
-			if halo > 0.0:
-				imgui_draw_circle(pos, rad + 8.0 + float(cong) * 2.0, Color(col.r, col.g, col.b, halo), 32, 6.0)
-			imgui_draw_circle_filled(pos, rad, Color(col.r * 0.45, col.g * 0.45, col.b * 0.5, 0.95), 32)
-			var border = NB_AMBER if n.in_use else Color(0.85, 0.88, 0.95, 0.85)
-			var bw = 3.0 if n.in_use else 1.5
-			if n.ssid == nb_selected:
-				border = NB_TEXT
-				bw = 3.5
-			imgui_draw_circle(pos, rad, border, 32, bw)
-			if not hide_label[i]:
-				_nb_text_centered(pos.x, pos.y + rad + 3.0, _nb_short(n.ssid), NB_TEXT)
-				_nb_text_centered(pos.x, pos.y + rad + 18.0, str(int(n.dbm)) + " dBm", NB_TEXT_DIM)
-			if n.in_use:
-				# El "conectado" se ve en el borde ámbar y la leyenda, no como texto
-				# encima de los vecinos que se dibujan alrededor del AP.
-				_nb_hosts_around(pos, (pos - Vector2(cx, cy)).angle(), rad)
-			# Área pulsable del nodo (botón invisible, como el anillo del Hogar).
-			push_style_color(COL_BUTTON, Color(0, 0, 0, 0))
-			push_style_color(COL_BUTTON_HOVERED, Color(1, 1, 1, 0.06))
-			push_style_color(COL_BUTTON_ACTIVE, Color(1, 1, 1, 0.12))
-			push_style_var_float(STYLE_VAR_FRAME_ROUNDING, rad)
-			set_cursor_pos(pos - Vector2(rad, rad))
-			var clicked = button("##nb" + str(i), Vector2(rad * 2.0, rad * 2.0))
-			pop_style_var()
-			pop_style_color(3)
-			if is_item_hovered():
-				hovered_tip = i
-			if clicked:
-				nb_selected = n.ssid
-		if hovered_tip >= 0 and hide_label[hovered_tip]:
-			var hn = nets[hovered_tip]
-			begin_tooltip()
-			text(hn.ssid)
-			text(str(int(hn.dbm)) + " dBm")
-			end_tooltip()
-		_nb_legend(vp)
-		if nb_panel_open:
-			_nb_panel(vp, panel_w, top, sel)
-		else:
-			# Pestaña para reabrir el panel de detalle cuando está colapsado.
-			imgui_draw_rect_filled(Rect2(Vector2(vp.x - pw, 0.0), Vector2(pw, vp.y)), Color(0.08, 0.09, 0.13, 0.96), 0.0)
-			imgui_draw_rect_filled(Rect2(Vector2(vp.x - pw, 0.0), Vector2(2.0, vp.y)), Color(0.30, 0.34, 0.45, 1.0), 0.0)
-			set_cursor_pos(Vector2(vp.x - pw + 4.0, top + 8.0))
-			if button("<", Vector2(pw - 8.0, 24.0)):
-				nb_panel_open = true
-	end()
-	pop_style_var()
-
-
-# Vecinos de la red local: cuadraditos en un arco AMPLIO alrededor del AP en uso, cada
-# uno con su etiqueta corta (último octeto, o el nombre) AL LADO, sin texto superpuesto
-# ni distancia propia (ver la leyenda: cuadrito = equipo de la red).
-func _nb_hosts_around(ap, ang, rad):
-	var hosts = neighborhood.hosts.duplicate() if neighborhood != null else []
-	if _service_running("Deskflow"):
-		hosts.append({"ip": "", "mac": "", "dev": "", "state": "deskflow"})
-	if hosts.empty():
-		return
-	var cw = 7.0 * get_imgui_scale()
-	var arc_r = rad + 34.0
-	var span = 1.7
-	for i in range(hosts.size()):
-		var h = hosts[i]
-		var t = 0.5 if hosts.size() == 1 else float(i) / float(hosts.size() - 1)
-		var dir = Vector2(cos(ang + (t - 0.5) * span), sin(ang + (t - 0.5) * span))
-		# Radio alternado: dos anillos finos para que las etiquetas no se apilen.
-		var p = ap + dir * (arc_r + (10.0 if i % 2 == 1 else 0.0))
-		var col = NB_HOST_REACH if h.state == "REACHABLE" else NB_HOST
-		if h.state == "deskflow":
-			col = NB_HOST_DESK
-		imgui_draw_rect_filled(Rect2(p - Vector2(5.0, 5.0), Vector2(10.0, 10.0)), col, 0.0)
-		var label = "Deskflow" if h.state == "deskflow" else _nb_host_short(h)
-		var lx = p.x + 8.0 if dir.x >= 0.0 else p.x - 8.0 - float(label.length()) * cw
-		_nb_text(Vector2(lx, p.y - 5.0), label, NB_TEXT_DIM)
-
-
-# Etiqueta corta de un vecino: último octeto de la IP, o cola de la MAC.
-func _nb_host_short(h):
-	if h.ip != "":
-		var parts = h.ip.split(".")
-		return parts[parts.size() - 1]
-	if h.mac != "":
-		return h.mac.substr(max(0, h.mac.length() - 5), 5)
-	return "?"
-
-
-# Leyenda compacta abajo a la izquierda, sobre la barra inferior del Frame.
-func _nb_legend(vp):
-	var cw = 7.0 * get_imgui_scale()
-	var y = vp.y - frame_bar_h(vp) - 14.0
-	var x = 14.0
-	imgui_draw_circle_filled(Vector2(x + 4.0, y), 5.0, NB_NODE_24, 0)
-	x += 12.0
-	_nb_text(Vector2(x, y - 5.0), "2.4 GHz", NB_TEXT_DIM)
-	x += 7.0 * cw + 16.0
-	imgui_draw_circle_filled(Vector2(x + 4.0, y), 5.0, NB_NODE_5, 0)
-	x += 12.0
-	_nb_text(Vector2(x, y - 5.0), "5 GHz", NB_TEXT_DIM)
-	x += 5.0 * cw + 16.0
-	imgui_draw_circle(Vector2(x + 4.0, y), 5.0, NB_AMBER, 0, 2.5)
-	x += 12.0
-	_nb_text(Vector2(x, y - 5.0), "conectado", NB_TEXT_DIM)
-	x += 9.0 * cw + 16.0
-	imgui_draw_rect_filled(Rect2(Vector2(x, y - 4.0), Vector2(9.0, 9.0)), NB_HOST, 0.0)
-	x += 13.0
-	_nb_text(Vector2(x, y - 5.0), "equipo (sin distancia)", NB_TEXT_DIM)
-
-
-# Panel lateral: detalle de la red elegida y el botón que abre nmtui en Terminal.
-func _nb_panel(vp, pw, top, sel):
-	var x0 = vp.x - pw
-	imgui_draw_rect_filled(Rect2(Vector2(x0, 0.0), Vector2(pw, vp.y)), Color(0.08, 0.09, 0.13, 0.96), 0.0)
-	imgui_draw_rect_filled(Rect2(Vector2(x0, 0.0), Vector2(2.0, vp.y)), Color(0.30, 0.34, 0.45, 1.0), 0.0)
-	var pad = 12.0
-	var y = top + 14.0
-	_nb_text(Vector2(x0 + pad, y), "Detalle", NB_TEXT_DIM)
-	# Colapsar el panel (deja más ancho al radar; necesario en 800x600).
-	set_cursor_pos(Vector2(x0 + pw - 26.0, top + 8.0))
-	if button("##nb_collapse", Vector2(20.0, 20.0)):
-		nb_panel_open = false
-	_nb_text(Vector2(x0 + pw - 22.0, top + 12.0), ">", NB_TEXT)
-	y += 22.0
-	if sel == null:
-		_nb_text(Vector2(x0 + pad, y), "Elegi una red", NB_TEXT)
-		y += 18.0
-		_nb_text(Vector2(x0 + pad, y), "Toca un nodo para ver", NB_TEXT_DIM)
-		y += 16.0
-		_nb_text(Vector2(x0 + pad, y), "SSID, canal y seguridad.", NB_TEXT_DIM)
-		return
-	var maxc = int((pw - 2.0 * pad) / (7.0 * get_imgui_scale()))
-	var ssid = sel.ssid
-	if maxc > 3 and ssid.length() > maxc:
-		ssid = ssid.substr(0, maxc - 3) + "..."
-	_nb_text(Vector2(x0 + pad, y), ssid, NB_TEXT)
-	y += 22.0
-	var sec = "abierta" if sel.security == "" else sel.security
-	var rows = [
-		"BSSID " + sel.bssid,
-		"Canal " + str(sel.chan),
-		"Banda " + sel.band + " GHz",
-		"Freq " + str(sel.freq) + " MHz",
-		"Senal " + str(int(sel.dbm)) + " dBm (" + str(sel["signal"]) + "%)",
-		"Seguridad " + sec,
-		"Radios " + str(sel.radios.size()) + " / " + str(int(sel.congestion)) + " en canal",
-	]
-	for r in rows:
-		_nb_text(Vector2(x0 + pad, y), r, NB_TEXT_DIM)
-		y += 17.0
-	if sel.in_use:
-		y += 4.0
-		_nb_text(Vector2(x0 + pad, y), "Conectado", NB_AMBER)
-		y += 18.0
-	y += 8.0
-	var bw = pw - 2.0 * pad
-	set_cursor_pos(Vector2(x0 + pad, y))
-	if button("Conectar (nmtui)", Vector2(bw, 28.0)):
-		_open_nmtui()
-	y += 34.0
-	set_cursor_pos(Vector2(x0 + pad, y))
-	if button("Cerrar detalle", Vector2(bw, 24.0)):
-		nb_selected = ""
 
 
 # Las actividades tipo script pueden tener recursos propios (p.ej. el viewport
