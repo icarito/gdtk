@@ -32,6 +32,8 @@ typedef struct {
 	void (*layer)(void *ud, int id, int state);
 	// xdg-activation: el toplevel `id` pide pasar al frente.
 	void (*activate)(void *ud, int id);
+	// El cliente pide minimizarse (xdg_toplevel.set_minimized o iconify X11).
+	void (*minimize)(void *ud, int id);
 	// Algo del árbol de `id` desapareció sin commit (menú X o popup cerrado): redibujar.
 	void (*damage)(void *ud, int id);
 } wl_server_callbacks;

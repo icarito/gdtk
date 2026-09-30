@@ -236,6 +236,7 @@ func _ready():
 	compositor.connect("toplevel_added", self, "_on_toplevel_added")
 	compositor.connect("toplevel_removed", self, "_on_toplevel_removed")
 	compositor.connect("toplevel_activate", self, "_on_toplevel_activate")
+	compositor.connect("toplevel_minimize", self, "_on_toplevel_minimize")
 	# Cambios de ventanas: rearmar la UI (el Frame las lista, recovery espera la suya).
 	compositor.connect("toplevel_added", self, "_redraw_on_signal")
 	compositor.connect("toplevel_removed", self, "_redraw_on_signal")
@@ -2341,6 +2342,17 @@ func _on_toplevel_activate(id):
 		_open_by_name(name)
 		compositor.focus(id)
 		request_redraw()
+
+
+# La propia app pide minimizarse desde su decoración (CSD) o vía iconify X11: se
+# reenvía a la minimización del shell. Sólo aplica a ventanas gestionadas (raíz en
+# `tiles`); un diálogo o una ventana no adoptada no se minimiza.
+func _on_toplevel_minimize(id):
+	var root = _root_of(id)
+	if not tiles.has(root) or minimized.has(root):
+		return
+	_minimize_window(root)
+	request_redraw()
 
 
 func _add_dialog(id):

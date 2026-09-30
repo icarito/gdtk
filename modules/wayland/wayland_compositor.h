@@ -48,6 +48,7 @@ class WaylandCompositor : public Node {
 	static void _cb_title(void *p_ud, int p_id, const char *p_title);
 	static void _cb_layer(void *p_ud, int p_id, int p_state);
 	static void _cb_activate(void *p_ud, int p_id);
+	static void _cb_minimize(void *p_ud, int p_id);
 	static void _cb_damage(void *p_ud, int p_id);
 
 	void _on_added(int p_id);
