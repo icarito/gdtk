@@ -61,6 +61,8 @@ var unmanaged = []
 # Home: anillo de actividades o grilla de apps instaladas (Tab alterna).
 var apps = Host.sc("res://apps.gd").new()
 var apps_view = false
+# Íconos XDG del anillo: rasterizar uno o dos por frame (el SVG bloquea el frame).
+var home_icon_loads = 0
 
 # Input remoto por libei (Deskflow, lan-mouse): EIS + portal RemoteDesktop en el módulo.
 var remote_input = null
@@ -134,6 +136,19 @@ const HANDLE_HIT = 7.0
 const EXPOSE_PAD = 28.0
 const EXPOSE_GAP = 18.0
 const MOD_KEYS = [KEY_CONTROL, KEY_SHIFT, KEY_ALT, KEY_META, KEY_SUPER_L, KEY_SUPER_R]
+
+# Hogar: primer corte visual (SPEC-sugar-home-visual). Pareja XO fija por ahora y
+# estados del anillo por contorno/atenuación además del color (ver SPEC-resource-ring).
+const XO_FILL = Color(0.78, 0.30, 0.52, 1.0)
+const XO_STROKE = Color(0.34, 0.15, 0.29, 1.0)
+const HOME_BG_TOP = Color(0.12, 0.13, 0.17, 1.0)
+const HOME_BG_BOTTOM = Color(0.05, 0.06, 0.09, 1.0)
+const RING_PLATE = Color(0.10, 0.11, 0.14, 0.88)
+const RING_CLOSED = Color(0.62, 0.64, 0.70, 0.55)
+const RING_OPEN = Color(0.98, 0.72, 0.30, 0.95)
+const RING_FOCUS = Color(0.55, 0.80, 1.0, 1.0)
+const RING_LABEL = Color(0.90, 0.91, 0.94, 1.0)
+const RING_LABEL_DIM = Color(0.72, 0.74, 0.79, 1.0)
 
 
 func _ready():
@@ -1353,27 +1368,31 @@ func _draw_home():
 	set_next_window_pos(Vector2.ZERO, true)
 	set_next_window_size(vp, true)
 	var flags = WINDOW_NO_DECORATION | WINDOW_NO_BACKGROUND | WINDOW_NO_MOVE | WINDOW_NO_SAVED_SETTINGS | WINDOW_NO_BRING_TO_FRONT_ON_FOCUS
+	# Sin padding el fondo y las posiciones absolutas coinciden con la vista.
+	push_style_var_vec2(STYLE_VAR_WINDOW_PADDING, Vector2.ZERO)
 	if begin("##home", flags):
 		var center = vp * 0.5
+
+		# Fondo sobrio: degradado vertical suave (sin imagen por ahora).
+		imgui_draw_rect_filled_multicolor(Rect2(Vector2.ZERO, vp), HOME_BG_TOP, HOME_BG_TOP, HOME_BG_BOTTOM, HOME_BG_BOTTOM)
 
 		var user = OS.get_environment("USER")
 		if user == "":
 			user = "user"
-		var user_size = Vector2(150, 150)
-		set_cursor_pos(center - user_size * 0.5)
-		button(user, user_size)
+		_draw_home_center(center, user)
 
+		home_icon_loads = 2
 		var radius = 0.3 * min(vp.x, vp.y)
 		var btn_size = Vector2(110, 110)
 		for i in range(ACTIVITIES.size()):
 			var angle = -PI / 2.0 + TAU * float(i) / float(ACTIVITIES.size())
 			var pos = center + Vector2(cos(angle), sin(angle)) * radius - btn_size * 0.5
-			set_cursor_pos(pos)
-			var label = ACTIVITIES[i].name
-			if ACTIVITIES[i].has("service") and _service_running(ACTIVITIES[i].name):
+			var act = ACTIVITIES[i]
+			var label = act.name
+			if act.has("service") and _service_running(act.name):
 				label += " *"
-			if button(label + "##" + ACTIVITIES[i].name, btn_size):
-				if ACTIVITIES[i].has("wayland"):
+			if _draw_ring_item(pos, btn_size, _activity_tex(act), label, _activity_state(act), act.name):
+				if act.has("wayland"):
 					pending_origin = Rect2(pos, btn_size)
 					pending_origin_since = OS.get_ticks_msec()
 				_activate(i)
@@ -1386,6 +1405,109 @@ func _draw_home():
 			set_cursor_pos(Vector2(20.0, vp.y - 45.0))
 			text(activity_error)
 	end()
+	pop_style_var()
+
+
+# Centro de Hogar: figura personal con la pareja de colores XO y el nombre debajo.
+func _draw_home_center(center, user):
+	var head = center + Vector2(0.0, -46.0)
+	imgui_draw_rect_filled(Rect2(center + Vector2(-38.0, -10.0), Vector2(76.0, 74.0)), XO_STROKE, 38.0)
+	imgui_draw_rect_filled(Rect2(center + Vector2(-30.0, -2.0), Vector2(60.0, 66.0)), XO_FILL, 30.0)
+	imgui_draw_circle_filled(head, 32.0, XO_STROKE, 0)
+	imgui_draw_circle_filled(head, 25.0, XO_FILL, 0)
+	var cw = 7.0 * get_imgui_scale()
+	set_cursor_pos(center + Vector2(-user.length() * cw * 0.5, 72.0))
+	text_colored(Color(0.93, 0.94, 0.97, 1.0), user)
+
+
+# Estado de una actividad en el anillo: cerrado / abierto / enfocado.
+func _activity_state(activity):
+	if current_activity != null and current_activity.name == activity.name:
+		return "focused"
+	if activity.has("wayland") and wayland_ids.has(activity.name) and _id_alive(wayland_ids[activity.name]):
+		return "open"
+	if activity.has("script") and script_instances.has(activity.name):
+		return "open"
+	if activity.has("service") and _service_running(activity.name):
+		return "open"
+	return "closed"
+
+
+# Botón circular del anillo: placa, borde por estado, ícono XDG y etiqueta legible.
+func _draw_ring_item(pos, size, tex, label, state, id):
+	set_cursor_pos(pos)
+	var sp = get_cursor_screen_pos()
+	var c = sp + size * 0.5
+	var radius = size.x * 0.5 - 2.0
+	var border = RING_CLOSED
+	var thickness = 1.5
+	if state == "focused":
+		border = RING_FOCUS
+		thickness = 3.5
+	elif state == "open":
+		border = RING_OPEN
+		thickness = 2.5
+	if (get_mouse_pos() - c).length() <= radius:
+		border = Color(border.r, border.g, border.b, 1.0)
+	imgui_draw_circle_filled(c, radius, RING_PLATE, 0)
+	if state == "focused":
+		imgui_draw_circle(c, radius + 3.0, Color(RING_FOCUS.r, RING_FOCUS.g, RING_FOCUS.b, 0.35), 0, 2.0)
+	imgui_draw_circle(c, radius, border, 0, thickness)
+	if state == "open":
+		# Señal de abierto además del color.
+		imgui_draw_circle_filled(c + Vector2(radius * 0.72, radius * 0.72), 4.0, RING_OPEN, 0)
+
+	# Área pulsable completa (mismo tamaño que la grilla anterior), sin fondo azul.
+	push_style_color(COL_BUTTON, Color(0, 0, 0, 0))
+	push_style_color(COL_BUTTON_HOVERED, Color(1, 1, 1, 0.05))
+	push_style_color(COL_BUTTON_ACTIVE, Color(1, 1, 1, 0.12))
+	push_style_var_float(STYLE_VAR_FRAME_ROUNDING, radius)
+	var clicked = button("##" + id, size)
+	pop_style_var()
+	pop_style_color(3)
+
+	var cw = 7.0 * get_imgui_scale()
+	if tex != null:
+		var icon_size = size * 0.56
+		set_cursor_pos(pos + (size - icon_size) * 0.5)
+		image(tex, icon_size)
+	else:
+		set_cursor_pos(pos + Vector2((size.x - cw) * 0.5, (size.y - 13.0 * get_imgui_scale()) * 0.5))
+		text_colored(Color(0.95, 0.85, 0.95, 1.0), id.substr(0, 1))
+
+	set_cursor_pos(pos + Vector2((size.x - label.length() * cw) * 0.5, size.y + 3.0))
+	text_colored(RING_LABEL if state != "closed" else RING_LABEL_DIM, label)
+	return clicked
+
+
+# Ícono XDG de una actividad: primero por programa de la ventana, luego por nombre.
+func _activity_tex(activity):
+	if not apps.scanned:
+		apps.scan()
+	var prog = ""
+	if activity.has("wayland") and activity.wayland.size() > 0:
+		prog = activity.wayland[0]
+	if prog != "":
+		for a in apps.apps:
+			if apps._program(a.exec) == prog and _activity_icon_of(a) != null:
+				return a.tex
+	# Sólo apps reales buscan por nombre; las internas usan monograma.
+	if activity.has("wayland"):
+		var want = apps.fold(activity.name)
+		for a in apps.apps:
+			if apps.fold(a.name) == want and _activity_icon_of(a) != null:
+				return a.tex
+	return null
+
+
+func _activity_icon_of(app):
+	if not app.icon_tried:
+		if home_icon_loads <= 0:
+			request_redraw()
+			return null
+		home_icon_loads -= 1
+		apps._load_icon(app)
+	return app.tex
 
 
 func _draw_apps():
