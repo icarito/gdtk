@@ -36,21 +36,24 @@ const DRAG_PX = 8.0
 # Estilo WindowMaker/NeXT: teselas CUADRADAS de una unidad de rejilla (shell.grid_unit),
 # bisel de 2px sin esquinas redondeadas, fondo gris azulado oscuro tipo NeXT. El bloque
 # comunica identidad/estado aunque el nombre no quepa; el nombre largo va en el tooltip.
-const NX_BG = Color(0.16, 0.17, 0.21, 0.97)
-const NX_FACE = Color(0.30, 0.33, 0.39, 1.0)
-const NX_FACE_SEL = Color(0.42, 0.45, 0.52, 1.0)
-const NX_FACE_DIM = Color(0.21, 0.22, 0.26, 1.0)
-const NX_LIGHT = Color(0.56, 0.60, 0.67, 1.0)
-const NX_DARK = Color(0.08, 0.09, 0.12, 1.0)
+const NX_BG = Color(0.14, 0.16, 0.24, 0.97)
+const NX_FACE = Color(0.28, 0.32, 0.42, 1.0)
+const NX_FACE_SEL = Color(0.40, 0.46, 0.58, 1.0)
+const NX_FACE_DIM = Color(0.19, 0.21, 0.29, 1.0)
+const NX_LIGHT = Color(0.55, 0.61, 0.74, 1.0)
+const NX_DARK = Color(0.07, 0.08, 0.13, 1.0)
 const NX_FOCUS = Color(0.86, 0.89, 0.97, 1.0)
 const NX_TEXT = Color(0.93, 0.94, 0.97, 1.0)
-const NX_TEXT_DIM = Color(0.60, 0.63, 0.70, 1.0)
+const NX_TEXT_DIM = Color(0.60, 0.63, 0.72, 1.0)
 const NX_SEL = Color(0.98, 0.80, 0.36, 1.0)
 const NX_CUR = Color(0.32, 0.60, 0.98, 1.0)
 const BEVEL = 2.0        # grosor del bisel (claro arriba/izq, oscuro abajo/der)
 const TITLE_H = 14.0     # alto de la línea de título dentro de la tesela
+const TITLE_MAX = 10     # máximo de caracteres del título (se recorta con ...)
 const ICON_MIN = 64.0    # ícono nunca por debajo de 64 px
 const ICON_MAX = 72.0
+const ICON_TILE_MIN = 40.0  # en bloques de ventana el ícono cede ante las mini-teselas
+const MINI = 18.0        # lado de las mini-teselas de minimizar/cerrar
 # Applets del borde inferior (SPEC-sugar-frame-applets.md): cada control es un bloque
 # cuadrado U x U de la misma rejilla, reordenable y ocultable. Lista corta de ids
 # estables; sin arquitectura genérica de providers.
@@ -411,7 +414,7 @@ func _tile(ui, pos, side, id, face = NX_FACE):
 func _draw_mini(ui, pos, side, glyph, pressed):
 	ui.set_cursor_pos(pos)
 	var r = Rect2(ui.get_cursor_screen_pos(), Vector2(side, side))
-	_bevel(ui, r, Color(0.26, 0.28, 0.33, 1.0), pressed)
+	_bevel(ui, r, Color(0.23, 0.26, 0.35, 1.0), pressed)
 	var cw = 7.0 * ui.get_imgui_scale()
 	ui.set_cursor_pos(pos + Vector2((side - cw) * 0.5, (side - 13.0 * ui.get_imgui_scale()) * 0.5))
 	ui.text_colored(NX_TEXT, glyph)
@@ -425,9 +428,12 @@ func _in_rect(p, pos, side):
 # `pos` es la esquina en coords LOCALES de la ventana (set_cursor_pos); el bisel y
 # las líneas de foco usan coords de pantalla.
 func _tile_title(ui, pos, side, label, dim):
-	var max_chars = int(max(1.0, (side - 6.0) / (7.0 * ui.get_imgui_scale())))
+	var max_chars = int(max(1.0, min(float(TITLE_MAX), (side - 6.0) / (7.0 * ui.get_imgui_scale()))))
 	if label.length() > max_chars:
-		label = label.substr(0, max_chars)
+		if max_chars > 3:
+			label = label.substr(0, max_chars - 3) + "..."
+		else:
+			label = label.substr(0, max_chars)
 	var lw = label.length() * 7.0 * ui.get_imgui_scale()
 	ui.set_cursor_pos(pos + Vector2(max(1.0, (side - lw) * 0.5), side - TITLE_H - 1.0))
 	ui.text_colored(NX_TEXT_DIM if dim else NX_TEXT, label)
@@ -721,7 +727,7 @@ func _input(event):
 			return
 		if code == KEY_M:
 			super_press = null
-			shell._minimize_window(shell.focused_tile)
+			shell._toggle_minimize_focused()
 			shell.request_redraw()
 			_gulp(code)
 			return
@@ -748,6 +754,12 @@ func _input(event):
 		if swallowed.has(code):
 			swallowed.erase(code)
 			get_tree().set_input_as_handled()
+		return
+	# Alt+M: minimizar/restaurar la ventana enfocada, sin depender de que el Frame esté
+	# a la vista (el botón "-" del bloque hace lo mismo cuando el Frame se muestra).
+	if event.alt and not event.control and not event.echo and code == KEY_M:
+		shell._toggle_minimize_focused()
+		_gulp(code)
 		return
 	# Frame a la vista: flechas mueven la selección y Enter/Espacio/m/Delete operan.
 	if visible and _frame_key(code, event):
@@ -833,7 +845,10 @@ func _frame_key(code, event):
 				lifted = null
 		elif code == KEY_M and over_app:
 			if items[sel].id >= 0:
-				shell._minimize_window(items[sel].id)
+				if shell.minimized.has(items[sel].id):
+					shell._restore_window(items[sel].id)
+				else:
+					shell._minimize_window(items[sel].id)
 		elif code == KEY_DELETE:
 			close(items[sel])
 		else:
@@ -1130,8 +1145,12 @@ func _draw_identity(ui, x, y, side, mouse):
 
 
 # Bloque Inicio: tesela cuadrada con el ícono Sugar de hogar y el título corto abajo.
+# Resalta cuando la vista actual es el Hogar (la ranura extra al final de la fila).
 func _draw_home_tile(ui, pos, side):
-	var b = _tile(ui, pos, side, "go_home")
+	var at_home = shell.current_activity == null
+	var b = _tile(ui, pos, side, "go_home", NX_CUR if at_home else NX_FACE)
+	if at_home:
+		_frame_focus(ui, b.rect, NX_FOCUS)
 	var title_h = TITLE_H if side >= 76.0 else 0.0
 	var s = clamp(side - title_h - 2.0 * BEVEL - 4.0, ICON_MIN, ICON_MAX)
 	var icon = shell.home_icon_tex()
@@ -1164,9 +1183,15 @@ func _draw_window_tile(ui, pos, side, item, current, is_sel, is_drop, mouse):
 	if current:
 		_frame_focus(ui, b.rect, NX_FOCUS)
 	var title_h = TITLE_H if side >= 76.0 else 0.0
-	var s = clamp(side - title_h - 2.0 * BEVEL - 4.0, ICON_MIN, ICON_MAX)
+	# Mini-teselas de control de ~18 px pegadas a las esquinas superiores. El ícono cede
+	# tamaño y se corre hacia abajo para no quedar debajo de ellas.
+	var ctrl = MINI
+	var top_h = ctrl + BEVEL + 3.0
+	var avail_w = side - 2.0 * BEVEL - 4.0
+	var avail_h = side - title_h - top_h - 2.0
+	var s = clamp(min(avail_w, avail_h), ICON_TILE_MIN, ICON_MAX)
 	var tex = _item_icon(item)
-	var iy = BEVEL + max(2.0, (side - title_h - s) * 0.5)
+	var iy = top_h + max(0.0, (side - title_h - top_h - s) * 0.5)
 	if tex != null:
 		ui.set_cursor_pos(pos + Vector2((side - s) * 0.5, iy))
 		ui.image(tex, Vector2(s, s))
@@ -1181,7 +1206,6 @@ func _draw_window_tile(ui, pos, side, item, current, is_sel, is_drop, mouse):
 			label = str(item.screen) + " " + label
 		_tile_title(ui, pos, side, label, item.minimized)
 	# Mini-teselas de control dentro del bloque; hit manual, encima del cuadrado.
-	var ctrl = max(16.0, side * 0.28)
 	var off = b.rect.position - pos
 	var min_loc = pos + Vector2(BEVEL + 1.0, BEVEL + 1.0)
 	var close_loc = pos + Vector2(side - ctrl - BEVEL - 1.0, BEVEL + 1.0)

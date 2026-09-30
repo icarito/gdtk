@@ -10,8 +10,9 @@ el modelo de navegación. La presentación en botones alargados del Frame es tra
 
 - **Dentro de Actividad**, izquierda y derecha recorren las pantallas existentes. Dos
   ventanas tileadas comparten una pantalla. El foco es una ventana dentro de ella.
-- **Hogar** es el lugar propio, con la persona en el centro. Entrar en una actividad y
-  volver a Hogar son cambios de escala de Sugar, no pantallas adicionales en la fila.
+- **Hogar** es el lugar propio, con la persona en el centro, y además la ranura extra
+  al final de la fila de pantallas (`units.size()`): se llega scrolleando a la derecha
+  desde la última pantalla y se vuelve con la izquierda a la que tuvo el foco.
 - **Vecindario** amplía la escala hacia otras personas/equipos; **Diario** recorre el
   tiempo. Sus propuestas están en `SPEC-sugar-journal-neighborhood.md`.
 - La misma secuencia de pantallas debe leerse en el cambio lateral, el Frame y el exposé.
@@ -31,6 +32,9 @@ el modelo de navegación. La presentación en botones alargados del Frame es tra
    que las demás ventanas de su pantalla viven en otro lugar.
 3. Respetar `fullscreen`, Home, ventanas internas y el caso sin ventanas: no mostrar
    indicadores de pantallas inexistentes. No alterar tamaño, input ni cierre de apps.
+4. **Hogar en la fila**. El Hogar es la ranura `units.size()` (también sin ventanas):
+   `_focus_dir`, `_pan_by`/`_snap_pan` y Super+rueda lo alcanzan y el paneo lo dibuja
+   deslizándose junto a las ventanas. Minimizar deja bloque atenuado + anillo punteado.
 
 ## Comprobación
 

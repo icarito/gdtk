@@ -125,6 +125,11 @@ var expose_scroll_target = 0.0
 var expose_auto = true   # true = centrar la seleccionada; false = scroll manual (rueda)
 var pan = 0.0            # scroll suave entre workspaces (Super+rueda): offset continuo
 var pan_active = false   # true mientras se panea; cae al más cercano al soltar Super
+# Hogar como pantalla extra al final de la fila (índice units.size()): su deslizamiento
+# discreto (flechas/rueda con el Frame) se anima; el continuo (Super+rueda) usa `pan`.
+var home_slide_since = -1
+var home_slide_from = 0.0
+var home_slide_to = 0.0
 var window_dragging = false  # Super+arrastre de una ventana: el view no reenvía al cliente
 var instant_switch = false   # Alt+Tab: reubicar las pantallas sin animación (1 frame)
 var focus_flash = 0      # ms del último cambio de foco (borde que destella)
@@ -155,10 +160,17 @@ const SUGAR_STROKE = Color(0.32, 0.30, 0.38, 1.0)
 # tamaños salen de la unidad de rejilla (ver grid_unit), no de constantes en px.
 const HOME_BG_TOP = Color(0.12, 0.13, 0.17, 1.0)
 const HOME_BG_BOTTOM = Color(0.05, 0.06, 0.09, 1.0)
+# Bloque "Apps" del Hogar: misma familia biselada (gris azulado) que los bloques del Frame.
+const HOME_BLOCK_FACE = Color(0.27, 0.31, 0.41, 1.0)
+const HOME_BLOCK_LIGHT = Color(0.53, 0.59, 0.73, 1.0)
+const HOME_BLOCK_DARK = Color(0.07, 0.08, 0.13, 1.0)
+const HOME_BLOCK_TEXT = Color(0.92, 0.93, 0.97, 1.0)
+const HOME_BEVEL = 2.0
 const RING_PLATE = Color(0.10, 0.11, 0.14, 0.88)
 const RING_CLOSED = Color(0.62, 0.64, 0.70, 0.55)
 const RING_OPEN = Color(0.98, 0.72, 0.30, 0.95)
 const RING_FOCUS = Color(0.55, 0.80, 1.0, 1.0)
+const RING_MIN = Color(0.56, 0.59, 0.68, 0.90)  # minimizada: contorno punteado atenuado
 const RING_LABEL = Color(0.90, 0.91, 0.94, 1.0)
 const RING_LABEL_DIM = Color(0.72, 0.74, 0.79, 1.0)
 
@@ -447,27 +459,33 @@ func _imgui_frame():
 		request_redraw()
 	recovery.tick(self)
 	_process_unmanaged()
+	_tick_home_slide()
 	# Fundido al cambiar de vista (ver frame.transition); 0 = ImGuiStyleVar_Alpha.
 	var fade = frame.transition()
 	if fade < 1.0:
 		push_style_var_float(0, fade)
 	if current_activity == null:
-		_draw_home()
+		_draw_home(_home_x(_units()))
 	else:
 		_draw_activity()
+		# Paneo/animación hacia el Hogar: se dibuja deslizándose junto a las ventanas.
+		if _home_anim_active() or pan_active:
+			var hx = _home_x(_units())
+			var vp = get_viewport_rect().size
+			if hx > -vp.x and hx < vp.x:
+				_draw_home(hx)
 	if fade < 1.0:
 		pop_style_var()
 
 	# Tiling: con alguna ventana abierta y una actividad wayland activa se muestran todos
-	# los tiles a la vez; en Home o en una actividad de script, la vista se oculta.
+	# los tiles a la vez; en Home o en una actividad de script, la vista se oculta. La
+	# vista también se muestra para el paneo/animación que trae o lleva al Hogar.
 	tile_mode = current_activity != null and current_activity.has("wayland") and not tiles.empty()
-	if tile_mode:
-		view.visible = true
+	var row = tile_mode or (not tiles.empty() and (_home_anim_active() or pan_active))
+	view.visible = row
+	if row:
 		_update_tiles()
-		instant_switch = false  # ya se reubicaron sin animación en este frame
-	else:
-		view.visible = false
-		instant_switch = false
+	instant_switch = false  # ya se reubicaron sin animación en este frame
 	var id = _current_wayland_id()
 	_update_dialogs(id)
 	if tiles_ui != null:
@@ -528,23 +546,57 @@ func _focused_unit_index(units):
 	return 0
 
 
-# Toda la fila a tamaño completo: la pantalla enfocada en (0,0) y el resto a ±ancho,
-# para que cambiar de pantalla deslice de costado. Por default una sola fila.
+# La fila incluye una ranura extra: el Hogar, siempre al final (índice units.size()).
+# ¿La pantalla actual es el Hogar? (el Hogar no es una actividad ni un toplevel).
+func _at_home():
+	return current_activity == null
+
+
+func _home_anim_active():
+	return home_slide_since >= 0
+
+
+# Índice continuo de la fila (0..units.size(), donde units.size() es el Hogar): la
+# pantalla ancla (la enfocada, o el Hogar) más el offset de paneo o de la animación.
+func _row_s(units):
+	var n = units.size()
+	if home_slide_since >= 0:
+		var k = clamp(float(OS.get_ticks_msec() - home_slide_since) / TILE_ANIM_MS, 0.0, 1.0)
+		return lerp(home_slide_from, home_slide_to, _ease(k))
+	var vp = get_viewport_rect().size
+	var a = float(n) if _at_home() else float(_focused_unit_index(units))
+	return a + pan / max(vp.x, 1.0)
+
+
+# Ranura de la última pantalla que tuvo el foco (para volver desde el Hogar).
+func _last_focus_unit(units):
+	var ui = _focused_unit_index_of(units, focused_tile)
+	if ui < 0:
+		ui = units.size() - 1
+	return ui
+
+
+# x del Hogar dentro de la fila: 0 = centrado en pantalla, ±ancho = fuera de vista.
+func _home_x(units):
+	var vp = get_viewport_rect().size
+	return (float(units.size()) - _row_s(units)) * vp.x
+
+
+# Toda la fila a tamaño completo: la pantalla enfocada (o el Hogar) en (0,0) y el resto
+# a ±ancho, para que cambiar de pantalla deslice de costado. La fila incluye el Hogar
+# como ranura extra al final (índice units.size()).
 func _compute_slide_layout():
 	tile_rects.clear()
 	var units = _units()
-	var n = units.size()
-	if n == 0:
-		return
 	var vp = get_viewport_rect().size
 	# Pantalla completa: la ventana ocupa todo; el resto queda fuera de pantalla.
 	if fullscreen_id >= 0 and tiles.has(fullscreen_id):
 		for id in tiles:
 			tile_rects[id] = Rect2(0.0, 0.0, vp.x, vp.y) if id == fullscreen_id else Rect2(vp.x * 2.0, 0.0, vp.x, vp.y)
 		return
-	var fi = _focused_unit_index(units)
-	for u in range(n):
-		var area = Rect2(float(u - fi) * vp.x - pan, 0.0, vp.x, vp.y)
+	var s = _row_s(units)
+	for u in range(units.size()):
+		var area = Rect2((float(u) - s) * vp.x, 0.0, vp.x, vp.y)
 		var members = units[u]
 		if members.size() == 1:
 			tile_rects[members[0]] = area
@@ -579,7 +631,7 @@ func _split_rects(members, area):
 # entre cada par, para dibujar/arrastrar la redimensión.
 func _compute_handles():
 	handles = []
-	if expose or fullscreen_id >= 0:
+	if expose or fullscreen_id >= 0 or _at_home() or _home_anim_active():
 		hover_handle = null
 		resize_handle = null
 		return
@@ -846,7 +898,7 @@ func _update_tile(id, now):
 	# Durante el paneo (Super+rueda) se posiciona directo, sin animación, para que el
 	# movimiento continuo no pelee con el easing.
 	var pos = rect.position
-	if pan_active or instant_switch:
+	if pan_active or instant_switch or home_slide_since >= 0:
 		tile_anim.erase(id)
 	elif tile_anim.has(id):
 		var a = tile_anim[id]
@@ -970,6 +1022,10 @@ func _update_ghosts(now):
 func _focus_tile(id):
 	if id < 0 or not _id_alive(id):
 		return
+	# Enfocar a mano cancela cualquier deslizamiento/hogar en curso.
+	pan = 0.0
+	pan_active = false
+	home_slide_since = -1
 	# Enfocar una minimizada la restaura (así el teclado puede traerlas de vuelta).
 	if minimized.has(id):
 		minimized.erase(id)
@@ -994,48 +1050,109 @@ func _focus_tile(id):
 	request_redraw()
 
 
-# Navegación de pantallas (una sola fila por default). dir: -1 izq, 1 der.
-# ←/→ cambian de pantalla (franja). ↑/↓ quedan sin efecto mientras haya una sola fila.
+# Navegación de pantallas (una sola fila por default, con el Hogar al final).
+# dir: -1 izq, 1 der. ←/→ cambian de pantalla (franja); desde la última, → llega al
+# Hogar y desde el Hogar, ← vuelve a la última pantalla que tuvo el foco.
 func _focus_dir(dir):
-	if not tile_mode or tiles.empty():
-		return
 	if dir != -1 and dir != 1:
+		return
+	if _home_anim_active():
 		return
 	pan = 0.0
 	pan_active = false
 	var units = _units()
-	var ui = _focused_unit_index(units)
-	_focus_unit(units, ui + dir)
-
-
-# Super+rueda: desplaza la franja de forma continua (signo +1 = siguiente). No cambia el
-# foco hasta soltar Super (_snap_pan).
-func _pan_by(amount):
+	var n = units.size()
+	if _at_home():
+		if dir < 0 and n > 0:
+			_start_home_leave(units, _last_focus_unit(units))
+		request_redraw()
+		return
 	if not tile_mode or tiles.empty():
 		return
-	var units = _units()
-	var n = units.size()
-	if n < 2:
+	if fullscreen_id >= 0:
 		return
-	var vp = get_viewport_rect().size
-	var fi = _focused_unit_index(units)
-	pan_active = true
-	pan = clamp(pan + amount * vp.x * 0.18, -float(fi) * vp.x, float(n - 1 - fi) * vp.x)
+	var ui = _focused_unit_index(units)
+	if dir > 0 and ui >= n - 1:
+		_start_home_enter(units)
+	else:
+		_focus_unit(units, ui + dir)
+
+
+# Entrada al Hogar (desde la última pantalla): anima la fila hasta la ranura n y al
+# terminar confirma el cambio con _go_home (ver _tick_home_slide).
+func _start_home_enter(units):
+	home_slide_from = _row_s(units)
+	home_slide_to = float(units.size())
+	home_slide_since = OS.get_ticks_msec()
 	request_redraw()
 
 
-# Al soltar Super: cae a la pantalla más cercana según el paneo acumulado.
+# Salida del Hogar (hacia la pantalla u): anima la fila desde la ranura n.
+func _start_home_leave(units, u):
+	home_slide_from = float(units.size())
+	home_slide_to = float(u)
+	home_slide_since = OS.get_ticks_msec()
+	request_redraw()
+
+
+# Cierra la animación del Hogar: entra (confirma Home) o sale (enfoca la pantalla).
+func _tick_home_slide():
+	if home_slide_since < 0:
+		return
+	var k = clamp(float(OS.get_ticks_msec() - home_slide_since) / TILE_ANIM_MS, 0.0, 1.0)
+	if k < 1.0:
+		request_redraw()
+		return
+	var to = home_slide_to
+	home_slide_since = -1
+	var units = _units()
+	var n = units.size()
+	if int(round(to)) >= n:
+		_go_home()
+	elif n > 0:
+		_focus_unit(units, int(clamp(round(to), 0.0, float(n - 1))))
+	request_redraw()
+
+
+# Super+rueda: desplaza la franja de forma continua (signo +1 = siguiente). Llega hasta
+# el Hogar (y desde el Hogar vuelve a las ventanas). No cambia el foco hasta soltar
+# Super (_snap_pan).
+func _pan_by(amount):
+	if _home_anim_active():
+		return
+	var units = _units()
+	var n = units.size()
+	if n == 0:
+		return
+	if not (tile_mode or _at_home()):
+		return
+	if fullscreen_id >= 0:
+		return
+	var vp = get_viewport_rect().size
+	var a = float(n) if _at_home() else float(_focused_unit_index(units))
+	pan_active = true
+	pan = clamp(pan + amount * vp.x * 0.18, -a * vp.x, (float(n) - a) * vp.x)
+	request_redraw()
+
+
+# Al soltar Super: cae a la pantalla más cercana según el paneo acumulado (incluido el
+# Hogar, si el paneo lo alcanzó).
 func _snap_pan():
 	if not pan_active:
 		return
 	var units = _units()
+	var n = units.size()
 	var vp = get_viewport_rect().size
-	var fi = _focused_unit_index(units)
+	var a = float(n) if _at_home() else float(_focused_unit_index(units))
 	var delta = int(round(pan / max(vp.x, 1.0)))
 	pan_active = false
 	pan = 0.0
-	if delta != 0 and not units.empty():
-		_focus_unit(units, int(clamp(fi + delta, 0, units.size() - 1)))
+	var target = int(clamp(a + float(delta), 0.0, float(n)))
+	if target >= n:
+		if not _at_home():
+			_go_home()
+	elif (target != int(a) or _at_home()) and n > 0:
+		_focus_unit(units, target)
 	request_redraw()
 
 
@@ -1121,6 +1238,8 @@ func _focus_unit(units, u):
 
 # Intercambia pantallas en la fila (←/→). ↑/↓ sin efecto con una sola fila.
 func _swap_dir(dir):
+	if _at_home() or _home_anim_active():
+		return
 	if not tile_mode or tiles.empty():
 		return
 	if dir != -1 and dir != 1:
@@ -1230,7 +1349,9 @@ func _untile_window(id):
 func _minimize_window(id):
 	if id < 0 or not tiles.has(id):
 		return
-	# La ventana se encoge hacia su ítem del Frame mientras se minimiza.
+	# La ventana se encoge hacia su ítem del Frame mientras se minimiza (animación
+	# fantasma: deja claro que pasó algo). El bloque atenuado queda en el Frame y el
+	# anillo del Hogar marca la actividad como minimizada.
 	_spawn_ghost(id, _panel_rect_for(id))
 	if fullscreen_id == id:
 		fullscreen_id = -1
@@ -1239,6 +1360,17 @@ func _minimize_window(id):
 	tiles.erase(id)
 	tile_fade.erase(id)
 	tile_intro.erase(id)
+	tile_anim.erase(id)
+	view_anim.erase(id)
+	# Se libera ya el nodo: si `tiles` queda vacío no habrá _update_tiles() que lo
+	# limpie y podría quedar un cuadro fantasma de la ventana minimizada.
+	var node = tile_nodes.get(id)
+	if node != null and is_instance_valid(node):
+		node.queue_free()
+	tile_nodes.erase(id)
+	tile_rects.erase(id)
+	tile_fit.erase(id)
+	expose_cards.erase(id)
 	if focused_tile == id:
 		focused_tile = -1
 		if tiles.empty():
@@ -1252,6 +1384,19 @@ func _restore_window(id):
 	if id < 0 or not _id_alive(id):
 		return
 	_focus_tile(id)  # ya limpia `minimized` y reinserta
+
+
+# Alt+M: minimiza la ventana enfocada; si ya está minimizada, la restaura. No depende
+# de que el Frame esté a la vista (ver frame.gd/_input).
+func _toggle_minimize_focused():
+	var id = focused_tile
+	if id < 0 or not _id_alive(id):
+		return
+	if minimized.has(id):
+		_restore_window(id)
+	elif current_activity != null and tiles.has(id):
+		_minimize_window(id)
+	request_redraw()
 
 
 # Alt+F11: pantalla completa de la ventana enfocada (ocupa todo, se esconde el Frame).
@@ -1410,15 +1555,29 @@ func _root_of(id):
 	return id
 
 
-func _draw_home():
+# Bisel clásico de 2px del Hogar (claro arriba/izq, oscuro abajo/der); `pressed` lo
+# invierte. Mismo lenguaje que los bloques del Frame. `r` en coords de pantalla.
+func _draw_home_bevel(r, face, pressed):
+	imgui_draw_rect_filled(r, face, 0.0)
+	var light = HOME_BLOCK_DARK if pressed else HOME_BLOCK_LIGHT
+	var dark = HOME_BLOCK_LIGHT if pressed else HOME_BLOCK_DARK
+	imgui_draw_rect_filled(Rect2(r.position, Vector2(r.size.x, HOME_BEVEL)), light, 0.0)
+	imgui_draw_rect_filled(Rect2(r.position, Vector2(HOME_BEVEL, r.size.y)), light, 0.0)
+	imgui_draw_rect_filled(Rect2(Vector2(r.position.x, r.end.y - HOME_BEVEL), Vector2(r.size.x, HOME_BEVEL)), dark, 0.0)
+	imgui_draw_rect_filled(Rect2(Vector2(r.end.x - HOME_BEVEL, r.position.y), Vector2(HOME_BEVEL, r.size.y)), dark, 0.0)
+
+
+# `offset` corre el Hogar dentro de la fila de pantallas: 0 en su lugar, ±ancho fuera
+# de vista. Así el paneo lo dibuja deslizándose junto a las ventanas, no de un salto.
+func _draw_home(offset = 0.0):
 	_tick_starting(OS.get_ticks_msec())
 	if is_key_pressed(KEY_TAB):
 		apps_view = not apps_view
 	if apps_view:
-		_draw_apps()
+		_draw_apps(offset)
 		return
 	var vp = get_viewport_rect().size
-	set_next_window_pos(Vector2.ZERO, true)
+	set_next_window_pos(Vector2(offset, 0.0), true)
 	set_next_window_size(vp, true)
 	var flags = WINDOW_NO_DECORATION | WINDOW_NO_BACKGROUND | WINDOW_NO_MOVE | WINDOW_NO_SAVED_SETTINGS | WINDOW_NO_BRING_TO_FRONT_ON_FOCUS
 	# Sin padding el fondo y las posiciones absolutas coinciden con la vista.
@@ -1445,8 +1604,28 @@ func _draw_home():
 					starting[act.name] = OS.get_ticks_msec()
 				_activate(i)
 
-		set_cursor_pos(Vector2(vp.x - 2.0 * u - pad, frame_bar_h(vp) + pad))
-		if button("Apps", Vector2(2.0 * u, u * 0.75)):
+		# Bloque Apps: tesela U x U con bisel, como los bloques del Frame.
+		var apps_side = u
+		var apps_pos = Vector2(vp.x - apps_side - pad, frame_bar_h(vp) + pad)
+		set_cursor_pos(apps_pos)
+		var apps_screen = get_cursor_screen_pos()
+		push_style_color(COL_BUTTON, Color(0, 0, 0, 0))
+		push_style_color(COL_BUTTON_HOVERED, Color(0, 0, 0, 0))
+		push_style_color(COL_BUTTON_ACTIVE, Color(0, 0, 0, 0))
+		push_style_var_float(STYLE_VAR_FRAME_ROUNDING, 0.0)
+		var apps_clicked = button("##apps_btn", Vector2(apps_side, apps_side))
+		var apps_held = is_item_active()
+		var apps_hover = is_item_hovered()
+		pop_style_var()
+		pop_style_color(3)
+		var apps_face = HOME_BLOCK_FACE
+		if apps_hover and not apps_held:
+			apps_face = apps_face.linear_interpolate(Color(1.0, 1.0, 1.0, apps_face.a), 0.08)
+		_draw_home_bevel(Rect2(apps_screen, Vector2(apps_side, apps_side)), apps_face, apps_held)
+		var apps_cw = 7.0 * get_imgui_scale()
+		set_cursor_pos(apps_pos + Vector2((apps_side - 4.0 * apps_cw) * 0.5, (apps_side - 13.0 * get_imgui_scale()) * 0.5))
+		text_colored(HOME_BLOCK_TEXT, "Apps")
+		if apps_clicked:
 			apps_view = true
 
 		if activity_error != "":
@@ -1571,12 +1750,12 @@ func _sugar_svg_text(name, stroke, fill):
 	return s
 
 
-# Estado de una actividad en el anillo: cerrado / abierto / enfocado.
+# Estado de una actividad en el anillo: cerrado / abierto / minimizado / enfocado.
 func _activity_state(activity):
 	if current_activity != null and current_activity.name == activity.name:
 		return "focused"
 	if activity.has("wayland") and wayland_ids.has(activity.name) and _id_alive(wayland_ids[activity.name]):
-		return "open"
+		return "minimized" if minimized.has(wayland_ids[activity.name]) else "open"
 	if activity.has("script") and script_instances.has(activity.name):
 		return "open"
 	if activity.has("service") and _service_running(activity.name):
@@ -1608,6 +1787,9 @@ func _draw_ring_item(pos, size, tex, label, state, id, starting_since = -1):
 	elif state == "focused":
 		border = RING_FOCUS
 		thickness = 3.5
+	elif state == "minimized":
+		border = RING_MIN
+		thickness = 2.0
 	elif state == "open":
 		border = RING_OPEN
 		thickness = 2.5
@@ -1643,8 +1825,17 @@ func _draw_ring_item(pos, size, tex, label, state, id, starting_since = -1):
 		set_cursor_pos(pos + Vector2((size.x - cw) * 0.5, (size.y - 13.0 * get_imgui_scale()) * 0.5))
 		text_colored(Color(0.95, 0.85, 0.95, 1.0), id.substr(0, 1))
 
+	if state == "minimized":
+		# Distinto de "abierta" más allá del color: ícono atenuado + contorno punteado.
+		imgui_draw_circle_filled(c, radius, Color(0.05, 0.06, 0.09, 0.45), 0)
+		var seg = 18
+		for i in range(seg):
+			if i % 2 == 1:
+				var ang = TAU * float(i) / float(seg)
+				imgui_draw_circle_filled(c + Vector2(cos(ang), sin(ang)) * radius, 2.0, RING_MIN, 0)
+
 	set_cursor_pos(pos + Vector2((size.x - label.length() * cw) * 0.5, size.y + 3.0))
-	text_colored(RING_LABEL if state != "closed" else RING_LABEL_DIM, label)
+	text_colored(RING_LABEL if (state != "closed" and state != "minimized") else RING_LABEL_DIM, label)
 	return clicked
 
 
@@ -1686,11 +1877,11 @@ func _activity_icon_of(app):
 	return app.tex
 
 
-func _draw_apps():
+func _draw_apps(offset = 0.0):
 	var vp = get_viewport_rect().size
 	# Bajo el Frame, que en el Home está siempre. El alto de la barra sale de la rejilla.
 	var top = frame_bar_h(vp)
-	set_next_window_pos(Vector2(0.0, top), true)
+	set_next_window_pos(Vector2(offset, top), true)
 	set_next_window_size(Vector2(vp.x, vp.y - top), true)
 	if begin("##apps", WINDOW_NO_DECORATION | WINDOW_NO_BACKGROUND | WINDOW_NO_MOVE | WINDOW_NO_SAVED_SETTINGS | WINDOW_NO_BRING_TO_FRONT_ON_FOCUS):
 		if button("Anillo"):
@@ -1840,6 +2031,7 @@ func _open_wayland(activity):
 
 func _go_home():
 	release_modifiers()  # no dejar modificadores pegados en la app que sale de foco
+	home_slide_since = -1
 	_release_activity()
 	current_activity = null
 	activity_instance = null
