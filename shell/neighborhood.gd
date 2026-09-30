@@ -298,6 +298,44 @@ static func _place_all(nets):
 		n.angle = _angle_for(n.band, t) + (float((h / 100) % 1000) / 1000.0 - 0.5) * 0.22
 
 
+# Separación por repulsión iterativa (pura y determinista). Recibe posiciones y radios
+# en la misma unidad (p.ej. px) y empuja cada par hasta que dist >= r_i + r_j + gap, con
+# un resorte suave hacia la posición original para conservar el anillo radial aproximado.
+# Los mismos nodos dan siempre la misma disposición: no parpadea entre frames.
+static func relax_positions(pts, radii, gap = 2.0, iterations = 16, spring = 0.03):
+	# Copia a Array: acepta igual Array que PoolVector2Array (este último no tiene
+	# duplicate() en Godot 3).
+	var p = []
+	for v in pts:
+		p.append(v)
+	var n = p.size()
+	for it in range(iterations):
+		for i in range(n):
+			for j in range(i + 1, n):
+				var d = p[j] - p[i]
+				var dist = d.length()
+				var need = float(radii[i]) + float(radii[j]) + gap
+				if dist >= need:
+					continue
+				var dir
+				if dist < 0.001:
+					# Coincidencia exacta: se rompe la simetría de forma determinista.
+					dir = Vector2(1.0, 0.0).rotated(float(i + j) * 1.3)
+					dist = 0.0
+				else:
+					dir = d / dist
+				var push = (need - dist) * 0.5
+				p[i] -= dir * push
+				p[j] += dir * push
+		# Resorte decreciente hacia la posición original: las últimas pasadas son
+		# repulsión pura, así el resultado final separa todos los pares.
+		var s = spring * float(iterations - it - 1) / float(iterations)
+		if s > 0.0:
+			for i in range(n):
+				p[i] = p[i].linear_interpolate(pts[i], s)
+	return p
+
+
 # Vecinos IPv4 de la red local: REACHABLE/STALE, sin FAILED ni INCOMPLETE.
 static func parse_neigh(text):
 	var out = []
@@ -357,6 +395,8 @@ static func selftest():
 	assert(cos(mired.angle) < 0.0, "5 GHz a la izquierda")
 	assert(parse_neigh("192.168.1.1 dev wlan0 lladdr aa:bb:cc:dd:ee:ff REACHABLE\n192.168.1.9 dev wlan0 FAILED").size() == 1,
 		"sin FAILED")
+	var rel = relax_positions([Vector2(10.0, 10.0), Vector2(10.0, 10.0)], [32.0, 32.0], 2.0, 16, 0.0)
+	assert((rel[0] - rel[1]).length() >= 64.0, "repulsión separa nodos de 64 px")
 	return true
 
 

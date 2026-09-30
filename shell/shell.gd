@@ -187,8 +187,8 @@ const NB_BG_TOP = Color(0.10, 0.11, 0.15, 1.0)
 const NB_BG_BOTTOM = Color(0.04, 0.05, 0.08, 1.0)
 const NB_RING = Color(0.55, 0.60, 0.72, 0.20)
 const NB_RING_NEAR = Color(0.55, 0.85, 0.70, 0.26)
-const NB_NODE_24 = Color(0.35, 0.72, 0.80, 0.96)
-const NB_NODE_5 = Color(0.45, 0.52, 0.92, 0.96)
+const NB_NODE_24 = Color(0.42, 0.58, 0.95, 0.96)  # azulado: 2.4 GHz
+const NB_NODE_5 = Color(0.30, 0.82, 0.78, 0.96)   # turquesa: 5 GHz
 const NB_NODE_DIM = Color(0.45, 0.48, 0.58, 0.70)
 const NB_AMBER = Color(0.98, 0.80, 0.36, 1.0)
 const NB_TEXT = Color(0.92, 0.93, 0.96, 1.0)
@@ -1643,7 +1643,9 @@ func _draw_home(offset = 0.0):
 			if act.has("service") and _service_running(act.name):
 				label += " *"
 			if _draw_ring_item(pos, btn_size, _activity_tex(act), label, _activity_state(act), act.name, starting.get(act.name, -1)):
-				if act.has("wayland"):
+				# Sólo una actividad wayland CERRADA arranca con pulso: la vista se
+				# queda en Hogar hasta que aparezca su ventana (ver _open_wayland).
+				if act.has("wayland") and _activity_state(act) == "closed":
 					pending_origin = Rect2(pos, btn_size)
 					pending_origin_since = OS.get_ticks_msec()
 					starting[act.name] = OS.get_ticks_msec()
@@ -1965,6 +1967,9 @@ func _launch_app(app):
 		ACTIVITIES.append({"name": app.name, "wayland": ["sh", "-c", app.cmd], "dynamic": true})
 		i = ACTIVITIES.size() - 1
 	_activate(i)
+	# La grilla vuelve al anillo de Hogar: ahí se ve el pulso de arranque del ícono
+	# hasta que llegue la ventana (la vista no salta a la actividad al lanzarla).
+	apps_view = false
 	apps.watch(self, app.name, last_launch_pid)
 	# Si no se pudo lanzar, no queda colgada en el anillo.
 	if pending_wayland == "" and not wayland_ids.has(app.name) and ACTIVITIES[i].get("dynamic", false):
@@ -2051,21 +2056,36 @@ func _open_by_name(name):
 
 func _open_wayland(activity):
 	var name = activity.name
-	_release_activity()
-	current_activity = activity
-	activity_instance = null
 	activity_error = ""
-	pending_wayland = ""
 
 	var id = -1
 	if wayland_ids.has(name) and _id_alive(wayland_ids[name]):
 		id = wayland_ids[name]
 
 	if id >= 0:
-		pending_origin = null  # ya existía: no es una entrada nueva
+		# Ya tenía ventana: se le sale de cualquier actividad previa y se enfoca, sin
+		# pulso ni animación de entrada (no es un arranque nuevo).
+		_release_activity()
+		activity_instance = null
+		pending_origin = null
+		pending_wayland = ""
 		starting.erase(name)
+		current_activity = activity
 		_focus_tile(id)
 		return
+
+	# Lanzamiento nuevo (actividad cerrada): la vista SE QUEDA EN HOGAR y el ícono
+	# pulsa (starting / _tick_starting) hasta que llegue su toplevel. No se toca
+	# current_activity, así el compositor no muestra el contenido de OTRA ventana en
+	# el intervalo; cuando la ventana aparece, _on_toplevel_added enfoca y hace la
+	# ampliación desde pending_origin. Si no llega en STARTING_MAX_MS el pulso se corta.
+	if pending_wayland == name:
+		# Ya se está lanzando esta misma actividad: no lanzar un segundo proceso.
+		return
+	if pending_wayland != "" and pending_wayland != name:
+		# Se estaba lanzando otra actividad: se descarta su aviso, sin romper.
+		starting.erase(pending_wayland)
+	pending_wayland = name
 
 	var vp = get_viewport_rect().size
 	view.rect_position = Vector2.ZERO
@@ -2078,7 +2098,6 @@ func _open_wayland(activity):
 	for i in range(1, activity.wayland.size()):
 		args.push_back(activity.wayland[i])
 
-	pending_wayland = name
 	var pid = compositor.launch(cmd, args)
 	last_launch_pid = pid
 	if pid < 0:
@@ -2159,9 +2178,12 @@ func _nb_user():
 		user = OS.get_environment("LOGNAME")
 	if user == "":
 		user = "user"
-	var host = IP.get_hostname()
+	var host = OS.get_environment("HOSTNAME")
 	if host == "":
-		host = OS.get_environment("HOSTNAME")
+		var f = File.new()
+		if f.open("/etc/hostname", File.READ) == OK:
+			host = f.get_as_text().strip_edges()
+			f.close()
 	return user + ("@" + host if host != "" else "")
 
 
@@ -2248,11 +2270,22 @@ func _draw_neighborhood(offset = 0.0):
 				if button("Encender Wi-Fi", Vector2(140.0, 26.0)):
 					_wifi_radio_on()
 
+		# Posiciones por anillo radial y luego repulsión iterativa (neighborhood.gd):
+		# ningún par de nodos de 64 px se solapa y se conserva el anillo aproximado.
+		var node_pos = []
+		var node_rad = []
+		for i in range(nets.size()):
+			var n0 = nets[i]
+			node_pos.append(Vector2(cx, cy) + Vector2(cos(n0.angle), sin(n0.angle)) * (n0.r_frac * R))
+			node_rad.append(clamp(NB_NODE_MIN + float(int(n0.congestion) - 1) * 3.0, NB_NODE_MIN, 58.0))
+		if neighborhood != null and node_pos.size() > 1:
+			node_pos = neighborhood.relax_positions(node_pos, node_rad, 2.0, 16, 0.03)
+
 		for i in range(nets.size()):
 			var n = nets[i]
-			var pos = Vector2(cx, cy) + Vector2(cos(n.angle), sin(n.angle)) * (n.r_frac * R)
+			var pos = node_pos[i]
+			var rad = node_rad[i]
 			var cong = int(n.congestion)
-			var rad = clamp(NB_NODE_MIN + float(cong - 1) * 3.0, NB_NODE_MIN, 58.0)
 			var col = NB_NODE_24 if n.band == "2.4" else NB_NODE_5
 			if n.ring == "lejos":
 				col = col.linear_interpolate(NB_NODE_DIM, 0.45)
@@ -2269,8 +2302,9 @@ func _draw_neighborhood(offset = 0.0):
 			_nb_text_centered(pos.x, pos.y + rad + 3.0, _nb_short(n.ssid), NB_TEXT)
 			_nb_text_centered(pos.x, pos.y + rad + 18.0, str(int(n.dbm)) + " dBm", NB_TEXT_DIM)
 			if n.in_use:
-				_nb_text_centered(pos.x, pos.y - rad - 20.0, "Conectado", NB_AMBER)
-				_nb_hosts_around(pos, n.angle, rad)
+				# El "conectado" se ve en el borde ámbar y la leyenda, no como texto
+				# encima de los vecinos que se dibujan alrededor del AP.
+				_nb_hosts_around(pos, (pos - Vector2(cx, cy)).angle(), rad)
 			# Área pulsable del nodo (botón invisible, como el anillo del Hogar).
 			push_style_color(COL_BUTTON, Color(0, 0, 0, 0))
 			push_style_color(COL_BUTTON_HOVERED, Color(1, 1, 1, 0.06))
@@ -2282,33 +2316,69 @@ func _draw_neighborhood(offset = 0.0):
 			pop_style_color(3)
 			if clicked:
 				nb_selected = n.ssid
+		_nb_legend(vp)
 		_nb_panel(vp, panel_w, top, sel)
 	end()
 	pop_style_var()
 
 
-# Vecinos de la red local: cuadraditos en un arco alrededor del AP en uso, SIN
-# distancia propia (no se inventa posición: se rotula "sin distancia").
+# Vecinos de la red local: cuadraditos en un arco AMPLIO alrededor del AP en uso, cada
+# uno con su etiqueta corta (último octeto, o el nombre) AL LADO, sin texto superpuesto
+# ni distancia propia (ver la leyenda: cuadrito = equipo de la red).
 func _nb_hosts_around(ap, ang, rad):
 	var hosts = neighborhood.hosts.duplicate() if neighborhood != null else []
 	if _service_running("Deskflow"):
 		hosts.append({"ip": "", "mac": "", "dev": "", "state": "deskflow"})
 	if hosts.empty():
 		return
-	var arc_r = rad + 30.0
-	var span = 1.1
+	var cw = 7.0 * get_imgui_scale()
+	var arc_r = rad + 34.0
+	var span = 1.7
 	for i in range(hosts.size()):
 		var h = hosts[i]
 		var t = 0.5 if hosts.size() == 1 else float(i) / float(hosts.size() - 1)
-		var a = ang + (t - 0.5) * span
-		var p = ap + Vector2(cos(a), sin(a)) * arc_r
+		var dir = Vector2(cos(ang + (t - 0.5) * span), sin(ang + (t - 0.5) * span))
+		# Radio alternado: dos anillos finos para que las etiquetas no se apilen.
+		var p = ap + dir * (arc_r + (10.0 if i % 2 == 1 else 0.0))
 		var col = NB_HOST_REACH if h.state == "REACHABLE" else NB_HOST
 		if h.state == "deskflow":
 			col = NB_HOST_DESK
-		imgui_draw_rect_filled(Rect2(p - Vector2(4.0, 4.0), Vector2(8.0, 8.0)), col, 0.0)
-		var label = "Deskflow" if h.state == "deskflow" else (h.ip if h.ip != "" else h.mac)
-		_nb_text_centered(p.x, p.y + 7.0, label, NB_TEXT_DIM)
-	_nb_text_centered(ap.x, ap.y + arc_r + 20.0, "sin distancia", NB_TEXT_DIM)
+		imgui_draw_rect_filled(Rect2(p - Vector2(5.0, 5.0), Vector2(10.0, 10.0)), col, 0.0)
+		var label = "Deskflow" if h.state == "deskflow" else _nb_host_short(h)
+		var lx = p.x + 8.0 if dir.x >= 0.0 else p.x - 8.0 - float(label.length()) * cw
+		_nb_text(Vector2(lx, p.y - 5.0), label, NB_TEXT_DIM)
+
+
+# Etiqueta corta de un vecino: último octeto de la IP, o cola de la MAC.
+func _nb_host_short(h):
+	if h.ip != "":
+		var parts = h.ip.split(".")
+		return parts[parts.size() - 1]
+	if h.mac != "":
+		return h.mac.substr(max(0, h.mac.length() - 5), 5)
+	return "?"
+
+
+# Leyenda compacta abajo a la izquierda, sobre la barra inferior del Frame.
+func _nb_legend(vp):
+	var cw = 7.0 * get_imgui_scale()
+	var y = vp.y - frame_bar_h(vp) - 14.0
+	var x = 14.0
+	imgui_draw_circle_filled(Vector2(x + 4.0, y), 5.0, NB_NODE_24, 0)
+	x += 12.0
+	_nb_text(Vector2(x, y - 5.0), "2.4 GHz", NB_TEXT_DIM)
+	x += 7.0 * cw + 16.0
+	imgui_draw_circle_filled(Vector2(x + 4.0, y), 5.0, NB_NODE_5, 0)
+	x += 12.0
+	_nb_text(Vector2(x, y - 5.0), "5 GHz", NB_TEXT_DIM)
+	x += 5.0 * cw + 16.0
+	imgui_draw_circle(Vector2(x + 4.0, y), 5.0, NB_AMBER, 0, 2.5)
+	x += 12.0
+	_nb_text(Vector2(x, y - 5.0), "conectado", NB_TEXT_DIM)
+	x += 9.0 * cw + 16.0
+	imgui_draw_rect_filled(Rect2(Vector2(x, y - 4.0), Vector2(9.0, 9.0)), NB_HOST, 0.0)
+	x += 13.0
+	_nb_text(Vector2(x, y - 5.0), "equipo (sin distancia)", NB_TEXT_DIM)
 
 
 # Panel lateral: detalle de la red elegida y el botón que abre nmtui en Terminal.
@@ -2327,12 +2397,17 @@ func _nb_panel(vp, pw, top, sel):
 		y += 16.0
 		_nb_text(Vector2(x0 + pad, y), "SSID, canal y seguridad.", NB_TEXT_DIM)
 		return
-	_nb_text(Vector2(x0 + pad, y), _nb_short(sel.ssid), NB_TEXT)
+	var maxc = int((pw - 2.0 * pad) / (7.0 * get_imgui_scale()))
+	var ssid = sel.ssid
+	if maxc > 3 and ssid.length() > maxc:
+		ssid = ssid.substr(0, maxc - 3) + "..."
+	_nb_text(Vector2(x0 + pad, y), ssid, NB_TEXT)
 	y += 22.0
 	var sec = "abierta" if sel.security == "" else sel.security
 	var rows = [
 		"BSSID " + sel.bssid,
-		"Canal " + str(sel.chan) + "  (" + sel.band + " GHz)",
+		"Canal " + str(sel.chan),
+		"Banda " + sel.band + " GHz",
 		"Freq " + str(sel.freq) + " MHz",
 		"Senal " + str(int(sel.dbm)) + " dBm (" + str(sel["signal"]) + "%)",
 		"Seguridad " + sec,
@@ -2397,6 +2472,10 @@ func _on_toplevel_added(id):
 		pending_wayland = ""
 		starting.erase(name)  # llegó la ventana: se corta la notificación de arranque
 		wayland_ids[name] = id
+		# Si veníamos de una actividad de script, se sueltan sus recursos transitorios
+		# (la instancia se conserva); recién acá se cambia de vista, no al lanzar.
+		_release_activity()
+		activity_instance = null
 		_add_tile(id)
 		_focus_tile(id)
 		return

@@ -1177,8 +1177,9 @@ func _draw_home_tile(ui, pos, side):
 	return b.clicked
 
 
-# Bloque Vecindario: tesela U x U con el ícono Sugar de red inalámbrica. Sólo abre la
-# vista (no escanea, no conecta); resalta cuando la vista actual es el Vecindario.
+# Bloque Vecindario: tesela U x U con un glifo Wi-Fi dibujado (tres arcos + punto;
+# el SVG network-wireless del tema es sólo un círculo vacío). Sólo abre la vista
+# (no escanea, no conecta); resalta cuando la vista actual es el Vecindario.
 func _draw_neighborhood_tile(ui, pos, side):
 	var active = shell.neighborhood_view
 	var b = _tile(ui, pos, side, "go_neighborhood", NX_CUR if active else NX_FACE)
@@ -1186,16 +1187,27 @@ func _draw_neighborhood_tile(ui, pos, side):
 		_frame_focus(ui, b.rect, NX_FOCUS)
 	var title_h = TITLE_H if side >= 76.0 else 0.0
 	var s = clamp(side - title_h - 2.0 * BEVEL - 4.0, ICON_MIN, ICON_MAX)
-	var icon = shell.neighborhood_icon_tex()
-	if icon != null:
-		ui.set_cursor_pos(pos + Vector2((side - s) * 0.5, BEVEL + max(2.0, (side - title_h - s) * 0.5)))
-		ui.image(icon, Vector2(s, s))
-	else:
-		ui.set_cursor_pos(pos + Vector2((side - 7.0 * ui.get_imgui_scale()) * 0.5, (side - 13.0 * ui.get_imgui_scale()) * 0.5))
-		ui.text_colored(NX_TEXT, "V")
+	var center = pos + Vector2(side * 0.5, BEVEL + max(2.0, (side - title_h - s) * 0.5) + s * 0.5)
+	_draw_wifi_glyph(ui, center, s * 0.5, NX_TEXT)
 	if title_h > 0.0:
 		_tile_title(ui, pos, side, "Vecindario", false)
 	return b.clicked
+
+
+# Glifo Wi-Fi dibujado con la lista de dibujo de ImGui: punto y tres arcos
+# concéntricos abiertos hacia arriba (reconocible, sin depender de un SVG).
+func _draw_wifi_glyph(ui, c, r, col):
+	var dot = c + Vector2(0.0, r * 0.45)
+	ui.imgui_draw_circle_filled(dot, max(1.5, r * 0.14), col, 0)
+	var thick = max(1.5, r * 0.13)
+	for band in range(3):
+		var ar = r * (0.38 + 0.28 * float(band))
+		var pts = PoolVector2Array()
+		var seg = 18
+		for i in range(seg + 1):
+			var a = lerp(-0.78 * PI, -0.22 * PI, float(i) / float(seg))
+			pts.append(dot + Vector2(cos(a), sin(a)) * ar)
+		ui.imgui_draw_polyline(pts, col, thick, true)
 
 
 # Bloque de ventana: tesela cuadrada con ícono (mínimo 64 px), título corto de una
