@@ -1,15 +1,15 @@
 # SPEC — Applets del Frame (controles independientes tipo Window Maker)
 
-Estado: propuesta de diseño; sin implementación en este corte. Complementa
+Estado: primer corte implementado y desplegado en Tengu (2026-09-29); Bluetooth,
+teclado y enlace siguen especificados para cortes posteriores. Complementa
 `SPEC-sugar-frame-blocks.md` (retícula y bordes) y `SPEC-sugar-spatial.md` (el orden
 del layout sale de `shell._units()`; el Frame no guarda una segunda copia). Habla sólo
 de controles: no cambia navegación, tiling ni cierre de apps.
 
 ## Idea
 
-Hoy el Frame mezcla ítems de ventanas con un bloque fijo: `shell/sysmon.gd` dibuja
-siempre CPU + MEM + SWP y `frame.gd` (línea ~601) agrega el reloj al final. Se quiere
-que cada control sea un **applet**: un bloque cuadrado con ícono, valor y estado, que la
+El Frame separa los ítems de ventanas de CPU, MEM, SWP y reloj, antes dibujados
+como un bloque fijo. Cada control es un **applet**: un bloque cuadrado con valor y estado, que la
 persona **fija, quita y ordena** como los appicons/Dock de Window Maker. Un applet no es
 una ventana: comunica su estado aunque su etiqueta no quepa y muestra el nombre completo
 al enfocarlo. Sugar ya ponía CPU/memoria en el borde del Frame; gdtk los vuelve ciudadanos
@@ -42,8 +42,8 @@ texto**, nunca sólo por color.
 
 | id | fuente real | primaria | secundaria |
 |---|---|---|---|
-| `reloj` | `OS.get_time()` (ya en `frame.gd`) | mostrar fecha | fijar/quitar |
-| `cpu` | `/proc/stat` (`sysmon.gd`, 1 s) | porcentaje e historial | fijar/quitar |
+| `reloj` | `OS.get_time()` (ya en `frame.gd`) | lectura; fecha más adelante | fijar/quitar |
+| `cpu` | `/proc/stat` (`sysmon.gd`, 1 s) | lectura de porcentaje; historial más adelante | fijar/quitar |
 | `memoria` | `/proc/meminfo` (`sysmon.gd`) | RAM global y porcentaje | fijar/quitar |
 | `swap` | `/proc/meminfo` (`sysmon.gd`) | swap global y porcentaje | fijar/quitar |
 | `bluetooth` | BlueZ; `blueman-manager` ya instalado en Tengu | abrir gestión de dispositivos | encender/apagar, cuando el estado esté integrado |
@@ -84,26 +84,27 @@ texto**, nunca sólo por color.
 ## Interacción, fijado y orden
 
 - **Fijar/quitar**: un botón `+` al final de la zona de applets abre la lista de
-  providers disponibles; pulsar fija/desfija (marca de verificación). Quitar un applet no
+  controles disponibles; pulsar fija/desfija (marca de verificación). Quitar un applet no
   borra su estado ni la config del sistema.
 - **Ordenar**: arrastrar un bloque horizontalmente con el mouse; el destino se marca y
   Esc cancela (mismo gesto que el reordenamiento de ventanas en `frame.gd`). Con teclado,
   flechas mueven la selección y Ctrl+←/→ mueven el applet elegido en el orden.
 - **Teclado**: la selección del Frame (`sel`) recorre también los applets, después de los
-  ítems de ventanas. Enter/Espacio = primaria; Menú o Shift+F10 = secundaria; Esc cierra
-  el menú antes de ocultar el Frame.
-- **Ratón**: clic izquierdo = primaria; clic derecho o «⌄» = secundaria. Zona pulsable
+  ítems de ventanas. Enter/Espacio = primaria; Ctrl+←/→ reordena; Delete quita.
+  La apertura del selector con Menú o Shift+F10 queda para otro corte.
+- **Ratón**: clic izquierdo = primaria; clic derecho = selector de controles. Zona pulsable
   ≥ 28 px de alto (el Frame mide `FRAME_H = 48`); no se agranda el Frame.
 
 ## Persistencia mínima
 
 - Archivo: `$XDG_CONFIG_HOME/gdtk/frame-applets.json` (por defecto
   `~/.config/gdtk/frame-applets.json`), junto a `~/.config/gdtk/keyboard`.
-- Contenido: `{"top":[], "right":[], "bottom":["cpu","memoria","swap","reloj","deskflow"], "left":[]}`.
-  Cada lista contiene los `id` visibles en orden; omitir uno lo oculta. **No** guarda
+- Contenido actual: `{"bottom":["cpu","memoria","swap","reloj","deskflow"]}`.
+  La lista contiene los `id` visibles en orden; omitir uno lo oculta. Los otros bordes
+  podrán añadirse cuando se implemente su composición. **No** guarda
   layout de ventanas ni grupos: eso sigue en `shell._units()`.
 - Escritura atómica y sólo al cambiar. Si falta o está corrupto → defaults (reloj, cpu,
-  memoria, deskflow visibles) sin romper el arranque. `id` desconocido se ignora y se
+  memoria, swap, deskflow visibles) sin romper el arranque. `id` desconocido se ignora y se
   conserva para una versión futura.
 
 ## Muestreo, coste y fallos
@@ -124,7 +125,8 @@ texto**, nunca sólo por color.
 
 ## Accesibilidad
 
-- Texto e ícono siempre presentes; el color no carga identidad ni estado.
+- Texto y valor siempre presentes; el color no carga identidad ni estado. Los íconos
+  ilustrados del mockup quedan para el siguiente corte visual.
 - Valor textual además de la barra/dial (p. ej. «CPU 37 %», «MEM 62 %»), visible al
   enfocar o pasar el puntero.
 - Movimiento reducido: sin pulsos; los cambios de valor no animan si la persona lo pide.
@@ -161,7 +163,8 @@ texto**, nunca sólo por color.
 
 ## Límites de este corte
 
-Sin implementación. No crear la vista Vecindario ni mover su control de red. No duplicar
+Sólo hay applets en el borde inferior; CPU, memoria, swap y reloj son de lectura.
+No crear la vista Vecindario ni mover su control de red. No duplicar
 el layout de ventanas. No tocar el motor ni el fork. Conservar las modificaciones
 existentes del árbol. No hacer commit ni push.
 

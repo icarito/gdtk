@@ -58,7 +58,7 @@ var dialog_boxes = {}
 # la actividad dinamica (en `added` todavia no se conocen).
 var unmanaged = []
 
-# Home: anillo de actividades o grilla de apps instaladas (Tab alterna).
+# Home: fila(s) de actividades o grilla de apps instaladas (Tab alterna).
 var apps = Host.sc("res://apps.gd").new()
 var apps_view = false
 # Íconos XDG del anillo: rasterizar uno o dos por frame (el SVG bloquea el frame).
@@ -142,10 +142,20 @@ const EXPOSE_PAD = 28.0
 const EXPOSE_GAP = 18.0
 const MOD_KEYS = [KEY_CONTROL, KEY_SHIFT, KEY_ALT, KEY_META, KEY_SUPER_L, KEY_SUPER_R]
 
-# Hogar: primer corte visual (SPEC-sugar-home-visual). Pareja XO fija por ahora y
-# estados del anillo por contorno/atenuación además del color (ver SPEC-resource-ring).
+# Hogar: fila(s) de favoritos centradas (SPEC-sugar-home-visual). Pareja XO para la
+# insignia de identidad del Frame; íconos de actividad con fill claro + stroke
+# oscuro-medio, y estados por contorno/atenuación además del color (SPEC-resource-ring).
 const XO_FILL = Color(0.78, 0.30, 0.52, 1.0)
 const XO_STROKE = Color(0.34, 0.15, 0.29, 1.0)
+# Íconos Sugar de actividad: la placa del círculo es oscura, así que el relleno va
+# claro para despegarla y el trazo oscuro-medio para definir la silueta.
+const SUGAR_FILL = Color(0.96, 0.95, 0.90, 1.0)
+const SUGAR_STROKE = Color(0.32, 0.30, 0.38, 1.0)
+# Favoritos/actividades: círculos grandes en fila horizontal centrada.
+const HOME_BTN = 118.0
+const HOME_GAP = 20.0
+const HOME_LABEL_H = 22.0
+const HOME_MARGIN = 30.0
 const HOME_BG_TOP = Color(0.12, 0.13, 0.17, 1.0)
 const HOME_BG_BOTTOM = Color(0.05, 0.06, 0.09, 1.0)
 const RING_PLATE = Color(0.10, 0.11, 0.14, 0.88)
@@ -156,7 +166,7 @@ const RING_LABEL = Color(0.90, 0.91, 0.94, 1.0)
 const RING_LABEL_DIM = Color(0.72, 0.74, 0.79, 1.0)
 
 # Íconos Sugar: los SVG traen un DOCTYPE con entidades &stroke_color;/&fill_color;.
-# Se cargan como texto, se sustituyen por la pareja XO y se rasterizan a una
+# Se cargan como texto, se sustituyen por los colores pedidos y se rasterizan a una
 # ImageTexture cacheada (el motor no expone load_svg_from_string en este árbol).
 const SUGAR_DIR = "res://icons/sugar/"
 const SUGAR_RASTER = 192  # px del SVG al rasterizar (se dibuja a ~120)
@@ -164,7 +174,9 @@ const SUGAR_RASTER = 192  # px del SVG al rasterizar (se dibuja a ~120)
 const SUGAR_ACTIVITY_ICONS = {
 	"Salir": "application-exit",
 	"Panel": "preferences-system",
-	"Gears": "preferences-system",
+	"Gears": "emblem-busy",
+	"Chat": "document-send",
+	"Deskflow": "network-wired",
 }
 # Notificación de arranque estilo Sugar: pulso ~1.2 s hasta que aparece la ventana.
 const STARTING_MAX_MS = 15000
@@ -1392,22 +1404,14 @@ func _draw_home():
 	# Sin padding el fondo y las posiciones absolutas coinciden con la vista.
 	push_style_var_vec2(STYLE_VAR_WINDOW_PADDING, Vector2.ZERO)
 	if begin("##home", flags):
-		var center = vp * 0.5
-
 		# Fondo sobrio: degradado vertical suave (sin imagen por ahora).
 		imgui_draw_rect_filled_multicolor(Rect2(Vector2.ZERO, vp), HOME_BG_TOP, HOME_BG_TOP, HOME_BG_BOTTOM, HOME_BG_BOTTOM)
 
-		var user = OS.get_environment("USER")
-		if user == "":
-			user = "user"
-		_draw_home_center(center, user)
-
 		home_icon_loads = 2
-		var radius = 0.3 * min(vp.x, vp.y)
-		var btn_size = Vector2(110, 110)
+		var btn_size = Vector2(HOME_BTN, HOME_BTN)
+		var layout = _home_layout(vp)
 		for i in range(ACTIVITIES.size()):
-			var angle = -PI / 2.0 + TAU * float(i) / float(ACTIVITIES.size())
-			var pos = center + Vector2(cos(angle), sin(angle)) * radius - btn_size * 0.5
+			var pos = layout[i]
 			var act = ACTIVITIES[i]
 			var label = act.name
 			if act.has("service") and _service_running(act.name):
@@ -1430,16 +1434,37 @@ func _draw_home():
 	pop_style_var()
 
 
-# Centro de Hogar: la figura XO clásica de Sugar (computer-xo.svg) y el nombre debajo.
-func _draw_home_center(center, user):
-	var icon = _load_sugar_svg("computer-xo", XO_STROKE, XO_FILL)
-	var icon_size = Vector2(120.0, 120.0) * get_imgui_scale()
-	if icon != null:
-		set_cursor_pos(center - icon_size * 0.5)
-		image(icon, icon_size)
-	var cw = 7.0 * get_imgui_scale()
-	set_cursor_pos(center + Vector2(-user.length() * cw * 0.5, icon_size.y * 0.5 + 12.0))
-	text_colored(Color(0.93, 0.94, 0.97, 1.0), user)
+# Posiciones de los favoritos/actividades: fila(s) horizontales centradas en el
+# área visible (debajo del Frame), sin nada fijo en el medio. Si no entran en una
+# fila, se reparten en dos o más, también centradas.
+func _home_layout(vp):
+	var n = ACTIVITIES.size()
+	var out = []
+	if n == 0:
+		return out
+	var top = frame.FRAME_H if frame != null else 0.0
+	var avail = vp.x - 2.0 * HOME_MARGIN
+	var per_row = int(max(1.0, floor((avail + HOME_GAP) / (HOME_BTN + HOME_GAP))))
+	var rows = int(ceil(float(n) / float(per_row)))
+	var row_h = HOME_BTN + HOME_LABEL_H + HOME_GAP
+	var total_h = float(rows) * row_h - HOME_GAP
+	var y0 = top + (vp.y - top - total_h) * 0.5
+	for i in range(n):
+		var r = int(floor(float(i) / float(per_row)))
+		var col = i - r * per_row
+		var count = per_row
+		if r == rows - 1:
+			count = n - per_row * (rows - 1)
+		var row_w = float(count) * HOME_BTN + float(count - 1) * HOME_GAP
+		var x0 = (vp.x - row_w) * 0.5
+		out.append(Vector2(x0 + float(col) * (HOME_BTN + HOME_GAP), y0 + float(r) * row_h))
+	return out
+
+
+# Insignia de identidad del Frame: figura XO + nombre de usuario, cacheada como
+# cualquier ícono Sugar (el rasterizador vive acá; el Frame la consume).
+func identity_tex():
+	return _load_sugar_svg("computer-xo", XO_STROKE, XO_FILL)
 
 
 # Notificación de arranque: mantiene el pulso mientras la actividad no tenga
@@ -1617,7 +1642,7 @@ func _sugar_icon_for(name):
 	var icon = SUGAR_ACTIVITY_ICONS.get(name, "")
 	if icon == "":
 		return null
-	return _load_sugar_svg(icon, XO_STROKE, XO_FILL)
+	return _load_sugar_svg(icon, SUGAR_STROKE, SUGAR_FILL)
 
 
 func _activity_icon_of(app):
