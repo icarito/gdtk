@@ -12,6 +12,13 @@ const REFRESH_MS = 20000      # refresco normal del listado
 const RESCAN_MS = 60000       # rescan best-effort una vez por minuto
 const SLEEP_STEP_MS = 100     # granularidad para que stop() no espere de más
 
+# Cápsula de un nodo en la vista: el disco del AP más el alto de su etiqueta
+# (SSID arriba, dBm abajo). La separación de la geometría simbólica usa la cápsula,
+# no el disco: así dos nodos nunca dejan sus etiquetas superpuestas.
+const NODE_HALF_W = 32.0      # media anchura (64 px de diámetro)
+const NODE_HALF_H = 50.0      # media altura (64 x 100 px: disco + etiqueta debajo)
+const LABEL_TAIL = 18.0       # alto extra bajo el disco ocupado por el texto
+
 var networks = []             # lista de nodos "red" (ESS), copiada por poll()
 var hosts = []                # vecinos de la red local, copiada por poll()
 var status = ""               # "", "ok", "empty", "off", "no_nmcli", "error"
@@ -298,11 +305,44 @@ static func _place_all(nets):
 		n.angle = _angle_for(n.band, t) + (float((h / 100) % 1000) / 1000.0 - 0.5) * 0.22
 
 
-# Separación por repulsión iterativa (pura y determinista). Recibe posiciones y radios
-# en la misma unidad (p.ej. px) y empuja cada par hasta que dist >= r_i + r_j + gap, con
-# un resorte suave hacia la posición original para conservar el anillo radial aproximado.
-# Los mismos nodos dan siempre la misma disposición: no parpadea entre frames.
-static func relax_positions(pts, radii, gap = 2.0, iterations = 16, spring = 0.03):
+# Media altura de la cápsula de un nodo de radio `rad`: el disco más la etiqueta.
+static func capsule_half_h(rad):
+	return float(rad) + LABEL_TAIL
+
+
+# Una pasada de repulsión por cápsulas. Empuja cada par a lo largo de la recta que
+# une sus centros, hasta separarlos según la función soporte de la caja en esa
+# dirección ((hw_i+hw_j)|dx| + (hh_i+hh_j)|dy|): es estable y determinista, y no se
+# atasca como el empuje por eje mínimo en un caso denso.
+static func _separate_once(p, half_w, half_h, gap):
+	var n = p.size()
+	for i in range(n):
+		for j in range(i + 1, n):
+			var d = p[j] - p[i]
+			var dist = d.length()
+			var dir
+			if dist < 0.0001:
+				# Coincidencia exacta: se rompe la simetría de forma determinista.
+				dir = Vector2(1.0, 0.0).rotated(float(i * 7 + j) * 0.7)
+				dist = 0.0
+			else:
+				dir = d / dist
+			var need = (float(half_w[i]) + float(half_w[j]) + gap) * abs(dir.x) \
+				+ (float(half_h[i]) + float(half_h[j]) + gap) * abs(dir.y)
+			if dist >= need:
+				continue  # ya separados (hay eje que los separa)
+			var push = (need - dist) * 0.5
+			p[i] -= dir * push
+			p[j] += dir * push
+
+
+# Separación por cápsulas (pura y determinista). Cada nodo ocupa una caja
+# [p - (hw, hh), p + (hw, hh)]; dos cajas nunca deben solaparse (con `gap` de margen),
+# así la etiqueta debajo del disco también queda libre. Se aplica repulsión iterativa
+# con un resorte decreciente hacia la posición original para conservar el anillo y el
+# sector angular aproximados (el nodo puede salir del anillo si hace falta: la última
+# pasada es repulsión pura). Los mismos nodos dan siempre la misma disposición.
+static func relax_capsules(pts, half_w, half_h, gap = 2.0, iterations = 48, spring = 0.02):
 	# Copia a Array: acepta igual Array que PoolVector2Array (este último no tiene
 	# duplicate() en Godot 3).
 	var p = []
@@ -310,30 +350,35 @@ static func relax_positions(pts, radii, gap = 2.0, iterations = 16, spring = 0.0
 		p.append(v)
 	var n = p.size()
 	for it in range(iterations):
-		for i in range(n):
-			for j in range(i + 1, n):
-				var d = p[j] - p[i]
-				var dist = d.length()
-				var need = float(radii[i]) + float(radii[j]) + gap
-				if dist >= need:
-					continue
-				var dir
-				if dist < 0.001:
-					# Coincidencia exacta: se rompe la simetría de forma determinista.
-					dir = Vector2(1.0, 0.0).rotated(float(i + j) * 1.3)
-					dist = 0.0
-				else:
-					dir = d / dist
-				var push = (need - dist) * 0.5
-				p[i] -= dir * push
-				p[j] += dir * push
-		# Resorte decreciente hacia la posición original: las últimas pasadas son
-		# repulsión pura, así el resultado final separa todos los pares.
+		_separate_once(p, half_w, half_h, gap)
+		# Resorte decreciente hacia la posición original.
 		var s = spring * float(iterations - it - 1) / float(iterations)
 		if s > 0.0:
 			for i in range(n):
 				p[i] = p[i].linear_interpolate(pts[i], s)
+	# Pasadas finales sin resorte: en un caso denso una sola vuelta puede quedar a
+	# medias. Se insiste sólo mientras quede algún par solapado (acotado y determinista).
+	var guard = 0
+	while guard < iterations and capsules_overlap(p, half_w, half_h, gap):
+		guard += 1
+		_separate_once(p, half_w, half_h, gap)
 	return p
+
+
+# Compatibilidad: la relajación circular histórica es el caso hw == hh == radio.
+static func relax_positions(pts, radii, gap = 2.0, iterations = 16, spring = 0.03):
+	return relax_capsules(pts, radii, radii, gap, iterations, spring)
+
+
+# ¿Se solapa algún par de cápsulas? Prueba pura (misma definición que relax_capsules)
+# para verificar que ninguna etiqueta pisa a otro nodo.
+static func capsules_overlap(pts, half_w, half_h, gap = 0.0):
+	for i in range(pts.size()):
+		for j in range(i + 1, pts.size()):
+			if abs(pts[j].x - pts[i].x) < float(half_w[i]) + float(half_w[j]) + gap \
+					and abs(pts[j].y - pts[i].y) < float(half_h[i]) + float(half_h[j]) + gap:
+				return true
+	return false
 
 
 # Vecinos IPv4 de la red local: REACHABLE/STALE, sin FAILED ni INCOMPLETE.

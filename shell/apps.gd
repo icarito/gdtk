@@ -28,6 +28,8 @@ var field_code = RegEx.new()
 var path_dirs = []
 # pid lanzado desde la grilla -> nombre de la app (ver watch).
 var watching = {}
+# Rect en pantalla del último ícono elegido (para animar la entrada de su ventana).
+var chosen_rect = null
 
 
 func _init():
@@ -181,7 +183,7 @@ func found(program):
 # Si el proceso lanzado termina sin haber abierto ventana, el shell no se queda
 # esperándola: sale del anillo y se avisa (la salida de la app queda en shell.log).
 func watch(shell, name, pid):
-	if pid <= 0 or shell.pending_wayland != name:
+	if pid <= 0 or not shell._pending_has(name):
 		return
 	watching[pid] = name
 	if not shell.compositor.is_connected("process_exited", self, "_on_exit"):
@@ -192,9 +194,10 @@ func _on_exit(pid, code, shell):
 	var name = watching.get(pid, "")
 	watching.erase(pid)
 	# Código 0: lo normal si otro proceso abre la ventana (gapplication, D-Bus, instancia única).
-	if name == "" or shell.pending_wayland != name or code == 0:
+	if name == "" or not shell._pending_has(name) or code == 0:
 		return
-	shell.pending_wayland = ""
+	shell._pending_remove(name)
+	shell.starting.erase(name)
 	var i = shell._activity_named(name)
 	if i >= 0 and shell.ACTIVITIES[i].get("dynamic", false):
 		shell.ACTIVITIES.remove(i)
@@ -325,6 +328,7 @@ func draw(ui):
 	ui.pop_item_width()
 	var list = matches()
 	var chosen = null
+	chosen_rect = null
 	if ui.is_key_pressed(KEY_ESCAPE):
 		query = ""
 	elif (ui.is_key_pressed(KEY_ENTER) or ui.is_key_pressed(KEY_KP_ENTER)) and query != "" and list.size() > 0:
@@ -356,6 +360,7 @@ func draw(ui):
 				else:
 					more = true
 			var clicked = false
+			var icon_scr = ui.get_cursor_screen_pos()
 			if app.tex != null:
 				clicked = ui.image_button("##" + app.id, app.tex, Vector2(ICON, ICON))
 			else:
@@ -364,6 +369,7 @@ func draw(ui):
 				ui.set_tooltip(app.name)
 			if clicked:
 				chosen = app
+				chosen_rect = Rect2(icon_scr, Vector2(ICON, ICON))
 			var label = app.name if app.name.length() <= 16 else app.name.substr(0, 15) + "."
 			ui.set_cursor_pos(cell + Vector2(max(0.0, (CELL.x - label.length() * char_w) * 0.5), ICON + 14.0))
 			ui.text(label)

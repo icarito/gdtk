@@ -32,6 +32,11 @@ var last_launch_pid = -1
 
 var wayland_ids = {}
 var pending_wayland = ""
+# Lanzamientos wayland esperando su toplevel, en orden (la última es la más reciente).
+# Puede haber varios a la vez; `expect` son tokens para casar app_id/título cuando el
+# compositor ya publica ese dato, así una ventana que llega fuera de orden se asocia
+# con el lanzamiento correcto.
+var pending_launches = []
 var requested_sizes = {}
 var last_geo = {}        # id -> último tamaño observado del cliente (para reafirmar el slot)
 # Los buffers wayland vienen con alfa premultiplicado.
@@ -70,6 +75,7 @@ var neighborhood = null
 var neighborhood_view = false
 var nb_selected = ""
 var nb_version = -1
+var nb_panel_open = true  # panel de detalle colapsable (necesario en 800x600)
 
 # Input remoto por libei (Deskflow, lan-mouse): EIS + portal RemoteDesktop en el módulo.
 var remote_input = null
@@ -197,6 +203,9 @@ const NB_HOST = Color(0.85, 0.86, 0.90, 0.95)
 const NB_HOST_REACH = Color(0.60, 0.92, 0.62, 1.0)
 const NB_HOST_DESK = Color(0.98, 0.72, 0.30, 1.0)
 const NB_NODE_MIN = 32.0   # radio: 64 px de diámetro mínimo
+const NB_NODE_SMALL = 24.0 # radio reducido: 48 px si hay demasiadas redes (dBm débil)
+const NB_MANY = 14         # a partir de acá se aprieta y se ocultan etiquetas que no caben
+const NB_WEAK_DBM = -80.0  # "débil" (más atenuada que -80 dBm): candidata a achicarse
 
 # Íconos Sugar: los SVG traen un DOCTYPE con entidades &stroke_color;/&fill_color;.
 # Se cargan como texto, se sustituyen por los colores pedidos y se rasterizan a una
@@ -1676,7 +1685,8 @@ func _draw_home(offset = 0.0):
 			apps_view = true
 
 		if activity_error != "":
-			set_cursor_pos(Vector2(pad, vp.y - u * 0.6))
+			# Sobre la barra inferior, no dentro (en 800x600 la barra mide 80 px).
+			set_cursor_pos(Vector2(pad, vp.y - frame_bar_h(vp) - 20.0))
 			text(activity_error)
 	end()
 	pop_style_var()
@@ -1697,13 +1707,26 @@ func _home_layout(vp):
 	var label_h = u * 0.375
 	var margin = u * 0.5
 	var top = frame_bar_h(vp) if frame != null else 0.0
+	var bottom = vp.y - (frame_bar_h(vp) if frame != null else 0.0)
+	var avail_h = max(u, bottom - top)
 	var avail = vp.x - 2.0 * margin
 	var per_row = int(max(1.0, floor((avail + gap) / (btn + gap))))
 	var rows = int(ceil(float(n) / float(per_row)))
 	var row_h = btn + label_h + gap
+	# Si el bloque no entra entre las barras (p. ej. 800x600 con muchas actividades
+	# abiertas), se encoge el círculo —nunca por debajo de 1 U: el ícono sigue en
+	# >= 64 px— antes que salirse de pantalla.
+	var guard = 0
+	while guard < 8 and rows > 1 and float(rows) * row_h - gap > avail_h:
+		btn = max(u, btn - u * 0.125)
+		per_row = int(max(1.0, floor((avail + gap) / (btn + gap))))
+		rows = int(ceil(float(n) / float(per_row)))
+		row_h = btn + label_h + gap
+		guard += 1
 	var total_h = float(rows) * row_h - gap
 	# Centrado, y luego a la rejilla: el múltiplo de U más cercano al centro.
 	var y0 = top + round(((vp.y - top - total_h) * 0.5) / u) * u
+	y0 = max(y0, top + 2.0)
 	for i in range(n):
 		var r = int(floor(float(i) / float(per_row)))
 		var col = i - r * per_row
@@ -1966,13 +1989,21 @@ func _launch_app(app):
 	if i < 0:
 		ACTIVITIES.append({"name": app.name, "wayland": ["sh", "-c", app.cmd], "dynamic": true})
 		i = ACTIVITIES.size() - 1
+	var act = ACTIVITIES[i]
+	# Igual que el anillo: si la actividad está cerrada se registra el pulso de
+	# arranque; la ventana entra animada desde el ícono de la grilla cuando llegue.
+	if act.has("wayland") and _activity_state(act) == "closed":
+		act["match"] = [apps._program(app.exec), app.name]
+		if apps.chosen_rect != null:
+			pending_origin = apps.chosen_rect
+			pending_origin_since = OS.get_ticks_msec()
 	_activate(i)
 	# La grilla vuelve al anillo de Hogar: ahí se ve el pulso de arranque del ícono
 	# hasta que llegue la ventana (la vista no salta a la actividad al lanzarla).
 	apps_view = false
 	apps.watch(self, app.name, last_launch_pid)
 	# Si no se pudo lanzar, no queda colgada en el anillo.
-	if pending_wayland == "" and not wayland_ids.has(app.name) and ACTIVITIES[i].get("dynamic", false):
+	if not _pending_has(app.name) and not wayland_ids.has(app.name) and ACTIVITIES[i].get("dynamic", false):
 		ACTIVITIES.remove(i)
 
 
@@ -2054,6 +2085,85 @@ func _open_by_name(name):
 	activity_error = "Actividad desconocida: " + name
 
 
+# --- Cola de lanzamientos pendientes -----------------------------------------
+# Varias actividades wayland pueden estar esperando su toplevel a la vez. Al llegar
+# una ventana se intenta casar su app_id/título con el `expect` de algún pendiente;
+# si el compositor no publica ese dato (o nada coincide) se usa la más reciente, que
+# es el comportamiento histórico.
+
+func _pending_has(name):
+	for p in pending_launches:
+		if p.name == name:
+			return true
+	return false
+
+
+func _pending_add(name, expect = []):
+	for p in pending_launches:
+		if p.name == name:
+			p["expect"] = expect
+			p["since"] = OS.get_ticks_msec()
+			pending_wayland = name
+			return
+	pending_launches.append({"name": name, "expect": expect, "since": OS.get_ticks_msec()})
+	pending_wayland = name
+
+
+func _pending_remove(name):
+	for i in range(pending_launches.size() - 1, -1, -1):
+		if pending_launches[i].name == name:
+			pending_launches.remove(i)
+	if pending_wayland == name:
+		pending_wayland = pending_launches[pending_launches.size() - 1].name if not pending_launches.empty() else ""
+
+
+func _pending_clear():
+	pending_launches = []
+	pending_wayland = ""
+
+
+# Tokens para casar la ventana de una actividad: el programa lanzado (si no es el
+# envoltorio `sh`), el nombre de la actividad y, cuando la grilla lo sabe, `match`.
+func _expect_for(activity):
+	var toks = []
+	if activity.has("match"):
+		for t in activity.match:
+			toks.append(str(t))
+	if activity.has("wayland") and activity.wayland.size() > 0:
+		var prog = str(activity.wayland[0])
+		if prog != "sh":
+			toks.append(prog)
+	var nm = str(activity.get("name", ""))
+	if nm != "":
+		toks.append(nm)
+	return toks
+
+
+# Pendiente al que corresponde el toplevel `id`, o "" si no hay app_id ni título
+# (sin dato no se inventa: el llamador cae al comportamiento actual).
+func _match_pending(id):
+	var app_id = compositor.get_app_id(id)
+	var title = compositor.get_title(id)
+	if app_id == "" and title == "":
+		return ""
+	var aid = app_id.to_lower()
+	var tit = title.to_lower()
+	for k in range(pending_launches.size() - 1, -1, -1):
+		for t in pending_launches[k].expect:
+			var tok = str(t).to_lower()
+			if tok == "":
+				continue
+			var base = tok.get_file() if tok.find("/") >= 0 else tok
+			if base == "":
+				continue
+			var hit = aid != "" and (aid.find(base) >= 0 or base.find(aid) >= 0)
+			if not hit and tit != "":
+				hit = tit.find(base) >= 0
+			if hit:
+				return pending_launches[k].name
+	return ""
+
+
 func _open_wayland(activity):
 	var name = activity.name
 	activity_error = ""
@@ -2068,7 +2178,7 @@ func _open_wayland(activity):
 		_release_activity()
 		activity_instance = null
 		pending_origin = null
-		pending_wayland = ""
+		_pending_remove(name)
 		starting.erase(name)
 		current_activity = activity
 		_focus_tile(id)
@@ -2079,13 +2189,12 @@ func _open_wayland(activity):
 	# current_activity, así el compositor no muestra el contenido de OTRA ventana en
 	# el intervalo; cuando la ventana aparece, _on_toplevel_added enfoca y hace la
 	# ampliación desde pending_origin. Si no llega en STARTING_MAX_MS el pulso se corta.
-	if pending_wayland == name:
+	if _pending_has(name):
 		# Ya se está lanzando esta misma actividad: no lanzar un segundo proceso.
 		return
-	if pending_wayland != "" and pending_wayland != name:
-		# Se estaba lanzando otra actividad: se descarta su aviso, sin romper.
-		starting.erase(pending_wayland)
-	pending_wayland = name
+	# Se conservan los otros pendientes (pueden seguir abriendo su ventana).
+	_pending_add(name, _expect_for(activity))
+	starting[name] = OS.get_ticks_msec()
 
 	var vp = get_viewport_rect().size
 	view.rect_position = Vector2.ZERO
@@ -2101,7 +2210,7 @@ func _open_wayland(activity):
 	var pid = compositor.launch(cmd, args)
 	last_launch_pid = pid
 	if pid < 0:
-		pending_wayland = ""
+		_pending_remove(name)
 		starting.erase(name)
 		activity_error = "No se pudo lanzar " + cmd
 		_go_home()
@@ -2118,7 +2227,7 @@ func _go_home():
 	_release_activity()
 	current_activity = null
 	activity_instance = null
-	pending_wayland = ""
+	_pending_clear()
 	typed = false
 	type_queue = []
 	type_done_frame = -1
@@ -2162,7 +2271,7 @@ func _open_nmtui():
 	ACTIVITIES.append({"name": name, "wayland": ["alacritty", "-e", "nmtui", "connect"], "dynamic": true})
 	var i = ACTIVITIES.size() - 1
 	_activate(i)
-	if pending_wayland == "" and not wayland_ids.has(name):
+	if not _pending_has(name) and not wayland_ids.has(name):
 		ACTIVITIES.remove(i)
 
 
@@ -2237,13 +2346,36 @@ func _draw_neighborhood(offset = 0.0):
 	if begin("##neighborhood", flags):
 		imgui_draw_rect_filled_multicolor(Rect2(Vector2.ZERO, vp), NB_BG_TOP, NB_BG_TOP, NB_BG_BOTTOM, NB_BG_BOTTOM)
 		var top = frame_bar_h(vp)
-		var panel_w = clamp(vp.x * 0.26, 210.0, 320.0)
-		var radar_w = max(220.0, vp.x - panel_w)
-		var cx = radar_w * 0.5
-		var cy = top + (vp.y - top) * 0.50
-		var R = max(80.0, min(radar_w * 0.5 - 20.0, (vp.y - top) * 0.5 - 64.0))
+		var bar = frame_bar_h(vp)
+		var panel_w = clamp(vp.x * 0.26, 200.0, 320.0)
+		var pw = panel_w if nb_panel_open else 30.0
+		var radar_w = max(200.0, vp.x - pw)
 		var sel = _nb_selected_net()
 		var nets = neighborhood.networks if neighborhood != null else []
+
+		# Geometría del radar acotada por las barras del Frame, la cabecera y la
+		# leyenda: en 800x600 ningún nodo ni su etiqueta se sale de pantalla.
+		var head = 64.0
+		var legend_h = 22.0
+		var area_top = top + head
+		var area_bottom = max(area_top + 40.0, vp.y - bar - legend_h)
+
+		# Radio de cada nodo (congestión) y, con muchas redes, se achican los nodos
+		# débiles para que la separación tenga solución real.
+		var node_rad = []
+		var shrink = nets.size() > NB_MANY
+		for n0 in nets:
+			var r0 = clamp(NB_NODE_MIN + float(int(n0.congestion) - 1) * 3.0, NB_NODE_MIN, 58.0)
+			if shrink and float(n0.dbm) <= NB_WEAK_DBM:
+				r0 = NB_NODE_SMALL
+			node_rad.append(r0)
+		var max_rad = NB_NODE_MIN
+		for r1 in node_rad:
+			max_rad = max(max_rad, r1)
+		var cx = radar_w * 0.5
+		var cy = (area_top + area_bottom) * 0.5
+		var R = max(80.0, min(radar_w * 0.5 - 20.0,
+			(area_bottom - area_top) * 0.5 - max_rad - 40.0))
 
 		_nb_text(Vector2(14.0, top + 8.0), "Vecindario", NB_TEXT)
 		_nb_text(Vector2(14.0, top + 26.0), neighborhood.status_line() if neighborhood != null else "", NB_TEXT_DIM)
@@ -2270,17 +2402,41 @@ func _draw_neighborhood(offset = 0.0):
 				if button("Encender Wi-Fi", Vector2(140.0, 26.0)):
 					_wifi_radio_on()
 
-		# Posiciones por anillo radial y luego repulsión iterativa (neighborhood.gd):
-		# ningún par de nodos de 64 px se solapa y se conserva el anillo aproximado.
+		# Posiciones por anillo radial y luego repulsión por cápsulas (neighborhood.gd):
+		# ningún par de nodos+etiquetas se solapa y se conserva el anillo aproximado.
 		var node_pos = []
-		var node_rad = []
+		var node_hw = []
+		var node_hh = []
 		for i in range(nets.size()):
 			var n0 = nets[i]
 			node_pos.append(Vector2(cx, cy) + Vector2(cos(n0.angle), sin(n0.angle)) * (n0.r_frac * R))
-			node_rad.append(clamp(NB_NODE_MIN + float(int(n0.congestion) - 1) * 3.0, NB_NODE_MIN, 58.0))
+			node_hw.append(node_rad[i])
+			node_hh.append(neighborhood.capsule_half_h(node_rad[i]) if neighborhood != null else node_rad[i])
 		if neighborhood != null and node_pos.size() > 1:
-			node_pos = neighborhood.relax_positions(node_pos, node_rad, 2.0, 16, 0.03)
+			node_pos = neighborhood.relax_capsules(node_pos, node_hw, node_hh, 2.0, 48, 0.02)
 
+		# Con muchas redes se ocultan las etiquetas que no caben (se muestran en un
+		# tooltip al pasar el ratón), para que el texto no pise otros nodos.
+		var hide_label = []
+		var cw = 7.0 * get_imgui_scale()
+		for i in range(nets.size()):
+			var hidden = false
+			if shrink:
+				var lw = max(22.0, float(_nb_short(nets[i].ssid).length()) * cw) * 0.5
+				var lc = node_pos[i] + Vector2(0.0, node_rad[i] + 12.0)
+				var lh = 13.0
+				if lc.x - lw < 4.0 or lc.x + lw > radar_w - 2.0 \
+						or lc.y + lh > area_bottom + 6.0:
+					hidden = true
+				for j in range(nets.size()):
+					if hidden or j == i:
+						continue
+					if abs(lc.x - node_pos[j].x) < lw + node_rad[j] \
+							and abs(lc.y - node_pos[j].y) < lh + node_rad[j]:
+						hidden = true
+			hide_label.append(hidden)
+
+		var hovered_tip = -1
 		for i in range(nets.size()):
 			var n = nets[i]
 			var pos = node_pos[i]
@@ -2291,16 +2447,17 @@ func _draw_neighborhood(offset = 0.0):
 				col = col.linear_interpolate(NB_NODE_DIM, 0.45)
 			var halo = clamp(float(cong - 1) * 0.06, 0.0, 0.28)
 			if halo > 0.0:
-				imgui_draw_circle(pos, rad + 8.0 + float(cong) * 2.0, Color(col.r, col.g, col.b, halo), 0, 12.0)
-			imgui_draw_circle_filled(pos, rad, Color(col.r * 0.45, col.g * 0.45, col.b * 0.5, 0.95), 0)
+				imgui_draw_circle(pos, rad + 8.0 + float(cong) * 2.0, Color(col.r, col.g, col.b, halo), 32, 6.0)
+			imgui_draw_circle_filled(pos, rad, Color(col.r * 0.45, col.g * 0.45, col.b * 0.5, 0.95), 32)
 			var border = NB_AMBER if n.in_use else Color(0.85, 0.88, 0.95, 0.85)
 			var bw = 3.0 if n.in_use else 1.5
 			if n.ssid == nb_selected:
 				border = NB_TEXT
 				bw = 3.5
-			imgui_draw_circle(pos, rad, border, 0, bw)
-			_nb_text_centered(pos.x, pos.y + rad + 3.0, _nb_short(n.ssid), NB_TEXT)
-			_nb_text_centered(pos.x, pos.y + rad + 18.0, str(int(n.dbm)) + " dBm", NB_TEXT_DIM)
+			imgui_draw_circle(pos, rad, border, 32, bw)
+			if not hide_label[i]:
+				_nb_text_centered(pos.x, pos.y + rad + 3.0, _nb_short(n.ssid), NB_TEXT)
+				_nb_text_centered(pos.x, pos.y + rad + 18.0, str(int(n.dbm)) + " dBm", NB_TEXT_DIM)
 			if n.in_use:
 				# El "conectado" se ve en el borde ámbar y la leyenda, no como texto
 				# encima de los vecinos que se dibujan alrededor del AP.
@@ -2314,10 +2471,26 @@ func _draw_neighborhood(offset = 0.0):
 			var clicked = button("##nb" + str(i), Vector2(rad * 2.0, rad * 2.0))
 			pop_style_var()
 			pop_style_color(3)
+			if is_item_hovered():
+				hovered_tip = i
 			if clicked:
 				nb_selected = n.ssid
+		if hovered_tip >= 0 and hide_label[hovered_tip]:
+			var hn = nets[hovered_tip]
+			begin_tooltip()
+			text(hn.ssid)
+			text(str(int(hn.dbm)) + " dBm")
+			end_tooltip()
 		_nb_legend(vp)
-		_nb_panel(vp, panel_w, top, sel)
+		if nb_panel_open:
+			_nb_panel(vp, panel_w, top, sel)
+		else:
+			# Pestaña para reabrir el panel de detalle cuando está colapsado.
+			imgui_draw_rect_filled(Rect2(Vector2(vp.x - pw, 0.0), Vector2(pw, vp.y)), Color(0.08, 0.09, 0.13, 0.96), 0.0)
+			imgui_draw_rect_filled(Rect2(Vector2(vp.x - pw, 0.0), Vector2(2.0, vp.y)), Color(0.30, 0.34, 0.45, 1.0), 0.0)
+			set_cursor_pos(Vector2(vp.x - pw + 4.0, top + 8.0))
+			if button("<", Vector2(pw - 8.0, 24.0)):
+				nb_panel_open = true
 	end()
 	pop_style_var()
 
@@ -2389,6 +2562,11 @@ func _nb_panel(vp, pw, top, sel):
 	var pad = 12.0
 	var y = top + 14.0
 	_nb_text(Vector2(x0 + pad, y), "Detalle", NB_TEXT_DIM)
+	# Colapsar el panel (deja más ancho al radar; necesario en 800x600).
+	set_cursor_pos(Vector2(x0 + pw - 26.0, top + 8.0))
+	if button("##nb_collapse", Vector2(20.0, 20.0)):
+		nb_panel_open = false
+	_nb_text(Vector2(x0 + pw - 22.0, top + 12.0), ">", NB_TEXT)
 	y += 22.0
 	if sel == null:
 		_nb_text(Vector2(x0 + pad, y), "Elegi una red", NB_TEXT)
@@ -2467,19 +2645,28 @@ func _on_toplevel_added(id):
 	if compositor.get_parent_id(id) > 0:
 		_add_dialog(id)
 		return
-	if pending_wayland != "":
-		var name = pending_wayland
-		pending_wayland = ""
-		starting.erase(name)  # llegó la ventana: se corta la notificación de arranque
-		wayland_ids[name] = id
-		# Si veníamos de una actividad de script, se sueltan sus recursos transitorios
-		# (la instancia se conserva); recién acá se cambia de vista, no al lanzar.
-		_release_activity()
-		activity_instance = null
-		_add_tile(id)
-		_focus_tile(id)
-		return
-	# Sin actividad: se creara una dinamica en cuanto llegue app_id/titulo.
+	if pending_wayland != "" or not pending_launches.empty():
+		# Con app_id/título se asocia SÓLO con el pendiente cuyo comando coincide (así
+		# una ventana fuera de orden se ata a su lanzamiento, no a la más reciente).
+		# Sin app_id ni título no hay dato: se usa la pendiente más reciente, el
+		# comportamiento histórico. Con dato pero sin coincidencia no se inventa:
+		# la ventana se trata como suelta (actividad dinámica).
+		var has_data = compositor.get_app_id(id) != "" or compositor.get_title(id) != ""
+		var name = _match_pending(id)
+		if name == "" and not has_data:
+			name = pending_wayland
+		if name != "":
+			_pending_remove(name)
+			starting.erase(name)  # llegó la ventana: se corta la notificación de arranque
+			wayland_ids[name] = id
+			# Si veníamos de una actividad de script, se sueltan sus recursos transitorios
+			# (la instancia se conserva); recién acá se cambia de vista, no al lanzar.
+			_release_activity()
+			activity_instance = null
+			_add_tile(id)
+			_focus_tile(id)
+			return
+	# Sin actividad (o sin coincidencia con app_id/título): se creara una dinamica.
 	unmanaged.append(id)
 
 
@@ -2542,7 +2729,7 @@ func _open_unmanaged_window(id):
 	current_activity = activity
 	activity_instance = null
 	activity_error = ""
-	pending_wayland = ""
+	_pending_clear()
 	_add_tile(id)
 	_focus_tile(id)
 	print("actividad dinamica ", name, " para toplevel ", id)

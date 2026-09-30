@@ -83,7 +83,7 @@ func tick(shell):
 	shell.request_redraw()  # hasta terminar de reabrir, aunque no haya input
 	if shell.pending_wayland != "" and OS.get_ticks_msec() - waiting_since < LAUNCH_TIMEOUT_MS:
 		return
-	shell.pending_wayland = ""
+	shell._pending_clear()
 	if not queue.empty():
 		waiting_since = OS.get_ticks_msec()
 		shell._open_by_name(queue.pop_front())

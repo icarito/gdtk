@@ -269,7 +269,7 @@ func _applet_primary(id):
 			shell.ACTIVITIES.append({"name": "Bluetooth", "wayland": ["blueman-manager"], "dynamic": true})
 			i = shell.ACTIVITIES.size() - 1
 		shell._activate(i)
-		if shell.pending_wayland == "" and not shell.wayland_ids.has("Bluetooth") and shell.ACTIVITIES[i].get("dynamic", false):
+		if not shell._pending_has("Bluetooth") and not shell.wayland_ids.has("Bluetooth") and shell.ACTIVITIES[i].get("dynamic", false):
 			shell.ACTIVITIES.remove(i)
 	elif id == "teclado":
 		applet_action_want = "teclado"
