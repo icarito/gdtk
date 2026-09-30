@@ -6,7 +6,7 @@ extends Node
 const DEFAULT_PORT = 7777
 const LINE_FEED = 10
 
-onready var shell = get_parent()
+var shell = null  # lo setea Host/Main (sobrevive a la recarga del shell)
 
 var server = null
 var token = ""
@@ -194,9 +194,15 @@ func _handle_line(conn, line):
 		return
 
 	# Lo que pida el control remoto puede cambiar la UI (open, home, cerrar...).
+	if shell == null or not is_instance_valid(shell):
+		_fail(conn, id, -32002, "shell recargando")
+		return
 	shell.last_activity = OS.get_ticks_msec()
 	shell.request_redraw()
 	match method:
+		"reload_shell":
+			_reply(conn, id, true)
+			Host.call_deferred("reload_shell")
 		"state":
 			_reply(conn, id, _state())
 		"open":
@@ -213,6 +219,39 @@ func _handle_line(conn, line):
 			_reply(conn, id, true)
 		"expose":
 			shell._toggle_expose(bool(params.get("on", true)))
+			_reply(conn, id, true)
+		"tile_drop":
+			shell._tile_drop(int(params.get("a", -1)), int(params.get("b", -1)))
+			_reply(conn, id, true)
+		"untile":
+			shell._untile_window(int(params.get("id", -1)))
+			_reply(conn, id, true)
+		"minimize":
+			shell._minimize_window(int(params.get("id", -1)))
+			_reply(conn, id, true)
+		"restore":
+			shell._restore_window(int(params.get("id", -1)))
+			_reply(conn, id, true)
+		"fullscreen":
+			shell._toggle_fullscreen()
+			_reply(conn, id, true)
+		"maximize":
+			shell._maximize_window(int(params.get("id", -1)))
+			_reply(conn, id, true)
+		"snap_tile":
+			shell._snap_tile(int(params.get("dir", -1)))
+			_reply(conn, id, true)
+		"pan":
+			shell._pan_by(float(params.get("dir", 1.0)))
+			_reply(conn, id, true)
+		"snap_pan":
+			shell._snap_pan()
+			_reply(conn, id, true)
+		"move_window":
+			shell._move_window_to(int(params.get("a", -1)), int(params.get("anchor", -1)), bool(params.get("before", true)))
+			_reply(conn, id, true)
+		"release_mods":
+			shell.release_modifiers()
 			_reply(conn, id, true)
 		"launch":
 			_launch(conn, id, params)
@@ -282,16 +321,32 @@ func _state():
 		"wayland_socket": shell.compositor.start(),
 		"windows": windows,
 		"activities": activities,
-		# Tiling: orden de las ventanas, la enfocada y si exposé está abierto.
+		# Pantallas: orden de las ventanas visibles, la enfocada, los grupos (split),
+		# las minimizadas y la vista de exposé.
 		"tiles": shell.tiles,
 		"focused_tile": shell.focused_tile,
+		"screens": shell._units(),
+		"groups": shell.groups,
+		"minimized": shell.minimized.keys(),
 		"expose": shell.expose,
+		"expose_sel": shell.expose_sel,
+		"expose_scroll": shell.expose_scroll,
+		"fullscreen": shell.fullscreen_id,
+		"handles": shell.handles.size(),
+		"pan": shell.pan,
+		"pan_active": shell.pan_active,
+		"fits": shell.fits_state(),
+		"geom": shell.geom_state(),
 		# Vueltas del loop, pasos de física y frames dibujados: para medir el reposo.
 		"engine": [Engine.get_idle_frames(), Engine.get_physics_frames(), Engine.get_frames_drawn()],
 		# Frame: items con su posición en pantalla (vacío si no se dibujó).
 		"frame": {"visible": shell.frame.drawn, "items": shell.frame.items_layout},
 		# Input remoto: clientes libei conectados y pedidos esperando el diálogo.
 		"remote_input": {"clients": shell.remote_input.get_client_count(), "requests": shell.input_requests.size()},
+		# Diagnóstico: eventos de entrada que llegaron al shell (mouse/touch).
+		"input": {"motion": shell.input_motion_count, "buttons": shell.input_button_count,
+			"touch": shell.input_touch_count, "last_button": shell.input_last_button,
+			"last_key": shell.input_last_key},
 	}
 
 

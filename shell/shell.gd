@@ -17,8 +17,9 @@ const TYPE_DELAY = 60
 const SHOT_DELAY = 90
 const SHOT_MAX_FRAMES = 900
 
-onready var compositor = $Compositor
-onready var view = $ViewLayer/View
+onready var compositor = Host.compositor
+var view = null          # Control que dibuja las ventanas (se crea en _ready)
+var view_layer = null    # CanvasLayer -1 debajo de ImGui
 
 var current_activity = null
 var activity_instance = null
@@ -32,13 +33,14 @@ var last_launch_pid = -1
 var wayland_ids = {}
 var pending_wayland = ""
 var requested_sizes = {}
+var last_geo = {}        # id -> último tamaño observado del cliente (para reafirmar el slot)
 # Los buffers wayland vienen con alfa premultiplicado.
 var premult_material = null
 
 var frame_count = 0
 var screenshot_path = ""
 var open_on_start = ""
-var recovery = preload("res://recovery.gd").new()
+var recovery = Host.sc("res://recovery.gd").new()
 var type_text = ""
 var typed = false
 var type_queue = []
@@ -57,7 +59,7 @@ var dialog_boxes = {}
 var unmanaged = []
 
 # Home: anillo de actividades o grilla de apps instaladas (Tab alterna).
-var apps = preload("res://apps.gd").new()
+var apps = Host.sc("res://apps.gd").new()
 var apps_view = false
 
 # Input remoto por libei (Deskflow, lan-mouse): EIS + portal RemoteDesktop en el módulo.
@@ -65,27 +67,73 @@ var remote_input = null
 var input_requests = []  # pedidos de otros procesos esperando el diálogo
 var eis_cursor = null  # sin cursor propio el host (cage/sway) no lo mueve: se dibuja uno
 
-# --- Tiling ---
-# Cada ventana raíz vive en un tile, uno al lado del otro (1:1, sin escalar: se pide
-# el tamaño del tile al cliente). `focused_tile` recibe teclado y clics; `tiles` es el
-# orden de layout. `expose` es la vista de miniaturas (las mismas ventanas, escaladas).
-var tiles = []
+# Diagnóstico de entrada (ver remote.gd state.input): cuentan eventos que llegan al shell.
+var input_motion_count = 0
+var input_button_count = 0
+var input_touch_count = 0
+var input_last_button = {}
+var input_last_key = {}
+var last_key_target = -1  # última ventana que recibió teclas (para reenviar sueltas)
+
+# --- Pantallas ---
+# Cada ventana raíz ocupa una "pantalla" a tamaño completo (1:1: se pide el tamaño al
+# cliente). Por default todas van en una sola fila horizontal y sólo la enfocada está
+# a la vista: cambiar de pantalla desliza (Ctrl+Alt+←/→, ver _focus_dir). Varias
+# ventanas pueden compartir una pantalla: son un "grupo" (split) que se arma arrastrando
+# un ítem sobre otro en el Frame y se deshace arrastrándolo fuera.
+# `minimized` son ventanas ocultas (siguen vivas; se restauran desde el Frame).
+# Alt+Tab cambia de app (ventana), Ctrl+Alt+←/→ cambia de pantalla en la fila.
+var tiles = []           # orden de las ventanas visibles (una por entrada, sin minimizadas)
+var groups = []          # Array de Array de ids: pantallas partidas (2+ ventanas)
+var minimized = {}       # id -> true
+var unit_focus = {}      # id-líder de la pantalla -> último miembro enfocado
 var focused_tile = -1
 var tile_mode = false
-var tile_nodes = {}      # id -> Control (contenedor de capas del tile)
+var tile_nodes = {}      # id -> Control (contenedor de capas de la ventana)
 var tile_rects = {}      # id -> Rect2 en coords de la vista
+var tile_fit = {}        # id -> {"scale", "offset"}: transform del contenido (para input)
 var tile_anim = {}       # id -> {"from": Vector2, "since": int}
 var tile_fade = {}       # id -> ms en que apareció (fade-in)
+var tile_intro = {}      # id -> true: falta su primera textura para animar la entrada
 var expose = false
 var expose_sel = 0
 var expose_cards = {}    # id -> Rect2 de la tarjeta en exposé
+var ghosts = []          # cierres/minimizados animados: {"node", "from", "to", "since"}
+var ghost_layer = null   # capa por encima de apps y Home para el fantasma de cierre
+# Rect (coords de vista) del ícono que lanzó la próxima ventana: ancla la animación de
+# entrada (escala desde el ícono). Se consume en _add_tile; expira a los pocos segundos.
+var pending_origin = null
+var pending_origin_since = 0
+# Animación de transformación (entrar/salir de exposé): id -> {"from_pos", "from_scale", "since"}.
+var view_anim = {}
+# Pantalla completa (Alt+F11): la ventana enfocada ocupa todo y se esconde el Frame.
+var fullscreen_id = -1
+# Proporción de reparto de una franja partida: id -> peso (default 1). Asa de borde.
+var split_weight = {}
+var handles = []         # asas de la franja enfocada: {"x", "y", "h", "i", "left", "right"}
+var hover_handle = null
+var resize_handle = null
+var expose_scroll = 0.0  # exposé: fila única con scroll horizontal
+var expose_scroll_target = 0.0
+var expose_auto = true   # true = centrar la seleccionada; false = scroll manual (rueda)
+var pan = 0.0            # scroll suave entre workspaces (Super+rueda): offset continuo
+var pan_active = false   # true mientras se panea; cae al más cercano al soltar Super
+var window_dragging = false  # Super+arrastre de una ventana: el view no reenvía al cliente
+var instant_switch = false   # Alt+Tab: reubicar las pantallas sin animación (1 frame)
 var focus_flash = 0      # ms del último cambio de foco (borde que destella)
 var tiles_ui = null
 var expose_bg = null     # fondo oscuro de exposé, detrás de los tiles
 const TILE_GAP = 3.0
-const TILE_ANIM_MS = 150
-const TILE_FADE_MS = 150
+const TILE_ANIM_MS = 320
+const TILE_FADE_MS = 440
+const GHOST_MS = 380
+const INTRO_MS = 480
+const EXPOSE_MS = 430
 const FOCUS_FLASH_MS = 260
+const HANDLE_HIT = 7.0
+const EXPOSE_PAD = 28.0
+const EXPOSE_GAP = 18.0
+const MOD_KEYS = [KEY_CONTROL, KEY_SHIFT, KEY_ALT, KEY_META, KEY_SUPER_L, KEY_SUPER_R]
 
 
 func _ready():
@@ -96,21 +144,30 @@ func _ready():
 	# Cambios de ventanas: rearmar la UI (el Frame las lista, recovery espera la suya).
 	compositor.connect("toplevel_added", self, "_redraw_on_signal")
 	compositor.connect("toplevel_removed", self, "_redraw_on_signal")
+	view_layer = CanvasLayer.new()
+	view_layer.name = "ViewLayer"
+	view_layer.layer = -1
+	add_child(view_layer)
+	view = Control.new()
+	view.name = "View"
+	view.visible = false
 	view.mouse_filter = Control.MOUSE_FILTER_STOP
+	view.rect_clip_content = false
+	view_layer.add_child(view)
 	view.connect("gui_input", self, "_on_view_input")
 	# Hijo después de Remote: su _input corre antes que el de ImGui (F6, Alt+Tab).
-	frame = preload("res://frame.gd").new()
+	frame = Host.sc("res://frame.gd").new()
 	frame.name = "Frame"
 	add_child(frame)
 	# Notificaciones y demás layer-shell, encima de todo (después del Frame: su _input va antes).
-	add_child(preload("res://layers.gd").new())
+	add_child(Host.sc("res://layers.gd").new())
 
 	# Capa de dialogos encima de la vista de la actividad.
 	dialog_view = Control.new()
 	dialog_view.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	dialog_view.rect_clip_content = true
 	dialog_view.visible = false
-	$ViewLayer.add_child(dialog_view)
+	view_layer.add_child(dialog_view)
 
 	# Bordes de foco, títulos y tarjetas de exposé: se dibuja a mano (Control._draw) y no
 	# captura input, así los clics siguen llegando a los tiles (una ventana ImGui sí lo haría).
@@ -118,17 +175,17 @@ func _ready():
 	tiles_ui.name = "TilesUI"
 	tiles_ui.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	tiles_ui.rect_clip_content = false
-	tiles_ui.set_script(preload("res://tiles_ui.gd"))
+	tiles_ui.set_script(Host.sc("res://tiles_ui.gd"))
 	tiles_ui.shell = self
-	$ViewLayer.add_child(tiles_ui)
+	view_layer.add_child(tiles_ui)
 
 	# Fondo de exposé: detrás de los tiles (View) para no tapar las miniaturas.
 	expose_bg = ColorRect.new()
 	expose_bg.color = Color(0.05, 0.06, 0.08, 0.92)
 	expose_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	expose_bg.visible = false
-	$ViewLayer.add_child(expose_bg)
-	$ViewLayer.move_child(expose_bg, 0)
+	view_layer.add_child(expose_bg)
+	view_layer.move_child(expose_bg, 0)
 
 	for arg in OS.get_cmdline_args():
 		if arg.begins_with("--screenshot="):
@@ -138,20 +195,8 @@ func _ready():
 		elif arg.begins_with("--type="):
 			type_text = arg.substr("--type=".length())
 
-	var socket = compositor.start()
-	if socket == "":
-		activity_error = "No se pudo iniciar el compositor wayland"
-		printerr(activity_error)
-	else:
-		print("compositor socket: ", socket)
-
-	remote_input = RemoteInput.new()
-	remote_input.name = "RemoteInput"
-	add_child(remote_input)
+	remote_input = Host.remote_input
 	remote_input.connect("access_requested", self, "_on_input_access")
-	var rerr = remote_input.start()
-	if rerr != "":
-		print("RemoteInput: ", rerr)
 	eis_cursor = _make_eis_cursor()
 
 	# Sin redibujo continuo: ImGui se arma sólo con input (a input_hz), con
@@ -173,9 +218,121 @@ func _ready():
 	for v in ["SDL_AUDIODRIVER", "SDL_JOYSTICK_HIDAPI", "SDL_HIDAPI_LIBUSB"]:
 		OS.set_environment(v, "")
 
-	recovery.load(self)
+	if Host.live_reload:
+		_adopt_windows()
+	else:
+		recovery.load(self)
 	if open_on_start != "":
 		_open_by_name(open_on_start)
+
+
+# Guarda el layout (orden/grupos/pesos/foco/fullscreen/minimizadas) para restaurarlo
+# tras una recarga en caliente (ver main.reload_shell).
+func _save_layout():
+	var gs = []
+	for g in groups:
+		gs.append(g.duplicate())
+	Host.layout = {"tiles": tiles.duplicate(), "groups": gs, "weights": split_weight.duplicate(),
+		"minimized": minimized.keys(), "focused": focused_tile, "fullscreen": fullscreen_id}
+
+
+# Al recargar el shell, las apps siguen vivas en el compositor del Host: se rearma el
+# estado (actividades y tiles) desde los toplevels existentes.
+func _adopt_windows():
+	var roots = []
+	for id in compositor.get_ids():
+		if compositor.get_parent_id(id) > 0:
+			if not dialogs.has(id):
+				dialogs.append(id)
+		else:
+			roots.append(id)
+	for id in roots:
+		var name = _unique_activity_name(_window_activity_name(id))
+		wayland_ids[name] = id
+		ACTIVITIES.append({"name": name, "wayland": [], "dynamic": true})
+		_add_tile(id)
+	var lay = Host.layout
+	Host.layout = {}
+	if typeof(lay) == TYPE_DICTIONARY and lay.get("tiles", []).size() > 0 and not roots.empty():
+		var known = {}
+		for id in roots:
+			known[id] = true
+		var order = []
+		for id in lay["tiles"]:
+			if known.has(id):
+				order.append(id)
+				known.erase(id)
+		for id in known.keys():
+			order.append(id)
+		tiles = order
+		for id in lay.get("minimized", []):
+			if tiles.has(id):
+				minimized[id] = true
+				tiles.erase(id)
+		groups = []
+		for g in lay.get("groups", []):
+			var gg = []
+			for id in g:
+				if tiles.has(id):
+					gg.append(id)
+			if gg.size() >= 2:
+				groups.append(gg)
+		split_weight = {}
+		for k in lay.get("weights", {}):
+			split_weight[int(k)] = lay["weights"][k]
+		var f = int(lay.get("focused", -1))
+		_focus_tile(f if tiles.has(f) else (tiles[tiles.size() - 1] if not tiles.empty() else -1))
+		fullscreen_id = int(lay.get("fullscreen", -1))
+		if not tiles.has(fullscreen_id):
+			fullscreen_id = -1
+		# Deja `tiles` en orden de franja (miembros de un grupo contiguos) para que el
+		# exposé muestre el mismo orden que los workspaces.
+		_rebuild_tiles(_units())
+		request_redraw()
+		return
+	if not roots.empty():
+		_focus_tile(roots[roots.size() - 1])
+	request_redraw()
+
+
+# Diagnóstico: geometría y capas por ventana (para el mapeo de puntero).
+func geom_state():
+	var out = {}
+	for id in tiles:
+		var geo = compositor.get_geometry(id)
+		var layers = compositor.get_layers(id)
+		var mn = Vector2(1e9, 1e9)
+		var mx = Vector2(-1e9, -1e9)
+		var l0 = [0, 0, 0, 0]
+		for i in range(layers.size()):
+			var rt = layers[i].rect
+			mn = Vector2(min(mn.x, rt.position.x), min(mn.y, rt.position.y))
+			mx = Vector2(max(mx.x, rt.position.x + rt.size.x), max(mx.y, rt.position.y + rt.size.y))
+			if i == 0:
+				l0 = [rt.position.x, rt.position.y, rt.size.x, rt.size.y]
+		out[str(id)] = {"geo": [geo.position.x, geo.position.y, geo.size.x, geo.size.y],
+			"l0": l0, "union": [mn.x, mn.y, mx.x - mn.x, mx.y - mn.y], "n": layers.size()}
+	return out
+
+
+# Recupera modificadores pegados: reenvía sueltas de Ctrl/Shift/Alt/Super a la app y
+# limpia el estado del shell (paneo/Super).
+func release_modifiers():
+	var id = _current_wayland_id()
+	if id < 0:
+		id = last_key_target
+	if id >= 0:
+		for sc in MOD_KEYS:
+			var ev = InputEventKey.new()
+			ev.scancode = sc
+			ev.physical_scancode = sc
+			ev.pressed = false
+			compositor.key(ev)
+	pan = 0.0
+	pan_active = false
+	if frame != null:
+		frame.super_press = null
+	request_redraw()
 
 
 var last_commits = 0
@@ -240,8 +397,10 @@ func _imgui_frame():
 	if tile_mode:
 		view.visible = true
 		_update_tiles()
+		instant_switch = false  # ya se reubicaron sin animación en este frame
 	else:
 		view.visible = false
+		instant_switch = false
 	var id = _current_wayland_id()
 	_update_dialogs(id)
 	if tiles_ui != null:
@@ -251,6 +410,7 @@ func _imgui_frame():
 		expose_bg.rect_size = get_viewport_rect().size
 		expose_bg.visible = expose
 	frame.draw(self)
+	_update_ghosts(OS.get_ticks_msec())
 
 	_draw_input_requests()
 	# HUD de debug global (autoload DebugHud): Super+F6 lo abre en cualquier actividad (frame.gd).
@@ -260,34 +420,164 @@ func _imgui_frame():
 	_run_test_logic()
 
 
-# --- Tiling: varios toplevels a la vez, uno por tile ---
+# --- Pantallas: una fila horizontal; cada pantalla puede tener varias apps ---
 
-# Hasta 3 ventanas en una fila; con más, grilla de columnas = techo(sqrt(n)).
-func _tile_cols():
-	var n = tiles.size()
-	if n <= 3:
-		return max(n, 1)
-	return int(ceil(sqrt(float(n))))
+# El grupo (franja con varias apps) que contiene la ventana, o null si va suelta.
+func _group_of(id):
+	for g in groups:
+		if g.has(id):
+			return g
+	return null
 
 
-func _compute_tile_layout():
+# Miembros de la pantalla de una ventana: su grupo, o ella sola.
+func _unit_members(id):
+	var g = _group_of(id)
+	return g if g != null else [id]
+
+
+# Unidades en orden de `tiles`: cada grupo una vez (en la posición de su primer miembro).
+func _units():
+	var out = []
+	var seen = {}
+	for id in tiles:
+		if seen.has(id):
+			continue
+		var g = _group_of(id)
+		if g != null:
+			out.append(g)
+			for m in g:
+				seen[m] = true
+		else:
+			out.append([id])
+			seen[id] = true
+	return out
+
+
+func _focused_unit_index(units):
+	for u in range(units.size()):
+		if units[u].has(focused_tile):
+			return u
+	return 0
+
+
+# Toda la fila a tamaño completo: la pantalla enfocada en (0,0) y el resto a ±ancho,
+# para que cambiar de pantalla deslice de costado. Por default una sola fila.
+func _compute_slide_layout():
 	tile_rects.clear()
-	var n = tiles.size()
+	var units = _units()
+	var n = units.size()
 	if n == 0:
 		return
 	var vp = get_viewport_rect().size
-	var cols = _tile_cols()
-	var rows = int(ceil(float(n) / float(cols)))
+	# Pantalla completa: la ventana ocupa todo; el resto queda fuera de pantalla.
+	if fullscreen_id >= 0 and tiles.has(fullscreen_id):
+		for id in tiles:
+			tile_rects[id] = Rect2(0.0, 0.0, vp.x, vp.y) if id == fullscreen_id else Rect2(vp.x * 2.0, 0.0, vp.x, vp.y)
+		return
+	var fi = _focused_unit_index(units)
+	for u in range(n):
+		var area = Rect2(float(u - fi) * vp.x - pan, 0.0, vp.x, vp.y)
+		var members = units[u]
+		if members.size() == 1:
+			tile_rects[members[0]] = area
+		else:
+			_split_rects(members, area)
+
+
+# Peso de reparto de una ventana dentro de su franja (default 1: partes iguales).
+func _weight(id):
+	return float(split_weight.get(id, 1.0))
+
+
+# Las apps de una franja van en UNA fila, sin tope; el ancho se reparte por pesos
+# (el asa de borde ajusta los pesos de las dos ventanas vecinas).
+func _split_rects(members, area):
+	var n = members.size()
+	if n == 0:
+		return
 	var gap = TILE_GAP
-	var cw = (vp.x - gap * float(cols + 1)) / float(cols)
-	var ch = (vp.y - gap * float(rows + 1)) / float(rows)
+	var total = 0.0
+	for m in members:
+		total += max(_weight(m), 0.001)
+	var avail = area.size.x - gap * float(n + 1)
+	var x = area.position.x + gap
 	for i in range(n):
-		var c = i % cols
-		var r = i / cols
-		tile_rects[tiles[i]] = Rect2(gap + float(c) * (cw + gap), gap + float(r) * (ch + gap), cw, ch)
+		var w = avail * max(_weight(members[i]), 0.001) / total
+		tile_rects[members[i]] = Rect2(x, area.position.y, w, area.size.y)
+		x += w + gap
 
 
-# Tarjetas de exposé: grilla centrada de hasta 3 miniaturas por fila.
+# Asas de la franja enfocada (sólo si tiene varias apps): coordenada x del borde
+# entre cada par, para dibujar/arrastrar la redimensión.
+func _compute_handles():
+	handles = []
+	if expose or fullscreen_id >= 0:
+		hover_handle = null
+		resize_handle = null
+		return
+	var units = _units()
+	if units.empty():
+		return
+	var u = units[_focused_unit_index(units)]
+	if u.size() < 2:
+		return
+	var vp = get_viewport_rect().size
+	for i in range(u.size() - 1):
+		var r = tile_rects.get(u[i])
+		if r == null:
+			continue
+		var x = r.position.x + r.size.x + TILE_GAP * 0.5
+		if x < -8.0 or x > vp.x + 8.0:
+			continue
+		handles.append({"x": x, "y": r.position.y, "h": r.size.y, "i": i, "left": u[i], "right": u[i + 1]})
+	# Reapunta las asas activas a las entradas nuevas: si no, la dibujada queda con la
+	# posición vieja y parece que no sigue al mouse (los rects sí se recalculan).
+	hover_handle = _find_handle(hover_handle)
+	resize_handle = _find_handle(resize_handle)
+
+
+func _find_handle(h):
+	if h == null:
+		return null
+	for nh in handles:
+		if nh.left == h.left and nh.right == h.right:
+			return nh
+	return null
+
+
+func _handle_at(pos):
+	for h in handles:
+		if abs(pos.x - h.x) <= HANDLE_HIT and pos.y >= h.y and pos.y <= h.y + h.h:
+			return h
+	return null
+
+
+# Transform de contenido por ventana, para el control remoto (claves string = JSON).
+func fits_state():
+	var out = {}
+	for id in tile_fit.keys():
+		var fit = tile_fit[id]
+		out[str(id)] = {"scale": fit.scale, "offset": [fit.offset.x, fit.offset.y]}
+	return out
+
+
+# Mueve el borde hasta mouse_x repartiendo el ancho combinado de las dos ventanas.
+func _resize_to(h, mouse_x):
+	var rl = tile_rects.get(h.left)
+	var rr = tile_rects.get(h.right)
+	if rl == null or rr == null:
+		return
+	var left = rl.position.x
+	var right = rr.position.x + rr.size.x
+	var frac = clamp((mouse_x - left) / max(right - left, 1.0), 0.12, 0.88)
+	var wsum = _weight(h.left) + _weight(h.right)
+	split_weight[h.left] = wsum * frac
+	split_weight[h.right] = wsum * (1.0 - frac)
+
+
+# Exposé: TODAS las tarjetas en una sola fila horizontal, en el mismo orden que la franja
+# de workspaces (`tiles`); si no entran, scroll horizontal (rueda) o centra la elegida.
 func _compute_expose_layout():
 	expose_cards.clear()
 	var n = tiles.size()
@@ -295,16 +585,28 @@ func _compute_expose_layout():
 		return
 	var vp = get_viewport_rect().size
 	expose_sel = int(clamp(expose_sel, 0, max(n - 1, 0)))
-	var cols = 3 if n > 3 else n
-	var rows = int(ceil(float(n) / float(cols)))
-	var pad = 28.0
-	var gap = 18.0
-	var cw = (vp.x - pad * 2.0 - gap * float(cols - 1)) / float(cols)
-	var ch = (vp.y - pad * 2.0 - gap * float(rows - 1)) / float(rows)
+	var ch = vp.y - EXPOSE_PAD * 2.0
+	var cw = clamp(vp.x * 0.6, 240.0, 720.0)
+	var total = EXPOSE_PAD * 2.0 + float(n) * cw + float(max(n - 1, 0)) * EXPOSE_GAP
+	var max_scroll = max(total - vp.x, 0.0)
+	if expose_auto:
+		var sel_left = EXPOSE_PAD + float(expose_sel) * (cw + EXPOSE_GAP)
+		expose_scroll_target = clamp(sel_left + cw * 0.5 - vp.x * 0.5, 0.0, max_scroll)
+	else:
+		expose_scroll_target = clamp(expose_scroll_target, 0.0, max_scroll)
+	expose_scroll = lerp(expose_scroll, expose_scroll_target, 0.25)
+	if abs(expose_scroll - expose_scroll_target) > 0.5:
+		request_redraw()
 	for i in range(n):
-		var c = i % cols
-		var r = i / cols
-		expose_cards[tiles[i]] = Rect2(pad + float(c) * (cw + gap), pad + float(r) * (ch + gap), cw, ch)
+		var x = EXPOSE_PAD + float(i) * (cw + EXPOSE_GAP) - expose_scroll
+		expose_cards[tiles[i]] = Rect2(x, EXPOSE_PAD, cw, ch)
+
+
+# Rueda en exposé: desplaza la tira sin cambiar la selección.
+func _expose_scroll_by(px):
+	expose_auto = false
+	expose_scroll_target += px
+	request_redraw()
 
 
 func _tile_node(id):
@@ -320,7 +622,9 @@ func _tile_node(id):
 
 
 # Un TextureRect por capa del árbol del toplevel, reusado por índice (raíz -> popups).
-func _fill_nodes(box, layers, off):
+# `scale`/`offset` mapean las coords del cliente al slot: si el cliente es más chico o
+# más grande que su slot, se escala y centra para que llene (ver _content_fit).
+func _fill_nodes(box, layers, scale, offset):
 	_ensure_premult_material()
 	while box.get_child_count() < layers.size():
 		var t = TextureRect.new()
@@ -337,11 +641,21 @@ func _fill_nodes(box, layers, off):
 		if (size.x <= 0.0 or size.y <= 0.0) and layer.texture != null:
 			size = layer.texture.get_size()
 		node.texture = layer.texture
-		node.rect_position = layer.rect.position + off
-		node.rect_size = size
+		node.rect_position = layer.rect.position * scale + offset
+		node.rect_size = size * scale
 		node.visible = layer.texture != null
 	for i in range(layers.size(), box.get_child_count()):
 		box.get_child(i).visible = false
+
+
+# Offset (local al nodo del slot) para mostrar el contenido del cliente (tamaño `csize`,
+# origen `cpos`) dentro del slot `ssize`. No escala nunca: 1:1 y centrado. Si el cliente
+# es más chico que el slot, queda centrado; si es más grande, se lo recorta el slot
+# (rect_clip_content). El redimensionado real lo hace compositor.set_size.
+func _content_fit(csize, ssize, cpos):
+	if csize.x <= 0.0 or csize.y <= 0.0:
+		return {"scale": 1.0, "offset": -cpos}
+	return {"scale": 1.0, "offset": -cpos + (ssize - csize) * 0.5}
 
 
 func _update_tiles():
@@ -350,7 +664,8 @@ func _update_tiles():
 	if expose:
 		_compute_expose_layout()
 	else:
-		_compute_tile_layout()
+		_compute_slide_layout()
+	_compute_handles()
 	for id in tile_nodes.keys():
 		if not tiles.has(id):
 			var node = tile_nodes[id]
@@ -359,6 +674,9 @@ func _update_tiles():
 			expose_cards.erase(id)
 			tile_anim.erase(id)
 			tile_fade.erase(id)
+			tile_intro.erase(id)
+			view_anim.erase(id)
+			tile_fit.erase(id)
 			if node != null and is_instance_valid(node):
 				node.queue_free()
 	var now = OS.get_ticks_msec()
@@ -373,27 +691,100 @@ func _update_tile(id, now):
 	var node = _tile_node(id)
 	var geo = compositor.get_geometry(id)
 	var layers = compositor.get_layers(id)
-	_fill_nodes(node, layers, -geo.position)
+	var rect = tile_rects.get(id, Rect2(Vector2.ZERO, view.rect_size))
+	# El cliente puede no ocupar el slot (elige tamaño propio, o se achica al cambiar
+	# de fuente): se centra 1:1 y, si es más grande que el slot, se reduce para que entre.
+	var fit = _content_fit(geo.size, rect.size, geo.position)
+	_fill_nodes(node, layers, fit.scale, fit.offset)
+	tile_fit[id] = fit
 
 	if expose:
-		# Miniatura: se escala el nodo entero (la app conserva su tamaño de tile) y se centra.
+		# Miniatura: se escala el nodo entero (la app conserva su tamaño de tile) y se
+		# centra, animando desde su transform de pantalla (ver _toggle_expose).
 		var card = expose_cards.get(id, Rect2(Vector2.ZERO, view.rect_size))
 		var size = node.rect_size
 		if size.x <= 0.0 or size.y <= 0.0:
 			size = card.size
 		var s = min(min(card.size.x / max(size.x, 1.0), card.size.y / max(size.y, 1.0)), 1.0)
-		node.rect_scale = Vector2(s, s)
-		node.rect_position = card.position + (card.size - size * s) * 0.5
+		var tpos = card.position + (card.size - size * s) * 0.5
+		var a = view_anim.get(id)
+		if a != null:
+			var e = _ease(float(now - a.since) / EXPOSE_MS)
+			node.rect_position = a.from_pos.linear_interpolate(tpos, e)
+			var sc = lerp(float(a.from_scale), s, e)
+			node.rect_scale = Vector2(sc, sc)
+			if float(now - a.since) >= EXPOSE_MS:
+				view_anim.erase(id)
+			else:
+				request_redraw()
+		else:
+			node.rect_scale = Vector2(s, s)
+			node.rect_position = tpos
 		node.modulate = Color(1, 1, 1, 1)
+		node.visible = true
 		return
 
-	var rect = tile_rects.get(id, Rect2(Vector2.ZERO, view.rect_size))
-	# Desliza desde donde estaba a su celda nueva (abrir, reacomodar, intercambiar).
+	# Vuelta de exposé: se interpola desde la tarjeta hasta su rect de pantalla.
+	if view_anim.has(id):
+		var a = view_anim[id]
+		var e = _ease(float(now - a.since) / EXPOSE_MS)
+		node.rect_position = a.from_pos.linear_interpolate(rect.position, e)
+		var sc = lerp(float(a.from_scale), 1.0, e)
+		node.rect_scale = Vector2(sc, sc)
+		node.rect_size = rect.size
+		node.visible = true
+		node.modulate = Color(1, 1, 1, 1)
+		if geo.size != Vector2.ZERO and requested_sizes.get(id) != rect.size:
+			requested_sizes[id] = rect.size
+			compositor.set_size(id, rect.size)
+		if float(now - a.since) >= EXPOSE_MS:
+			view_anim.erase(id)
+		else:
+			request_redraw()
+		return
+
+	# Entrada: escala y se traslada desde el ícono que la lanzó (o desde el borde
+	# derecho, mismo tamaño). El placeholder con spinner lo dibuja tiles_ui hasta que
+	# llega la primera textura. El tamaño del cliente queda en el destino (1:1).
+	if tile_intro.has(id):
+		var info = tile_intro[id]
+		if layers.size() > 0 and layers[0].texture != null:
+			info["ready"] = true
+		var k = clamp(float(now - info.since) / INTRO_MS, 0.0, 1.0)
+		var e = _ease(k)
+		var from = info.get("from")
+		if from == null:
+			from = Rect2(Vector2(view.rect_size.x, rect.position.y), rect.size)
+		var s = lerp(_intro_scale(from, rect), 1.0, e)
+		var center = (from.position + from.size * 0.5).linear_interpolate(rect.position + rect.size * 0.5, e)
+		var pos = center - rect.size * s * 0.5
+		node.rect_scale = Vector2(s, s)
+		node.rect_position = pos
+		node.rect_size = rect.size
+		node.visible = true
+		node.modulate = Color(1, 1, 1, min(e, 1.0))
+		info["rect"] = Rect2(pos, rect.size * s)
+		if geo.size != Vector2.ZERO and requested_sizes.get(id) != rect.size:
+			requested_sizes[id] = rect.size
+			compositor.set_size(id, rect.size)
+		if k >= 1.0:
+			tile_intro.erase(id)
+			node.rect_scale = Vector2.ONE
+			node.rect_position = rect.position
+		else:
+			request_redraw()
+		return
+
+	# Desliza desde donde estaba a su celda nueva (reacomodar, cambiar de pantalla).
+	# Durante el paneo (Super+rueda) se posiciona directo, sin animación, para que el
+	# movimiento continuo no pelee con el easing.
 	var pos = rect.position
-	if tile_anim.has(id):
+	if pan_active or instant_switch:
+		tile_anim.erase(id)
+	elif tile_anim.has(id):
 		var a = tile_anim[id]
 		var k = clamp(float(now - a.since) / TILE_ANIM_MS, 0.0, 1.0)
-		pos = a.from.linear_interpolate(rect.position, 1.0 - pow(1.0 - k, 3.0))
+		pos = a.from.linear_interpolate(rect.position, _ease(k))
 		if k >= 1.0:
 			tile_anim.erase(id)
 		else:
@@ -404,32 +795,130 @@ func _update_tile(id, now):
 	node.rect_scale = Vector2.ONE
 	node.rect_position = pos
 	node.rect_size = rect.size
-	# Fade-in de una ventana recién abierta.
-	var mod = 1.0
-	if tile_fade.has(id):
-		var k = clamp(float(now - tile_fade[id]) / TILE_FADE_MS, 0.0, 1.0)
-		mod = 1.0 - pow(1.0 - k, 3.0)
-		if k >= 1.0:
-			tile_fade.erase(id)
-		else:
-			request_redraw()
-	node.modulate = Color(mod, mod, mod, mod)
+	# Sólo se dibuja la pantalla que asoma: las demás quedan fuera (±ancho/±alto).
+	var vp = view.rect_size
+	node.visible = pos.x + rect.size.x > 0.0 and pos.x < vp.x and pos.y + rect.size.y > 0.0 and pos.y < vp.y
+	node.modulate = Color(1, 1, 1, 1)
 
-	# 1:1 con el tamaño del tile: se le pide al cliente que se ajuste (texto nítido).
-	if geo.size != Vector2.ZERO and requested_sizes.get(id) != rect.size:
-		requested_sizes[id] = rect.size
-		compositor.set_size(id, rect.size)
+	# Ajuste 1:1: se le pide al cliente el tamaño del slot (texto nítido). Se reafirma
+	# cuando el cliente se achica solo (p. ej. al cambiar la fuente) y no molesta si el
+	# cliente no acepta (sólo se reintenta cuando su tamaño cambia).
+	if rect.size.x > 0.0 and rect.size.y > 0.0:
+		var drifted = geo.size != Vector2.ZERO and geo.size != rect.size and last_geo.get(id) != geo.size
+		if requested_sizes.get(id) != rect.size or drifted:
+			requested_sizes[id] = rect.size
+			compositor.set_size(id, rect.size)
+		last_geo[id] = geo.size
 	if tex_ready_frame < 0 and id == focused_tile and layers.size() > 0 and layers[0].texture != null:
 		tex_ready_frame = frame_count
+
+
+# Easing con rebote leve (ease-out-back): arranca rápido, se pasa un poco del destino
+# y vuelve. k normalizado 0..1 (puede devolver >1 por el overshoot).
+func _ease(k):
+	k = clamp(k, 0.0, 1.0)
+	var c1 = 1.20158
+	var c3 = c1 + 1.0
+	return 1.0 + c3 * pow(k - 1.0, 3.0) + c1 * pow(k - 1.0, 2.0)
+
+
+# Escala inicial para la entrada: la ventana nace del tamaño del ícono (nunca > 1).
+func _intro_scale(from, target):
+	if target.size.x <= 0.0 or target.size.y <= 0.0:
+		return 1.0
+	return min(min(from.size.x / target.size.x, from.size.y / target.size.y), 1.0)
+
+
+# Rect del ítem de la ventana en el Frame (si está dibujado); si no, un punto arriba.
+# Es el destino de las animaciones de minimizar/cerrar (la ventana vuelve a su ítem).
+func _panel_rect_for(id):
+	if frame != null:
+		var r = frame.item_rect(id)
+		if r != null:
+			return r
+	return Rect2(Vector2(view.rect_size.x * 0.5 - 60.0, 2.0), Vector2(120.0, 24.0))
+
+
+# Congela el cuadro on-screen de la ventana y lo anima hacia `to_rect` (o arriba si es
+# null), encogiéndose. Se usa un snapshot del viewport para no depender de que el cliente
+# siga teniendo vivo su buffer (dmabuf). Sirve para cerrar y para minimizar.
+func _spawn_ghost(id, to_rect):
+	if not view.visible:
+		return
+	var rect = tile_rects.get(id)
+	if rect == null:
+		return
+	var vp = get_viewport_rect().size
+	var vis = Rect2(Vector2.ZERO, vp).clip(rect)
+	if vis.size.x < 8.0 or vis.size.y < 8.0:
+		return
+	var img = get_viewport().get_texture().get_data()
+	if img == null:
+		return
+	img.flip_y()
+	img = img.get_rect(Rect2(vis.position, vis.size))
+	if img == null or img.get_width() <= 0 or img.get_height() <= 0:
+		return
+	if to_rect == null:
+		to_rect = Rect2(Vector2(vis.position.x + vis.size.x * 0.5 - 30.0, 2.0), Vector2(60.0, 20.0))
+	var tex = ImageTexture.new()
+	tex.create_from_image(img, 0)
+	var node = TextureRect.new()
+	node.texture = tex
+	node.expand = true
+	node.stretch_mode = TextureRect.STRETCH_SCALE
+	node.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	node.rect_size = vis.size
+	node.rect_position = vis.position
+	if ghost_layer == null:
+		ghost_layer = CanvasLayer.new()
+		ghost_layer.layer = 1
+		add_child(ghost_layer)
+	ghost_layer.add_child(node)
+	ghosts.append({"node": node, "from": vis, "to": to_rect, "since": OS.get_ticks_msec()})
+	request_redraw()
+
+
+# Anima los fantasmas: interpola posición y tamaño desde la ventana hasta el ícono, con
+# alfa 1 -> 0.
+func _update_ghosts(now):
+	for i in range(ghosts.size() - 1, -1, -1):
+		var g = ghosts[i]
+		var k = clamp(float(now - g.since) / GHOST_MS, 0.0, 1.0)
+		var e = _ease(k)
+		var from = g.from
+		var to = g.to
+		var pos = from.position.linear_interpolate(to.position, e)
+		var size = from.size.linear_interpolate(to.size, e)
+		g.node.rect_position = pos
+		g.node.rect_size = size
+		g.node.modulate = Color(1, 1, 1, 1.0 - k)
+		if k >= 1.0:
+			g.node.queue_free()
+			ghosts.remove(i)
+		else:
+			request_redraw()
 
 
 func _focus_tile(id):
 	if id < 0 or not _id_alive(id):
 		return
+	# Enfocar una minimizada la restaura (así el teclado puede traerlas de vuelta).
+	if minimized.has(id):
+		minimized.erase(id)
 	if not tiles.has(id):
 		tiles.append(id)
+		tile_intro[id] = _new_intro()
+	# Enfocar otra ventana sale de pantalla completa.
+	if fullscreen_id >= 0 and fullscreen_id != id:
+		fullscreen_id = -1
 	focused_tile = id
 	focus_flash = OS.get_ticks_msec()
+	# Memoriza el miembro enfocado de la pantalla (para volver a él desde otra).
+	for u in _units():
+		if u.has(id):
+			unit_focus[u[0]] = id
+			break
 	var name = _activity_for_window(id)
 	var i = _activity_named(name)
 	if i >= 0:
@@ -438,57 +927,156 @@ func _focus_tile(id):
 	request_redraw()
 
 
-# Mueve el foco a la celda vecina. dir: -1 izq, 1 der, -2 arriba, 2 abajo (rota en la fila).
+# Navegación de pantallas (una sola fila por default). dir: -1 izq, 1 der.
+# ←/→ cambian de pantalla (franja). ↑/↓ quedan sin efecto mientras haya una sola fila.
 func _focus_dir(dir):
 	if not tile_mode or tiles.empty():
 		return
-	var i = tiles.find(focused_tile)
-	if i < 0:
-		i = 0
-	var n = tiles.size()
-	var cols = _tile_cols()
-	var c = i % cols
-	var r = i / cols
-	var nc = c
-	var nr = r
-	if dir == -1 or dir == 1:
-		nc = posmod(c + dir, cols)
+	if dir != -1 and dir != 1:
+		return
+	pan = 0.0
+	pan_active = false
+	var units = _units()
+	var ui = _focused_unit_index(units)
+	_focus_unit(units, ui + dir)
+
+
+# Super+rueda: desplaza la franja de forma continua (signo +1 = siguiente). No cambia el
+# foco hasta soltar Super (_snap_pan).
+func _pan_by(amount):
+	if not tile_mode or tiles.empty():
+		return
+	var units = _units()
+	var n = units.size()
+	if n < 2:
+		return
+	var vp = get_viewport_rect().size
+	var fi = _focused_unit_index(units)
+	pan_active = true
+	pan = clamp(pan + amount * vp.x * 0.18, -float(fi) * vp.x, float(n - 1 - fi) * vp.x)
+	request_redraw()
+
+
+# Al soltar Super: cae a la pantalla más cercana según el paneo acumulado.
+func _snap_pan():
+	if not pan_active:
+		return
+	var units = _units()
+	var vp = get_viewport_rect().size
+	var fi = _focused_unit_index(units)
+	var delta = int(round(pan / max(vp.x, 1.0)))
+	pan_active = false
+	pan = 0.0
+	if delta != 0 and not units.empty():
+		_focus_unit(units, int(clamp(fi + delta, 0, units.size() - 1)))
+	request_redraw()
+
+
+# Super+←/→: deja la ventana enfocada en modo tiled ocupando la mitad izquierda/derecha
+# (junto a otra). Maximizar (Alt+F10) es lo mismo pero ocupando todo el workspace.
+func _snap_tile(dir):
+	if not tile_mode or focused_tile < 0:
+		return
+	var units = _units()
+	var ui = _focused_unit_index(units)
+	var members = units[ui]
+	if members.size() >= 2:
+		# Ya está en una franja: la reordena para quedar a la izquierda/derecha.
+		var i = members.find(focused_tile)
+		if i < 0:
+			return
+		var j = 0 if dir < 0 else members.size() - 1
+		if i != j:
+			members.remove(i)
+			members.insert(j, focused_tile)
+			_rebuild_tiles(units)
+		for m in members:
+			split_weight[m] = 1.0
+		_focus_tile(focused_tile)
+		return
+	# Suelta: la tilea con otra pantalla vecina.
+	var other = -1
+	for k in range(units.size()):
+		if k == ui:
+			continue
+		other = units[k][0]
+		break
+	if other < 0:
+		return
+	if dir < 0:
+		_tile_drop(other, focused_tile)  # enfocada primero = izquierda
 	else:
-		nr = r + (1 if dir == 2 else -1)
-		if nr < 0:
-			nr = 0
-	var j = nr * cols + nc
-	if j >= 0 and j < n:
-		_focus_tile(tiles[j])
+		_tile_drop(focused_tile, other)  # enfocada segunda = derecha
+	split_weight[other] = 1.0
+	split_weight[focused_tile] = 1.0
 
 
-# Intercambia el tile enfocado con el vecino en esa dirección (se deslizan al nuevo lugar).
+# Reordena la franja moviendo la pantalla de `dragged` al lugar de la de `anchor`.
+func _move_window_to(dragged, anchor, before):
+	if dragged < 0 or anchor < 0 or dragged == anchor:
+		return
+	if not tiles.has(dragged) or not tiles.has(anchor):
+		return
+	var units = _units()
+	var du = _focused_unit_index_of(units, dragged)
+	var au = _focused_unit_index_of(units, anchor)
+	if du < 0 or au < 0 or du == au:
+		return
+	var moved = units[du]
+	units.remove(du)
+	var target = _focused_unit_index_of(units, anchor)
+	if target < 0:
+		target = units.size() - 1
+	if not before:
+		target += 1
+	units.insert(int(clamp(target, 0, units.size())), moved)
+	_rebuild_tiles(units)
+	_focus_tile(dragged)
+
+
+func _focused_unit_index_of(units, id):
+	for i in range(units.size()):
+		if units[i].has(id):
+			return i
+	return -1
+
+
+# Enfoca la pantalla u (recordando su último miembro enfocado).
+func _focus_unit(units, u):
+	if u < 0 or u >= units.size():
+		return
+	var members = units[u]
+	var want = unit_focus.get(members[0], members[0])
+	if not members.has(want):
+		want = members[0]
+	_focus_tile(want)
+
+
+# Intercambia pantallas en la fila (←/→). ↑/↓ sin efecto con una sola fila.
 func _swap_dir(dir):
 	if not tile_mode or tiles.empty():
 		return
-	var i = tiles.find(focused_tile)
-	if i < 0:
+	if dir != -1 and dir != 1:
 		return
-	var n = tiles.size()
-	var cols = _tile_cols()
-	var c = i % cols
-	var r = i / cols
-	var nc = c
-	var nr = r
-	if dir == -1 or dir == 1:
-		nc = c + dir
-		if nc < 0 or nc >= cols:
-			return
-	else:
-		nr = r + (1 if dir == 2 else -1)
-		if nr < 0:
-			return
-	var j = nr * cols + nc
-	if j < 0 or j >= n or j == i:
+	var units = _units()
+	var ui = _focused_unit_index(units)
+	_swap_units(units, ui, ui + dir)
+
+
+func _swap_units(units, a, b):
+	if a < 0 or b < 0 or a >= units.size() or b >= units.size() or a == b:
 		return
-	var tmp = tiles[i]
-	tiles[i] = tiles[j]
-	tiles[j] = tmp
+	var tmp = units[a]
+	units[a] = units[b]
+	units[b] = tmp
+	_rebuild_tiles(units)
+
+
+func _rebuild_tiles(units):
+	var out = []
+	for u in units:
+		out.append_array(u)
+	tiles = out
 	request_redraw()
 
 
@@ -496,6 +1084,14 @@ func _toggle_expose(on):
 	expose = on
 	if on:
 		expose_sel = max(tiles.find(focused_tile), 0)
+		expose_auto = true
+		release_modifiers()  # no dejar Ctrl/Shift pegados en la app al entrar
+	# El pasaje se anima: cada ventana arranca desde su transform actual (pantalla o tarjeta).
+	var now = OS.get_ticks_msec()
+	for id in tiles:
+		var node = tile_nodes.get(id)
+		if node != null and is_instance_valid(node):
+			view_anim[id] = {"from_pos": node.rect_position, "from_scale": node.rect_scale.x, "since": now}
 	request_redraw()
 
 
@@ -503,6 +1099,7 @@ func _expose_move(step):
 	if tiles.empty():
 		return
 	expose_sel = posmod(expose_sel + step, tiles.size())
+	expose_auto = true  # al cambiar la selección, se recentra
 	request_redraw()
 
 
@@ -510,10 +1107,126 @@ func _expose_commit():
 	var id = -1
 	if expose_sel >= 0 and expose_sel < tiles.size():
 		id = tiles[expose_sel]
-	expose = false
+	_toggle_expose(false)
 	if id >= 0:
 		_focus_tile(id)
 	request_redraw()
+
+
+# --- Grupos (pantallas partidas) y minimizar ---
+
+func _remove_from_group(id):
+	split_weight.erase(id)
+	for i in range(groups.size() - 1, -1, -1):
+		var g = groups[i]
+		var k = g.find(id)
+		if k >= 0:
+			g.remove(k)
+			if g.size() < 2:
+				groups.remove(i)
+			break
+	request_redraw()
+
+
+# Pantalla partida: `a` se suma a la pantalla de `b` (drag en el Frame, o teclado).
+func _tile_drop(a, b):
+	if a < 0 or b < 0 or a == b:
+		return
+	if not tiles.has(a) or not tiles.has(b):
+		return
+	_remove_from_group(a)
+	var g = _group_of(b)
+	if g == null:
+		g = [b, a]
+		groups.append(g)
+		split_weight[b] = 1.0
+		split_weight[a] = 1.0
+	else:
+		g.append(a)
+		split_weight.erase(a)
+	# Quedan contiguas (la pantalla sale en orden b, a).
+	tiles.erase(a)
+	var at = tiles.find(b)
+	tiles.insert((at + 1) if at >= 0 else tiles.size(), a)
+	unit_focus[b] = a
+	_focus_tile(a)
+
+
+# Saca la ventana de su grupo: vuelve a pantalla completa.
+func _untile_window(id):
+	if id < 0 or not tiles.has(id) or _group_of(id) == null:
+		return
+	_remove_from_group(id)
+	_focus_tile(id)
+
+
+func _minimize_window(id):
+	if id < 0 or not tiles.has(id):
+		return
+	# La ventana se encoge hacia su ítem del Frame mientras se minimiza.
+	_spawn_ghost(id, _panel_rect_for(id))
+	if fullscreen_id == id:
+		fullscreen_id = -1
+	_remove_from_group(id)
+	minimized[id] = true
+	tiles.erase(id)
+	tile_fade.erase(id)
+	tile_intro.erase(id)
+	if focused_tile == id:
+		focused_tile = -1
+		if tiles.empty():
+			_go_home()
+		else:
+			_focus_tile(tiles[tiles.size() - 1])
+	request_redraw()
+
+
+func _restore_window(id):
+	if id < 0 or not _id_alive(id):
+		return
+	_focus_tile(id)  # ya limpia `minimized` y reinserta
+
+
+# Alt+F11: pantalla completa de la ventana enfocada (ocupa todo, se esconde el Frame).
+func _toggle_fullscreen():
+	if fullscreen_id >= 0:
+		fullscreen_id = -1
+	elif focused_tile >= 0 and tiles.has(focused_tile):
+		fullscreen_id = focused_tile
+	if frame != null:
+		frame.set_visible(false)
+	request_redraw()
+
+
+# Alt+F10: maximizar = sacar la ventana de su franja partida para que ocupe todo el
+# workspace (una ventana sola ya llena la pantalla; el contenido se ajusta con _content_fit).
+func _maximize_window(id):
+	if id < 0 or not tiles.has(id):
+		return
+	fullscreen_id = -1
+	_remove_from_group(id)
+	_focus_tile(id)
+	if frame != null:
+		frame.set_visible(false)
+	request_redraw()
+
+
+# Teclado: tilea la ventana enfocada con la siguiente (arma una pantalla partida sin mouse).
+func _tile_with_next():
+	if not tile_mode or focused_tile < 0:
+		return
+	var units = _units()
+	var i = _focused_unit_index(units)
+	var next_id = -1
+	for k in range(i + 1, units.size()):
+		for m in units[k]:
+			if m != focused_tile:
+				next_id = m
+				break
+		if next_id >= 0:
+			break
+	if next_id >= 0:
+		_tile_drop(focused_tile, next_id)
 
 
 func _ensure_premult_material():
@@ -660,6 +1373,9 @@ func _draw_home():
 			if ACTIVITIES[i].has("service") and _service_running(ACTIVITIES[i].name):
 				label += " *"
 			if button(label + "##" + ACTIVITIES[i].name, btn_size):
+				if ACTIVITIES[i].has("wayland"):
+					pending_origin = Rect2(pos, btn_size)
+					pending_origin_since = OS.get_ticks_msec()
 				_activate(i)
 
 		set_cursor_pos(Vector2(vp.x - 110.0, frame.FRAME_H + 10.0))
@@ -795,6 +1511,7 @@ func _open_wayland(activity):
 		id = wayland_ids[name]
 
 	if id >= 0:
+		pending_origin = null  # ya existía: no es una entrada nueva
 		_focus_tile(id)
 		return
 
@@ -821,6 +1538,7 @@ func _open_wayland(activity):
 
 
 func _go_home():
+	release_modifiers()  # no dejar modificadores pegados en la app que sale de foco
 	_release_activity()
 	current_activity = null
 	activity_instance = null
@@ -948,8 +1666,18 @@ func _open_unmanaged_window(id):
 func _add_tile(id):
 	if not tiles.has(id):
 		tiles.append(id)
-		tile_fade[id] = OS.get_ticks_msec()
+		tile_intro[id] = _new_intro()
 	request_redraw()
+
+
+# Entrada animada: si hay un ícono de origen reciente, escala desde él; si no, desde el
+# borde derecho (mismo tamaño). `ready` pasa a true con la primera textura.
+func _new_intro():
+	var from = null
+	if pending_origin != null and OS.get_ticks_msec() - pending_origin_since < 4000:
+		from = pending_origin
+	pending_origin = null
+	return {"from": from, "since": OS.get_ticks_msec(), "ready": false, "rect": Rect2()}
 
 
 func _activity_for_window(id):
@@ -1017,9 +1745,17 @@ func _on_toplevel_removed(id):
 	var index = _activity_named(removed_name)
 	if index >= 0 and ACTIVITIES[index].get("dynamic", false):
 		ACTIVITIES.remove(index)
-	# Sale del tiling: cierra su nodo y, si era el enfocado y no estamos en una actividad
-	# de script, pasa el foco al vecino (si estamos en Chat, no se le quita la pantalla).
+	# Sale de las pantallas: congela su cuadro para la animación de cierre, limpia
+	# grupo/minimizado y, si era la enfocada y no estamos en una actividad de script,
+	# pasa el foco al vecino.
 	var had_tile = tiles.has(id)
+	if had_tile:
+		_spawn_ghost(id, _panel_rect_for(id))
+	if fullscreen_id == id:
+		fullscreen_id = -1
+	_remove_from_group(id)
+	minimized.erase(id)
+	unit_focus.erase(id)
 	tiles.erase(id)
 	if had_tile:
 		request_redraw()
@@ -1053,6 +1789,8 @@ func _refocus_dialog():
 
 
 func _on_view_input(event):
+	if window_dragging:
+		return
 	if expose:
 		if event is InputEventMouseButton and event.pressed:
 			var hit = _view_hit_test(event.position)
@@ -1061,11 +1799,35 @@ func _on_view_input(event):
 				_expose_commit()
 		return
 	if event is InputEventMouseMotion:
+		# Asa de redimensión de la franja: primero la arrastra, después sólo la insinúa.
+		if resize_handle != null:
+			_resize_to(resize_handle, event.position.x)
+			request_redraw()
+			return
+		hover_handle = _handle_at(event.position)
+		if hover_handle != null:
+			request_redraw()
+			return
 		var hit = _view_hit_test(event.position)
 		if hit.id < 0:
 			return
 		compositor.pointer_motion(hit.id, hit.pos)
 	elif event is InputEventMouseButton:
+		# Con Super la rueda es para el shell (cambiar de workspace), no para la app.
+		if (event.button_index == BUTTON_WHEEL_UP or event.button_index == BUTTON_WHEEL_DOWN) \
+				and Input.is_key_pressed(KEY_META):
+			return
+		if event.pressed and event.button_index == BUTTON_LEFT:
+			var h = _handle_at(event.position)
+			if h != null:
+				resize_handle = h
+				hover_handle = h
+				request_redraw()
+				return
+		elif not event.pressed and resize_handle != null:
+			resize_handle = null
+			request_redraw()
+			return
 		var hit = _view_hit_test(event.position)
 		if hit.id < 0:
 			return
@@ -1095,12 +1857,23 @@ func _view_hit_test(pos):
 		var d = dialogs[i]
 		var rect = _dialog_rect(d)
 		if rect.has_point(pos):
-			var geo = _dialog_geo(d)
-			return {"id": d, "pos": pos - rect.position + geo.position, "dialog": d}
+			# El compositor espera coords del buffer: la caja alinea la geometry en
+			# rect.position, así que se suma geo.position.
+			return {"id": d, "pos": pos - rect.position + _dialog_geo(d).position, "dialog": d}
 	for id in tiles:
 		var r = tile_rects.get(id)
-		if r != null and r.has_point(pos):
-			var geo = compositor.get_geometry(id)
+		if r == null:
+			continue
+		var fit = tile_fit.get(id)
+		var geo = compositor.get_geometry(id)
+		# El contenido se dibuja en coords del buffer + offset; el compositor espera
+		# coords del buffer, así que alcanza con deshacer el offset (d - offset).
+		var content = r
+		if fit != null and fit.scale > 0.0:
+			content = Rect2(r.position + geo.position * fit.scale + fit.offset, geo.size * fit.scale)
+		if content.has_point(pos):
+			if fit != null and fit.scale > 0.0:
+				return {"id": id, "pos": (pos - r.position - fit.offset) / fit.scale, "dialog": 0}
 			return {"id": id, "pos": pos - r.position + geo.position, "dialog": 0}
 	return {"id": -1, "pos": Vector2.ZERO, "dialog": 0}
 
@@ -1110,6 +1883,17 @@ func _view_hit_test(pos):
 # home ImGui marca todo como manejado y a _unhandled_input no llega nada.
 func _input(event):
 	last_activity = OS.get_ticks_msec()
+	if event is InputEventMouseMotion:
+		input_motion_count += 1
+	elif event is InputEventMouseButton:
+		input_button_count += 1
+		input_last_button = {"button": event.button_index, "pressed": event.pressed, "device": event.device, "pos": [event.position.x, event.position.y]}
+	elif event is InputEventScreenTouch:
+		input_touch_count += 1
+	if event is InputEventKey:
+		input_last_key = {"scancode": event.scancode, "physical": event.physical_scancode,
+			"pressed": event.pressed, "ctrl": event.control, "shift": event.shift,
+			"alt": event.alt, "meta": event.meta}
 	if event is InputEventMouse:
 		_move_eis_cursor(event)
 	if current_activity == null and not apps.search_active and event is InputEventKey and event.pressed \
@@ -1119,16 +1903,20 @@ func _input(event):
 
 
 func _unhandled_input(event):
-	if current_activity == null or not current_activity.has("wayland"):
-		return
 	if not (event is InputEventKey):
-		return
-	# Con exposé abierto el teclado es para elegir ventana, no para la app.
-	if expose:
 		return
 	var id = _current_wayland_id()
 	if id < 0:
+		id = last_key_target  # última ventana que recibió teclas (exposé/Home incluidos)
+	if id < 0:
 		return
+	if event.pressed:
+		# Las pulsaciones sólo van a la app con una actividad wayland activa y sin exposé.
+		if current_activity == null or not current_activity.has("wayland") or expose:
+			return
+		last_key_target = id
+	# Las SUELTAS se reenvían siempre (aunque estemos en exposé o en Home): si no, un
+	# modificador apretado antes de abrir exposé/Home queda pegado en la app.
 	compositor.key(event)
 	get_tree().set_input_as_handled()
 

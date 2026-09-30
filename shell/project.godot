@@ -11,7 +11,7 @@ config_version=4
 [application]
 
 config/name="gdtk shell"
-run/main_scene="res://shell.tscn"
+run/main_scene="res://main.tscn"
 run/low_processor_mode=true
 run/low_processor_mode_sleep_usec=16000
 
@@ -23,6 +23,7 @@ output_latency=500
 [autoload]
 
 DebugHud="*res://addons/debug_hud/debug_hud.gd"
+Host="*res://host.gd"
 
 [input_devices]
 
