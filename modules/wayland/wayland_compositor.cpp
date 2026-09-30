@@ -361,6 +361,10 @@ void WaylandCompositor::_cb_activate(void *p_ud, int p_id) {
 	static_cast<WaylandCompositor *>(p_ud)->emit_signal("toplevel_activate", p_id);
 }
 
+void WaylandCompositor::_cb_minimize(void *p_ud, int p_id) {
+	static_cast<WaylandCompositor *>(p_ud)->emit_signal("toplevel_minimize", p_id);
+}
+
 // Con end_frame en uso, sólo los commits de lo que se dibujó (o de ventanas nuevas que
 // todavía no se dibujaron) piden redibujar: una app de fondo que anima no despierta al shell.
 void WaylandCompositor::_count_commit(int p_id) {
@@ -510,6 +514,7 @@ void WaylandCompositor::_bind_methods() {
 	ADD_SIGNAL(MethodInfo("toplevel_added", PropertyInfo(Variant::INT, "id")));
 	ADD_SIGNAL(MethodInfo("toplevel_removed", PropertyInfo(Variant::INT, "id")));
 	ADD_SIGNAL(MethodInfo("toplevel_activate", PropertyInfo(Variant::INT, "id")));
+	ADD_SIGNAL(MethodInfo("toplevel_minimize", PropertyInfo(Variant::INT, "id")));
 	ADD_SIGNAL(MethodInfo("layers_changed"));
 	ADD_SIGNAL(MethodInfo("process_exited", PropertyInfo(Variant::INT, "pid"), PropertyInfo(Variant::INT, "code")));
 }
@@ -575,6 +580,7 @@ String WaylandCompositor::start() {
 	cb.title = &WaylandCompositor::_cb_title;
 	cb.layer = &WaylandCompositor::_cb_layer;
 	cb.activate = &WaylandCompositor::_cb_activate;
+	cb.minimize = &WaylandCompositor::_cb_minimize;
 	cb.damage = &WaylandCompositor::_cb_damage;
 
 	server = wl_server_create(cb, (int)default_size.x, (int)default_size.y);

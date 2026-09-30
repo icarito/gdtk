@@ -58,6 +58,8 @@ typedef struct toplevel {
 	struct wl_listener unmap;
 	struct wl_listener destroy;
 	struct wl_listener set_title;
+	// se registra en ambas rutas (xdg y Xwayland)
+	struct wl_listener request_minimize;
 	// sólo X
 	struct wl_listener associate;
 	struct wl_listener dissociate;
@@ -576,9 +578,30 @@ static void handle_toplevel_unmap(struct wl_listener *listener, void *data) {
 	t->mapped = false;
 }
 
+// El cliente pide minimizarse: xdg_toplevel.set_minimized (CSD, p.ej. GTK/LibreWolf)
+// o iconify de una ventana X11. La minimización real la decide el shell (cb.minimize);
+// para xdg hay que devolver un configure (aunque no cambie el estado) o es violación
+// de protocolo.
+static void handle_toplevel_request_minimize(struct wl_listener *listener, void *data) {
+	toplevel *t = wl_container_of(listener, t, request_minimize);
+	if (t->tl != NULL) {
+		wlr_xdg_surface_schedule_configure(t->tl->base);
+	} else {
+		// Xwayland emite el evento también al des-iconificar (minimize=false): no es
+		// un pedido de minimizar.
+		struct wlr_xwayland_minimize_event *ev = data;
+		if (ev != NULL && !ev->minimize) {
+			return;
+		}
+	}
+	if (t->server->cb.minimize != NULL) {
+		t->server->cb.minimize(t->server->cb.ud, t->id);
+	}
+}
+
 static void toplevel_unlink(toplevel *t) {
 	struct wl_listener *all[] = { &t->commit, &t->map, &t->unmap, &t->destroy, &t->set_title,
-		&t->associate, &t->dissociate, &t->request_configure };
+		&t->request_minimize, &t->associate, &t->dissociate, &t->request_configure };
 	for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
 		wl_list_remove(&all[i]->link);
 		wl_list_init(&all[i]->link);
@@ -731,6 +754,8 @@ static void handle_new_toplevel(struct wl_listener *listener, void *data) {
 	wl_signal_add(&tl->events.destroy, &t->destroy);
 	t->set_title.notify = handle_toplevel_set_title;
 	wl_signal_add(&tl->events.set_title, &t->set_title);
+	t->request_minimize.notify = handle_toplevel_request_minimize;
+	wl_signal_add(&tl->events.request_minimize, &t->request_minimize);
 
 	wl_list_insert(s->toplevels.prev, &t->link);
 
@@ -1153,6 +1178,8 @@ static void handle_new_xsurface(struct wl_listener *listener, void *data) {
 	wl_signal_add(&xs->events.destroy, &t->destroy);
 	t->set_title.notify = handle_toplevel_set_title;
 	wl_signal_add(&xs->events.set_title, &t->set_title);
+	t->request_minimize.notify = handle_toplevel_request_minimize;
+	wl_signal_add(&xs->events.request_minimize, &t->request_minimize);
 	t->associate.notify = handle_xtoplevel_associate;
 	wl_signal_add(&xs->events.associate, &t->associate);
 	t->dissociate.notify = handle_xtoplevel_dissociate;
