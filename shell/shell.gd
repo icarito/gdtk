@@ -1709,7 +1709,7 @@ func _draw_home(offset = 0.0):
 			var clicked = _draw_ring_item(pos, btn_size, _ring_tex(e), label,
 				_ring_state(e), e.id, starting.get(e.name, -1), _ring_appear(e.name, now))
 			ring_layout.append({"entry": e, "screen": screen, "size": btn_size})
-			if ring_drag != null and e.kind == "favorite" and e != ring_drag:
+			if ring_drag != null and e.kind == "favorite" and e.name != ring_drag.name:
 				var d = (mouse - (screen + btn_size * 0.5)).length()
 				if d < btn_size.x * 1.6 and (ring_drop == null or d < ring_drop.dist):
 					ring_drop = {"screen": screen, "size": btn_size, "dist": d, "entry": e}
@@ -1971,14 +1971,16 @@ func _ring_hit(pos):
 
 
 # Id del favorito mostrado más cercano al punto (dentro del radio de una tesela),
-# o "" si no hay ninguno cerca. Un favorito arrastrado toma su lugar en el orden.
-func _favorite_target_near(pos):
+# o "" si no hay ninguno cerca. `exclude_id` es el favorito arrastrado, que se salta
+# para que soltarlo sobre sí mismo no lo mande al final. Un favorito arrastrado toma
+# el lugar del más cercano.
+func _favorite_target_near(pos, exclude_id = ""):
 	var best = ""
 	var bd = 1e9
 	var bs = 0.0
 	for it in ring_layout:
 		var e = it.entry
-		if e.kind != "favorite":
+		if e.kind != "favorite" or e.app.id == exclude_id:
 			continue
 		var d = (pos - (it.screen + it.size * 0.5)).length()
 		if d < bd:
@@ -2027,7 +2029,7 @@ func _finish_ring_drag(pos):
 		return
 	# Reordenar favoritos: el que se suelta sobre otro toma su lugar.
 	if e.kind == "favorite":
-		var target = _favorite_target_near(pos)
+		var target = _favorite_target_near(pos, e.app.id)
 		if target != "":
 			ring_favorites.erase(e.app.id)
 			var at = ring_favorites.find(target)

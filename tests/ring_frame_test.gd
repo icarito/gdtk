@@ -126,13 +126,19 @@ func _init():
 	# 10) Reorden de favoritos: el arrastrado toma el lugar del más cercano.
 	shell.ring_favorites = ["a", "b", "c"]
 	shell.ring_layout = [
+		{"entry": {"kind": "favorite", "app": {"id": "a"}, "name": "A"}, "screen": Vector2(600, 600), "size": Vector2(80, 80)},
 		{"entry": {"kind": "favorite", "app": {"id": "b"}, "name": "B"}, "screen": Vector2(100, 100), "size": Vector2(80, 80)},
 		{"entry": {"kind": "favorite", "app": {"id": "c"}, "name": "C"}, "screen": Vector2(300, 300), "size": Vector2(80, 80)}]
 	shell.ring_drag = {"kind": "favorite", "app": {"id": "a"}, "name": "A"}
-	check("target cerca de C", shell._favorite_target_near(Vector2(330, 330)) == "c")
-	check("target lejos -> sin reorden", shell._favorite_target_near(Vector2(800, 800)) == "")
+	check("target cerca de C (salta A)", shell._favorite_target_near(Vector2(330, 330), "a") == "c")
+	check("target sobre sí mismo -> sin reorden", shell._favorite_target_near(Vector2(620, 620), "a") == "")
+	check("target lejos -> sin reorden", shell._favorite_target_near(Vector2(800, 800), "a") == "")
 	shell._finish_ring_drag(Vector2(330, 330))
 	check("A toma el lugar de C: [b, a, c]", shell.ring_favorites == ["b", "a", "c"])
+	# Soltarlo sobre sí mismo no lo manda al final.
+	shell.ring_favorites = ["a", "b", "c"]
+	shell._finish_ring_drag(Vector2(620, 620))
+	check("A sobre sí mismo conserva el orden", shell.ring_favorites == ["a", "b", "c"])
 	shell.ring_drag = null
 
 	# 11) Ring -> basurero borra el favorito (una actividad no).
