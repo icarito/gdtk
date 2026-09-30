@@ -151,11 +151,8 @@ const XO_STROKE = Color(0.34, 0.15, 0.29, 1.0)
 # claro para despegarla y el trazo oscuro-medio para definir la silueta.
 const SUGAR_FILL = Color(0.96, 0.95, 0.90, 1.0)
 const SUGAR_STROKE = Color(0.32, 0.30, 0.38, 1.0)
-# Favoritos/actividades: círculos grandes en fila horizontal centrada.
-const HOME_BTN = 118.0
-const HOME_GAP = 20.0
-const HOME_LABEL_H = 22.0
-const HOME_MARGIN = 30.0
+# Favoritos/actividades: círculos grandes en fila horizontal centrada. Todos los
+# tamaños salen de la unidad de rejilla (ver grid_unit), no de constantes en px.
 const HOME_BG_TOP = Color(0.12, 0.13, 0.17, 1.0)
 const HOME_BG_BOTTOM = Color(0.05, 0.06, 0.09, 1.0)
 const RING_PLATE = Color(0.10, 0.11, 0.14, 0.88)
@@ -181,6 +178,29 @@ const SUGAR_ACTIVITY_ICONS = {
 # Notificación de arranque estilo Sugar: pulso ~1.2 s hasta que aparece la ventana.
 const STARTING_MAX_MS = 15000
 const STARTING_PERIOD_S = 1.2
+
+
+# Unidad de rejilla única del Hogar y del Frame: la pantalla se reparte en celdas
+# cuadradas de U px (16 columnas x 10 filas en 1280x800, que da 80). El mínimo de 80
+# garantiza que el ícono de 64 entre holgado en cualquier resolución razonable.
+# Todo bloque/salto del Hogar y del Frame sale de acá; no se repiten números.
+func grid_unit(vp):
+	return max(80.0, floor(min(vp.x / 16.0, vp.y / 10.0)))
+
+
+# Alto de las barras del Frame (superior e inferior). Una unidad completa; si la
+# pantalla es tan baja que dos barras de U tapan el área de apps, se usa media
+# unidad (sin bajar de 64, el ícono más chico antes del caso extremo).
+func frame_bar_h(vp):
+	var u = grid_unit(vp)
+	if vp.y >= 3.0 * u:
+		return u
+	return max(64.0, floor(u * 0.5))
+
+
+# Ícono del botón Inicio del Frame (Sugar: símbolo de hogar).
+func home_icon_tex():
+	return _load_sugar_svg("go-home", SUGAR_STROKE, SUGAR_FILL)
 
 
 func _ready():
@@ -1408,7 +1428,9 @@ func _draw_home():
 		imgui_draw_rect_filled_multicolor(Rect2(Vector2.ZERO, vp), HOME_BG_TOP, HOME_BG_TOP, HOME_BG_BOTTOM, HOME_BG_BOTTOM)
 
 		home_icon_loads = 2
-		var btn_size = Vector2(HOME_BTN, HOME_BTN)
+		var u = grid_unit(vp)
+		var pad = u * 0.125
+		var btn_size = Vector2(u * 1.5, u * 1.5)
 		var layout = _home_layout(vp)
 		for i in range(ACTIVITIES.size()):
 			var pos = layout[i]
@@ -1423,12 +1445,12 @@ func _draw_home():
 					starting[act.name] = OS.get_ticks_msec()
 				_activate(i)
 
-		set_cursor_pos(Vector2(vp.x - 110.0, frame.FRAME_H + 10.0))
-		if button("Apps", Vector2(100, 32)):
+		set_cursor_pos(Vector2(vp.x - 2.0 * u - pad, frame_bar_h(vp) + pad))
+		if button("Apps", Vector2(2.0 * u, u * 0.75)):
 			apps_view = true
 
 		if activity_error != "":
-			set_cursor_pos(Vector2(20.0, vp.y - 45.0))
+			set_cursor_pos(Vector2(pad, vp.y - u * 0.6))
 			text(activity_error)
 	end()
 	pop_style_var()
@@ -1436,28 +1458,35 @@ func _draw_home():
 
 # Posiciones de los favoritos/actividades: fila(s) horizontales centradas en el
 # área visible (debajo del Frame), sin nada fijo en el medio. Si no entran en una
-# fila, se reparten en dos o más, también centradas.
+# fila, se reparten en dos o más, también centradas. Todo sale de la unidad U y se
+# snap-ea a la rejilla, cuidando el aspect ratio en cualquier resolución.
 func _home_layout(vp):
 	var n = ACTIVITIES.size()
 	var out = []
 	if n == 0:
 		return out
-	var top = frame.FRAME_H if frame != null else 0.0
-	var avail = vp.x - 2.0 * HOME_MARGIN
-	var per_row = int(max(1.0, floor((avail + HOME_GAP) / (HOME_BTN + HOME_GAP))))
+	var u = grid_unit(vp)
+	var btn = u * 1.5       # círculo grande: 120 px a U=80
+	var gap = u * 0.5
+	var label_h = u * 0.375
+	var margin = u * 0.5
+	var top = frame_bar_h(vp) if frame != null else 0.0
+	var avail = vp.x - 2.0 * margin
+	var per_row = int(max(1.0, floor((avail + gap) / (btn + gap))))
 	var rows = int(ceil(float(n) / float(per_row)))
-	var row_h = HOME_BTN + HOME_LABEL_H + HOME_GAP
-	var total_h = float(rows) * row_h - HOME_GAP
-	var y0 = top + (vp.y - top - total_h) * 0.5
+	var row_h = btn + label_h + gap
+	var total_h = float(rows) * row_h - gap
+	# Centrado, y luego a la rejilla: el múltiplo de U más cercano al centro.
+	var y0 = top + round(((vp.y - top - total_h) * 0.5) / u) * u
 	for i in range(n):
 		var r = int(floor(float(i) / float(per_row)))
 		var col = i - r * per_row
 		var count = per_row
 		if r == rows - 1:
 			count = n - per_row * (rows - 1)
-		var row_w = float(count) * HOME_BTN + float(count - 1) * HOME_GAP
-		var x0 = (vp.x - row_w) * 0.5
-		out.append(Vector2(x0 + float(col) * (HOME_BTN + HOME_GAP), y0 + float(r) * row_h))
+		var row_w = float(count) * btn + float(count - 1) * gap
+		var x0 = round(((vp.x - row_w) * 0.5) / u) * u
+		out.append(Vector2(x0 + float(col) * (btn + gap), y0 + float(r) * row_h))
 	return out
 
 
@@ -1605,7 +1634,9 @@ func _draw_ring_item(pos, size, tex, label, state, id, starting_since = -1):
 
 	var cw = 7.0 * get_imgui_scale()
 	if tex != null:
-		var icon_size = size * 0.56 * pulse
+		# 64-72 px de ícono dentro del círculo de 1.5U: nunca por debajo de 64.
+		var side = clamp(size.x * 0.56, 64.0, 72.0) * pulse
+		var icon_size = Vector2(side, side)
 		set_cursor_pos(pos + (size - icon_size) * 0.5)
 		image(tex, icon_size)
 	else:
@@ -1657,9 +1688,10 @@ func _activity_icon_of(app):
 
 func _draw_apps():
 	var vp = get_viewport_rect().size
-	# Bajo el Frame, que en el Home está siempre.
-	set_next_window_pos(Vector2(0.0, frame.FRAME_H), true)
-	set_next_window_size(Vector2(vp.x, vp.y - frame.FRAME_H), true)
+	# Bajo el Frame, que en el Home está siempre. El alto de la barra sale de la rejilla.
+	var top = frame_bar_h(vp)
+	set_next_window_pos(Vector2(0.0, top), true)
+	set_next_window_size(Vector2(vp.x, vp.y - top), true)
 	if begin("##apps", WINDOW_NO_DECORATION | WINDOW_NO_BACKGROUND | WINDOW_NO_MOVE | WINDOW_NO_SAVED_SETTINGS | WINDOW_NO_BRING_TO_FRONT_ON_FOCUS):
 		if button("Anillo"):
 			apps_view = false

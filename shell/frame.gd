@@ -25,25 +25,35 @@ extends Node
 # al shell; sólo en cage anidado lo roba el escritorio anfitrión (probar con el
 # control remoto: `key alt+Tab`).
 
-const FRAME_H = 48.0
 const CORNER = 4.0
 const EDGE = 1.0
 const HOT_MS = 250
 # Entrada/salida del Frame deslizándose desde arriba (ease-out).
 const SLIDE_MS = 130
 const SUPER_KEYS = [KEY_META, KEY_SUPER_L, KEY_SUPER_R]
-const ITEM_W = 200.0
-const CLOSE_W = 28.0
-const MIN_W = 26.0
-const PAD = 8.0
+const PAD = 6.0          # separación entre bloques del Frame
 const DRAG_PX = 8.0
-# Insignia de identidad (persona): figura XO + nombre, fija a la derecha de Inicio.
-const ID_BADGE_ICON = 28.0
-const ID_BADGE_GAP = 6.0
-const ID_BADGE_PAD = 4.0
+# Estilo WindowMaker/NeXT: teselas CUADRADAS de una unidad de rejilla (shell.grid_unit),
+# bisel de 2px sin esquinas redondeadas, fondo gris azulado oscuro tipo NeXT. El bloque
+# comunica identidad/estado aunque el nombre no quepa; el nombre largo va en el tooltip.
+const NX_BG = Color(0.16, 0.17, 0.21, 0.97)
+const NX_FACE = Color(0.30, 0.33, 0.39, 1.0)
+const NX_FACE_SEL = Color(0.42, 0.45, 0.52, 1.0)
+const NX_FACE_DIM = Color(0.21, 0.22, 0.26, 1.0)
+const NX_LIGHT = Color(0.56, 0.60, 0.67, 1.0)
+const NX_DARK = Color(0.08, 0.09, 0.12, 1.0)
+const NX_FOCUS = Color(0.86, 0.89, 0.97, 1.0)
+const NX_TEXT = Color(0.93, 0.94, 0.97, 1.0)
+const NX_TEXT_DIM = Color(0.60, 0.63, 0.70, 1.0)
+const NX_SEL = Color(0.98, 0.80, 0.36, 1.0)
+const NX_CUR = Color(0.32, 0.60, 0.98, 1.0)
+const BEVEL = 2.0        # grosor del bisel (claro arriba/izq, oscuro abajo/der)
+const TITLE_H = 14.0     # alto de la línea de título dentro de la tesela
+const ICON_MIN = 64.0    # ícono nunca por debajo de 64 px
+const ICON_MAX = 72.0
 # Applets del borde inferior (SPEC-sugar-frame-applets.md): cada control es un bloque
-# cuadrado fijo, reordenable y ocultable. Lista corta de ids estables; sin arquitectura
-# genérica de providers.
+# cuadrado U x U de la misma rejilla, reordenable y ocultable. Lista corta de ids
+# estables; sin arquitectura genérica de providers.
 const APPLETS = [
 	{"id": "cpu", "name": "CPU", "short": "CPU"},
 	{"id": "memoria", "name": "Memoria", "short": "MEM"},
@@ -54,9 +64,6 @@ const APPLETS = [
 	{"id": "teclado", "name": "Teclado", "short": "TEC"},
 ]
 const APPLET_DEFAULT = ["cpu", "memoria", "swap", "reloj", "deskflow", "bluetooth", "teclado"]
-const APPLET = 44.0
-const APPLET_PAD = 4.0
-const ADD_W = 28.0
 const DESKFLOW = "Deskflow"
 const DESKFLOW_MS = 1000
 
@@ -336,6 +343,96 @@ func _applet_pct(id):
 	return -1.0
 
 
+# --- Bloques WindowMaker/NeXT -----------------------------------------------
+# Alto de las barras y lado de las teselas: la MISMA unidad de rejilla del Hogar.
+func _vh():
+	return shell.frame_bar_h(get_viewport().size)
+
+
+# Bisel clásico de 2px: claro arriba/izquierda, oscuro abajo/derecha. `pressed` lo
+# invierte (estado hundido). Sin redondeo; las teselas del Frame nunca son redondas.
+func _bevel(ui, r, face, pressed):
+	ui.imgui_draw_rect_filled(r, face, 0.0)
+	var light = NX_DARK if pressed else NX_LIGHT
+	var dark = NX_LIGHT if pressed else NX_DARK
+	ui.imgui_draw_rect_filled(Rect2(r.position, Vector2(r.size.x, BEVEL)), light, 0.0)
+	ui.imgui_draw_rect_filled(Rect2(r.position, Vector2(BEVEL, r.size.y)), light, 0.0)
+	ui.imgui_draw_rect_filled(Rect2(Vector2(r.position.x, r.end.y - BEVEL), Vector2(r.size.x, BEVEL)), dark, 0.0)
+	ui.imgui_draw_rect_filled(Rect2(Vector2(r.end.x - BEVEL, r.position.y), Vector2(BEVEL, r.size.y)), dark, 0.0)
+
+
+# Marco de foco por fuera de la tesela (2px, claro).
+func _frame_focus(ui, r, color):
+	var p = PoolVector2Array([
+		r.position - Vector2(2.0, 2.0),
+		Vector2(r.end.x + 2.0, r.position.y - 2.0),
+		r.end + Vector2(2.0, 2.0),
+		Vector2(r.position.x - 2.0, r.end.y + 2.0)])
+	ui.imgui_draw_polyline(p, color, 2.0, true)
+
+
+# Ícono de un ítem del Frame: el de su actividad si está cargado, si no el Sugar
+# disponible; el que llame decide el monograma si devuelve null. Fuerza la carga
+# perezosa de a dos íconos por frame como en el Hogar.
+func _item_icon(item):
+	if item.id >= 0:
+		for a in shell.ACTIVITIES:
+			if a.name == item.name:
+				var tex = shell._activity_tex(a)
+				if tex != null:
+					return tex
+				break
+	return shell._sugar_icon_for(item.name)
+
+
+# Botón-tesela: la interacción la maneja ImGui (colores transparentes) y el bisel se
+# dibuja a mano encima. Devuelve el click y el rect en pantalla. `held` es el hundido.
+func _tile(ui, pos, side, id, face = NX_FACE):
+	ui.set_cursor_pos(pos)
+	var r = Rect2(ui.get_cursor_screen_pos(), Vector2(side, side))
+	ui.push_style_color(ui.COL_BUTTON, Color(0, 0, 0, 0))
+	ui.push_style_color(ui.COL_BUTTON_HOVERED, Color(0, 0, 0, 0))
+	ui.push_style_color(ui.COL_BUTTON_ACTIVE, Color(0, 0, 0, 0))
+	ui.push_style_var_float(ui.STYLE_VAR_FRAME_ROUNDING, 0.0)
+	var clicked = ui.button("##" + id, Vector2(side, side))
+	var held = ui.is_item_active()
+	var hover = ui.is_item_hovered()
+	ui.pop_style_var()
+	ui.pop_style_color(3)
+	if hover and not held:
+		face = face.linear_interpolate(Color(1.0, 1.0, 1.0, face.a), 0.08)
+	_bevel(ui, r, face, held)
+	return {"clicked": clicked, "rect": r}
+
+
+# Mini-tesela de control (minimizar/cerrar) dentro del bloque de ventana. Se dibuja
+# a mano y el hit se resuelve por rect: dos botones ImGui solapados dejarían que el
+# cuadrado principal (más temprano) se quede con el hover. `pos` local.
+func _draw_mini(ui, pos, side, glyph, pressed):
+	ui.set_cursor_pos(pos)
+	var r = Rect2(ui.get_cursor_screen_pos(), Vector2(side, side))
+	_bevel(ui, r, Color(0.26, 0.28, 0.33, 1.0), pressed)
+	var cw = 7.0 * ui.get_imgui_scale()
+	ui.set_cursor_pos(pos + Vector2((side - cw) * 0.5, (side - 13.0 * ui.get_imgui_scale()) * 0.5))
+	ui.text_colored(NX_TEXT, glyph)
+
+
+func _in_rect(p, pos, side):
+	return p.x >= pos.x and p.x < pos.x + side and p.y >= pos.y and p.y < pos.y + side
+
+
+# Título corto de una línea, centrado, dentro de la parte baja de la tesela.
+# `pos` es la esquina en coords LOCALES de la ventana (set_cursor_pos); el bisel y
+# las líneas de foco usan coords de pantalla.
+func _tile_title(ui, pos, side, label, dim):
+	var max_chars = int(max(1.0, (side - 6.0) / (7.0 * ui.get_imgui_scale())))
+	if label.length() > max_chars:
+		label = label.substr(0, max_chars)
+	var lw = label.length() * 7.0 * ui.get_imgui_scale()
+	ui.set_cursor_pos(pos + Vector2(max(1.0, (side - lw) * 0.5), side - TITLE_H - 1.0))
+	ui.text_colored(NX_TEXT_DIM if dim else NX_TEXT, label)
+
+
 func set_visible(v):
 	visible = v
 	entered = false
@@ -399,7 +496,7 @@ func _is_current(item):
 func item_rect(id):
 	for it in items_layout:
 		if it.id == id:
-			return Rect2(it.x, it.y, it.hit_w, 28.0)
+			return Rect2(it.x, it.y, it.w, it.h)
 	return null
 
 
@@ -510,7 +607,7 @@ func _input(event):
 				shell.request_redraw()
 				get_tree().set_input_as_handled()
 				return
-			if visible and mouse_pos.y <= FRAME_H:
+			if visible and mouse_pos.y <= _vh():
 				shell._focus_dir(-1 if event.button_index == BUTTON_WHEEL_UP else 1)
 				shell.request_redraw()
 				get_tree().set_input_as_handled()
@@ -531,7 +628,7 @@ func _input(event):
 			mouse_down = event.pressed
 			if event.pressed:
 				# Super+arrastre sobre una ventana: la mueve al Frame (reordenar/tilear).
-				if super_press != null and mouse_pos.y > FRAME_H and shell.focused_tile >= 0:
+				if super_press != null and mouse_pos.y > _vh() and shell.focused_tile >= 0:
 					win_drag = {"id": shell.focused_tile}
 					shell.window_dragging = true
 					set_visible(true)
@@ -765,15 +862,15 @@ func _frame_key(code, event):
 	return true
 
 
-# Ítem cuyo rect (incluye los botones de minimizar/cerrar) contiene el punto.
+# Ítem cuyo bloque cuadrado contiene el punto (las mini-teselas de control van dentro).
 func _item_at(pos):
 	for it in items_layout:
-		if pos.x >= it.x and pos.x < it.x + it.hit_w and pos.y >= it.y and pos.y < it.y + 28.0:
+		if pos.x >= it.x and pos.x < it.x + it.w and pos.y >= it.y and pos.y < it.y + it.h:
 			return it
 	return null
 
 
-# Id del applet bajo el punto (rects del último dibujo del borde inferior).
+# Id del applet bajo el punto (rects cuadrados del último dibujo del borde inferior).
 func _applet_at(pos):
 	if not applets_drawn:
 		return null
@@ -805,8 +902,9 @@ func _finish_applet_drag():
 	if id == null:
 		return
 	# Fuera de la franja inferior, cancelar sin alterar la composición.
-	var bottom = get_viewport().size.y - FRAME_H
-	if mouse_pos.y < bottom or mouse_pos.y >= bottom + FRAME_H:
+	var h = _vh()
+	var bottom = get_viewport().size.y - h
+	if mouse_pos.y < bottom or mouse_pos.y >= bottom + h:
 		shell.request_redraw()
 		return
 	var to = _applet_drop_index(mouse_pos.x, id)
@@ -838,7 +936,7 @@ func _finish_win_drag():
 	var dragged = win_drag.id
 	win_drag = null
 	shell.window_dragging = false
-	if mouse_pos.y <= FRAME_H:
+	if mouse_pos.y <= _vh():
 		var t = _frame_insert_target(mouse_pos.x)
 		if t != null:
 			shell._move_window_to(dragged, t.id, t.before)
@@ -872,40 +970,48 @@ func _arrow_dir(code):
 	return 0
 
 
-# Borde inferior retráctil: bloques cuadrados de applets + la celda "+" que abre el
-# selector para fijar/quitar. `off` es el mismo deslizamiento que la barra superior.
+# Borde inferior retráctil: bloques cuadrados U x U de applets + la celda "+" (también
+# U x U) que abre el selector para fijar/quitar. `off` es el mismo deslizamiento de la
+# barra superior; el alto de la barra sale de la rejilla.
 func _draw_applets(ui, vp, off, mouse):
 	applets_layout = []
 	applet_picker_open = false
-	var by = vp.y - FRAME_H - off
+	var side = shell.frame_bar_h(vp)
+	var by = vp.y - side - off
+	ui.push_style_var_vec2(ui.STYLE_VAR_WINDOW_PADDING, Vector2.ZERO)
 	ui.set_next_window_pos(Vector2(0.0, by), true)
-	ui.set_next_window_size(Vector2(vp.x, FRAME_H), true)
-	var flags = ui.WINDOW_NO_DECORATION | ui.WINDOW_NO_MOVE | ui.WINDOW_NO_SAVED_SETTINGS | ui.WINDOW_NO_SCROLLBAR
+	ui.set_next_window_size(Vector2(vp.x, side), true)
+	var flags = ui.WINDOW_NO_DECORATION | ui.WINDOW_NO_MOVE | ui.WINDOW_NO_SAVED_SETTINGS | ui.WINDOW_NO_SCROLLBAR | ui.WINDOW_NO_BACKGROUND
 	if not ui.begin("##frame_bottom", flags):
 		ui.end()
+		ui.pop_style_var()
 		return
+	# Fondo NeXT de la franja inferior, para que los bloques floten sobre lo mismo.
+	ui.imgui_draw_rect_filled(Rect2(Vector2.ZERO, Vector2(vp.x, side)), NX_BG, 0.0)
 	var n = applets_visible.size()
-	var step = APPLET + APPLET_PAD
-	var total_w = n * step + ADD_W + APPLET_PAD
+	var step = side + PAD
+	var total_w = n * step + side + PAD
 	var x = max(PAD, vp.x - PAD - total_w)
-	var y = (FRAME_H - APPLET) * 0.5
+	var y = 0.0
 	var n_items = running().size()
 	for i in range(n):
 		var id = applets_visible[i]
 		var pos = Vector2(x + i * step, y)
 		ui.set_cursor_pos(pos)
 		var o = ui.get_cursor_screen_pos()
-		applets_layout.append({"id": id, "x": o.x, "y": o.y, "w": APPLET})
-		_draw_applet(ui, id, pos, o, visible and (n_items + i) == sel and applet_drag == null, mouse)
+		applets_layout.append({"id": id, "x": o.x, "y": o.y, "w": side})
+		_draw_applet(ui, id, pos, o, side, visible and (n_items + i) == sel and applet_drag == null, mouse)
 	# Celda "+": abre la lista de controles (fijar/quitar), pulsable con mouse o teclado.
 	var add_x = x + n * step
-	ui.set_cursor_pos(Vector2(add_x, y))
-	var add_scr = ui.get_cursor_screen_pos()
-	if ui.button("+##applets_add", Vector2(ADD_W, APPLET)) or applet_picker_want:
+	var add_b = _tile(ui, Vector2(add_x, y), side, "applets_add")
+	var add_scr = add_b.rect.position
+	if add_b.clicked or applet_picker_want:
 		applet_picker_want = false
 		ui.open_popup("##applets_add")
+	ui.set_cursor_pos(Vector2(add_x, y) + Vector2((side - 7.0 * ui.get_imgui_scale()) * 0.5, (side - 13.0 * ui.get_imgui_scale()) * 0.5))
+	ui.text_colored(NX_TEXT, "+")
 	if visible and sel == n_items + n:
-		_draw_outline(ui, Rect2(add_scr, Vector2(ADD_W, APPLET)), Color(1.0, 0.85, 0.35, 0.95))
+		_frame_focus(ui, add_b.rect, NX_SEL)
 	if ui.begin_popup("##applets_add"):
 		applet_picker_open = true
 		ui.text_disabled("Controles del Frame")
@@ -938,46 +1044,47 @@ func _draw_applets(ui, vp, off, mouse):
 	if applet_drag != null:
 		var to = _applet_drop_index(mouse.x, applet_drag)
 		var mx = applets_layout[to].x if to < applets_layout.size() else add_scr.x
-		ui.imgui_draw_rect_filled(Rect2(mx - 1.0, add_scr.y, 2.0, APPLET), Color(1.0, 0.85, 0.35, 0.95), 0.0)
+		ui.imgui_draw_rect_filled(Rect2(mx - 1.0, add_scr.y, 2.0, side), NX_SEL, 0.0)
 	ui.end()
+	ui.pop_style_var()
 	applets_drawn = true
 
 
-# Un applet: relleno y contorno según estado, etiqueta y valor textuales (nunca sólo
-# color) y barra proporcional cuando hay medición. Tooltip con el nombre completo.
-func _draw_applet(ui, id, pos, scr, is_sel, mouse):
+# Un applet: bloque cuadrado U x U con bisel; el estado va por color de la barra/
+# etiqueta además del valor textual (nunca sólo color). Tooltip con el nombre completo.
+func _draw_applet(ui, id, pos, scr, side, is_sel, mouse):
 	var a = _applet_def(id)
 	if a == null:
 		return
 	var state = _applet_state(id)
-	ui.set_cursor_pos(pos)
-	var rect = Rect2(scr, Vector2(APPLET, APPLET))
-	var fill = Color(1, 1, 1, 0.10)
-	var line = Color(1, 1, 1, 0.22)
-	if state == "activo":
-		fill = Color(0.35, 0.75, 1.0, 0.26)
-		line = Color(0.55, 0.85, 1.0, 0.9)
-	elif state == "apagado":
-		fill = Color(1, 1, 1, 0.05)
-	elif state == "sin_dato":
-		fill = Color(1, 1, 1, 0.03)
-		line = Color(1, 1, 1, 0.28)
-	elif state == "cambiando":
-		line = Color(1.0, 0.85, 0.35, 0.95)
-	elif state == "error" or state == "no_disponible":
-		line = Color(0.95, 0.55, 0.3, 0.9)
+	var b = _tile(ui, pos, side, "app_" + id)
+	var rect = b.rect
 	if is_sel:
-		line = Color(1.0, 0.85, 0.35, 0.95)
-	ui.imgui_draw_rect_filled(rect, fill, 3.0)
-	_draw_outline(ui, rect, line)
+		_frame_focus(ui, rect, NX_SEL)
+	var line = NX_LIGHT
+	if state == "activo":
+		line = Color(0.45, 0.80, 1.0, 1.0)
+	elif state == "apagado" or state == "sin_dato":
+		line = NX_TEXT_DIM
+	elif state == "cambiando":
+		line = NX_SEL
+	elif state == "error" or state == "no_disponible":
+		line = Color(0.95, 0.55, 0.30, 1.0)
+	# Glifo cuadrado (64 px) hundido: placa oscura con el rótulo corto y el valor.
+	var g = min(ICON_MIN, side - 2.0 * BEVEL - 6.0)
+	var gp_scr = scr + Vector2((side - g) * 0.5, BEVEL + 3.0)
+	var gp_loc = pos + Vector2((side - g) * 0.5, BEVEL + 3.0)
+	ui.imgui_draw_rect_filled(Rect2(gp_scr, Vector2(g, g)), Color(0.10, 0.11, 0.14, 1.0), 0.0)
+	ui.set_cursor_pos(gp_loc + Vector2(4.0, 3.0))
+	ui.text_colored(NX_TEXT_DIM, a.short)
+	var v = _applet_value(id)
+	var vw = v.length() * 7.0 * ui.get_imgui_scale()
+	ui.set_cursor_pos(gp_loc + Vector2(max(3.0, (g - vw) * 0.5), g * 0.45))
+	ui.text_colored(NX_TEXT, v)
 	var pct = _applet_pct(id)
 	if pct >= 0.0:
-		var b = Rect2(rect.position + Vector2(3.0, rect.size.y - 5.0), Vector2((rect.size.x - 6.0) * pct, 3.0))
-		ui.imgui_draw_rect_filled(b, Color(0.35, 0.8, 1.0, 0.9), 1.0)
-	ui.set_cursor_pos(pos + Vector2(4.0, 3.0))
-	ui.text_disabled(a.short)
-	ui.set_cursor_pos(pos + Vector2(4.0, 22.0))
-	ui.text(_applet_value(id))
+		var bw = (side - 8.0) * clamp(pct, 0.0, 1.0)
+		ui.imgui_draw_rect_filled(Rect2(rect.position + Vector2(4.0, side - 6.0), Vector2(bw, 3.0)), line, 0.0)
 	if mouse.x >= rect.position.x and mouse.x < rect.end.x and mouse.y >= rect.position.y and mouse.y < rect.end.y:
 		ui.begin_tooltip()
 		ui.text(a.name)
@@ -1003,25 +1110,90 @@ func _user_name():
 	return user
 
 
-func _identity_width(ui):
-	return ID_BADGE_ICON + ID_BADGE_GAP + float(_user_name().length()) * 7.0 * ui.get_imgui_scale()
-
-
-# Insignia fija de identidad en la barra superior: placa tenue, figura XO cacheada
-# (rasterizada por el shell, ver identity_tex) y nombre de usuario. Sin acción por ahora.
-func _draw_identity(ui, x, y):
-	var user = _user_name()
-	var w = _identity_width(ui)
-	# Placa tenue: se dibuja en coords de pantalla (como los applets), así sigue
-	# al Frame mientras desliza.
-	ui.set_cursor_pos(Vector2(x - ID_BADGE_PAD, y - 2.0))
-	ui.imgui_draw_rect_filled(Rect2(ui.get_cursor_screen_pos(), Vector2(w + ID_BADGE_PAD * 2.0, 32.0)), Color(1, 1, 1, 0.07), 6.0)
+# Insignia de identidad en la barra superior: bloque cuadrado U x U con bisel y la
+# figura XO (rasterizada por el shell, ver identity_tex) centrada. El nombre de usuario
+# va en el tooltip (no cabe en la tesela cuadrada). Sin acción por ahora.
+func _draw_identity(ui, x, y, side, mouse):
+	var local = Vector2(x, y)
+	ui.set_cursor_pos(local)
+	var r = Rect2(ui.get_cursor_screen_pos(), Vector2(side, side))
+	_bevel(ui, r, NX_FACE, false)
 	var icon = shell.identity_tex()
 	if icon != null:
-		ui.set_cursor_pos(Vector2(x, y + (28.0 - ID_BADGE_ICON) * 0.5))
-		ui.image(icon, Vector2(ID_BADGE_ICON, ID_BADGE_ICON))
-	ui.set_cursor_pos(Vector2(x + ID_BADGE_ICON + ID_BADGE_GAP, y + 7.0))
-	ui.text_colored(Color(0.90, 0.91, 0.94, 1.0), user)
+		var s = clamp(side - 2.0 * BEVEL - 8.0, ICON_MIN, ICON_MAX)
+		ui.set_cursor_pos(local + Vector2((side - s) * 0.5, (side - s) * 0.5))
+		ui.image(icon, Vector2(s, s))
+	if mouse.x >= r.position.x and mouse.x < r.end.x and mouse.y >= r.position.y and mouse.y < r.end.y:
+		ui.begin_tooltip()
+		ui.text(_user_name())
+		ui.end_tooltip()
+
+
+# Bloque Inicio: tesela cuadrada con el ícono Sugar de hogar y el título corto abajo.
+func _draw_home_tile(ui, pos, side):
+	var b = _tile(ui, pos, side, "go_home")
+	var title_h = TITLE_H if side >= 76.0 else 0.0
+	var s = clamp(side - title_h - 2.0 * BEVEL - 4.0, ICON_MIN, ICON_MAX)
+	var icon = shell.home_icon_tex()
+	if icon != null:
+		ui.set_cursor_pos(pos + Vector2((side - s) * 0.5, BEVEL + max(2.0, (side - title_h - s) * 0.5)))
+		ui.image(icon, Vector2(s, s))
+	else:
+		ui.set_cursor_pos(pos + Vector2((side - 7.0 * ui.get_imgui_scale()) * 0.5, (side - 13.0 * ui.get_imgui_scale()) * 0.5))
+		ui.text_colored(NX_TEXT, "H")
+	if title_h > 0.0:
+		_tile_title(ui, pos, side, "Inicio", false)
+	return b.clicked
+
+
+# Bloque de ventana: tesela cuadrada con ícono centrado, título corto de una línea y
+# las mini-teselas de minimizar (arriba-izq) y cerrar (arriba-der). Estado por color
+# de cara (foco/actual, destino, selección, minimizada) sin depender del texto.
+# `pos` es local; el bisel/foco usan el rect en pantalla que devuelve _tile.
+func _draw_window_tile(ui, pos, side, item, current, is_sel, is_drop, mouse):
+	var face = NX_FACE
+	if current:
+		face = NX_CUR
+	elif is_drop:
+		face = NX_SEL
+	elif is_sel:
+		face = NX_FACE_SEL
+	elif item.minimized:
+		face = NX_FACE_DIM
+	var b = _tile(ui, pos, side, "w" + item.key, face)
+	if current:
+		_frame_focus(ui, b.rect, NX_FOCUS)
+	var title_h = TITLE_H if side >= 76.0 else 0.0
+	var s = clamp(side - title_h - 2.0 * BEVEL - 4.0, ICON_MIN, ICON_MAX)
+	var tex = _item_icon(item)
+	var iy = BEVEL + max(2.0, (side - title_h - s) * 0.5)
+	if tex != null:
+		ui.set_cursor_pos(pos + Vector2((side - s) * 0.5, iy))
+		ui.image(tex, Vector2(s, s))
+	else:
+		var mono = item.name.substr(0, 1).to_upper() if item.name != "" else "?"
+		ui.set_cursor_pos(pos + Vector2((side - 7.0 * ui.get_imgui_scale()) * 0.5, iy + s * 0.28))
+		ui.text_colored(NX_TEXT, mono)
+	if title_h > 0.0:
+		# El número de pantalla compartido va como prefijo del título corto.
+		var label = item.title
+		if item.screen > 0:
+			label = str(item.screen) + " " + label
+		_tile_title(ui, pos, side, label, item.minimized)
+	# Mini-teselas de control dentro del bloque; hit manual, encima del cuadrado.
+	var ctrl = max(16.0, side * 0.28)
+	var off = b.rect.position - pos
+	var min_loc = pos + Vector2(BEVEL + 1.0, BEVEL + 1.0)
+	var close_loc = pos + Vector2(side - ctrl - BEVEL - 1.0, BEVEL + 1.0)
+	var over_min = _in_rect(mouse, min_loc + off, ctrl)
+	var over_close = _in_rect(mouse, close_loc + off, ctrl)
+	_draw_mini(ui, min_loc, ctrl, "-", over_min and mouse_down)
+	_draw_mini(ui, close_loc, ctrl, "x", over_close and mouse_down)
+	if b.clicked and over_close:
+		return {"clicked": false, "minimize": false, "close": true}
+	if b.clicked and over_min:
+		return {"clicked": false, "minimize": true, "close": false}
+	return {"clicked": b.clicked, "minimize": false, "close": false}
 
 
 # Llamado en cada imgui_frame del shell, después de la vista.
@@ -1041,6 +1213,10 @@ func draw(ui):
 	var mouse = ui.get_mouse_pos()
 	var now = OS.get_ticks_msec()
 	var vp = ui.get_viewport_rect().size
+	var bh = shell.frame_bar_h(vp)
+	# Los applets y las ventanas se dibujan con su ícono; permitir la carga perezosa
+	# de a dos por frame, igual que el Hogar.
+	shell.home_icon_loads = max(shell.home_icon_loads, 2)
 	# MousePos es -FLT_MAX hasta el primer movimiento: eso no es la esquina.
 	var hot = mouse.y >= 0.0 and (mouse.y <= EDGE or mouse.y >= vp.y - EDGE or (mouse.x >= 0.0 and mouse.x <= CORNER and mouse.y <= CORNER))
 	if hot:
@@ -1060,9 +1236,9 @@ func draw(ui):
 		corner_since = 0
 	if visible and not home:
 		# La barra inferior cuenta como parte del Frame: el mouse ahí no lo auto-oculta.
-		if mouse.y <= FRAME_H or mouse.y >= vp.y - FRAME_H:
+		if mouse.y <= bh or mouse.y >= vp.y - bh:
 			entered = true
-		elif entered and mouse.y > FRAME_H + 16.0 and mouse.y < vp.y - FRAME_H \
+		elif entered and mouse.y > bh + 16.0 and mouse.y < vp.y - bh \
 				and dragging == null and lifted == null and win_drag == null \
 				and applet_drag == null and applet_press == null and now > show_until:
 			set_visible(false)
@@ -1073,30 +1249,33 @@ func draw(ui):
 
 	items_layout = []
 	var off = _slide(visible or home, now)
-	drawn = off > -FRAME_H
+	drawn = off > -bh
 	if not drawn:
 		applets_layout = []
 		applets_drawn = false
 		return
 
+	# Teselas cuadradas de lado U (alto de la barra).
+	var side = bh
+	ui.push_style_var_vec2(ui.STYLE_VAR_WINDOW_PADDING, Vector2.ZERO)
 	ui.set_next_window_pos(Vector2(0.0, off), true)
-	ui.set_next_window_size(Vector2(vp.x, FRAME_H), true)
-	var flags = ui.WINDOW_NO_DECORATION | ui.WINDOW_NO_MOVE | ui.WINDOW_NO_SAVED_SETTINGS | ui.WINDOW_NO_SCROLLBAR
+	ui.set_next_window_size(Vector2(vp.x, bh), true)
+	var flags = ui.WINDOW_NO_DECORATION | ui.WINDOW_NO_MOVE | ui.WINDOW_NO_SAVED_SETTINGS | ui.WINDOW_NO_SCROLLBAR | ui.WINDOW_NO_BACKGROUND
 	var chosen = null
 	var to_close = null
 	var to_minimize = null
 	if ui.begin("##frame", flags):
-		var y = 10.0
-		ui.set_cursor_pos(Vector2(PAD, y))
-		if ui.button("Inicio", Vector2(90, 28)):
+		# Fondo NeXT de la franja superior.
+		ui.imgui_draw_rect_filled(Rect2(Vector2.ZERO, Vector2(vp.x, bh)), NX_BG, 0.0)
+		var y = (bh - side) * 0.5
+		var x = PAD
+		if _draw_home_tile(ui, Vector2(x, y), side):
 			set_visible(false)
 			shell._go_home()
-
-		# Insignia de identidad: figura XO + usuario, a la derecha de Inicio. Por ahora
-		# no tiene acción (no captura input: sólo se dibuja).
-		var badge_x = PAD + 90.0 + PAD
-		_draw_identity(ui, badge_x, y)
-		var badge_w = _identity_width(ui)
+		x += side + PAD
+		# Insignia de identidad: bloque cuadrado con la figura XO. Sin acción.
+		_draw_identity(ui, x, y, side, mouse)
+		x += side + PAD
 
 		var items = running()
 		# La selección recorre las ventanas y después los applets (y la celda "+").
@@ -1117,53 +1296,23 @@ func draw(ui):
 		elif lifted != null:
 			drop_id = lifted.id
 
-		var x = badge_x + badge_w + PAD * 2.0
-		var w = ITEM_W
-		if items.size() > 0:
-			# ponytail: se achican para caber; con muchísimas no hay scroll.
-			w = clamp((vp.x - PAD - x) / items.size() - CLOSE_W - MIN_W - PAD, 40.0, ITEM_W)
 		var index = 0
 		for item in items:
 			var current = _is_current(item)
-			var label = item.title
-			# Número de pantalla compartido por las ventanas de una misma franja: las
-			# minimizadas y las internas (screen 0) no lo llevan. No toca `title`.
-			if item.screen > 0:
-				label = str(item.screen) + " " + label
-			var max_chars = int(w / 8.0)
-			if label.length() > max_chars:
-				label = label.substr(0, max_chars - 2) + ".."
 			var is_sel = visible and index == sel and dragging == null
 			var is_drop = (item.id >= 0 and item.id == drop_id)
-			ui.set_cursor_pos(Vector2(x, y))
-			if current:
-				ui.push_style_color(ui.COL_BUTTON, Color(0.26, 0.59, 0.98, 0.9))
-			elif is_drop:
-				ui.push_style_color(ui.COL_BUTTON, Color(0.98, 0.65, 0.20, 0.95))
-			elif is_sel:
-				ui.push_style_color(ui.COL_BUTTON, Color(0.45, 0.45, 0.50, 0.95))
-			elif item.minimized or (item.id >= 0 and item.screen == 0):
-				ui.push_style_color(ui.COL_TEXT, Color(0.6, 0.6, 0.6, 1.0))
-			if ui.button(label + "##" + item.key, Vector2(w, 28)):
-				chosen = item
-			if current or is_drop or is_sel or item.minimized or (item.id >= 0 and item.screen == 0):
-				ui.pop_style_color()
-			var min_x = x + w + 2.0
-			var close_x = min_x + MIN_W
-			ui.set_cursor_pos(Vector2(min_x, y))
-			if ui.button("-##m" + item.key, Vector2(MIN_W - 2.0, 28)):
-				to_minimize = item
-			ui.set_cursor_pos(Vector2(close_x, y))
-			if ui.button("x##c" + item.key, Vector2(CLOSE_W - 4.0, 28)):
+			var res = _draw_window_tile(ui, Vector2(x, y), side, item, current, is_sel, is_drop, mouse)
+			if res.close:
 				to_close = item
+			elif res.minimize:
+				to_minimize = item
+			elif res.clicked:
+				chosen = item
 			items_layout.append({"title": item.title, "id": item.id, "current": current,
 				"minimized": item.minimized, "screen": item.screen, "x": x, "y": y + off,
-				"w": w, "min_x": min_x, "close_x": close_x,
-				"hit_w": w + MIN_W + CLOSE_W - 2.0})
-			x += w + MIN_W + CLOSE_W + PAD
+				"w": side, "h": side, "min_x": x, "close_x": x + side, "hit_w": side})
+			x += side + PAD
 			index += 1
-
-		# El reloj y CPU/MEM/SWP viven como applets en el borde inferior.
 
 		# Chip flotante mientras se arrastra, se levanta o se mueve una ventana con Super.
 		var ghost = dragging if dragging != null else lifted
@@ -1178,11 +1327,14 @@ func draw(ui):
 			ui.text(ghost_title)
 			ui.end_tooltip()
 	ui.end()
+	ui.pop_style_var()
 
 	_draw_applets(ui, vp, off, mouse)
 
-	if chosen != null:
-		switch_to(chosen)
+	# Cerrar/minimizar tienen prioridad sobre cambiar: las mini-teselas van encima
+	# del bloque cuadrado y pueden compartir el clic en las esquinas.
+	if to_close != null:
+		close(to_close)
 	elif to_minimize != null:
 		if to_minimize.id >= 0:
 			if to_minimize.minimized:
@@ -1190,8 +1342,8 @@ func draw(ui):
 			else:
 				shell._minimize_window(to_minimize.id)
 			shell.request_redraw()
-	elif to_close != null:
-		close(to_close)
+	elif chosen != null:
+		switch_to(chosen)
 
 
 func _hot_wake():
@@ -1199,9 +1351,10 @@ func _hot_wake():
 	shell.request_redraw()
 
 
-# Desplazamiento vertical del Frame: 0 quieto a la vista, -FRAME_H fuera. Mientras
+# Desplazamiento vertical del Frame: 0 quieto a la vista, -barra fuera. Mientras
 # desliza pide frames y mantiene despierto el loop; al terminar deja de pedirlos.
 func _slide(want, now):
+	var bh = _vh()
 	if want and slide_instant:
 		slide_instant = false
 		shown = true
@@ -1219,7 +1372,7 @@ func _slide(want, now):
 	var p = 1.0 - pow(1.0 - k, 3.0)
 	if not shown:
 		p = 1.0 - p
-	return -FRAME_H * (1.0 - p)
+	return -bh * (1.0 - p)
 
 
 # Cambio de vista (Home <-> app, anillo <-> grilla, entre apps): fundido de FADE_MS
