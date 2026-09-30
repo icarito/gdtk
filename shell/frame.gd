@@ -117,8 +117,17 @@ var applet_from = Vector2.ZERO
 var app_press = null
 var app_drag = null
 var app_from = Vector2.ZERO
+var app_grab = Vector2.ZERO    # offset del punto de agarre dentro de la tesela de app
 var pinned_layout = []
+var pinned_prev = []           # layout de pines del frame anterior (para el drop)
 var suppress_pinned_click = ""
+# Animación de las barras (reacomodo al arrastrar): id -> {from, to, x, since}.
+# Mismo lenguaje de ease-out que el reacomodo del anillo (ver shell._ease_out).
+var bar_anim = {}
+var applet_grab = Vector2.ZERO
+# Basurero del Frame: bloque en la esquina superior derecha, visible sólo con un
+# drag activo. `trash_layout` es su rect en pantalla del último dibujo.
+var trash_layout = null
 
 
 func _ready():
@@ -276,36 +285,120 @@ func _pin_app(app, zone, x):
 	pinned_top.erase(app.id)
 	pinned_dock.erase(app.id)
 	var target = pinned_top if zone == "top" else pinned_dock
-	var index = 0
-	for tile in pinned_layout:
-		if tile.zone == zone and tile.app.id != app.id and tile.rect.position.x + tile.rect.size.x * 0.5 < x:
-			index += 1
+	var index = int(clamp(_pin_slot(zone, x), 0, target.size()))
 	target.insert(index, app.id)
 	_save_applets()
 	shell.request_redraw()
 
 
-func _pinned_at(pos):
+# Índice de inserción en la zona: cuántos pines (del frame anterior, sin el arrastrado)
+# tienen su centro a la izquierda de x. Es el mismo cálculo para preview y drop.
+func _pin_slot(zone, x):
+	var index = 0
+	for tile in pinned_prev:
+		if tile.zone != zone:
+			continue
+		if app_drag != null and tile.app.id == app_drag.id:
+			continue
+		if tile.rect.position.x + tile.rect.size.x * 0.5 < x:
+			index += 1
+	return index
+
+
+func _pinned_hit(pos):
 	for tile in pinned_layout:
 		if tile.rect.has_point(pos):
-			return tile.app
+			return tile
 	return null
 
 
+# Inserta `dragged` en `slot` de la lista sin él. Si no estaba, sólo se inserta.
+func _order_with_gap(ids, dragged, slot):
+	var rest = []
+	for i in ids:
+		if i != dragged:
+			rest.append(i)
+	slot = int(clamp(slot, 0, rest.size()))
+	rest.insert(slot, dragged)
+	return rest
+
+
+# Posición x animada de una tesela de barra (pines/applets). Retarget con ease-out;
+# pide frames mientras dura. `_bar_set` fija el punto de partida (asentado tras soltar).
+func _bar_x(id, target, now):
+	var a = bar_anim.get(id)
+	if a == null:
+		bar_anim[id] = {"from": target, "to": target, "x": target, "since": now}
+		return target
+	if abs(a.to - target) > 0.5:
+		a["from"] = a.x
+		a["to"] = target
+		a["since"] = now
+	var k = clamp(float(now - a.since) / float(shell.LAYOUT_MS), 0.0, 1.0)
+	a["x"] = lerp(a.from, a.to, shell._ease_out(k))
+	if k < 1.0:
+		shell.request_redraw()
+		shell.last_activity = now
+	return a["x"]
+
+
+func _bar_set(id, x):
+	var now = OS.get_ticks_msec()
+	bar_anim[id] = {"from": x, "to": x, "x": x, "since": now}
+	shell.request_redraw()
+	shell.last_activity = now
+
+
+func _zone_at(pos):
+	var bh = _vh()
+	if pos.y <= bh:
+		return "top"
+	if pos.y >= get_viewport().size.y - bh:
+		return "dock"
+	return ""
+
+
+func _drag_active():
+	return app_drag != null or applet_drag != null or dragging != null or win_drag != null \
+		or (shell != null and shell.ring_drag != null)
+
+
+# Rect en pantalla del basurero (null cuando no se dibuja: sin drag activo).
+func trash_rect():
+	return trash_layout
+
+
+func is_trash(pos):
+	return trash_layout != null and trash_layout.has_point(pos)
+
+
 func _draw_pinned(ui, ids, x, side, zone):
-	for id in ids:
+	var now = OS.get_ticks_msec()
+	var step = side + PAD
+	var dragged = app_drag.id if app_drag != null else null
+	# Preview: con un app arrastrado en esta zona, el resto se corre dejando el hueco.
+	var order = ids
+	if dragged != null and _zone_at(mouse_pos) == zone:
+		order = _order_with_gap(ids, dragged, _pin_slot(zone, mouse_pos.x))
+	for k in range(order.size()):
+		var id = order[k]
+		var shown = _bar_x("pin_" + id, x + k * step, now)
+		if id == dragged:
+			# Hueco del destino resaltado (el fantasma va pegado al cursor).
+			ui.set_cursor_pos(Vector2(shown, 0.0))
+			ui.imgui_draw_rect_filled(Rect2(ui.get_cursor_screen_pos(), Vector2(side, side)), Color(1, 1, 1, 0.06), 0.0)
+			ui.imgui_draw_rect_filled(Rect2(ui.get_cursor_screen_pos() + Vector2(0.0, side - 3.0), Vector2(side, 3.0)), NX_SEL, 0.0)
+			continue
 		var app = _pinned_app(id)
 		if app == null:
 			continue
-		var pos = Vector2(x, 0.0)
-		var tile = _draw_app_tile(ui, app, pos, side, "pin_" + zone + id, app_drag != null and app_drag.id == id)
+		var tile = _draw_app_tile(ui, app, Vector2(shown, 0.0), side, "pin_" + zone + id, false)
 		pinned_layout.append({"app": app, "rect": tile.rect, "zone": zone})
 		if app_drag == null and tile.rect.has_point(mouse_pos):
-			ui.set_tooltip(app.name + " · arrastrar para mover")
+			ui.set_tooltip(app.name + " · arrastrar para mover o al anillo")
 		if tile.clicked and suppress_pinned_click != id:
 			shell._launch_app(app)
-		x += side + PAD
-	return x
+	return x + order.size() * step
 
 
 func _draw_app_tile(ui, app, pos, side, id, empty = false):
@@ -647,11 +740,12 @@ func _input(event):
 		if event.button_index == BUTTON_LEFT:
 			mouse_down = event.pressed
 			if event.pressed:
-				var hit_app = _pinned_at(mouse_pos)
-				if hit_app == null and shell.apps_view:
-					hit_app = shell.apps.at(mouse_pos)
-				if hit_app != null:
-					app_press = hit_app
+				var hit_tile = _pinned_hit(mouse_pos)
+				if hit_tile == null and shell.apps_view:
+					hit_tile = shell.apps.at_tile(mouse_pos)
+				if hit_tile != null:
+					app_press = hit_tile.app
+					app_grab = mouse_pos - hit_tile.rect.position
 					app_from = mouse_pos
 					app_drag = null
 				# Super+arrastre sobre una ventana: la mueve al Frame (reordenar/tilear).
@@ -665,6 +759,8 @@ func _input(event):
 				var hit_applet = _applet_at(mouse_pos)
 				if hit_applet != null and not applet_picker_open:
 					applet_press = hit_applet
+					var ah = _applet_hit(mouse_pos)
+					applet_grab = mouse_pos - Vector2(ah.x, ah.y) if ah != null else Vector2(_vh() * 0.5, _vh() * 0.5)
 					applet_from = mouse_pos
 					applet_drag = null
 					var at = applets_visible.find(hit_applet)
@@ -678,13 +774,25 @@ func _input(event):
 				dragging = null
 			else:
 				if app_drag != null:
-					var zone = "top" if mouse_pos.y <= _vh() else "dock" if mouse_pos.y >= get_viewport().size.y - _vh() else ""
-					if zone != "":
-						_pin_app(app_drag, zone, mouse_pos.x)
-					elif pinned_top.has(app_drag.id) or pinned_dock.has(app_drag.id):
+					if is_trash(mouse_pos):
+						# Basurero: desfija la app (no la desinstala).
 						pinned_top.erase(app_drag.id)
 						pinned_dock.erase(app_drag.id)
 						_save_applets()
+					elif shell.is_ring_drop(mouse_pos):
+						# Frame -> Anillo: crea un favorito.
+						shell.add_ring_favorite(app_drag.id)
+					else:
+						var zone = "top" if mouse_pos.y <= _vh() else "dock" if mouse_pos.y >= get_viewport().size.y - _vh() else ""
+						if zone != "":
+							_pin_app(app_drag, zone, mouse_pos.x)
+						elif pinned_top.has(app_drag.id) or pinned_dock.has(app_drag.id):
+							pinned_top.erase(app_drag.id)
+							pinned_dock.erase(app_drag.id)
+							_save_applets()
+						# El bloque se asienta: parte de la posición del cursor.
+						if zone != "":
+							_bar_set("pin_" + app_drag.id, mouse_pos.x)
 					shell.apps.suppress_click = app_drag.id
 					suppress_pinned_click = app_drag.id
 				app_drag = null
@@ -931,32 +1039,45 @@ func _item_at(pos):
 func _applet_at(pos):
 	if not applets_drawn:
 		return null
+	var it = _applet_hit(pos)
+	return it.id if it != null else null
+
+
+func _applet_hit(pos):
+	if not applets_drawn:
+		return null
 	for it in applets_layout:
 		if pos.x >= it.x and pos.x < it.x + it.w and pos.y >= it.y and pos.y < it.y + it.w:
-			return it.id
+			return it
 	return null
 
 
-# Índice de destino al soltar un applet arrastrado, según la x del mouse: la primera
-# celda cuyo centro queda a la derecha, o el final.
-func _applet_drop_index(x, dragged):
-	var n = applets_layout.size()
-	var idx = n
-	for i in range(n):
-		var it = applets_layout[i]
-		if it.id == dragged:
+# Índice de inserción entre applets: cuántos (del dibujo anterior, sin el arrastrado)
+# tienen su centro a la izquierda de x. Mismo cálculo para el preview y para soltar.
+func _applet_slot(x, layout = null):
+	var L = layout if layout != null else applets_layout
+	var idx = 0
+	for it in L:
+		if applet_drag != null and it.id == applet_drag:
 			continue
-		if x < it.x + it.w * 0.5:
-			idx = i
-			break
+		if it.x + it.w * 0.5 < x:
+			idx += 1
 	return idx
 
 
 func _finish_applet_drag():
 	var id = applet_drag
+	if id == null:
+		return
+	# El slot se calcula con applet_drag aún puesto (así _applet_slot salta su tesela).
+	var slot = _applet_slot(mouse_pos.x)
 	applet_drag = null
 	applet_press = null
-	if id == null:
+	# Basurero: quitar el control (equivale a Delete en el Frame).
+	if is_trash(mouse_pos):
+		_applet_set_visible(id, false)
+		_bar_set("app_" + id, mouse_pos.x)
+		shell.request_redraw()
 		return
 	# Fuera de la franja inferior, cancelar sin alterar la composición.
 	var h = _vh()
@@ -964,21 +1085,21 @@ func _finish_applet_drag():
 	if mouse_pos.y < bottom or mouse_pos.y >= bottom + h:
 		shell.request_redraw()
 		return
-	var to = _applet_drop_index(mouse_pos.x, id)
-	var from = applets_visible.find(id)
-	if from >= 0:
-		applets_visible.remove(from)
-		if to > from:
-			to -= 1
-		to = int(clamp(to, 0, applets_visible.size()))
-		applets_visible.insert(to, id)
-		applets_dirty = true
-		_save_applets()
+	# El bloque se asienta en su lugar: parte de la posición del cursor y anima al slot.
+	_bar_set("app_" + id, mouse_pos.x)
+	applets_visible = _order_with_gap(applets_visible, id, slot)
+	applets_dirty = true
+	_save_applets()
 	shell.request_redraw()
 
 
 # Suelta del arrastre: sobre otra ventana tilea; fuera, la vuelve a pantalla completa.
+# Sobre el basurero, cierra la ventana (equivale a la X del bloque).
 func _finish_drag():
+	if is_trash(mouse_pos):
+		close(dragging)
+		shell.request_redraw()
+		return
 	var target = _item_at(mouse_pos)
 	if target != null and target.id >= 0 and not target.minimized and target.id != dragging.id:
 		shell._tile_drop(dragging.id, target.id)
@@ -988,16 +1109,27 @@ func _finish_drag():
 
 
 # Super+arrastre: si se suelta sobre la barra del Frame, mueve la ventana a ese lugar
-# (reordena la franja); si no, cancela.
+# (reordena la franja); sobre el basurero la cierra; si no, cancela.
 func _finish_win_drag():
 	var dragged = win_drag.id
 	win_drag = null
 	shell.window_dragging = false
-	if mouse_pos.y <= _vh():
+	if is_trash(mouse_pos):
+		var item = _item_by_id(dragged)
+		if item != null:
+			close(item)
+	elif mouse_pos.y <= _vh():
 		var t = _frame_insert_target(mouse_pos.x)
 		if t != null:
 			shell._move_window_to(dragged, t.id, t.before)
 	shell.request_redraw()
+
+
+func _item_by_id(id):
+	for it in running():
+		if it.id == id:
+			return it
+	return null
 
 
 # Ítem del Frame bajo una x (coords de pantalla): dónde insertar al soltar, y si va
@@ -1031,6 +1163,7 @@ func _arrow_dir(code):
 # U x U) que abre el selector para fijar/quitar. `off` es el mismo deslizamiento de la
 # barra superior; el alto de la barra sale de la rejilla.
 func _draw_applets(ui, vp, off, mouse):
+	var prev = applets_layout
 	applets_layout = []
 	applet_picker_open = false
 	var side = shell.frame_bar_h(vp)
@@ -1054,12 +1187,19 @@ func _draw_applets(ui, vp, off, mouse):
 	var x = max(PAD, vp.x - PAD - total_w)
 	var y = 0.0
 	var n_items = running().size()
+	var now = OS.get_ticks_msec()
+	# Preview: con un applet arrastrado, el resto se corre dejando el hueco del destino.
+	var order = applets_visible
+	if applet_drag != null:
+		order = _order_with_gap(applets_visible, applet_drag, _applet_slot(mouse.x, prev))
 	for i in range(n):
-		var id = applets_visible[i]
-		var pos = Vector2(x + i * step, y)
+		var id = order[i]
+		var pos = Vector2(_bar_x("app_" + id, x + i * step, now), y)
 		ui.set_cursor_pos(pos)
 		var o = ui.get_cursor_screen_pos()
 		applets_layout.append({"id": id, "x": o.x, "y": o.y, "w": side})
+		if id == applet_drag:
+			continue
 		_draw_applet(ui, id, pos, o, side, visible and (n_items + i) == sel and applet_drag == null, mouse)
 	# Celda "+": abre la lista de controles (fijar/quitar), pulsable con mouse o teclado.
 	var add_x = x + n * step
@@ -1090,11 +1230,14 @@ func _draw_applets(ui, vp, off, mouse):
 				shell.request_redraw()
 		ui.text_disabled(keyboard.detail)
 		ui.end_popup()
-	# Marca vertical del destino mientras se arrastra un applet (Esc cancela).
+	# Hueco del applet arrastrado, resaltado (Esc cancela; el fantasma va al cursor).
 	if applet_drag != null:
-		var to = _applet_drop_index(mouse.x, applet_drag)
-		var mx = applets_layout[to].x if to < applets_layout.size() else add_scr.x
-		ui.imgui_draw_rect_filled(Rect2(mx - 1.0, add_scr.y, 2.0, side), NX_SEL, 0.0)
+		var gi = order.find(applet_drag)
+		if gi >= 0:
+			ui.set_cursor_pos(Vector2(x + gi * step, y))
+			var gscr = ui.get_cursor_screen_pos()
+			ui.imgui_draw_rect_filled(Rect2(gscr, Vector2(side, side)), Color(1, 1, 1, 0.06), 0.0)
+			ui.imgui_draw_rect_filled(Rect2(gscr + Vector2(0.0, side - 3.0), Vector2(side, 3.0)), NX_SEL, 0.0)
 	ui.end()
 	ui.pop_style_var()
 	applets_drawn = true
@@ -1318,6 +1461,7 @@ func draw(ui):
 		items_layout = []
 		applets_layout = []
 		applets_drawn = false
+		trash_layout = null
 		return
 	var home = shell.current_activity == null
 	var mouse = ui.get_mouse_pos()
@@ -1359,12 +1503,16 @@ func draw(ui):
 			show_until = 0
 
 	items_layout = []
+	# Guarda el layout de pines anterior para calcular el destino del arrastre
+	# (el de este frame se rearma durante el dibujo).
+	pinned_prev = pinned_layout.duplicate()
 	pinned_layout = []
 	var off = _slide(visible or home, now)
 	drawn = off > -bh
 	if not drawn:
 		applets_layout = []
 		applets_drawn = false
+		trash_layout = null
 		return
 
 	# Teselas cuadradas de lado U (alto de la barra).
@@ -1445,6 +1593,16 @@ func draw(ui):
 			ui.begin_tooltip()
 			ui.text(ghost_title)
 			ui.end_tooltip()
+		# Basurero: esquina superior derecha de la barra, visible SÓLO mientras hay
+		# un drag activo (app, applet, ventana o anillo). Es zona de soltado.
+		trash_layout = null
+		if _drag_active():
+			ui.set_cursor_pos(Vector2(vp.x - side - PAD, y))
+			var tr = Rect2(ui.get_cursor_screen_pos(), Vector2(side, side))
+			trash_layout = tr
+			var hot_trash = tr.has_point(mouse_pos)
+			_bevel(ui, tr, Color(0.34, 0.20, 0.22, 1.0) if hot_trash else NX_FACE, false)
+			_draw_trash_glyph(ui, tr, Color(0.98, 0.52, 0.46, 1.0) if hot_trash else NX_TEXT)
 	ui.end()
 	ui.pop_style_var()
 
@@ -1467,13 +1625,32 @@ func draw(ui):
 	suppress_pinned_click = ""
 
 
+# Glifo de basurero dibujado a mano (tapa, asa, cuerpo y costillas); reconocible
+# sin depender de un SVG del tema.
+func _draw_trash_glyph(ui, r, col):
+	var x = r.position.x
+	var y = r.position.y
+	var w = r.size.x
+	ui.imgui_draw_rect_filled(Rect2(Vector2(x + w * 0.22, y + w * 0.28), Vector2(w * 0.56, w * 0.06)), col, 0.0)
+	ui.imgui_draw_rect_filled(Rect2(Vector2(x + w * 0.40, y + w * 0.21), Vector2(w * 0.20, w * 0.05)), col, 0.0)
+	ui.imgui_draw_polyline(PoolVector2Array([
+		Vector2(x + w * 0.28, y + w * 0.36),
+		Vector2(x + w * 0.32, y + w * 0.76),
+		Vector2(x + w * 0.68, y + w * 0.76),
+		Vector2(x + w * 0.72, y + w * 0.36)]), col, 2.0, false)
+	ui.imgui_draw_polyline(PoolVector2Array([Vector2(x + w * 0.42, y + w * 0.42), Vector2(x + w * 0.44, y + w * 0.70)]), col, 1.0, false)
+	ui.imgui_draw_polyline(PoolVector2Array([Vector2(x + w * 0.58, y + w * 0.42), Vector2(x + w * 0.56, y + w * 0.70)]), col, 1.0, false)
+
+
 func _draw_drag_tile(ui, side):
 	if app_drag == null and applet_drag == null:
 		return
 	ui.push_style_var_vec2(ui.STYLE_VAR_WINDOW_PADDING, Vector2.ZERO)
 	# El tooltip por defecto se ancla en MousePos + (16,10) (+ padding): eso era el
-	# corrimiento de ~20 px. Lo forzamos al cursor para que el bloque caiga debajo.
-	ui.set_next_window_pos(mouse_pos - Vector2(side * 0.5, 0.0), true)
+	# corrimiento de ~20 px. Se fuerza al cursor MENOS el offset de agarre, para que
+	# la tesela quede exactamente donde estaba respecto del punto que se tomó.
+	var grab = app_grab if app_drag != null else applet_grab
+	ui.set_next_window_pos(mouse_pos - grab, true)
 	ui.begin_tooltip()
 	var pos = Vector2.ZERO
 	if app_drag != null:
