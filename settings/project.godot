@@ -1,0 +1,26 @@
+; Proyecto Godot propio de la app Configuración (K11a). Se lanza como cualquier
+; actividad del shell: `godot-gdtk --path settings`. La UI se arma por código
+; (main.gd y settings/pages/*.gd); no hay dependencias del shell ni del módulo ImGui.
+config_version=4
+
+[application]
+
+config/name="gdtk Configuración"
+run/main_scene="res://main.tscn"
+run/low_processor_mode=true
+run/low_processor_mode_sleep_usec=16000
+
+[audio]
+
+driver="Dummy"
+
+[display]
+
+window/size/width=900
+window/size/height=640
+window/size/resizable=true
+
+[rendering]
+
+quality/driver/driver_name="GLES2"
+environment/default_clear_color=Color( 0.06, 0.07, 0.09, 1 )
