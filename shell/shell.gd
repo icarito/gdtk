@@ -12,11 +12,12 @@ var ACTIVITIES = [
 	{"name": "Deskflow", "service": "deskflow-core client --new-instance -s ~/gdtk/deskflow-client.conf"},
 	# Pantalla: receptor de gvd (monitor virtual de otro host, H.264/UDP :5600). Se abre como
 	# ventana Wayland; el emisor se arranca en el otro host (gvd.py send --host <este host>).
-	# La ruta se resuelve como neighborhood_actions.gvd_path_candidates: dev (~/Proyectos/gvd),
-	# instalado (~/gvd) y PATH; sin hardcodear una sola ubicación.
+	# La ruta se resuelve como neighborhood_actions.gvd_path_candidates: vendoreado
+	# (~/gdtk/tools/gvd), dev (~/Proyectos/gvd), instalado (~/gvd) y PATH; sin
+	# hardcodear una sola ubicación.
 	# K18: el receptor usa un título fijo ("Pantalla compartida") y se trata como
 	# una ventana normal; `match` lo asocia por ese título aunque el comando sea `python3`.
-	{"name": "Pantalla", "match": ["Pantalla compartida"], "wayland": ["sh", "-c", "for c in \"$HOME/Proyectos/gvd/gvd.py\" \"$HOME/gvd/gvd.py\" \"$(command -v gvd 2>/dev/null)\"; do [ -n \"$c\" ] && [ -f \"$c\" ] && exec python3 \"$c\" recv --sink wayland; done; echo 'vecindario: gvd no encontrado (recv)' >&2"]},
+	{"name": "Pantalla", "match": ["Pantalla compartida"], "wayland": ["sh", "-c", "for c in \"$HOME/gdtk/tools/gvd/gvd.py\" \"$HOME/Proyectos/gvd/gvd.py\" \"$HOME/gvd/gvd.py\" \"$(command -v gvd 2>/dev/null)\"; do [ -n \"$c\" ] && [ -f \"$c\" ] && exec python3 \"$c\" recv --sink wayland; done; echo 'vecindario: gvd no encontrado (recv)' >&2"]},
 	# 'Salir' ya no es una actividad del anillo: es una acción de sesión del ícono central
 	# del Hogar (ver _draw_home / popup ##home_session).
 ]
