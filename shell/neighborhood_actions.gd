@@ -66,10 +66,14 @@ const _SAFE_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456
 const _CMD_SAFE = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/="
 
 
-# Candidatos de gvd en orden: desarrollo, instalación futura, binario en PATH.
-static func gvd_path_candidates(home = ""):
+# Candidatos de gvd en orden: instalación gdtk (~/gdtk), HOME de sesión gdtk
+# (GDTK_HOME, p. ej. el repo en desarrollo), checkouts viejos y binario en PATH.
+static func gvd_path_candidates(home = "", gdtk_home = ""):
 	var h = String(home).strip_edges()
+	var g = String(gdtk_home).strip_edges()
 	var out = []
+	if g != "":
+		out.append(g.plus_file("tools/gvd").plus_file("gvd.py"))
 	if h != "":
 		out.append(h.plus_file("gdtk/tools/gvd").plus_file("gvd.py"))
 		out.append(h.plus_file("Proyectos/gvd").plus_file("gvd.py"))
@@ -555,6 +559,9 @@ static func selftest():
 	assert(resolve_gvd_path(c, {c[2]: true}) == c[2], "usa ~/gvd si no hay desarrollo")
 	assert(resolve_gvd_path(c, {c[3]: true}) == "gvd", "cae al PATH")
 	assert(resolve_gvd_path(c, null) == c[0], "sin exists devuelve el primero")
+	# GDTK_HOME (sesión gdtk, p. ej. el repo en desarrollo) tiene prioridad.
+	var g = gvd_path_candidates("/home/u", "/opt/gdtk")
+	assert(g.size() == 5 and g[0] == "/opt/gdtk/tools/gvd/gvd.py", "GDTK_HOME primero")
 
 	# argv: puerto alternativo y posición; rechazos.
 	var p = gvd_send_plan("/home/u/Proyectos/gvd/gvd.py", "tengu.local", 5601, {"position": "right"})

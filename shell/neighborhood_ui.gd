@@ -465,7 +465,7 @@ func _local_context():
 	var script = _actions_script()
 	if script == null:
 		return ctx
-	var candidates = script.gvd_path_candidates(home)
+	var candidates = script.gvd_path_candidates(home, OS.get_environment("GDTK_HOME"))
 	var exists = {}
 	var f = File.new()
 	for c in candidates:

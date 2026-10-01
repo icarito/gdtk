@@ -342,7 +342,7 @@ func _init():
 class Recorder:
 	extends Reference
 	var last_local = {}
-	func gvd_path_candidates(_home = ""):
+	func gvd_path_candidates(_home = "", _gdtk_home = ""):
 		return []
 	func resolve_gvd_path(_candidates, _exists = null):
 		return ""
