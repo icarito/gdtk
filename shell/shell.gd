@@ -4183,6 +4183,14 @@ func _has_sway_socket():
 	return OS.get_environment("SWAYSOCK").strip_edges() != ""
 
 
+# ¿Hay canal autorizado hacia este host para abrir su receptor (ssh/buzón)? Es el
+# mismo canal que usa `_start_gvd_screen` para el receptor remoto; el Vecindario lo
+# consulta para habilitar las acciones de pantalla cuando el peer anuncia
+# state=capable (no mantiene receptor escuchando). Barato: lookup + modelo puro.
+func provision_channel_for(host_id):
+	return bool(_inbox_peer_for(String(host_id)).get("ok", false))
+
+
 # Arranca una sesión de pantalla hacia `host_id`. `share_my_screen` emite local
 # (si GNOME) y abre el receptor del peer por ssh; `use_as_screen` abre el receptor
 # local en un tile y pide al peer (GNOME) que emita. Nunca bloquea.
