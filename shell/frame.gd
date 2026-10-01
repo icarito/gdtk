@@ -1888,12 +1888,15 @@ func draw(ui):
 	var vp = ui.get_viewport_rect().size
 	var bh = shell.frame_bar_h(vp)
 	# Los applets y las ventanas se dibujan con su ícono; permitir la carga perezosa
-	# de a dos por frame, igual que el Hogar.
-	shell.home_icon_loads = max(shell.home_icon_loads, 2)
+	# de varios por frame (antes 2): con varias ventanas/pines distintas, las de más
+	# caían al monograma aunque el .desktop tuviera ícono. Cada app se carga una vez.
+	shell.home_icon_loads = max(shell.home_icon_loads, 8)
 	# MousePos es -FLT_MAX hasta el primer movimiento: eso no es la esquina.
-	# Hover para revelar el autohide: toda la franja donde vive la barra (no sólo el
-	# borde de 1px), arriba y abajo.
-	var hot = mouse.y >= 0.0 and (mouse.y <= bh or mouse.y >= vp.y - bh)
+	# Hover para revelar el autohide: con la barra oculta hay que EMPUJAR el borde
+	# (canto de HOT_EDGE px), no basta con entrar en la franja del Frame; así no
+	# aparece al interactuar con el contenido pegado al borde.
+	var hot = mouse.y >= 0.0 and (mouse.y <= HOT_EDGE * ui.get_imgui_scale() \
+		or mouse.y >= vp.y - HOT_EDGE * ui.get_imgui_scale())
 	if hot:
 		if corner_since == 0:
 			corner_since = now

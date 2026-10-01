@@ -37,6 +37,10 @@ const MID_FRACTION = 0.62
 const OUTER_FRACTION = 1.0
 # Puntos de Wi-Fi: no son nodos; van entre el anillo interior y el exterior.
 const WIFI_DOT_RADIUS = 2.5
+# Tamaño visible del ícono de AP (era un punto de 5 px: ilegible). El AP es
+# infraestructura, así que es tenue, pero seleccionable.
+const WIFI_ICON_SIZE = 30.0
+const WIFI_HIT_EXTRA = 6.0
 const WIFI_FRACTION_MIN = 0.32
 const WIFI_FRACTION_MAX = 0.95
 
@@ -181,8 +185,23 @@ static func wifi_dots(networks, vp, bar):
 			"pos": Vector2(center.x + cos(a) * r, center.y + sin(a) * r),
 			"in_use": bool(n.get("in_use", false)),
 			"ssid": String(n.get("ssid", "")),
+			"security": String(n.get("security", "")),
+			"signal": int(n.get("signal", 0)),
 		})
 	return out
+
+
+# AP (red Wi-Fi) bajo `point`, o null. Radio de impacto = ícono + margen.
+static func hit_wifi(point, points, radius = WIFI_ICON_SIZE * 0.5 + WIFI_HIT_EXTRA):
+	if typeof(points) != TYPE_ARRAY:
+		return null
+	var p = Vector2(point)
+	for w in points:
+		if typeof(w) != TYPE_DICTIONARY:
+			continue
+		if p.distance_to(Vector2(w.get("pos", Vector2.ZERO))) <= float(radius):
+			return w
+	return null
 
 
 # "Red: <SSID>" de la red en uso, o "" si no hay. Texto humano para la UI.

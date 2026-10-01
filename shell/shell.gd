@@ -1924,7 +1924,7 @@ func _draw_home(offset = 0.0):
 		# Fondo: degradado sobrio, color sólido o imagen configurada (K11a).
 		_draw_home_background(vp)
 
-		home_icon_loads = 2
+		home_icon_loads = 8
 		var u = grid_unit(vp)
 		var pad = 0.0  # bloques pegados al borde, igual que el Frame (sin margen de 1px)
 		var btn_size = Vector2(u * 1.25, u * 1.25)
@@ -2631,8 +2631,20 @@ func _activity_tex(activity):
 	# su ícono y caía al genérico.
 	var want_prog = apps.fold(prog)
 	if want_prog != "":
+		# El app_id de Wayland puede ser reverse-DNS (org.gnome.Nautilus) o llevar
+		# sufijo; el binario del .desktop suele ser el último segmento (nautilus).
+		# También se compara contra StartupWMClass, que es el mapeo canónico.
+		var tail = want_prog
+		var dot = want_prog.find(".")
+		if dot > 0:
+			tail = want_prog.substr(dot + 1)
 		for a in apps.apps:
-			if apps.fold(apps._program(a.exec)) == want_prog and _activity_icon_of(a) != null:
+			var wm = apps.fold(a.get("wm_class", ""))
+			if (wm == want_prog or (wm != "" and wm == tail)) and _activity_icon_of(a) != null:
+				return a.tex
+		for a in apps.apps:
+			var p = apps.fold(apps._program(a.exec))
+			if (p == want_prog or p == tail) and _activity_icon_of(a) != null:
 				return a.tex
 	# Sólo apps reales buscan por nombre; las internas usan monograma.
 	if activity.has("wayland"):
@@ -4398,15 +4410,42 @@ func _wifi_radio_on():
 	request_redraw()
 
 
-# Las actividades tipo script pueden tener recursos propios (p.ej. el viewport
-# 3D del Panel). Se les da la opcion de liberarlos al salir de la actividad; la
+# Conectar a una red desde el Vecindario. Red abierta: nmcli directo. Red con
+# seguridad: nmtui (pide la clave en su propia TUI; NUNCA pasamos secretos por
+# argv). Sin nmcli cae a nmtui. No bloquea: ejecuta en segundo plano.
+func _wifi_connect(ssid, security):
+	var s = String(ssid).strip_edges()
+	if s == "" or s.begins_with("-"):
+		return
+	if _which("nmcli") == "":
+		_open_nmtui()
+		return
+	var sec = String(security).strip_edges()
+	if sec == "" or sec == "--":
+		OS.execute("nmcli", ["device", "wifi", "connect", s], false)
+	else:
+		_open_nmtui()
+
+
+# Desconectar la red (por perfil). No bloquea.
+func _wifi_disconnect(ssid):
+	var s = String(ssid).strip_edges()
+	if s == "" or s.begins_with("-"):
+		return
+	if _which("nmcli") == "":
+		return
+	OS.execute("nmcli", ["connection", "down", "id", s], false)
+
+
+# Las actividades tipo script pueden tener recursos propios (p.ej. un viewport
+# 3D). Se les da la opcion de liberarlos al salir de la actividad; la
 # instancia (su estado) sigue en script_instances y los recrea al volver.
 func _release_activity():
 	if activity_instance != null and activity_instance.has_method("cleanup"):
 		activity_instance.cleanup()
 
 
-# Cerrar desde el Frame: se descarta la instancia (el Chat pierde su historial).
+# Cerrar desde el Frame: se descarta la instancia (la actividad pierde su estado).
 func _close_script_activity(name):
 	if current_activity != null and current_activity.name == name:
 		_go_home()

@@ -90,6 +90,9 @@ var _menu_rows = []
 var _menu_rect = Rect2()
 var _menu_open_pos = Vector2.ZERO
 var _menu_hover = -1
+var _menu_layer = null       # nodo hijo propio, por encima de íconos (ver _sync_menu)
+var _menu_is_wifi = false    # true = el menú es de una red Wi-Fi, no de un host
+var _menu_wifi = null        # red Wi-Fi del menú (ver _open_wifi_menu)
 var _since_ms = -1
 
 
@@ -149,7 +152,30 @@ func refresh(force = false):
 
 	if _menu_host != null:
 		_build_menu_rows()
+	# El menú vive en un nodo propio agregado al final: los íconos/etiquetas son
+	# hijos nativos y se dibujan por encima del _draw del padre, así que el menú
+	# debe ser el último hijo con z_index alto para no quedar oculto.
+	if _menu_layer == null or not is_instance_valid(_menu_layer):
+		_menu_layer = preload("res://neighborhood_menu.gd").new()
+		_menu_layer.name = "MenuLayer"
+		_menu_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_menu_layer.z_index = 10
+		add_child(_menu_layer)
+	_menu_layer.rect_size = vp
+	_menu_layer.raise()
+	_sync_menu()
 	update()
+
+
+# Vuelca el estado del menú (filas, rect, hover) a la capa que lo dibuja.
+func _sync_menu():
+	if _menu_layer == null or not is_instance_valid(_menu_layer):
+		return
+	_menu_layer.visible = _menu_host != null
+	_menu_layer.rows = _menu_rows
+	_menu_layer.rect = _menu_rect
+	_menu_layer.hover = _menu_hover
+	_menu_layer.update()
 
 
 func _elapsed_ms():
@@ -194,6 +220,11 @@ func _on_mouse_button(event):
 	if event.button_index == BUTTON_RIGHT and event.pressed:
 		if _menu_host != null and _menu_rect.has_point(pos):
 			return
+		var wifi = MAP.hit_wifi(pos, wifi_points)
+		if wifi != null:
+			_open_wifi_menu(wifi, pos)
+			accept_event()
+			return
 		var node = MAP.hit_node(pos, host_nodes)
 		if node != null:
 			_open_menu(node.host, pos)
@@ -216,6 +247,12 @@ func _on_mouse_button(event):
 			update()
 			return
 	if event.pressed:
+		var wifi_hit = MAP.hit_wifi(pos, wifi_points)
+		if wifi_hit != null:
+			_open_wifi_menu(wifi_hit, pos)
+			accept_event()
+			update()
+			return
 		var hit = MAP.hit_node(pos, host_nodes)
 		if hit != null:
 			selected_host = String(hit.id)
@@ -331,6 +368,8 @@ func _open_menu(host, at):
 		return
 	selected_host = String(host.get("id", ""))
 	_menu_host = host
+	_menu_is_wifi = false
+	_menu_wifi = null
 	_menu_items = MAP.neighbor_menu(host, _host_actions(host), compass_direction(selected_host),
 		MAP.debug_enabled(OS.get_environment("GDTK_DEBUG")))
 	_menu_open_pos = Vector2(at)
@@ -339,8 +378,44 @@ func _open_menu(host, at):
 	update()
 
 
+# Menú de una red Wi-Fi (infraestructura, no presencia social): conectar /
+# desconectar / encender la radio. La ejecución la hace el shell (nmcli/nmtui).
+func _open_wifi_menu(w, at):
+	if typeof(w) != TYPE_DICTIONARY:
+		return
+	_menu_is_wifi = true
+	_menu_wifi = w
+	_menu_host = {}  # no-null: hay menú abierto (los huéspedes del menú son de host)
+	_menu_items = _wifi_menu_items(w)
+	_menu_open_pos = Vector2(at)
+	_menu_hover = -1
+	_build_menu_rows()
+	update()
+
+
+func _wifi_menu_items(w):
+	var ssid = String(w.get("ssid", "")).strip_edges()
+	var in_use = bool(w.get("in_use", false))
+	var out = []
+	if ssid == "":
+		return out
+	out.append({"kind": "wifi_connect", "id": "wifi_connect",
+		"label": "Conectar a " + ssid, "enabled": not in_use,
+		"reason": "ya está conectada" if in_use else "",
+		"ssid": ssid, "security": String(w.get("security", ""))})
+	if in_use:
+		out.append({"kind": "wifi_disconnect", "id": "wifi_disconnect",
+			"label": "Desconectar", "enabled": true, "reason": "", "ssid": ssid})
+	out.append({"kind": "separator"})
+	out.append({"kind": "wifi_radio", "id": "wifi_radio",
+		"label": "Encender Wi-Fi", "enabled": true, "reason": "", "ssid": ""})
+	return out
+
+
 func _close_menu():
 	_menu_host = null
+	_menu_is_wifi = false
+	_menu_wifi = null
 	_menu_items = []
 	_menu_rows = []
 	_menu_rect = Rect2()
@@ -394,8 +469,21 @@ func _activate_row(row):
 	var item = row.get("item", null)
 	if item == null or not bool(item.get("enabled", false)):
 		return
-	var host_id = String(_menu_host.get("id", ""))
 	var kind = String(item.get("kind", ""))
+	if _menu_is_wifi:
+		if kind == "wifi_connect":
+			if shell != null and shell.has_method("_wifi_connect"):
+				shell._wifi_connect(String(item.get("ssid", "")), String(item.get("security", "")))
+		elif kind == "wifi_disconnect":
+			if shell != null and shell.has_method("_wifi_disconnect"):
+				shell._wifi_disconnect(String(item.get("ssid", "")))
+		elif kind == "wifi_radio":
+			if shell != null and shell.has_method("_wifi_radio_on"):
+				shell._wifi_radio_on()
+		_close_menu()
+		update()
+		return
+	var host_id = String(_menu_host.get("id", ""))
 	if kind == "action":
 		_run_host_action(host_id, item.action)
 	elif kind == "direction":
@@ -701,8 +789,8 @@ func _draw():
 		var active = bool(dot.in_use)
 		var ap = _icon_texture("np/" + AP_ICON)
 		if ap != null:
-			# El AP deja de ser un punto: ícono chico, tenue salvo la red en uso.
-			var s = (MAP.WIFI_DOT_RADIUS + (1.0 if active else 0.0)) * 5.0
+			# El AP deja de ser un punto: ícono legible, tenue salvo la red en uso.
+			var s = MAP.WIFI_ICON_SIZE + (4.0 if active else 0.0)
 			draw_texture_rect(ap, Rect2(Vector2(dot.pos) - Vector2(s, s) * 0.5, Vector2(s, s)),
 				false, WIFI_DOT_ACTIVE if active else WIFI_DOT)
 		else:
@@ -721,7 +809,8 @@ func _draw():
 				var target = MAP.directional_center(dir, 0, 1, center, float(radii.mid))
 				draw_arc(target, 22.0, 0.0, TAU, 32, NODE_SEL, 2.0)
 			_draw_node(drag_node, _drag_now, float(drag_node.size))
-	_draw_menu()
+	# El menú lo dibuja _menu_layer (nodo propio, por encima); acá sólo se sincroniza.
+	_sync_menu()
 
 
 func _draw_center_plate():
@@ -743,37 +832,6 @@ func _draw_node(node, c, size):
 	draw_arc(c, r, 0.0, TAU, 48, ring, 2.0)
 	if String(node.id) == selected_host:
 		draw_arc(c, r + 4.0, 0.0, TAU, 48, NODE_SEL, 2.0)
-
-
-func _draw_menu():
-	if _menu_host == null:
-		return
-	var font = get_font("font", "Label")
-	if font == null:
-		return
-	var b = 2.0
-	_bevel(_menu_rect, MENU.FACE, MENU.LIGHT, MENU.DARK, b)
-	var title = Rect2(_menu_rect.position + Vector2(b, b), Vector2(_menu_rect.size.x - 2.0 * b, MENU_TITLE_H))
-	_bevel(title, MENU.TITLE_BG, MENU.LIGHT, MENU.DARK, 1.0)
-	var tw = font.get_string_size("Vecino").x
-	draw_string(font, title.position + Vector2((title.size.x - tw) * 0.5, 14.0), "Vecino", MENU.TITLE_TEXT)
-	var idx = 0
-	for row in _menu_rows:
-		var rect = Rect2(row.rect)
-		var item = row.get("item", null)
-		if item == null:
-			if row.has("reason"):
-				draw_string(font, rect.position + Vector2(MENU_PAD_X + 10.0, 11.0), String(row.reason), MENU.TEXT_DISABLED)
-			else:
-				draw_rect(Rect2(rect.position + Vector2(MENU_PAD_X, rect.size.y * 0.5), Vector2(rect.size.x - 2.0 * MENU_PAD_X, 1.0)), MENU.DARK)
-			idx += 1
-			continue
-		var enabled = bool(item.get("enabled", false))
-		if idx == _menu_hover and enabled:
-			draw_rect(rect, MENU.HILITE)
-		var color = MENU.TEXT if enabled else MENU.TEXT_DISABLED
-		draw_string(font, rect.position + Vector2(MENU_PAD_X + 10.0, 17.0), String(item.get("label", "")), color)
-		idx += 1
 
 
 func _bevel(rect, face, light, dark, b):

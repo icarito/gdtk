@@ -143,6 +143,9 @@ func parse(path, desktops):
 	return {
 		"id": "", "name": name, "exec": exec, "cmd": cmd, "icon": e.get("Icon", ""),
 		"categories": cats, "key": fold(name + cats),
+		# StartupWMClass mapea el app_id de Wayland (p. ej. org.gnome.Nautilus) al
+		# .desktop: es la forma canónica de resolver el ícono de una ventana.
+		"wm_class": e.get("StartupWMClass", ""),
 		"tex": null, "icon_tried": false,
 	}
 
@@ -374,10 +377,10 @@ func draw(ui):
 			ui._draw_home_bevel(Rect2(icon_scr, Vector2(ICON, ICON)), Color(0.12, 0.13, 0.17, 1.0) if moving else ui.HOME_BLOCK_FACE, held)
 			if not moving:
 				if app.tex != null:
-					ui.set_cursor_pos(cell + Vector2((side - ICON) * 0.5 + 4.0, 8.0))
-					ui.image(app.tex, Vector2(ICON - 8, ICON - 8))
+					ui.set_cursor_pos(cell + Vector2((side - ICON) * 0.5 + 6.0, 10.0))
+					ui.image(app.tex, Vector2(ICON - 12, ICON - 12))
 				else:
-					ui.set_cursor_pos(cell + Vector2((side - ICON) * 0.5 + 5.0, 24.0))
+					ui.set_cursor_pos(cell + Vector2((side - ICON) * 0.5 + 6.0, 26.0))
 					ui.text(app.name.substr(0, 7))
 			tiles.append({"app": app, "rect": Rect2(icon_scr, Vector2(ICON, ICON))})
 			if ui.is_item_hovered():
