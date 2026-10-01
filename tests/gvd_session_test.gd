@@ -68,8 +68,8 @@ func _init():
 
 	# recv_plan.
 	var rp = mod.recv_plan("/home/u/Proyectos/gvd/gvd.py")
-	check("recv_plan ---sink wayland", rp.ok and rp.args[2] == "--sink"
-		and rp.args[3] == "wayland")
+	check("recv_plan ---sink auto", rp.ok and rp.args[2] == "--sink"
+		and rp.args[3] == "auto")
 	check("recv_plan sink invalido falla",
 		not mod.recv_plan("/home/u/Proyectos/gvd/gvd.py", "fbdev").ok)
 

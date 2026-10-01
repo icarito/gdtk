@@ -39,7 +39,7 @@ extends Reference
 #     No crear un segundo ciclo de vida. Si hay que cambiar el config, generar el
 #     archivo de forma explícita y reversible antes del toggle.
 #   - gvd recv local: reusar la actividad "Pantalla" del shell (ya lanza
-#     `python3 $HOME/gvd/gvd.py recv --sink wayland`); al integrar, resolver la ruta
+#     `python3 $HOME/gvd/gvd.py recv --sink auto`); al integrar, resolver la ruta
 #     real con resolve_gvd_path() (~/Proyectos/gvd en desarrollo, ~/gvd o PATH después).
 #   - Portapapeles: ya NO es una opción de menú (SPEC-ui-rework decisión
 #     2026-10-01). Con "Controlar" se asume compartido (clipboardSharing=true en
@@ -58,7 +58,7 @@ const DESKFLOW_LAYOUT = preload("res://deskflow_layout.gd")
 const DESKFLOW_CONF = preload("res://deskflow_conf.gd")
 const DESKFLOW_SETTINGS = preload("res://deskflow_settings.gd")
 const POSITIONS = ["right", "left", "above", "below"]
-const SINKS = ["wayland", "x11"]
+const SINKS = ["auto", "ffplay", "gl", "xv", "wayland"]
 const DESKFLOW_MODES = ["client", "server"]
 # Caracteres seguros para nombres de host y para átomos de ruta/binary sin shell.
 const _SAFE_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
@@ -155,7 +155,7 @@ static func gvd_recv_plan(gvd_path, opts = {}):
 	var p = String(gvd_path).strip_edges()
 	if not valid_local_path(p):
 		return _bad("ruta gvd inválida: " + p)
-	var sink = String(opts.get("sink", "wayland")).strip_edges()
+	var sink = String(opts.get("sink", "auto")).strip_edges()
 	if not SINKS.has(sink):
 		return _bad("sink inválido: " + sink)
 	var n = int(opts.get("port", 0))
@@ -566,7 +566,7 @@ static func selftest():
 	assert(not gvd_send_plan("/home/u/Proyectos/gvd/gvd.py", "tengu.local", 0,
 		{"position": "diagonal"}).ok, "posición inválida")
 	var r = gvd_recv_plan("/home/u/gvd/gvd.py")
-	assert(r.ok and r.cmd == "python3" and r.args[2] == "--sink" and r.args[3] == "wayland",
+	assert(r.ok and r.cmd == "python3" and r.args[2] == "--sink" and r.args[3] == "auto",
 		"argv de gvd recv")
 	assert(not gvd_recv_plan("/home/u/gvd/gvd.py", {"sink": "fbdev"}).ok, "sink inválido")
 	var rp2 = gvd_recv_plan("/home/u/gvd/gvd.py", {"port": 5601})

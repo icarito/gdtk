@@ -92,8 +92,9 @@ static func send_plan(gvd_path, peer_host, port, direction, opts = {}):
 	return ACTIONS.gvd_send_plan(gvd_path, peer_host, port, o)
 
 
-# Plan del receptor local: `gvd recv --sink <sink>` (default wayland, §7).
-static func recv_plan(gvd_path, sink = "wayland"):
+# Plan del receptor local: `gvd recv --sink <sink>` (default auto; waylandsink
+# aborta en el compositor embebido, así que se prefiere gl/xv).
+static func recv_plan(gvd_path, sink = "auto"):
 	return ACTIONS.gvd_recv_plan(gvd_path, {"sink": sink})
 
 
@@ -184,7 +185,7 @@ static func selftest():
 	ok = ok and sp_none.ok and sp_none.args.find("--position") < 0
 	ok = ok and send_plan("~/gvd/gvd.py", "tengu.local", 5600, "east").ok == false
 	var rp = recv_plan("/home/u/Proyectos/gvd/gvd.py")
-	ok = ok and rp.ok and rp.args[2] == "--sink" and rp.args[3] == "wayland"
+	ok = ok and rp.ok and rp.args[2] == "--sink" and rp.args[3] == "auto"
 
 	# Clasificacion y disponibilidad.
 	ok = ok and action_kind("use_remote_input") == "deskflow_service"

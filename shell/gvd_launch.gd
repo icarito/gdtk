@@ -95,11 +95,12 @@ static func local_send_argv(gvd_path, peer, port = 0, position = ""):
 	return ACTIONS.gvd_send_plan(gvd_path, peer, port, opts)
 
 
-# Plan del receptor LOCAL ("Ver su escritorio aquí"): `gvd recv --sink wayland`
-# con `--cursor sway` si la sesión tiene SWAYSOCK y `--port` si el emisor remoto
-# usa otro puerto. El shell lo abre en un tile.
+# Plan del receptor LOCAL ("Ver su escritorio aquí"): `gvd recv --sink auto`
+# (prefiere gl/xv; waylandsink aborta en el compositor embebido) con `--cursor
+# sway` si la sesión tiene SWAYSOCK y `--port` si el emisor remoto usa otro
+# puerto. El shell lo abre en un tile.
 static func local_recv_argv(gvd_path, has_sway = false, port = 0):
-	var plan = ACTIONS.gvd_recv_plan(gvd_path, {"sink": "wayland", "port": int(port)})
+	var plan = ACTIONS.gvd_recv_plan(gvd_path, {"sink": "auto", "port": int(port)})
 	if not bool(plan.get("ok", false)):
 		return plan
 	if bool(has_sway):
@@ -111,7 +112,7 @@ static func local_recv_argv(gvd_path, has_sway = false, port = 0):
 # resuelve gvd por candidatos y no interpola nada no confiable: `has_sway` sólo
 # elige una variante fija.
 static func remote_recv_argv(peer, has_sway = false):
-	var cmd = _remote_loop() + " recv --sink wayland"
+	var cmd = _remote_loop() + " recv --sink auto"
 	if bool(has_sway):
 		cmd += " --cursor sway"
 	cmd += "; done; echo 'vecindario: gvd no encontrado (recv)' >&2"
@@ -268,7 +269,7 @@ static func selftest():
 	ok = ok and gvd_path_of(null) == "" and target_host_of(real) != ""
 	ok = ok and gvd_path_of({"ok": false, "cmd": "", "args": []}) == ""
 
-	# Receptor local: sink wayland y cursor sway sólo si hay SWAYSOCK.
+	# Receptor local: sink auto (gl/xv) y cursor sway sólo si hay SWAYSOCK.
 	var rp = local_recv_argv("/home/u/gvd/gvd.py", false)
 	ok = ok and rp.ok and rp.cmd == "python3" and rp.args[1] == "recv"
 	ok = ok and rp.args.find("--sink") >= 0 and rp.args.find("--cursor") < 0
@@ -292,7 +293,7 @@ static func selftest():
 	ok = ok and rr.args.has("BatchMode=yes") and rr.args.has("ConnectTimeout=3")
 	ok = ok and rr.args[rr.args.size() - 2] == "tengu.local"
 	var rcmd = String(rr.args[rr.args.size() - 1])
-	ok = ok and rcmd.find("recv --sink wayland") >= 0 and rcmd.find("--cursor") < 0
+	ok = ok and rcmd.find("recv --sink auto") >= 0 and rcmd.find("--cursor") < 0
 	ok = ok and rcmd.find("command -v gvd") >= 0
 	var rrs = remote_recv_argv("tengu.local", true)
 	ok = ok and String(rrs.args[rrs.args.size() - 1]).find("--cursor sway") >= 0

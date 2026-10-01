@@ -634,11 +634,11 @@ def ffplay_command(args):
 
 def recv_pipeline(args, sink, stats):
     # K18: el receptor es una ventana normal, nunca fullscreen; el shell la
-    # coloca en el hueco central. `force-aspect-ratio` mantiene la proporcion
-    # dentro del slot que le da el compositor.
+    # coloca en el hueco central. NUNCA se escala: el emisor crea el monitor
+    # virtual a la resolución target y el receptor la muestra 1:1. Sin
+    # `force-aspect-ratio`: waylandsink pediría wp_viewporter para escalar, el
+    # compositor embebido no lo implementa y el proceso aborta (segfault).
     inner = [sink, "sync=false"]
-    if sink in VIDEO_SINKS:
-        inner += ["force-aspect-ratio=true"]
     rtp_caps = 'application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000'
     if args.transport == "tcp":
         e = [GST, "-q", "tcpserversrc", "host=0.0.0.0",

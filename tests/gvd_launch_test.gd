@@ -47,8 +47,8 @@ func _init():
 
 	# Receptor local en un tile: --cursor sway sólo con SWAYSOCK.
 	var rp = mod.local_recv_argv("/home/u/gvd/gvd.py", false)
-	check("receptor local wayland", rp.ok and rp.cmd == "python3"
-		and rp.args[1] == "recv" and rp.args[3] == "wayland")
+	check("receptor local auto (gl/xv)", rp.ok and rp.cmd == "python3"
+		and rp.args[1] == "recv" and rp.args[3] == "auto")
 	check("receptor sin sway no fuerza cursor", rp.args.find("--cursor") < 0)
 	var rps = mod.local_recv_argv("/home/u/gvd/gvd.py", true)
 	check("receptor con SWAYSOCK usa --cursor sway",
@@ -72,7 +72,7 @@ func _init():
 	check("ssh con peer como argumento", rr.args[rr.args.size() - 2] == "tengu.local")
 	var rcmd = String(rr.args[rr.args.size() - 1])
 	check("comando remoto resuelve gvd y abre recv",
-		rcmd.find("recv --sink wayland") >= 0 and rcmd.find("command -v gvd") >= 0)
+		rcmd.find("recv --sink auto") >= 0 and rcmd.find("command -v gvd") >= 0)
 	check("receptor remoto sin sway no fuerza cursor", rcmd.find("--cursor") < 0)
 	var rrs = mod.remote_recv_argv("tengu.local", true)
 	check("receptor remoto con SWAYSOCK usa cursor",
