@@ -28,13 +28,19 @@ while :; do
 	# tee por un fifo: el log queda en disco y la salida sigue llegando a quien lanzó la sesión.
 	fifo="$RUN/gdtk-shell.$$.fifo"; rm -f "$fifo"; mkfifo "$fifo"
 	tee "$LOGDIR/shell.log" <"$fifo" &
+	tee_pid=$!
 	# shellcheck disable=SC2086
 	"$@" $safe >"$fifo" 2>&1 &
 	pid=$!
 	echo "$pid" >"$RUN/gdtk-shell.pid"
 	wait "$pid"; rc=$?
 	pid=""
-	wait; rm -f "$fifo" "$RUN/gdtk-shell.pid"
+	# No usar `wait` sin argumentos: un hijo del shell (gvd, terminal, deskflow) puede
+	# heredar el FIFO y mantener vivo al tee, dejando al supervisor colgado sin
+	# relanzar el shell. Se cierra el tee explícitamente y se sigue.
+	kill "$tee_pid" 2>/dev/null
+	wait "$tee_pid" 2>/dev/null
+	rm -f "$fifo" "$RUN/gdtk-shell.pid"
 
 	if [ "$rc" -eq 0 ] || [ -f "$QUIT" ]; then
 		[ "$rc" -eq 0 ] || say "salida pedida; el cierre terminó con rc=$rc"

@@ -823,6 +823,13 @@ func _in_rect(p, pos, side):
 	return p.x >= pos.x and p.x < pos.x + side and p.y >= pos.y and p.y < pos.y + side
 
 
+# Alto de la línea de título escalado con la UI: sin esto, con fuentes escaladas
+# (p. ej. pantallas de alta densidad) el texto se sale de la tesela y lo recorta la
+# barra. El resto de los offsets de texto ya usan get_imgui_scale().
+func _title_h(ui):
+	return TITLE_H * ui.get_imgui_scale()
+
+
 # Título corto de una línea, centrado, dentro de la parte baja de la tesela.
 # `pos` es la esquina en coords LOCALES de la ventana (set_cursor_pos); el bisel y
 # las líneas de foco usan coords de pantalla.
@@ -834,7 +841,7 @@ func _tile_title(ui, pos, side, label, dim):
 		else:
 			label = label.substr(0, max_chars)
 	var lw = label.length() * 7.0 * ui.get_imgui_scale()
-	ui.set_cursor_pos(pos + Vector2(max(1.0, (side - lw) * 0.5), side - TITLE_H - 1.0))
+	ui.set_cursor_pos(pos + Vector2(max(1.0, (side - lw) * 0.5), side - _title_h(ui) - 1.0))
 	ui.text_colored(NX_TEXT_DIM if dim else NX_TEXT, label)
 
 
@@ -1698,8 +1705,9 @@ func _draw_home_tile(ui, pos, side):
 	var b = _tile(ui, pos, side, "go_home", NX_CUR if at_home else NX_FACE)
 	if at_home:
 		_frame_focus(ui, b.rect, NX_FOCUS)
-	var title_h = TITLE_H if side >= 76.0 else 0.0
-	var s = clamp(side - title_h - 2.0 * BEVEL - 4.0, ICON_MIN, ICON_MAX)
+	var ts = ui.get_imgui_scale()
+	var title_h = _title_h(ui) if side >= 76.0 * ts else 0.0
+	var s = clamp(side - title_h - 2.0 * BEVEL - 4.0, ICON_MIN * ts, ICON_MAX * ts)
 	var icon = shell.home_icon_tex()
 	if icon != null:
 		ui.set_cursor_pos(pos + Vector2((side - s) * 0.5, BEVEL + max(2.0, (side - title_h - s) * 0.5)))
@@ -1720,8 +1728,9 @@ func _draw_neighborhood_tile(ui, pos, side):
 	var b = _tile(ui, pos, side, "go_neighborhood", NX_CUR if active else NX_FACE)
 	if active:
 		_frame_focus(ui, b.rect, NX_FOCUS)
-	var title_h = TITLE_H if side >= 76.0 else 0.0
-	var s = clamp(side - title_h - 2.0 * BEVEL - 4.0, ICON_MIN, ICON_MAX)
+	var ts = ui.get_imgui_scale()
+	var title_h = _title_h(ui) if side >= 76.0 * ts else 0.0
+	var s = clamp(side - title_h - 2.0 * BEVEL - 4.0, ICON_MIN * ts, ICON_MAX * ts)
 	var center = pos + Vector2(side * 0.5, BEVEL + max(2.0, (side - title_h - s) * 0.5) + s * 0.5)
 	_draw_wifi_glyph(ui, center, s * 0.5, NX_TEXT)
 	if title_h > 0.0:
@@ -1765,12 +1774,15 @@ func _draw_window_tile(ui, pos, side, item, current, is_sel, is_drop, mouse):
 		_frame_focus(ui, b.rect, NX_FOCUS)
 	# El ícono manda: mínimo 64 px. Si no caben 64 px + el título, se dibuja arriba
 	# (a ras del bisel) y el título va sobre una banda inferior semitransparente.
+	var ts = ui.get_imgui_scale()
+	var title_h = _title_h(ui)
 	var inner = side - 2.0 * BEVEL
-	var stack = inner - TITLE_H - 4.0
-	var overlap = stack < ICON_TILE_MIN
-	var s = min(float(ICON_TILE_MIN), inner) if overlap else clamp(stack, ICON_TILE_MIN, ICON_MAX)
+	var stack = inner - title_h - 4.0
+	var icon_tile_min = ICON_TILE_MIN * ts
+	var overlap = stack < icon_tile_min
+	var s = min(float(icon_tile_min), inner) if overlap else clamp(stack, icon_tile_min, ICON_MAX * ts)
 	var tex = _item_icon(item)
-	var iy = BEVEL + 0.5 if overlap else BEVEL + max(0.0, (inner - TITLE_H - s) * 0.5)
+	var iy = BEVEL + 0.5 if overlap else BEVEL + max(0.0, (inner - title_h - s) * 0.5)
 	if tex != null:
 		ui.set_cursor_pos(pos + Vector2((side - s) * 0.5, iy))
 		ui.image(tex, Vector2(s, s))
@@ -1781,8 +1793,8 @@ func _draw_window_tile(ui, pos, side, item, current, is_sel, is_drop, mouse):
 	# Banda inferior semitransparente cuando el título pisa al ícono: garantiza
 	# legibilidad sin encoger el ícono por debajo de 64 px.
 	if overlap:
-		ui.imgui_draw_rect_filled(Rect2(b.rect.position + Vector2(BEVEL, side - TITLE_H),
-			Vector2(side - 2.0 * BEVEL, TITLE_H - BEVEL)), Color(0.0, 0.0, 0.0, 0.5), 0.0)
+		ui.imgui_draw_rect_filled(Rect2(b.rect.position + Vector2(BEVEL, side - title_h),
+			Vector2(side - 2.0 * BEVEL, title_h - BEVEL)), Color(0.0, 0.0, 0.0, 0.5), 0.0)
 	# El número de pantalla compartido va como prefijo del título corto.
 	var label = item.title
 	if item.screen > 0:

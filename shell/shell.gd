@@ -124,6 +124,9 @@ var ring_grab = Vector2.ZERO
 var ring_suppress = ""     # nombre cuya activación se ignora tras un drag
 var ring_drop = null       # entrada destino resaltada mientras se arrastra
 
+# Rotación de pantalla (menú del anillo): cache de presencia de acelerómetro.
+var _rotate_sensor = null
+
 # Vecindario: modelo de Wi-Fi y vista nativa bajo el Frame ImGui.
 var neighborhood = null
 var neighborhood_ui = null
@@ -323,6 +326,24 @@ const STARTING_PERIOD_S = 1.2
 # Todo bloque/salto del Hogar y del Frame sale de acá; no se repiten números.
 func grid_unit(vp):
 	return max(80.0, floor(min(vp.x / 16.0, vp.y / 10.0)))
+
+
+# Unidad base de la grilla: con U=80 la UI está a escala 1. La resolución ya escala
+# los bloques; con el texto hay que hacer lo mismo o queda diminuto respecto de
+# ellos (p. ej. 2160x1440 da U=135 y el font de 13 px se ve mini). Se ata a la
+# grilla y se aplica a ImGui (font + estilo) y a los offsets del shell, que ya
+# multiplican por get_imgui_scale().
+const GRID_BASE = 80.0
+
+func ui_scale(vp):
+	return clamp(grid_unit(vp) / GRID_BASE, 1.0, 3.0)
+
+
+# Mantiene la escala de UI sincronizada con el viewport (barato e idempotente).
+func _sync_ui_scale():
+	var want = ui_scale(get_viewport_rect().size)
+	if abs(want - get_imgui_scale()) > 0.01:
+		imgui_scale = want
 
 
 # Alto de las barras del Frame (superior e inferior). Una unidad completa; si la
@@ -659,6 +680,8 @@ func _redraw_on_signal(_id):
 
 
 func _imgui_frame():
+	# Antes de dibujar: el texto sigue el tamaño de la grilla (fuentes escaladas).
+	_sync_ui_scale()
 	# Actividades internas animadas (Panel con animación) piden frames continuos.
 	if activity_instance != null and activity_instance.get("animate"):
 		request_redraw()
@@ -1867,6 +1890,16 @@ func _draw_home(offset = 0.0):
 		MENU_STYLE.begin(self)
 		if begin_popup("##home_session"):
 			MENU_STYLE.chrome(self, "Sesión")
+			if _rotate_has_sensor() and begin_menu("Pantalla"):
+				if MENU_STYLE.item(self, "Rotar a la izquierda"):
+					_rotate_screen("left")
+				if MENU_STYLE.item(self, "Rotar a la derecha"):
+					_rotate_screen("right")
+				separator()
+				var auto_on = _rotate_auto_on()
+				if MENU_STYLE.item(self, "Auto-rotación", "", auto_on):
+					_rotate_set_auto(not auto_on)
+				end_menu()
 			if MENU_STYLE.item(self, "Salir"):
 				recovery.quit(self)
 			if MENU_STYLE.item(self, "Recargar el shell"):
@@ -1933,6 +1966,71 @@ func _draw_home(offset = 0.0):
 			text(activity_error)
 	end()
 	pop_style_var()
+
+
+# --- Rotación de pantalla (menú del anillo) --------------------------------------
+# Delega en session/gdtk-rotate (ver SPEC/session/DEPS): `left`/`right` rotan 90° y
+# `hold` pausa el modo auto; `auto` sigue el sensor y arranca activo por defecto. El
+# estado "auto activo" es la ausencia de $XDG_RUNTIME_DIR/gdtk/rotate.hold.
+
+func _rotate_runtime_dir():
+	var d = OS.get_environment("XDG_RUNTIME_DIR")
+	if d == "":
+		d = "/tmp"
+	return d + "/gdtk"
+
+
+func _rotate_script():
+	var home = OS.get_environment("GDTK_HOME")
+	if home == "":
+		home = OS.get_environment("HOME") + "/gdtk"
+	return home + "/session/gdtk-rotate"
+
+
+func _rotate_run(args):
+	var exe = _rotate_script()
+	if File.new().file_exists(exe):
+		OS.execute(exe, args, false)
+
+
+# ¿Hay acelerómetro? Se escanea una vez y se cachea (sin I/O por frame).
+func _rotate_has_sensor():
+	if _rotate_sensor != null:
+		return _rotate_sensor
+	_rotate_sensor = false
+	var dir = Directory.new()
+	if dir.open("/sys/bus/iio/devices") == OK:
+		dir.list_dir_begin()
+		var n = dir.get_next()
+		while n != "":
+			if n.begins_with("iio:device"):
+				var f = File.new()
+				var p = "/sys/bus/iio/devices/" + n + "/name"
+				if f.file_exists(p) and f.open(p, File.READ) == OK:
+					if f.get_as_text().find("accel") != -1:
+						_rotate_sensor = true
+						break
+			n = dir.get_next()
+		dir.list_dir_end()
+	return _rotate_sensor
+
+
+func _rotate_auto_on():
+	return not File.new().file_exists(_rotate_runtime_dir() + "/rotate.hold")
+
+
+# Gesto manual: rota y pausa el auto, para que el sensor no lo pise enseguida.
+func _rotate_screen(direction):
+	_rotate_run([direction])
+	_rotate_run(["hold", "on"])
+
+
+func _rotate_set_auto(on):
+	if on:
+		_rotate_run(["hold", "off"])
+		_rotate_run(["auto"])   # instancia única: no duplica el daemon
+	else:
+		_rotate_run(["hold", "on"])
 
 
 # --- Anillo: entradas, favoritos y layout animado --------------------------------
