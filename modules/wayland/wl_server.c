@@ -32,6 +32,8 @@
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_shm.h>
 #include <wlr/types/wlr_subcompositor.h>
+#include <wlr/types/wlr_text_input_v3.h>
+#include <wlr/types/wlr_input_method_v2.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/types/wlr_server_decoration.h>
@@ -96,6 +98,18 @@ typedef struct surface_state {
 	struct wl_listener new_subsurface;
 } surface_state;
 
+// Un text-input-v3 de un cliente: el campo de texto que pide IME (text-input-v3).
+// Vive en s->text_inputs; el relay le reenvia el preedit/commit del motor.
+typedef struct text_input_relay {
+	struct wl_list link;
+	struct wl_server *server;
+	struct wlr_text_input_v3 *input;
+	struct wl_listener enable;
+	struct wl_listener commit;
+	struct wl_listener disable;
+	struct wl_listener destroy;
+} text_input_relay;
+
 struct wl_server {
 	struct wl_display *display;
 	struct wl_event_loop *loop;
@@ -107,6 +121,22 @@ struct wl_server {
 	struct wlr_xdg_shell *xdg_shell;
 	struct wlr_seat *seat;
 	struct wlr_keyboard keyboard;
+
+	// IME (K14): text-input-v3 del cliente y el motor IME (fcitx5/ibus) por
+	// input-method-v2. Relay minimo: activa el motor con el foco de text-input,
+	// reenvia preedit/commit y le cede el teclado durante sus grabs.
+	struct wlr_text_input_manager_v3 *text_input_manager;
+	struct wlr_input_method_manager_v2 *input_method_manager;
+	struct wlr_input_method_v2 *input_method;
+	struct wlr_text_input_v3 *active_text_input;
+	struct wlr_input_method_keyboard_grab_v2 *keyboard_grab;
+	struct wl_list text_inputs; // text_input_relay.link
+	struct wl_listener new_text_input;
+	struct wl_listener new_input_method;
+	struct wl_listener input_method_commit;
+	struct wl_listener input_method_grab_keyboard;
+	struct wl_listener input_method_destroy;
+	struct wl_listener keyboard_grab_destroy;
 
 	// Todo lo EGL/GL vive aqui y se resuelve con eglGetProcAddress: no se
 	// linkea libGL/libGLES, solo egl.
@@ -306,6 +336,222 @@ static void surface_state_acquire(struct wl_server *s, struct wlr_surface *surfa
 	st->destroy.notify = handle_surface_destroy;
 	wl_signal_add(&surface->events.destroy, &st->destroy);
 	wl_list_insert(s->surfaces.prev, &st->link);
+}
+
+// --- IME: relay text-input-v3 <-> input-method-v2 (K14) ---
+// El motor IME (fcitx5/ibus) se conecta por input-method-v2; los clientes piden
+// texto por text-input-v3. Aqui solo se enruta: foco de text-input al toplevel
+// enfocado, ida de surrounding/content-type, vuelta de preedit/commit, y cesion
+// del teclado mientras el motor tiene un grab. Sin procesos en el render: todo
+// corre en el hilo de dispatch de Wayland.
+
+static void handle_text_input_enable(struct wl_listener *listener, void *data);
+
+static void handle_text_input_commit(struct wl_listener *listener, void *data);
+
+static void handle_text_input_disable(struct wl_listener *listener, void *data);
+
+static void handle_text_input_destroy(struct wl_listener *listener, void *data);
+
+static void handle_new_text_input(struct wl_listener *listener, void *data) {
+	struct wl_server *s = wl_container_of(listener, s, new_text_input);
+	struct wlr_text_input_v3 *input = data;
+	text_input_relay *ti = calloc(1, sizeof(*ti));
+	if (ti == NULL) {
+		return;
+	}
+	ti->server = s;
+	ti->input = input;
+	ti->enable.notify = handle_text_input_enable;
+	wl_signal_add(&input->events.enable, &ti->enable);
+	ti->commit.notify = handle_text_input_commit;
+	wl_signal_add(&input->events.commit, &ti->commit);
+	ti->disable.notify = handle_text_input_disable;
+	wl_signal_add(&input->events.disable, &ti->disable);
+	ti->destroy.notify = handle_text_input_destroy;
+	wl_signal_add(&input->events.destroy, &ti->destroy);
+	wl_list_insert(&s->text_inputs, &ti->link);
+}
+
+// El cliente habilito su campo: activar el motor y mandarle el contexto.
+static void handle_text_input_enable(struct wl_listener *listener, void *data) {
+	text_input_relay *ti = wl_container_of(listener, ti, enable);
+	struct wl_server *s = ti->server;
+	if (s->input_method == NULL) {
+		return;
+	}
+	s->active_text_input = ti->input;
+	wlr_input_method_v2_send_activate(s->input_method);
+	if ((ti->input->active_features & WLR_TEXT_INPUT_V3_FEATURE_SURROUNDING_TEXT) &&
+			ti->input->current.surrounding.text != NULL) {
+		wlr_input_method_v2_send_surrounding_text(s->input_method,
+				ti->input->current.surrounding.text,
+				ti->input->current.surrounding.cursor,
+				ti->input->current.surrounding.anchor);
+	}
+	if (ti->input->active_features & WLR_TEXT_INPUT_V3_FEATURE_CONTENT_TYPE) {
+		wlr_input_method_v2_send_content_type(s->input_method,
+				ti->input->current.content_type.hint,
+				ti->input->current.content_type.purpose);
+	}
+	wlr_input_method_v2_send_done(s->input_method);
+}
+
+// Reenvia el estado actual al motor para que refina su candidato.
+static void handle_text_input_commit(struct wl_listener *listener, void *data) {
+	text_input_relay *ti = wl_container_of(listener, ti, commit);
+	struct wl_server *s = ti->server;
+	if (s->input_method == NULL || s->active_text_input != ti->input) {
+		return;
+	}
+	if ((ti->input->active_features & WLR_TEXT_INPUT_V3_FEATURE_SURROUNDING_TEXT) &&
+			ti->input->current.surrounding.text != NULL) {
+		wlr_input_method_v2_send_surrounding_text(s->input_method,
+				ti->input->current.surrounding.text,
+				ti->input->current.surrounding.cursor,
+				ti->input->current.surrounding.anchor);
+	}
+	if (ti->input->active_features & WLR_TEXT_INPUT_V3_FEATURE_CONTENT_TYPE) {
+		wlr_input_method_v2_send_content_type(s->input_method,
+				ti->input->current.content_type.hint,
+				ti->input->current.content_type.purpose);
+	}
+	wlr_input_method_v2_send_done(s->input_method);
+}
+
+static void handle_text_input_disable(struct wl_listener *listener, void *data) {
+	text_input_relay *ti = wl_container_of(listener, ti, disable);
+	struct wl_server *s = ti->server;
+	if (s->active_text_input != ti->input) {
+		return;
+	}
+	s->active_text_input = NULL;
+	if (s->input_method != NULL) {
+		wlr_input_method_v2_send_deactivate(s->input_method);
+	}
+}
+
+static void handle_text_input_destroy(struct wl_listener *listener, void *data) {
+	text_input_relay *ti = wl_container_of(listener, ti, destroy);
+	struct wl_server *s = ti->server;
+	if (s->active_text_input == ti->input) {
+		s->active_text_input = NULL;
+		if (s->input_method != NULL) {
+			wlr_input_method_v2_send_deactivate(s->input_method);
+		}
+	}
+	wl_list_remove(&ti->enable.link);
+	wl_list_remove(&ti->commit.link);
+	wl_list_remove(&ti->disable.link);
+	wl_list_remove(&ti->destroy.link);
+	wl_list_remove(&ti->link);
+	free(ti);
+}
+
+// El toplevel enfocado manda en el foco de text-input. Como text-input-v3 es
+// por cliente, se entra en los text-input del mismo cliente que la surface y se
+// sale del resto.
+static void text_input_relay_set_focus(struct wl_server *s, struct wlr_surface *surface) {
+	if (s == NULL) {
+		return;
+	}
+	text_input_relay *ti;
+	wl_list_for_each(ti, &s->text_inputs, link) {
+		struct wlr_text_input_v3 *input = ti->input;
+		bool same_client = surface != NULL && input->resource != NULL &&
+				wl_resource_get_client(input->resource) ==
+				wl_resource_get_client(surface->resource);
+		if (same_client) {
+			if (input->focused_surface != surface) {
+				if (input->focused_surface != NULL) {
+					wlr_text_input_v3_send_leave(input);
+				}
+				wlr_text_input_v3_send_enter(input, surface);
+			}
+		} else if (input->focused_surface != NULL) {
+			wlr_text_input_v3_send_leave(input);
+		}
+	}
+}
+
+static void handle_input_method_commit(struct wl_listener *listener, void *data);
+
+static void handle_input_method_grab_keyboard(struct wl_listener *listener, void *data);
+
+static void handle_input_method_destroy(struct wl_listener *listener, void *data);
+
+static void handle_keyboard_grab_destroy(struct wl_listener *listener, void *data);
+
+static void handle_new_input_method(struct wl_listener *listener, void *data) {
+	struct wl_server *s = wl_container_of(listener, s, new_input_method);
+	struct wlr_input_method_v2 *im = data;
+	if (s->input_method != NULL) {
+		// Un solo motor IME a la vez: el segundo recibe unavailable.
+		wlr_input_method_v2_send_unavailable(im);
+		return;
+	}
+	s->input_method = im;
+	s->input_method_commit.notify = handle_input_method_commit;
+	wl_signal_add(&im->events.commit, &s->input_method_commit);
+	s->input_method_grab_keyboard.notify = handle_input_method_grab_keyboard;
+	wl_signal_add(&im->events.grab_keyboard, &s->input_method_grab_keyboard);
+	s->input_method_destroy.notify = handle_input_method_destroy;
+	wl_signal_add(&im->events.destroy, &s->input_method_destroy);
+}
+
+// El motor produjo texto: reenviar preedit/commit/delete al campo enfocado.
+static void handle_input_method_commit(struct wl_listener *listener, void *data) {
+	struct wl_server *s = wl_container_of(listener, s, input_method_commit);
+	struct wlr_input_method_v2 *im = data;
+	struct wlr_text_input_v3 *input = s->active_text_input;
+	if (input == NULL) {
+		return;
+	}
+	if (im->current.preedit.text != NULL) {
+		wlr_text_input_v3_send_preedit_string(input, im->current.preedit.text,
+				im->current.preedit.cursor_begin, im->current.preedit.cursor_end);
+	}
+	if (im->current.commit_text != NULL) {
+		wlr_text_input_v3_send_commit_string(input, im->current.commit_text);
+	}
+	if (im->current.delete.before_length > 0 || im->current.delete.after_length > 0) {
+		wlr_text_input_v3_send_delete_surrounding_text(input,
+				im->current.delete.before_length, im->current.delete.after_length);
+	}
+	wlr_text_input_v3_send_done(input);
+}
+
+// El motor toma el teclado (composición/preedit): se le da el keymap y los
+// modificadores; wl_server_key le reenvia las teclas mientras dure el grab.
+static void handle_input_method_grab_keyboard(struct wl_listener *listener, void *data) {
+	struct wl_server *s = wl_container_of(listener, s, input_method_grab_keyboard);
+	struct wlr_input_method_keyboard_grab_v2 *grab = data;
+	if (s->keyboard_grab != NULL) {
+		wl_list_remove(&s->keyboard_grab_destroy.link);
+		wlr_input_method_keyboard_grab_v2_destroy(s->keyboard_grab);
+		s->keyboard_grab = NULL;
+	}
+	s->keyboard_grab = grab;
+	wlr_input_method_keyboard_grab_v2_set_keyboard(grab, &s->keyboard);
+	wlr_input_method_keyboard_grab_v2_send_modifiers(grab, &s->keyboard.modifiers);
+	s->keyboard_grab_destroy.notify = handle_keyboard_grab_destroy;
+	wl_signal_add(&grab->events.destroy, &s->keyboard_grab_destroy);
+}
+
+static void handle_keyboard_grab_destroy(struct wl_listener *listener, void *data) {
+	struct wl_server *s = wl_container_of(listener, s, keyboard_grab_destroy);
+	wl_list_remove(&s->keyboard_grab_destroy.link);
+	wl_list_init(&s->keyboard_grab_destroy.link);
+	s->keyboard_grab = NULL;
+}
+
+static void handle_input_method_destroy(struct wl_listener *listener, void *data) {
+	struct wl_server *s = wl_container_of(listener, s, input_method_destroy);
+	s->active_text_input = NULL;
+	wl_list_remove(&s->input_method_commit.link);
+	wl_list_remove(&s->input_method_grab_keyboard.link);
+	wl_list_remove(&s->input_method_destroy.link);
+	s->input_method = NULL;
 }
 
 // Atributos EGL de import por plano (hasta 4, como WLR_DMABUF_MAX_PLANES).
@@ -542,6 +788,7 @@ static void toplevel_apply_focus(toplevel *t) {
 	if (t->mapped) {
 		wlr_seat_keyboard_notify_enter(s->seat, surface,
 				s->keyboard.keycodes, s->keyboard.num_keycodes, &s->keyboard.modifiers);
+		text_input_relay_set_focus(s, surface);
 	}
 }
 
@@ -1216,6 +1463,7 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 	wl_list_init(&s->surfaces);
 	wl_list_init(&s->layers);
 	wl_list_init(&s->xors);
+	wl_list_init(&s->text_inputs);
 
 	s->display = wl_display_create();
 	if (s->display == NULL) {
@@ -1291,6 +1539,23 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 	wlr_seat_set_keyboard(s->seat, &s->keyboard);
 	wlr_seat_set_capabilities(s->seat,
 			WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD);
+
+	// IME (K14): text-input-v3 para los clientes y input-method-v2 para el motor.
+	// Si no hay motor conectado, text-input queda anunciado pero inactivo.
+	s->text_input_manager = wlr_text_input_manager_v3_create(s->display);
+	if (s->text_input_manager != NULL) {
+		s->new_text_input.notify = handle_new_text_input;
+		wl_signal_add(&s->text_input_manager->events.new_text_input, &s->new_text_input);
+	} else {
+		wlr_log(WLR_ERROR, "wl_server: fallo wlr_text_input_manager_v3_create");
+	}
+	s->input_method_manager = wlr_input_method_manager_v2_create(s->display);
+	if (s->input_method_manager != NULL) {
+		s->new_input_method.notify = handle_new_input_method;
+		wl_signal_add(&s->input_method_manager->events.new_input_method, &s->new_input_method);
+	} else {
+		wlr_log(WLR_ERROR, "wl_server: fallo wlr_input_method_manager_v2_create");
+	}
 
 	s->new_toplevel.notify = handle_new_toplevel;
 	wl_signal_add(&s->xdg_shell->events.new_toplevel, &s->new_toplevel);
@@ -1550,6 +1815,16 @@ void wl_server_key(wl_server *s, uint32_t time_ms, uint32_t evdev_key, int press
 		.update_state = true,
 		.state = pressed ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED,
 	};
+	// IME (K14): con un grab activo el motor procesa la tecla (composicion) y
+	// decide que reenviar; no llega directo al cliente.
+	if (s->keyboard_grab != NULL) {
+		wlr_keyboard_notify_key(&s->keyboard, &ev);
+		wlr_input_method_keyboard_grab_v2_send_key(s->keyboard_grab, time_ms,
+				evdev_key, ev.state);
+		wlr_input_method_keyboard_grab_v2_send_modifiers(s->keyboard_grab,
+				&s->keyboard.modifiers);
+		return;
+	}
 	wlr_keyboard_notify_key(&s->keyboard, &ev);
 	wlr_seat_keyboard_notify_modifiers(s->seat, &s->keyboard.modifiers);
 	wlr_seat_keyboard_notify_key(s->seat, time_ms, evdev_key, ev.state);
@@ -1738,7 +2013,8 @@ void wl_server_destroy(wl_server *s) {
 		wl_list_remove(&s->new_decoration.link);
 	}
 	struct wl_listener *extra[] = { &s->new_layer, &s->request_activate,
-		&s->request_set_selection, &s->request_set_primary_selection, &s->new_xsurface };
+		&s->request_set_selection, &s->request_set_primary_selection, &s->new_xsurface,
+		&s->new_text_input, &s->new_input_method };
 	for (size_t i = 0; i < sizeof(extra) / sizeof(extra[0]); i++) {
 		if (extra[i]->notify != NULL) {
 			wl_list_remove(&extra[i]->link);
@@ -1751,6 +2027,29 @@ void wl_server_destroy(wl_server *s) {
 	}
 	if (s->display != NULL) {
 		wl_display_destroy_clients(s->display);
+	}
+
+	// IME (K14): los text-input y el input-method normalmente ya murieron con
+	// sus clientes (events.destroy). Red de seguridad.
+	s->active_text_input = NULL;
+	if (s->input_method != NULL) {
+		wl_list_remove(&s->input_method_commit.link);
+		wl_list_remove(&s->input_method_grab_keyboard.link);
+		wl_list_remove(&s->input_method_destroy.link);
+		s->input_method = NULL;
+	}
+	if (s->keyboard_grab != NULL) {
+		wl_list_remove(&s->keyboard_grab_destroy.link);
+		s->keyboard_grab = NULL;
+	}
+	text_input_relay *ti, *titmp;
+	wl_list_for_each_safe(ti, titmp, &s->text_inputs, link) {
+		wl_list_remove(&ti->enable.link);
+		wl_list_remove(&ti->commit.link);
+		wl_list_remove(&ti->disable.link);
+		wl_list_remove(&ti->destroy.link);
+		wl_list_remove(&ti->link);
+		free(ti);
 	}
 
 	// Red de seguridad: los toplevels normalmente ya se liberaron en destroy.

@@ -6,6 +6,8 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 . "$HERE/session/keyboard.sh"
 . "$HERE/session/portal.sh"   # XDG_CURRENT_DESKTOP=gdtk para el portal RemoteDesktop
 export GDTK_SESSION=wayland GDTK_HOME="$HERE"
+# polkit, llavero, notificaciones y ~/.config/autostart (difiere hasta tener compositor).
+"$HERE/session/autostart.sh"
 if [ -z "$GDTK_GODOT" ]; then
 	GDTK_GODOT="$HERE/bin/godot-gdtk"
 	[ -x "$GDTK_GODOT" ] || GDTK_GODOT=/home/icarito/Proyectos/godot3-box3d/godot-dev/bin/godot.frt.opt.debug.x86_64.gdtklite

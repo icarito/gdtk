@@ -1,4 +1,10 @@
 #!/bin/sh
+# DEPRECADO: la sesión por defecto es sway (cage ya no se soporta: sin lápiz/touch).
+# Este nombre se conserva como alias para entradas .desktop antiguas.
+# El autostart (polkit/keyring/notificaciones, session/autostart.sh) lo hace la
+# sesión sway a la que se delega.
+exec "$(dirname "$0")/gdtk-session-sway" "$@"
+# --- código cage anterior (no se ejecuta) ---
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 . "$HERE/session/keyboard.sh"
 . "$HERE/session/portal.sh"   # XDG_CURRENT_DESKTOP=gdtk para el portal RemoteDesktop
