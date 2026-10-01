@@ -4103,7 +4103,8 @@ func _has_tracked(key):
 	return pid > 0
 
 
-# Corta una sesión rastreada: olvida y mata su pid. Sin zombies.
+# Corta una sesión rastreada: olvida y termina su pid. SIGTERM (no SIGKILL) para
+# que procesos con limpieza — gvd desmonta su monitor virtual headless — la hagan.
 func _stop_tracked(key):
 	var k = String(key)
 	_gvd_mutex.lock()
@@ -4216,6 +4217,12 @@ func _start_gvd_screen(host_id, action):
 			OS.get_environment("XDG_CURRENT_DESKTOP"),
 			OS.get_environment("XDG_SESSION_TYPE"))
 		var wlr_virtual = backend == "wlr" and _has_sway_socket()
+		# Reintentar no debe apilar emisores: varios gvd send al mismo peer:puerto
+		# se pisarían. Se corta la sesión previa (SIGTERM: desmonta su monitor).
+		if _has_tracked(id):
+			_stop_tracked(id)
+		if _has_tracked(GVD_LAUNCH.remote_recv_key(id)):
+			_stop_tracked(GVD_LAUNCH.remote_recv_key(id))
 		var sp = GVD_LAUNCH.local_send_argv(gvd_path, peer,
 			GVD_LAUNCH.port_of_plan(plan), GVD_LAUNCH.position_for(direction), wlr_virtual)
 		if not bool(sp.get("ok", false)):
