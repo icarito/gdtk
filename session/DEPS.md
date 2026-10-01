@@ -20,6 +20,23 @@ relanza lo que ya corre.
 | Ejecutor de `.desktop` | `dex` | Opcional. Si está, el script lo usa para lanzar `~/.config/autostart` respetando `Hidden`/`OnlyShowIn`/`NotShowIn`; si no, hace el parseo y filtrado él mismo. |
 | Publicación de entorno | `dbus` (`dbus-update-activation-environment`) | Necesario para que los servicios activados por D-Bus/systemd vean `GNOME_KEYRING_CONTROL` y `SSH_AUTH_SOCK`. |
 
+## Sensores y rotación de pantalla (Surface Pro 3)
+
+`session/sensor-hub.sh` (invocado por `gdtk-session-sway`) habilita los sensores
+del Surface Pro 3 (acelerómetro, giroscopio, ALS, magnetómetro) sin reactivar el
+táctil N-Trig dañado. En este equipo el sensor hub (`MSHW0030`) y el táctil
+(`NTRG0001`) son ambos I2C-HID y `i2c_hid_acpi` los auto-enlaza; como cuelgan de
+controladores I2C distintos, el script desbinda el controlador del táctil
+(`INT33C3`, i2c-1) y recién entonces carga `i2c_hid_acpi` a mano, dejando sólo
+`MSHW0030` (i2c-0). Requiere `i2c_hid`/`i2c_hid_acpi` blacklisteados (p. ej.
+`/etc/modprobe.d/disable-touch.conf`) y `sudo -n`. Es idempotente y opcional.
+
+`session/gdtk-rotate` aplica `swaymsg output '*' transform ...`: `next`/`set`
+manual, `status`, y `auto` sigue `net.hadess.SensorProxy.AccelerometerOrientation`
+(iio-sensor-proxy) con `hold` para pausar. `sway.conf` lo arranca en modo `auto`
+sólo si hay acelerómetro. Si la orientación sale invertida, ajustar la matriz
+`ACCEL_MOUNT_MATRIX` en `/etc/udev/hwdb.d/60-sensor.hwdb`.
+
 ## Notas
 
 - **Autologin y llavero**: con autologin el keyring **no** se desbloquea por PAM; la

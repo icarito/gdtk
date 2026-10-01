@@ -1,0 +1,123 @@
+#!/bin/sh
+# Rotación de pantalla para la sesión sway de gdtk.
+#
+#   gdtk-rotate next            rota 90° en sentido horario (0 -> 90 -> 180 -> 270)
+#   gdtk-rotate right           igual que next (horario)
+#   gdtk-rotate left            rota 90° en sentido antihorario (0 -> 270 -> 180 -> 90)
+#   gdtk-rotate set <t>         fija el transform: normal | 90 | 180 | 270
+#   gdtk-rotate auto            daemon: sigue la orientación del equipo (por defecto)
+#                               (instancia única: si ya corre, no arranca otra)
+#   gdtk-rotate hold [on|off|toggle]
+#                               pausa/reactiva el modo auto (para leer acostado)
+#   gdtk-rotate status          transform actual, orientación y estado del hold
+#
+# El transform se aplica con `swaymsg output '*' transform <t>` (rota el output
+# completo, incluido el shell a pantalla completa). La orientación la publica
+# iio-sensor-proxy por D-Bus (net.hadess.SensorProxy.AccelerometerOrientation),
+# que ya resuelve la matriz de montaje del sensor.
+#
+# Emparejamiento orientación -> transform (convención wlroots, a 90°):
+#   normal    -> normal      right-up -> 90
+#   bottom-up -> 180         left-up  -> 270
+# Si la rotación sale invertida, se corrige acá o con la matriz de montaje
+# ACCEL_MOUNT_MATRIX en /etc/udev/hwdb.d/60-sensor.hwdb.
+
+run_dir="${XDG_RUNTIME_DIR:-/tmp}/gdtk"
+mkdir -p "$run_dir" 2>/dev/null || true
+hold_file="$run_dir/rotate.hold"
+pid_file="$run_dir/rotate.pid"
+
+sway_ok() { command -v swaymsg >/dev/null 2>&1 && [ -n "${SWAYSOCK:-}" ]; }
+set_transform() { swaymsg output '*' transform "$1" >/dev/null 2>&1; }
+
+current_transform() {
+	swaymsg -t get_outputs -r 2>/dev/null \
+		| jq -r 'map(select(.focused))[0].transform // .[0].transform // "normal"' 2>/dev/null
+}
+
+# Sólo los cuatro transform "puros"; cualquier otro valor arranca desde 90.
+cycle() { # cycle <cw|ccw>
+	case "$(current_transform):$1" in
+		normal:cw|0:cw)   set_transform 90 ;;
+		90:cw)            set_transform 180 ;;
+		180:cw)           set_transform 270 ;;
+		270:cw)           set_transform normal ;;
+		normal:ccw|0:ccw) set_transform 270 ;;
+		90:ccw)           set_transform normal ;;
+		180:ccw)          set_transform 90 ;;
+		270:ccw)          set_transform 180 ;;
+		*)                set_transform 90 ;;
+	esac
+}
+
+orientation() {
+	busctl --system get-property net.hadess.SensorProxy /net/hadess/SensorProxy \
+		net.hadess.SensorProxy AccelerometerOrientation 2>/dev/null \
+		| sed -e 's/^s //' -e 's/^"//' -e 's/"$//'
+}
+
+orientation_transform() {
+	case "$1" in
+		normal)          printf 'normal' ;;
+		right-up)        printf '90' ;;
+		bottom-up)       printf '180' ;;
+		left-up)         printf '270' ;;
+		*)               printf '' ;;
+	esac
+}
+
+held() { [ -f "$hold_file" ]; }
+
+auto_loop() {
+	# Instancia única: si ya hay un daemon vivo, no arranca otro.
+	if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file" 2>/dev/null)" 2>/dev/null; then
+		exit 0
+	fi
+	echo $$ >"$pid_file"
+	# swaymsg necesita el socket; si auto arranca antes que sway, espera.
+	_n=0
+	while ! sway_ok && [ "$_n" -lt 300 ]; do sleep 0.2; _n=$((_n + 1)); done
+	sway_ok || { rm -f "$pid_file"; echo "gdtk-rotate: sin SWAYSOCK, salgo" >&2; exit 0; }
+
+	busctl --system call net.hadess.SensorProxy /net/hadess/SensorProxy \
+		net.hadess.SensorProxy ClaimAccelerometer >/dev/null 2>&1 || true
+	trap 'busctl --system call net.hadess.SensorProxy /net/hadess/SensorProxy \
+		net.hadess.SensorProxy ReleaseAccelerometer >/dev/null 2>&1; rm -f "$pid_file"; exit 0' INT TERM
+
+	_last=""
+	while :; do
+		_o="$(orientation)"
+		_t="$(orientation_transform "$_o")"
+		if [ -n "$_t" ] && [ "$_t" != "$_last" ] && ! held; then
+			case "$(current_transform)" in
+				"$_t") : ;;
+				*) set_transform "$_t" ;;
+			esac
+			_last="$_t"
+		fi
+		sleep 1
+	done
+}
+
+case "${1:-status}" in
+	next|right) cycle cw ;;
+	left)       cycle ccw ;;
+	set)
+		case "${2:-}" in
+			normal|90|180|270) set_transform "${2}" ;;
+			*) echo "uso: gdtk-rotate set normal|90|180|270" >&2; exit 2 ;;
+		esac ;;
+	auto)  auto_loop ;;
+	hold)
+		case "${2:-toggle}" in
+			on)     : >"$hold_file" ;;
+			off)    rm -f "$hold_file" ;;
+			toggle) if held; then rm -f "$hold_file"; else : >"$hold_file"; fi ;;
+			*) echo "uso: gdtk-rotate hold [on|off|toggle]" >&2; exit 2 ;;
+		esac ;;
+	status)
+		printf 'transform: %s\norientation: %s\nhold: %s\n' \
+			"$(current_transform)" "$(orientation)" \
+			"$(held && echo on || echo off)" ;;
+	*) echo "uso: gdtk-rotate {next|right|left|set <t>|auto|hold [on|off|toggle]|status}" >&2; exit 2 ;;
+esac
