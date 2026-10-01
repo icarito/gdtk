@@ -18,16 +18,21 @@ const IDENTITY_HID_LEN = 16
 
 # Identidad local no secreta: el hostname es sólo la etiqueta visible; el `hid`
 # es opaco (hash del hostname) para no publicar el hostname real como identidad
-# (SPEC-sugar-neighborhood-host-actions §Identidad local). Puro y testeable.
-static func local_identity(hostname):
+# (SPEC-sugar-neighborhood-host-actions §Identidad local). `kind` es el tipo de
+# equipo local (desktop/laptop/tablet/mobile/tv/unknown) que también elige el
+# ícono de "Este equipo"; se publica en el TXT para que el vecino lo vea. Puro.
+static func local_identity(hostname, kind = "unknown"):
 	var label = String(hostname).strip_edges()
 	if label == "":
 		label = "gdtk"
+	var k = String(kind).strip_edges().to_lower()
+	if not ["desktop", "laptop", "tablet", "mobile", "tv"].has(k):
+		k = "unknown"
 	return {
 		"hid": _opaque_id(label),
 		"name": label,
-		"kind": "unknown",
-		"icon": "unknown",
+		"kind": k,
+		"icon": k,
 		"auth": "ask",
 	}
 

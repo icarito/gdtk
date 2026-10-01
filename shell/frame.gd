@@ -16,22 +16,20 @@ extends Node
 # pulsación retenida se reenvía antes a la app y el combo le llega entero. FRT la
 # entrega como scancode KEY_META (keysym) con physical KEY_SUPER_L/R.
 #
-# Borde: y <= EDGE en cualquier x (Deskflow entrando/saliendo por arriba, o chocar
-# el borde). HOT_MS evita disparos al pasar hacia pestañas/menús pegados arriba, y
-# un clic mientras espera la desarma hasta salir del borde (clic en una pestaña).
+# Autohide: pasar el mouse por la franja donde vive una barra (arriba/abajo) la
+# revela. HOT_MS evita disparos al cruzar hacia menús pegados al borde, y un clic
+# mientras espera la desarma hasta salir de la franja.
 #
 # Alt+Tab / Alt+Shift+Tab ciclan entre lo abierto sin mostrar el Frame. Se eligió
 # Alt+Tab (no Ctrl+Tab, que usan las apps para pestañas): bajo cage en DRM llega
 # al shell; sólo en cage anidado lo roba el escritorio anfitrión (probar con el
 # control remoto: `key alt+Tab`).
 
-const CORNER = 4.0
-const EDGE = 1.0
 const HOT_MS = 250
 # Entrada/salida del Frame deslizándose desde arriba (ease-out).
 const SLIDE_MS = 130
 const SUPER_KEYS = [KEY_META, KEY_SUPER_L, KEY_SUPER_R]
-const PAD = 6.0          # separación entre bloques del Frame
+const PAD = 0.0          # sin separación entre bloques del Frame (pegados al borde)
 const DRAG_PX = 8.0
 # Estilo WindowMaker/NeXT: teselas CUADRADAS de una unidad de rejilla (shell.grid_unit),
 # bisel de 2px sin esquinas redondeadas, fondo gris azulado oscuro tipo NeXT. El bloque
@@ -48,6 +46,9 @@ const NX_TEXT_DIM = Color(0.60, 0.63, 0.72, 1.0)
 const NX_SEL = Color(0.98, 0.80, 0.36, 1.0)
 const NX_CUR = Color(0.32, 0.60, 0.98, 1.0)
 const BEVEL = 2.0        # grosor del bisel (claro arriba/izq, oscuro abajo/der)
+# Sombra suave del Frame sobre el contenido, pegada al borde interior de cada barra.
+const SHADOW = 6.0
+const SHADOW_ALPHA = 0.36
 const TITLE_H = 14.0     # alto de la línea de título dentro de la tesela
 const TITLE_MAX = 10     # máximo de caracteres del título (se recorta con ...)
 const ICON_MIN = 64.0    # ícono nunca por debajo de 64 px
@@ -463,8 +464,13 @@ func _draw_app_tile(ui, app, pos, side, id, empty = false):
 	if not empty:
 		var icon = shell._activity_icon_of(app)
 		if icon != null:
-			var icon_side = min(56.0, side - 8.0)
-			ui.set_cursor_pos(pos + Vector2((side - icon_side) * 0.5, 4.0))
+			# Ícono centrado en el bloque (arriba de la línea de título) y escalado
+			# con la UI: antes quedaba fijo en 56 px aun con bloques grandes.
+			var ts = ui.get_imgui_scale()
+			var th = _title_h(ui)
+			var icon_side = min(56.0 * ts, side - 8.0 * ts)
+			var iy = ts * 2.0 + max(0.0, (side - th - icon_side) * 0.5)
+			ui.set_cursor_pos(pos + Vector2((side - icon_side) * 0.5, iy))
 			ui.image(icon, Vector2(icon_side, icon_side))
 		_tile_title(ui, pos, side, app.name, false)
 	return tile
@@ -1606,6 +1612,39 @@ func _draw_applets(ui, vp, off, mouse):
 	applets_drawn = true
 
 
+# Sombra del Frame sobre el contenido, pegada al borde interior de cada barra.
+# La lista de dibujo de ImGui se recorta a la ventana que la emite: por eso la
+# sombra se dibuja en ventanas propias, sin fondo ni ítems, apenas más altas que
+# la franja. Da profundidad y separa el Frame de la ventana activa.
+func _draw_frame_shadow(ui, vp, bh, off_top, off_bottom, top_drawn, bottom_drawn):
+	if top_drawn:
+		_shadow_band(ui, "##frame_shadow_top", Vector2(0.0, off_top + bh), vp.x, 1.0)
+	if bottom_drawn:
+		_shadow_band(ui, "##frame_shadow_bottom",
+			Vector2(0.0, vp.y - bh - off_bottom - SHADOW), vp.x, -1.0)
+
+
+# Banda de sombra de SHADOW px que arranca en `origin` (borde interior de la
+# barra) y se desvanece hacia el contenido. `dir` +1 baja del borde superior,
+# -1 sube desde el inferior.
+func _shadow_band(ui, id, origin, width, dir):
+	var flags = ui.WINDOW_NO_DECORATION | ui.WINDOW_NO_MOVE | ui.WINDOW_NO_SAVED_SETTINGS \
+		| ui.WINDOW_NO_SCROLLBAR | ui.WINDOW_NO_BACKGROUND | ui.WINDOW_NO_COLLAPSE
+	ui.set_next_window_pos(origin, true)
+	ui.set_next_window_size(Vector2(width, SHADOW), true)
+	if not ui.begin(id, flags):
+		ui.end()
+		return
+	var rows = max(1, int(SHADOW))
+	for i in range(rows):
+		var t = float(i) / float(rows)
+		var a = SHADOW_ALPHA * (1.0 - t) * (1.0 - t)
+		var y = origin.y + (float(i) if dir > 0.0 else SHADOW - 1.0 - float(i))
+		ui.imgui_draw_rect_filled(Rect2(Vector2(0.0, y), Vector2(width, 1.0)),
+			Color(0.0, 0.0, 0.0, a), 0.0)
+	ui.end()
+
+
 # Un applet: bloque cuadrado U x U con bisel; el estado va por color de la barra/
 # etiqueta además del valor textual (nunca sólo color). Tooltip con el nombre completo.
 func _draw_applet(ui, id, pos, scr, w, side, is_sel, mouse, is_ghost = false):
@@ -1708,7 +1747,9 @@ func _draw_home_tile(ui, pos, side):
 	var ts = ui.get_imgui_scale()
 	var title_h = _title_h(ui) if side >= 76.0 * ts else 0.0
 	var s = clamp(side - title_h - 2.0 * BEVEL - 4.0, ICON_MIN * ts, ICON_MAX * ts)
-	var icon = shell.home_icon_tex()
+	# Bloque Inicio = "Este equipo": lleva el ícono del equipo local (desktop,
+	# laptop, tablet, mobile o tv), no una casita genérica.
+	var icon = shell.local_device_icon_tex()
 	if icon != null:
 		ui.set_cursor_pos(pos + Vector2((side - s) * 0.5, BEVEL + max(2.0, (side - title_h - s) * 0.5)))
 		ui.image(icon, Vector2(s, s))
@@ -1720,9 +1761,9 @@ func _draw_home_tile(ui, pos, side):
 	return b.clicked
 
 
-# Bloque Vecindario: tesela U x U con un glifo Wi-Fi dibujado (tres arcos + punto;
-# el SVG network-wireless del tema es sólo un círculo vacío). Sólo abre la vista
-# (no escanea, no conecta); resalta cuando la vista actual es el Vecindario.
+# Bloque Vecindario: tesela U x U con el ícono de red inalámbrica (The Noun
+# Project, ver icons/np/CREDITS.txt). Sólo abre la vista (no escanea, no conecta);
+# resalta cuando la vista actual es el Vecindario.
 func _draw_neighborhood_tile(ui, pos, side):
 	var active = shell.neighborhood_view
 	var b = _tile(ui, pos, side, "go_neighborhood", NX_CUR if active else NX_FACE)
@@ -1731,8 +1772,13 @@ func _draw_neighborhood_tile(ui, pos, side):
 	var ts = ui.get_imgui_scale()
 	var title_h = _title_h(ui) if side >= 76.0 * ts else 0.0
 	var s = clamp(side - title_h - 2.0 * BEVEL - 4.0, ICON_MIN * ts, ICON_MAX * ts)
-	var center = pos + Vector2(side * 0.5, BEVEL + max(2.0, (side - title_h - s) * 0.5) + s * 0.5)
-	_draw_wifi_glyph(ui, center, s * 0.5, NX_TEXT)
+	var icon = shell.neighborhood_icon_tex()
+	if icon != null:
+		ui.set_cursor_pos(pos + Vector2((side - s) * 0.5, BEVEL + max(2.0, (side - title_h - s) * 0.5)))
+		ui.image(icon, Vector2(s, s))
+	else:
+		var center = pos + Vector2(side * 0.5, BEVEL + max(2.0, (side - title_h - s) * 0.5) + s * 0.5)
+		_draw_wifi_glyph(ui, center, s * 0.5, NX_TEXT)
 	if title_h > 0.0:
 		_tile_title(ui, pos, side, "Vecindario", false)
 	return b.clicked
@@ -1845,7 +1891,9 @@ func draw(ui):
 	# de a dos por frame, igual que el Hogar.
 	shell.home_icon_loads = max(shell.home_icon_loads, 2)
 	# MousePos es -FLT_MAX hasta el primer movimiento: eso no es la esquina.
-	var hot = mouse.y >= 0.0 and (mouse.y <= EDGE or mouse.y >= vp.y - EDGE or (mouse.x >= 0.0 and mouse.x <= CORNER and mouse.y <= CORNER))
+	# Hover para revelar el autohide: toda la franja donde vive la barra (no sólo el
+	# borde de 1px), arriba y abajo.
+	var hot = mouse.y >= 0.0 and (mouse.y <= bh or mouse.y >= vp.y - bh)
 	if hot:
 		if corner_since == 0:
 			corner_since = now
@@ -2009,6 +2057,7 @@ func draw(ui):
 
 	if bottom_drawn:
 		_draw_applets(ui, vp, off_bottom, mouse)
+	_draw_frame_shadow(ui, vp, bh, off_top, off_bottom, top_drawn, bottom_drawn)
 	_draw_drag_tile(ui, bh)
 
 	# Cerrar/minimizar tienen prioridad sobre cambiar: las mini-teselas van encima
@@ -2044,16 +2093,36 @@ func _draw_trash_glyph(ui, r, col):
 	ui.imgui_draw_polyline(PoolVector2Array([Vector2(x + w * 0.58, y + w * 0.42), Vector2(x + w * 0.56, y + w * 0.70)]), col, 1.0, false)
 
 
-# Botón de pin de una barra (K19): tesela con glifo de chincheta. Cara resaltada
-# cuando la barra está fijada. Devuelve true si se hizo clic.
+# Botón de pin de una barra (K19): control redondo, chico y sutil en la esquina
+# derecha, no un bloque. El slot se reserva para el layout, pero sólo el círculo es
+# clickeable (el resto del slot no captura el mouse). En relieve, apenas notorio en
+# reposo; se aclara al pasar el mouse y toma acento ámbar cuando la barra está fija.
 func _draw_pin_toggle(ui, pos, side, pinned, id):
-	ui.set_cursor_pos(pos)
-	var b = _tile(ui, pos, side, id)
-	if pinned:
-		_frame_focus(ui, b.rect, NX_FOCUS)
-	var face = NX_CUR if pinned else NX_TEXT
-	_draw_pin_glyph(ui, b.rect, face)
-	return b.clicked
+	var ts = ui.get_imgui_scale()
+	var r = min(side * 0.22, 13.0 * ts)
+	var d = r * 2.0
+	var center = pos + Vector2(side * 0.5, side * 0.5)
+	ui.set_cursor_pos(center - Vector2(r, r))
+	var rect = Rect2(ui.get_cursor_screen_pos(), Vector2(d, d))
+	ui.push_style_color(ui.COL_BUTTON, Color(0, 0, 0, 0))
+	ui.push_style_color(ui.COL_BUTTON_HOVERED, Color(0, 0, 0, 0))
+	ui.push_style_color(ui.COL_BUTTON_ACTIVE, Color(0, 0, 0, 0))
+	var clicked = ui.button("##" + id, Vector2(d, d))
+	var held = ui.is_item_active()
+	var hover = ui.is_item_hovered()
+	ui.pop_style_color(3)
+	var c = rect.position + Vector2(r, r)
+	var face = NX_CUR if pinned else NX_FACE.linear_interpolate(NX_LIGHT, 0.12)
+	if hover and not held:
+		face = face.linear_interpolate(Color(1, 1, 1, face.a), 0.10)
+	# Relieve circular: sombra abajo-derecha, cara, aro claro arriba-izquierda.
+	ui.imgui_draw_circle_filled(c + Vector2(0.0, 1.0), r, NX_DARK, 0)
+	ui.imgui_draw_circle_filled(c, r, face, 0)
+	ui.imgui_draw_circle(c, r - 0.5, NX_DARK if held else NX_LIGHT, 24, 1.0)
+	var g = r * 0.72
+	_draw_pin_glyph(ui, Rect2(c - Vector2(g, g), Vector2(g * 2.0, g * 2.0)),
+		NX_SEL if pinned else NX_TEXT_DIM)
+	return clicked
 
 
 # Chincheta: cabeza (rombo/triángulo), cuerpo y aguja, dibujados a mano.

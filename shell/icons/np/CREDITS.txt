@@ -1,0 +1,11 @@
+Iconos: The Noun Project (https://thenounproject.com)
+Licencia: Creative Commons Attribution (requiere atribucion).
+Recoloreados a #F5F2E6 sobre transparencia. Thumbnail PNG 200px.
+
+wireless.png     wireless network  id=7501689  wireless network by IYIKON from Noun Project
+access-point.png Router  id=6917221  Router by cdesign933 from Noun Project
+device-desktop.png Computer  id=1391811  Computer by 4B Icons from Noun Project
+device-laptop.png Laptop  id=7456572  Laptop by Suprihatin from Noun Project
+device-tablet.png Tablet  id=8239581  Tablet by insdesign86 from Noun Project
+device-mobile.png Smartphone  id=196038  Smartphone by Universal Icons from Noun Project
+device-tv.png    Television  id=844034  Television by Joel Wisneski from Noun Project

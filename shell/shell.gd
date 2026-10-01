@@ -53,6 +53,8 @@ const HANDSHAKE = preload("res://neighborhood_handshake.gd")
 # Hueco central del Frame (K12): cálculo puro compartido por el layout de tiles y
 # los diálogos; ver content_layout.gd. No se repite el descuento de barras.
 const CONTENT_LAYOUT = preload("res://content_layout.gd")
+# Tipo de equipo local (kind de Vecindario) para el ícono de "Este equipo"/Inicio.
+const DEVICE_KIND = preload("res://device_kind.gd")
 
 onready var compositor = Host.compositor
 var view = null          # Control que dibuja las ventanas (se crea en _ready)
@@ -306,6 +308,17 @@ const DRAG_PX = 8.0
 # ImageTexture cacheada (el motor no expone load_svg_from_string en este árbol).
 const SUGAR_DIR = "res://icons/sugar/"
 const SUGAR_RASTER = 192  # px del SVG al rasterizar (se dibuja a ~120)
+# Íconos nuevos (The Noun Project, ver icons/np/CREDITS.txt): PNG 200 px claros
+# con transparencia. El rasterizador de Sugar no aplica (no son SVG con
+# entidades), así que se cargan como ImageTexture y se cachean aparte.
+const NP_DIR = "res://icons/np/"
+const DEVICE_ICONS = {
+	"desktop": "device-desktop",
+	"laptop": "device-laptop",
+	"tablet": "device-tablet",
+	"mobile": "device-mobile",
+	"tv": "device-tv",
+}
 # Actividades sin ícono XDG con un ícono Sugar razonable (el resto usa inicial).
 const SUGAR_ACTIVITY_ICONS = {
 	"Panel": "preferences-system",
@@ -321,11 +334,13 @@ const STARTING_PERIOD_S = 1.2
 
 
 # Unidad de rejilla única del Hogar y del Frame: la pantalla se reparte en celdas
-# cuadradas de U px (16 columnas x 10 filas en 1280x800, que da 80). El mínimo de 80
-# garantiza que el ícono de 64 entre holgado en cualquier resolución razonable.
+# cuadradas de U px. Se ata al lado CORTO (min) dividido 10, no a 16x10 fijo: así
+# la escala es la misma en apaisado y en vertical. Antes usaba min(x/16, y/10), que
+# en portrait (p. ej. 1440x2160) daba U=90 en vez de 144 y encogía bloques y fuentes.
+# El mínimo de 80 garantiza que el ícono de 64 entre holgado en cualquier resolución.
 # Todo bloque/salto del Hogar y del Frame sale de acá; no se repiten números.
 func grid_unit(vp):
-	return max(80.0, floor(min(vp.x / 16.0, vp.y / 10.0)))
+	return max(80.0, floor(min(vp.x, vp.y) / 10.0))
 
 
 # Unidad base de la grilla: con U=80 la UI está a escala 1. La resolución ya escala
@@ -380,14 +395,71 @@ func _content_rect(vp):
 	return _tile_rect(vp)
 
 
-# Ícono del botón Inicio del Frame (Sugar: símbolo de hogar).
-func home_icon_tex():
-	return _load_sugar_svg("go-home", SUGAR_STROKE, SUGAR_FILL)
+# Ícono del equipo local: el mismo `kind` que publica el Vecindario (o "unknown",
+# que cae al ícono de escritorio). Es el que va en el bloque Inicio del Frame y en
+# la placa central del mapa, en lugar de una casita genérica.
+func local_device_icon_tex():
+	return device_icon_tex(local_device_kind())
 
 
-# Ícono del bloque Vecindario del Frame (Sugar: red inalámbrica).
+# Ícono por kind de Vecindario (desktop/laptop/tablet/mobile/tv). Cae al ícono de
+# escritorio para "unknown" y al XO de Sugar si el PNG no está.
+func device_icon_tex(kind):
+	var name = DEVICE_ICONS.get(String(kind), "device-desktop")
+	var tex = _load_np_icon(name)
+	if tex != null:
+		return tex
+	return _load_sugar_svg("computer-xo", SUGAR_STROKE, SUGAR_FILL)
+
+
+# Ícono del bloque Vecindario del Frame.
 func neighborhood_icon_tex():
+	var tex = _load_np_icon("wireless")
+	if tex != null:
+		return tex
 	return _load_sugar_svg("network-wireless", SUGAR_STROKE, SUGAR_FILL)
+
+
+# Tipo de equipo local resuelto una vez: override GDTK_DEVICE_KIND > chasis DMI >
+# presencia de batería > unknown (ver device_kind.gd). Barato e idempotente.
+var _local_kind = null
+
+func local_device_kind():
+	if _local_kind != null:
+		return _local_kind
+	var chassis = _read_sysfs_line("/sys/class/dmi/id/chassis_type")
+	var product = _read_sysfs_line("/sys/class/dmi/id/product_name")
+	_local_kind = DEVICE_KIND.detect(OS.get_environment("GDTK_DEVICE_KIND"), chassis, _has_battery(), product)
+	return _local_kind
+
+
+# Primera línea de un archivo sysfs, o "" si no existe/no se puede leer.
+func _read_sysfs_line(path):
+	var f = File.new()
+	if not f.file_exists(path) or f.open(path, File.READ) != OK:
+		return ""
+	var text = f.get_as_text().strip_edges()
+	f.close()
+	return text
+
+
+# ¿Hay alguna batería? Sólo un indicio para inferir portátil cuando el DMI no
+# ayuda. No bloquea: lista un directorio acotado.
+func _has_battery():
+	var d = Directory.new()
+	if d.open("/sys/class/power_supply") != OK:
+		return false
+	d.list_dir_begin(true, true)
+	var found = false
+	while true:
+		var n = d.get_next()
+		if n == "":
+			break
+		if n.begins_with("BAT"):
+			found = true
+			break
+	d.list_dir_end()
+	return found
 
 
 func _ready():
@@ -1854,7 +1926,7 @@ func _draw_home(offset = 0.0):
 
 		home_icon_loads = 2
 		var u = grid_unit(vp)
-		var pad = u * 0.125
+		var pad = 0.0  # bloques pegados al borde, igual que el Frame (sin margen de 1px)
 		var btn_size = Vector2(u * 1.25, u * 1.25)
 		var entries = _ring_entries()
 		var layout = _orbit_layout(vp, entries.size())
@@ -2363,6 +2435,22 @@ func _tick_starting(now):
 		request_redraw()
 
 
+# Carga (y cachea) un PNG de shell/icons/np como ImageTexture. A diferencia de
+# Sugar no hay entidades de color: el color viene horneado en el asset.
+func _load_np_icon(name):
+	var key = "np:" + String(name)
+	if sugar_icons.has(key):
+		return sugar_icons[key]
+	var path = NP_DIR + String(name) + ".png"
+	var img = Image.new()
+	if img.load(path) != OK or img.get_width() == 0:
+		return null
+	var tex = ImageTexture.new()
+	tex.create_from_image(img, Texture.FLAG_FILTER)
+	sugar_icons[key] = tex
+	return tex
+
+
 # Rasteriza un SVG de Sugar a ImageTexture cacheada. Reemplaza las entidades
 # &stroke_color;/&fill_color; por los colores XO, quita el DOCTYPE y lo carga.
 func _load_sugar_svg(name, stroke, fill):
@@ -2502,8 +2590,10 @@ func _draw_ring_item(pos, size, tex, label, state, id, starting_since = -1, appe
 
 	var cw = 7.0 * get_imgui_scale()
 	if tex != null:
-		# 64-72 px de ícono dentro del círculo de 1.5U: nunca por debajo de 64.
-		var side = clamp(size.x * 0.56, 64.0, 72.0) * pulse * scale
+		# Ícono dentro del círculo de 1.25U, centrado y escalado con la UI: el tope
+		# fijo de 72 px dejaba el ícono chico en bloques grandes (portrait/densas).
+		var ts = get_imgui_scale()
+		var side = clamp(size.x * 0.56, 64.0 * ts, 72.0 * ts) * pulse * scale
 		var icon_size = Vector2(side, side)
 		set_cursor_pos(pos + (size - icon_size) * 0.5)
 		image(tex, icon_size)
@@ -2536,9 +2626,13 @@ func _activity_tex(activity):
 	var prog = ""
 	if activity.has("wayland") and activity.wayland.size() > 0:
 		prog = activity.wayland[0]
-	if prog != "":
+	# El app_id de Wayland suele traer otra capitalización que el binario del .desktop
+	# (p. ej. "Alacritty" vs "alacritty"): se compara plegado o Terminal no encontraba
+	# su ícono y caía al genérico.
+	var want_prog = apps.fold(prog)
+	if want_prog != "":
 		for a in apps.apps:
-			if apps._program(a.exec) == prog and _activity_icon_of(a) != null:
+			if apps.fold(apps._program(a.exec)) == want_prog and _activity_icon_of(a) != null:
 				return a.tex
 	# Sólo apps reales buscan por nombre; las internas usan monograma.
 	if activity.has("wayland"):
@@ -2552,7 +2646,8 @@ func _activity_tex(activity):
 
 # Ícono de una ventana sin actividad cargada (o cuya actividad no tiene ícono):
 # primero el XDG del programa por el app_id del toplevel; si no hay, el Sugar por
-# nombre; y por último un ícono genérico de ventana Sugar (nunca un monograma suelto).
+# nombre; y por último un genérico de computadora (antes usaba "document-send", el
+# sobre de Chat, y por eso varias ventanas aparecían con ese ícono).
 func _window_icon(id, name):
 	if id >= 0:
 		var app_id = compositor.get_app_id(id)
@@ -2563,7 +2658,7 @@ func _window_icon(id, name):
 	var sugar = _sugar_icon_for(name)
 	if sugar != null:
 		return sugar
-	return _load_sugar_svg("document-send", SUGAR_STROKE, SUGAR_FILL)
+	return _load_sugar_svg("computer-xo", SUGAR_STROKE, SUGAR_FILL)
 
 
 func _sugar_icon_for(name):
@@ -2974,7 +3069,7 @@ func _start_publishers():
 	var avahi = _publisher.detect_avahi()
 	if not avahi.available:
 		return   # degradado, sin error
-	var identity = PUBLISH_PLAN.local_identity(_local_hostname())
+	var identity = PUBLISH_PLAN.local_identity(_local_hostname(), local_device_kind())
 	var caps = {"gvd": true, "gvd_port": 5600, "deskflow": true, "deskflow_port": 24800}
 	var plan = PUBLISH_PLAN.new().build(identity, caps, avahi.path)
 	for entry in plan.services:

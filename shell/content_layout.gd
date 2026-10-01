@@ -19,6 +19,10 @@ extends Reference
 # Vocabulario: no produce texto visible; los nombres de lados son internos
 # (inglés/cardinales) y nunca salen a la UI.
 
+# Separación entre una barra fijada y la ventana: 1px para que se lea el borde del
+# Frame sin que la ventana quede pegada. Al autohide no aplica (no reserva franja).
+const FRAME_GAP = 1.0
+
 static func content_rect(viewport, block, frame_edges):
 	var origin = _viewport_origin(viewport)
 	var vp = _viewport_size(viewport)
@@ -26,10 +30,11 @@ static func content_rect(viewport, block, frame_edges):
 		return Rect2()
 	var b = max(float(block), 0.0)
 	var edges = frame_edge_set(frame_edges)
-	var left = b if edges.has("left") else 0.0
-	var top = b if edges.has("top") else 0.0
-	var right = b if edges.has("right") else 0.0
-	var bottom = b if edges.has("bottom") else 0.0
+	var e = b + FRAME_GAP if b > 0.0 else 0.0
+	var left = e if edges.has("left") else 0.0
+	var top = e if edges.has("top") else 0.0
+	var right = e if edges.has("right") else 0.0
+	var bottom = e if edges.has("bottom") else 0.0
 	var w = max(vp.x - left - right, 0.0)
 	var h = max(vp.y - top - bottom, 0.0)
 	return Rect2(origin + Vector2(left, top), Vector2(w, h))
@@ -97,20 +102,20 @@ static func _viewport_size(viewport):
 # Autoprueba del modelo (mismo espíritu que screen_layout.gd). Devuelve true si pasa.
 static func selftest():
 	var top_bottom = content_rect(Vector2(1280, 800), 80.0, {"top": true, "bottom": true})
-	assert(top_bottom.position == Vector2(0, 80) and top_bottom.size == Vector2(1280, 640), "arriba/abajo")
+	assert(top_bottom.position == Vector2(0, 81) and top_bottom.size == Vector2(1280, 638), "arriba/abajo")
 	var all4 = content_rect(Vector2(1280, 800), 80.0,
 		{"top": true, "bottom": true, "left": true, "right": true})
-	assert(all4.position == Vector2(80, 80) and all4.size == Vector2(1120, 640), "cuatro lados")
+	assert(all4.position == Vector2(81, 81) and all4.size == Vector2(1118, 638), "cuatro lados")
 	assert(content_rect(Vector2(1280, 800), 80.0, ["up", "down"]) == top_bottom, "alias")
 	assert(content_rect(Vector2(1000, 600), 0.0, {}) == Rect2(0, 0, 1000, 600), "bloque 0")
 	assert(content_rect(Rect2(10, 20, 1000, 600), 50.0, ["top", "left"])
-		== Rect2(60, 70, 950, 550), "origen del Rect2")
+		== Rect2(61, 71, 949, 549), "origen del Rect2")
 	assert(clamp_inside(all4, Vector2(-99, -99), Vector2(100, 100)) == all4.position, "encaje")
 	# Con autohide (sin lados reservados) la ventana usa todo el viewport; una barra
-	# fijada reserva su franja. No hay deslizamiento: no se redimensiona al mostrarse.
+	# fijada reserva su franja + 1px. No hay deslizamiento: no se redimensiona al mostrarse.
 	assert(content_rect(Vector2(1280, 800), 80.0, {}) == Rect2(0, 0, 1280, 800), "autohide: viewport completo")
-	assert(content_rect(Vector2(1280, 800), 80.0, {"top": true}) == Rect2(0, 80, 1280, 720), "pin superior reserva")
-	assert(content_rect(Vector2(1280, 800), 80.0, {"bottom": true}) == Rect2(0, 0, 1280, 720), "pin inferior reserva")
+	assert(content_rect(Vector2(1280, 800), 80.0, {"top": true}) == Rect2(0, 81, 1280, 719), "pin superior reserva")
+	assert(content_rect(Vector2(1280, 800), 80.0, {"bottom": true}) == Rect2(0, 0, 1280, 719), "pin inferior reserva")
 	return true
 
 

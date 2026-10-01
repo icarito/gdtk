@@ -1,6 +1,8 @@
 demo/.import/
 demo/imgui.ini
 *.png
+# Los íconos del Frame/Vecindario (The Noun Project) sí se versionan.
+!shell/icons/np/*.png
 *.o
 __pycache__/
 kilo_run.log

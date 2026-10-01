@@ -28,6 +28,11 @@ func _init():
 	# Wi-Fi y hosts no comparten selección.
 	check("selected (SSID) y selected_host separados", ui.selected == "" and ui.selected_host == "")
 
+	# Assets nuevos (The Noun Project): deben resolver fuera de la UI también.
+	check("ícono de AP presente", ui._icon_texture("np/access-point") != null)
+	check("ícono de tablet presente", ui._icon_texture("np/device-tablet") != null)
+	check("sin shell el device local es unknown", ui._local_device_kind() == "unknown")
+
 	# --- Vocabulario: helper de traducción -----------------------------------
 	check("acción pantalla en lenguaje humano",
 		MAP.human_action_label("use_as_screen") == "Ver su escritorio aquí")
@@ -223,8 +228,15 @@ func _init():
 	check("tooltip sin vocabulario interno", not MAP.has_internal_terms(tooltip))
 
 	var icon = ui._host_icon(host)
-	check("icono de host resuelto a un SVG existente",
-		File.new().file_exists("res://icons/" + icon + ".svg"))
+	var icon_file = "res://icons/" + icon + ".png"
+	if not File.new().file_exists(icon_file):
+		icon_file = "res://icons/" + icon + ".svg"
+	check("icono de host resuelto a un asset existente", File.new().file_exists(icon_file))
+	check("laptop mapea al ícono de laptop", icon == "np/device-laptop")
+	check("tablet mapea al ícono de tablet",
+		ui._host_icon({"kind": "tablet", "icon": "tablet"}) == "np/device-tablet")
+	check("kind desconocido cae al respaldo",
+		ui._host_icon({"kind": "unknown", "icon": ""}) == "sugar/network-wired")
 
 	var hosts = [host]
 	check("_host_by_id encuentra y descarta", ui._host_by_id(hosts, "h1") != null

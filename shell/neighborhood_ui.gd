@@ -34,10 +34,19 @@ const NODE_RING = Color(0.60, 0.69, 0.82, 0.40)
 const NODE_SEL = Color(1.0, 0.84, 0.43, 1.0)
 const NODE_DIM_ALPHA = 0.45
 const CENTER_PLATE = Color(0.14, 0.18, 0.27, 1.0)
-const CENTER_MONITOR = Color(0.78, 0.82, 0.90, 1.0)
-const CENTER_ICON = "sugar/computer-xo"
 const WIFI_DOT = Color(0.55, 0.64, 0.80, 0.65)
 const WIFI_DOT_ACTIVE = Color(1.0, 0.84, 0.43, 0.95)
+# Íconos nuevos (The Noun Project, ver icons/np/CREDITS.txt): PNG claros. Los hosts
+# llevan el ícono de su `kind` y el punto del Wi-Fi pasa a ser un ícono de AP.
+const NP_DIR = "res://icons/np/"
+const DEVICE_ICONS = {
+	"desktop": "device-desktop",
+	"laptop": "device-laptop",
+	"tablet": "device-tablet",
+	"mobile": "device-mobile",
+	"tv": "device-tv",
+}
+const AP_ICON = "access-point"
 
 # Menú contextual (estilo WindowMaker; mismas medidas que menu_style.gd).
 const MENU_W = 248.0
@@ -65,6 +74,7 @@ var direction_conflicts = [] # lista de {"direction","hids":[..]} (la puebla el 
 var _actions = null          # instancia perezosa de neighborhood_actions.gd
 var _directions_model = null # instancia perezosa de neighborhood_directions.gd
 var _icon_cache = {}         # nombre de ícono -> ruta resuelta (evita I/O repetido)
+var _tex_cache = {}          # ruta resuelta -> ImageTexture (para _draw directo)
 
 # Arrastre (imán a una dirección al soltar).
 var _drag_id = ""
@@ -110,7 +120,9 @@ func refresh(force = false):
 	_label("Vecindario", Vector2(16, bar + 10), 220)
 	_label(MAP.CENTER_TITLE, center + Vector2(-90, 34), 180, Label.ALIGN_CENTER)
 	_label(local_name(), center + Vector2(-90, 54), 180, Label.ALIGN_CENTER, TEXT_DIM)
-	_make_icon(self, CENTER_ICON, center - Vector2(26, 26), 52.0)
+	# "Este equipo" lleva el ícono del dispositivo local (mismo kind que publica).
+	_make_icon(self, "np/" + DEVICE_ICONS.get(_local_device_kind(), "device-desktop"),
+		center - Vector2(26, 26), 52.0)
 	var wifi_text = MAP.wifi_label(networks)
 	if wifi_text != "":
 		_label(wifi_text, Vector2(16, bar + 34), 360, Label.ALIGN_LEFT, TEXT_DIM)
@@ -608,25 +620,39 @@ func _human_state(state):
 	return String(state)
 
 
-# Icono existente si lo hay; si no, los candidatos de respaldo y, por último, el
-# ícono de red del repo. Cachea por nombre para no repetir I/O.
+# Icono de un host: primero el ícono nuevo por `kind` (desktop/laptop/tablet/
+# mobile/tv), que es lo que distingue a un par de otro; si no, el `icon` publicado
+# y, por último, el ícono de red del repo. Cachea por nombre para no repetir I/O.
 func _host_icon(host):
-	var name = String(host.get("icon", "")) if typeof(host) == TYPE_DICTIONARY else ""
-	if _icon_cache.has(name):
-		return String(_icon_cache[name])
+	var d = host if typeof(host) == TYPE_DICTIONARY else {}
+	var kind = String(d.get("kind", ""))
+	var name = String(d.get("icon", ""))
+	var cache_key = "kind:" + kind + "|icon:" + name
+	if _icon_cache.has(cache_key):
+		return String(_icon_cache[cache_key])
 	var f = File.new()
 	var candidates = []
+	if DEVICE_ICONS.has(kind):
+		candidates.append("np/" + DEVICE_ICONS[kind])
 	if name != "":
 		candidates.append(name)
 		candidates.append("sugar/" + name)
 	candidates.append_array(HOST_FALLBACK_ICONS)
 	var resolved = "sugar/computer-xo"
 	for n in candidates:
-		if f.file_exists("res://icons/" + n + ".svg"):
+		if f.file_exists("res://icons/" + n + ".svg") or f.file_exists("res://icons/" + n + ".png"):
 			resolved = n
 			break
-	_icon_cache[name] = resolved
+	_icon_cache[cache_key] = resolved
 	return resolved
+
+
+# Tipo del equipo local: lo resuelve el shell (mismo que publica el Vecindario);
+# sin shell (tests) cae a "unknown". El centro del mapa muestra este dispositivo.
+func _local_device_kind():
+	if shell != null and shell.has_method("local_device_kind"):
+		return String(shell.local_device_kind())
+	return "unknown"
 
 
 # Nombre corto del host: prefiere el `name` del servicio (lo que el vecino se
@@ -667,8 +693,16 @@ func _draw():
 	for r in [radii.inner, radii.mid, radii.outer]:
 		draw_arc(center, float(r), 0.0, TAU, 96, RING_MID if r == radii.mid else RING, 1.0)
 	for dot in wifi_points:
-		draw_circle(Vector2(dot.pos), MAP.WIFI_DOT_RADIUS + (1.0 if bool(dot.in_use) else 0.0),
-			WIFI_DOT_ACTIVE if bool(dot.in_use) else WIFI_DOT)
+		var active = bool(dot.in_use)
+		var ap = _icon_texture("np/" + AP_ICON)
+		if ap != null:
+			# El AP deja de ser un punto: ícono chico, tenue salvo la red en uso.
+			var s = (MAP.WIFI_DOT_RADIUS + (1.0 if active else 0.0)) * 5.0
+			draw_texture_rect(ap, Rect2(Vector2(dot.pos) - Vector2(s, s) * 0.5, Vector2(s, s)),
+				false, WIFI_DOT_ACTIVE if active else WIFI_DOT)
+		else:
+			draw_circle(Vector2(dot.pos), MAP.WIFI_DOT_RADIUS + (1.0 if active else 0.0),
+				WIFI_DOT_ACTIVE if active else WIFI_DOT)
 	_draw_center_plate()
 	for node in host_nodes:
 		if _dragging and String(node.id) == _drag_id:
@@ -686,13 +720,9 @@ func _draw():
 
 
 func _draw_center_plate():
+	# Placa del equipo local: el ícono del dispositivo lo dibuja refresh() encima.
 	draw_circle(center, 28.0, CENTER_PLATE)
 	draw_arc(center, 28.0, 0.0, TAU, 48, NODE_RING, 2.0)
-	var m = Rect2(center + Vector2(-16, -12), Vector2(32, 24))
-	draw_rect(m, CENTER_MONITOR)
-	draw_rect(Rect2(m.position + Vector2(3, 3), m.size - Vector2(6, 8)), BG)
-	draw_rect(Rect2(center + Vector2(-5, 12), Vector2(10, 3)), CENTER_MONITOR)
-	draw_rect(Rect2(center + Vector2(-9, 15), Vector2(18, 3)), CENTER_MONITOR)
 
 
 func _draw_node(node, c, size):
@@ -763,7 +793,46 @@ func _label(caption, pos, width, align = Label.ALIGN_LEFT, color = TEXT):
 	add_child(label)
 
 
+# Carga (y cachea) un PNG o SVG de res://icons/ como ImageTexture. Devuelve null si
+# no existe. Soporta los íconos nuevos (np/*.png) además de los SVG del repo.
+func _icon_texture(name):
+	var key = String(name)
+	if _tex_cache.has(key):
+		return _tex_cache[key]
+	var f = File.new()
+	var path = ""
+	if f.file_exists("res://icons/" + key + ".png"):
+		path = "res://icons/" + key + ".png"
+	elif f.file_exists("res://icons/" + key + ".svg"):
+		path = "res://icons/" + key + ".svg"
+	else:
+		_tex_cache[key] = null
+		return null
+	var image = Image.new()
+	if image.load(path) != OK or image.get_width() == 0:
+		_tex_cache[key] = null
+		return null
+	var texture = ImageTexture.new()
+	texture.create_from_image(image, Texture.FLAG_FILTER)
+	_tex_cache[key] = texture
+	return texture
+
+
 func _make_icon(parent, name, pos, size):
+	var png = "res://icons/" + String(name) + ".png"
+	if File.new().file_exists(png):
+		var texture = _icon_texture(String(name))
+		if texture == null:
+			return
+		var tex_rect = TextureRect.new()
+		tex_rect.texture = texture
+		tex_rect.expand = true
+		tex_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		tex_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		tex_rect.rect_position = pos
+		tex_rect.rect_size = Vector2(size, size)
+		parent.add_child(tex_rect)
+		return
 	var path = "res://icons/" + name + ".svg"
 	if ClassDB.class_exists("SlugVector2D") and ClassDB.class_exists("SlugVector"):
 		var vector = ClassDB.instance("SlugVector")
