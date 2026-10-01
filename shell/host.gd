@@ -22,6 +22,15 @@ func _ready():
 		printerr("Host: no se pudo iniciar el compositor wayland")
 	else:
 		print("compositor socket: ", socket)
+		# Publica el socket del compositor interno en un archivo estable del runtime
+		# dir: otros gdtk (p. ej. el receptor remoto lanzado por ssh para "Extender")
+		# lo leen sin depender del número wayland-N ni de adivinar cuál es.
+		var rt = OS.get_environment("XDG_RUNTIME_DIR")
+		if rt != "":
+			var f = File.new()
+			if f.open(rt.plus_file("gdtk-wayland"), File.WRITE) == OK:
+				f.store_line(socket)
+				f.close()
 
 	remote_input = RemoteInput.new()
 	remote_input.name = "RemoteInput"

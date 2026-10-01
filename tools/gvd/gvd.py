@@ -969,13 +969,29 @@ class SwayVirtualOutput:
         _sway_cmd(sock, "output", self.name, "resolution",
                   f"{self.width}x{self.height}")
         _sway_cmd(sock, "output", self.name, "bg", "#000000")
-        max_x = max((o["rect"]["x"] + o["rect"]["width"] for o in before), default=0)
-        max_y = max((o["rect"]["y"] + o["rect"]["height"] for o in before), default=0)
+        # Anclar relativo a la pantalla REAL (output enfocado o no-headless), no al
+        # bounding box de todos los outputs: con outputs virtuales previos o con el
+        # auto-placement de sway, max_x/max_y caia del lado equivocado. Se normaliza
+        # el output real a (0,0) y el virtual se pega a su borde pedido.
+        ref_name, ref = None, None
+        for o in before:
+            if str(o.get("name", "")).startswith("HEADLESS"):
+                continue
+            if o.get("focused"):
+                ref_name, ref = o.get("name"), o["rect"]
+                break
+            if ref is None:
+                ref_name, ref = o.get("name"), o["rect"]
+        if ref is None:
+            ref_name, ref = "eDP-1", {"x": 0, "y": 0,
+                                      "width": self.width, "height": self.height}
+        _sway_cmd(sock, "output", str(ref_name), "position", "0", "0")
+        rw, rh = int(ref["width"]), int(ref["height"])
         pos = {
-            "right": (max_x, 0),
+            "right": (rw, 0),
             "left": (-self.width, 0),
             "above": (0, -self.height),
-            "below": (0, max_y),
+            "below": (0, rh),
         }[self.direction]
         _sway_cmd(sock, "output", self.name, "position", str(pos[0]), str(pos[1]))
         log(f"[+] monitor virtual sway: {self.name} {self.width}x{self.height} "
