@@ -10,6 +10,13 @@ var ACTIVITIES = [
 	# Deskflow: en X11 inyecta por XTest; en Wayland (cage, sway) pide el portal RemoteDesktop
 	# y le llega un fd del EIS del shell (RemoteInput): se le da permiso sin preguntar.
 	{"name": "Deskflow", "service": "deskflow-core client --new-instance -s ~/gdtk/deskflow-client.conf"},
+	# Pantalla: receptor de gvd (monitor virtual de otro host, H.264/UDP :5600). Se abre como
+	# ventana Wayland; el emisor se arranca en el otro host (gvd.py send --host <este host>).
+	# La ruta se resuelve como neighborhood_actions.gvd_path_candidates: dev (~/Proyectos/gvd),
+	# instalado (~/gvd) y PATH; sin hardcodear una sola ubicación.
+	# K18: el receptor usa un título fijo ("Pantalla compartida") y se trata como
+	# una ventana normal; `match` lo asocia por ese título aunque el comando sea `python3`.
+	{"name": "Pantalla", "match": ["Pantalla compartida"], "wayland": ["sh", "-c", "for c in \"$HOME/Proyectos/gvd/gvd.py\" \"$HOME/gvd/gvd.py\" \"$(command -v gvd 2>/dev/null)\"; do [ -n \"$c\" ] && [ -f \"$c\" ] && exec python3 \"$c\" recv --sink wayland; done; echo 'vecindario: gvd no encontrado (recv)' >&2"]},
 	# 'Salir' ya no es una actividad del anillo: es una acción de sesión del ícono central
 	# del Hogar (ver _draw_home / popup ##home_session).
 ]
@@ -17,6 +24,34 @@ var ACTIVITIES = [
 const TYPE_DELAY = 60
 const SHOT_DELAY = 90
 const SHOT_MAX_FRAMES = 900
+
+# Modelo puro de la brújula de dirección (Kilo A): sólo normaliza/serializa y
+# detecta conflictos; sin I/O. El shell lo cablea a la vista y a la persistencia.
+const DIRECTIONS_MODEL = preload("res://neighborhood_directions.gd")
+# Generadores puros del layout Deskflow (K5): links desde la brujula y el formato
+# real de servidor; el shell sólo los consume al aplicar.
+const LAYOUT_MODEL = preload("res://deskflow_layout.gd")
+const CONF_MODEL = preload("res://deskflow_conf.gd")
+# Sesión de pantalla gvd (Kilo F2): modelo puro de estados/planes/clasificación que
+# usa el despacho de acciones del Vecindario (no ejecuta nada por sí mismo).
+const GVD_SESSION = preload("res://gvd_session.gd")
+# K17: planes puros de automatización de gvd (emisor local/receptor remoto por
+# ssh, `--position` del mapa, `--cursor sway`, suspensión del vínculo Deskflow).
+const GVD_LAUNCH = preload("res://gvd_launch.gd")
+const MENU_STYLE = preload("res://menu_style.gd")
+const HOST_DISPATCH = preload("res://host_dispatch.gd")
+# Publisher mDNS del Vecindario: modelo puro + plan puro de anuncios; el shell
+# resuelve avahi una vez y lanza cada anuncio sin bloquear el frame (§2/§14).
+const PUBLISH_MODEL = preload("res://neighborhood_publish.gd")
+const PUBLISH_PLAN = preload("res://neighborhood_publish_plan.gd")
+# Buzón del handshake de dirección (K3): transporte puro por ssh (rutas, argv sin
+# shell-injection, decisión por archivo) + modelo puro del DTO. El shell sólo hace
+# el I/O en Threads y aplica el snapshot con `apply` (SPEC §6/§9/§14).
+const INBOX_MODEL = preload("res://neighborhood_inbox.gd")
+const HANDSHAKE = preload("res://neighborhood_handshake.gd")
+# Hueco central del Frame (K12): cálculo puro compartido por el layout de tiles y
+# los diálogos; ver content_layout.gd. No se repite el descuento de barras.
+const CONTENT_LAYOUT = preload("res://content_layout.gd")
 
 onready var compositor = Host.compositor
 var view = null          # Control que dibuja las ventanas (se crea en _ready)
@@ -93,6 +128,57 @@ var neighborhood = null
 var neighborhood_ui = null
 var neighborhood_view = false
 var nb_version = -1
+# Dirección por host (brújula): hid -> entry normalizado de DIRECTIONS_MODEL.
+# Se persiste en $XDG_CONFIG_HOME/gdtk/neighborhood-directions.json sin bloquear.
+var host_directions = {}
+var _dir_write_threads = []   # Threads de escritura de un solo uso, reapeados en _process
+var _dir_write_states = []    # estado {"done": bool} compartido con cada Thread
+var _dir_mutex = Mutex.new()  # protege los flags "done" de las escrituras
+
+# Buzón del handshake de dirección (K3): worker con TTL que escanea
+# ~/.config/gdtk/direction-inbox y publica decisiones ya decodificadas; el hilo
+# principal sólo las aplica. Los envíos por ssh van en Threads de un solo uso.
+var _inbox_thread = null
+var _inbox_want_stop = false
+var _inbox_entries = []       # decisiones {"action", "message"} publicadas por el worker
+var _inbox_version = 0        # sube cuando el worker publica un lote nuevo
+var _inbox_consumed = 0       # última versión aplicada por el hilo principal
+var _inbox_send_threads = []  # envíos ssh en curso, reapeados en _inbox_poll
+var _inbox_send_states = []   # {"done": bool, "code": int}
+var _inbox_mutex = Mutex.new()  # protege el snapshot, los flags y el want_stop
+
+# Sesiones rastreadas del Vecindario (gvd send, servidor Deskflow) y estado por host.
+# Sólo memoria: la UI lee estos caches ("idle"/"starting"/"active"); los procesos se
+# lanzan en Threads de un solo uso y nunca en el hilo de render (§0/§14).
+# Clave por host: el propio host_id (gvd) o "deskflow:" + host_id (servidor Deskflow).
+var gvd_session_pids = {}     # key -> pid de la sesión viva
+var _gvd_launch_threads = []  # Threads de lanzamiento rastreado, reapeados en _process
+var _gvd_launch_states = []   # {"done": bool, "key": String, "pid": int, "error": String}
+var _gvd_mutex = Mutex.new()  # protege gvd_session_pids y los flags "done"
+# K17: vínculo Deskflow suspendido temporalmente mientras gvd extiende el monitor
+# virtual hacia ese vecino/dirección. Se guarda para restaurarlo al cortar la
+# sesión de pantalla (SPEC-ui-rework-2026-10, decisión 2026-10-01).
+var _gvd_link_suspended = {}      # hid -> direction
+var _gvd_link_restore = {}        # hid -> true si hay que relanzar Deskflow al cortar
+var _deskflow_server_launch = {}  # hid -> {cmd, args} para restaurar el servidor
+# Servidor Deskflow local: se resuelve UNA sola vez si `deskflow-core` está en $PATH
+# (File.file_exists, sin OS.execute) y no se recalcula por frame.
+var _deskflow_probed = false  # ya se escaneó $PATH una vez
+var _deskflow_core = ""       # ruta de deskflow-core en $PATH, o "" si no está
+# Escrituras de config de plan (p. ej. layout Deskflow) con toggle/lanzamiento diferido
+# hasta que la escritura atómica termine; patrón _persist_directions/_dir_poll sin bloquear.
+var _plan_write_threads = []
+var _plan_write_states = []   # {"done": bool, "then_toggle": String, "then_launch": Dictionary, "path": String}
+var _plan_mutex = Mutex.new()
+# Deskflow por host: intención en memoria, nunca implícita ni automática. El
+# portapapeles dejó de ser una opción (se asume compartido con "Controlar").
+var host_deskflow = {}        # host_id -> bool (intención; la actividad es global)
+
+# Configuración (K11a): puente a ~/.config/gdtk/settings.json, releído en un Thread
+# con TTL (sin I/O en el frame). El render sólo copia accent/fondo del snapshot.
+var settings_bridge = null
+var settings_rev = -1
+var accent = Color(0.55, 0.80, 1.0, 1.0)  # RING_FOCUS por defecto; ver _apply_settings
 
 # Input remoto por libei (Deskflow, lan-mouse): EIS + portal RemoteDesktop en el módulo.
 var remote_input = null
@@ -125,6 +211,10 @@ var tile_nodes = {}      # id -> Control (contenedor de capas de la ventana)
 var tile_rects = {}      # id -> Rect2 en coords de la vista
 var tile_fit = {}        # id -> {"scale", "offset"}: transform del contenido (para input)
 var tile_anim = {}       # id -> {"from": Vector2, "since": int}
+# El Frame desliza: los tiles siguen su borde (posición directa) para no pelear con
+# el easing; con el Frame oculto ocupan toda la pantalla.
+var frame_follow = false
+var frame_off_prev = 0.0
 var tile_fade = {}       # id -> ms en que apareció (fade-in)
 var tile_intro = {}      # id -> true: falta su primera textura para animar la entrada
 var expose = false
@@ -222,6 +312,8 @@ const SUGAR_ACTIVITY_ICONS = {
 	"Gears": "emblem-busy",
 	"Chat": "document-send",
 	"Deskflow": "network-wired",
+	"Pantalla": "computer-xo",
+	"Configuración": "preferences-system",
 }
 # Notificación de arranque estilo Sugar: pulso ~1.2 s hasta que aparece la ventana.
 const STARTING_MAX_MS = 15000
@@ -244,6 +336,34 @@ func frame_bar_h(vp):
 	if vp.y >= 3.0 * u:
 		return u
 	return max(64.0, floor(u * 0.5))
+
+
+# --- K12: hueco central del Frame --------------------------------------------
+# Lados que reserva el Frame para diálogos/ventanas hijas (K12): las dos barras.
+# La limitación de tamaño es SÓLO para diálogos, nunca para top-levels; los
+# laterales quedan soportados para cuando el Frame dibuje bloques a los costados.
+func _frame_edges():
+	return {"top": true, "bottom": true}
+
+
+# Deslizamiento actual del Frame (0 a la vista, -alto oculto). El layout de tiles
+# lo sigue para adaptarse al hueco que deja el Frame y usar toda la pantalla
+# cuando está oculto.
+func _frame_slide():
+	if frame == null or not is_instance_valid(frame):
+		return 0.0
+	return frame.slide_off
+
+
+# Rect de una ventana top-level en modo tiled: bajo la barra superior, alto
+# completo hasta el borde inferior, siguiendo el deslizamiento del Frame.
+func _tile_rect(vp):
+	return CONTENT_LAYOUT.tile_rect(vp, frame_bar_h(vp), _frame_slide())
+
+
+# Hueco central del Frame (diálogos y ventanas hijas): entre las dos barras.
+func _content_rect(vp):
+	return CONTENT_LAYOUT.content_rect(vp, frame_bar_h(vp), _frame_edges())
 
 
 # Ícono del botón Inicio del Frame (Sugar: símbolo de hogar).
@@ -291,6 +411,25 @@ func _ready():
 	neighborhood_ui.model = neighborhood
 	neighborhood_ui.visible = false
 	view_layer.add_child(neighborhood_ui)
+	# Brújula: carga local (sin red) y vuelca el modelo a la vista ya creada.
+	_load_directions()
+	_refresh_direction_views()
+	# Servicios: worker de fondo que mide pgrep/kill -0 y publica un snapshot; el
+	# dibujo y el portal RemoteInput sólo leen ese cache (nunca esperan al frame).
+	_start_service_worker()
+	# Anuncio mDNS de la identidad local (gvd/Deskflow) fuera del frame; sin avahi
+	# queda degradado y silencioso.
+	_start_publishers()
+	# Buzón del handshake de dirección: worker propio con TTL que publica el
+	# resultado; el frame sólo copia (nunca ssh en el hilo de render, §14).
+	_start_inbox()
+	# Configuración (K11a): puente a settings.json (lectura en Thread con TTL).
+	# La actividad "Configuración" relanza este binario con --path settings.
+	settings_bridge = Host.sc("res://settings_bridge.gd").new()
+	if settings_bridge != null:
+		settings_bridge.reload_now()
+		_apply_settings()
+		ACTIVITIES.append({"name": "Configuración", "wayland": settings_bridge.launch_argv()})
 	# Notificaciones y demás layer-shell, encima de todo (después del Frame: su _input va antes).
 	add_child(Host.sc("res://layers.gd").new())
 
@@ -494,6 +633,18 @@ func _process(_delta):
 			nb_version = neighborhood.version
 			if neighborhood_view:
 				request_redraw()
+	# Servicios: copia el snapshot del worker (sin consultar procesos acá).
+	_svc_poll()
+	# Escrituras de dirección: reapea los Threads ya terminados (no bloquea).
+	_dir_poll()
+	# Buzón del handshake de dirección: aplica el snapshot del worker y reapea los
+	# envíos ssh terminados (sin bloquear, sin I/O de disco acá).
+	_inbox_poll()
+	# Sesiones de pantalla gvd y escrituras de config de plan: sólo reap de Threads.
+	_gvd_poll()
+	_plan_poll()
+	# Configuración: reapa el Thread de lectura y aplica acento/fondo del snapshot.
+	settings_poll()
 	if screenshot_path == "":
 		var sleep = SLEEP_IDLE if now - last_activity > IDLE_MS else SLEEP_ACTIVE
 		if OS.low_processor_usage_mode_sleep_usec != sleep:
@@ -660,8 +811,12 @@ func _compute_slide_layout():
 			tile_rects[id] = Rect2(0.0, 0.0, vp.x, vp.y) if id == fullscreen_id else Rect2(vp.x * 2.0, 0.0, vp.x, vp.y)
 		return
 	var s = _row_s(units)
+	# Cada pantalla (top-level) vive bajo la barra superior con alto completo; la
+	# fila desliza con el ancho del viewport (consistente con pan/_home_x), así los
+	# vecinos quedan a ±ancho. Sólo los diálogos se limitan al hueco de dos barras.
+	var cr = _tile_rect(vp)
 	for u in range(units.size()):
-		var area = Rect2((float(u) - s) * vp.x, 0.0, vp.x, vp.y)
+		var area = Rect2(cr.position.x + (float(u) - s) * vp.x, cr.position.y, cr.size.x, cr.size.y)
 		var members = units[u]
 		if members.size() == 1:
 			tile_rects[members[0]] = area
@@ -844,7 +999,12 @@ func _content_fit(csize, ssize, cpos):
 
 func _update_tiles():
 	view.rect_size = get_viewport_rect().size
-	compositor.default_size = view.rect_size
+	compositor.default_size = _tile_rect(view.rect_size).size
+	# Sigue el deslizamiento del Frame: mientras se mueve, los tiles se reubican
+	# directo (sin animación propia) para no quedar desfasados del borde.
+	var foff = _frame_slide()
+	frame_follow = abs(foff - frame_off_prev) > 0.01
+	frame_off_prev = foff
 	if expose:
 		_compute_expose_layout()
 	else:
@@ -963,7 +1123,7 @@ func _update_tile(id, now):
 	# Durante el paneo (Super+rueda) se posiciona directo, sin animación, para que el
 	# movimiento continuo no pelee con el easing.
 	var pos = rect.position
-	if pan_active or instant_switch or home_slide_since >= 0:
+	if pan_active or instant_switch or home_slide_since >= 0 or frame_follow:
 		tile_anim.erase(id)
 	elif tile_anim.has(id):
 		var a = tile_anim[id]
@@ -1478,16 +1638,35 @@ func _toggle_fullscreen():
 
 
 # Alt+F10: maximizar = sacar la ventana de su franja partida para que ocupe todo el
-# workspace (una ventana sola ya llena la pantalla; el contenido se ajusta con _content_fit).
+# hueco central del Frame (K12). Ya no se esconde el Frame: la ventana no queda por
+# debajo de las barras, así que ocultarlo sólo dejaría franjas vacías. Pantalla
+# completa (todo el viewport, sin Frame) sigue siendo Alt+F11.
 func _maximize_window(id):
 	if id < 0 or not tiles.has(id):
 		return
 	fullscreen_id = -1
 	_remove_from_group(id)
 	_focus_tile(id)
-	if frame != null:
-		frame.set_visible(false)
 	request_redraw()
+
+
+# K18: la ventana de pantalla compartida se reconoce por su título fijo
+# ("Pantalla compartida"). Este helper reutiliza la lógica de maximizar
+# existente (`_maximize_window`, Alt+F10) para llevarla al hueco central de K12
+# y restaurarla; cualquier UI (bloque/ventana) o gesto puede invocarlo sin
+# duplicar el cálculo del layout. Devuelve true si encontró la ventana.
+func maximize_window_by_title(title):
+	var want = String(title).strip_edges().to_lower()
+	if want == "":
+		return false
+	for id in tiles:
+		if _id_alive(id) and compositor.get_title(id).to_lower().find(want) >= 0:
+			if fullscreen_id == id:
+				fullscreen_id = -1
+			else:
+				_maximize_window(id)
+			return true
+	return false
 
 
 # Teclado: tilea la ventana enfocada con la siguiente (arma una pantalla partida sin mouse).
@@ -1522,8 +1701,10 @@ func _update_dialogs(root_id):
 	if expose:
 		dialog_view.visible = false
 		return
-	dialog_view.rect_position = Vector2.ZERO
-	dialog_view.rect_size = view.rect_size
+	# K12: los diálogos se recortan al hueco central del Frame, no a toda la pantalla.
+	var cr = _content_rect(view.rect_size)
+	dialog_view.rect_position = cr.position
+	dialog_view.rect_size = cr.size
 
 	for i in range(dialogs.size() - 1, -1, -1):
 		if not _id_alive(dialogs[i]):
@@ -1563,7 +1744,9 @@ func _layout_dialog(box, d):
 	_ensure_premult_material()
 	var geo = _dialog_geo(d)
 	var layers = compositor.get_layers(d)
-	box.rect_position = _dialog_rect(d).position  # centrado sobre el tile de su raíz
+	# `_dialog_rect` devuelve coords de pantalla; la caja se posiciona local a la
+	# capa de diálogos (que ahora está recortada al hueco central de K12).
+	box.rect_position = _dialog_rect(d).position - dialog_view.rect_position
 	box.rect_size = geo.size
 	while box.get_child_count() < layers.size():
 		var child = TextureRect.new()
@@ -1605,10 +1788,14 @@ func _dialog_geo(d):
 	return Rect2(mn, mx - mn)
 
 
+# K12: centra el diálogo sobre la ventana de su raíz, pero siempre dentro del hueco
+# central del Frame; si no cabe, se alinea arriba-izquierda y lo recorta la capa.
 func _dialog_rect(d):
 	var geo = _dialog_geo(d)
-	var base = tile_rects.get(_root_of(d), Rect2(Vector2.ZERO, view.rect_size))
-	return Rect2(base.position + base.size * 0.5 - geo.size * 0.5 - geo.position, geo.size)
+	var cr = _content_rect(view.rect_size)
+	var base = tile_rects.get(_root_of(d), cr)
+	var centered = base.position + base.size * 0.5 - geo.size * 0.5 - geo.position
+	return Rect2(CONTENT_LAYOUT.clamp_inside(cr, centered, geo.size), geo.size)
 
 
 func _root_of(id):
@@ -1651,8 +1838,8 @@ func _draw_home(offset = 0.0):
 	# Sin padding el fondo y las posiciones absolutas coinciden con la vista.
 	push_style_var_vec2(STYLE_VAR_WINDOW_PADDING, Vector2.ZERO)
 	if begin("##home", flags):
-		# Fondo sobrio: degradado vertical suave (sin imagen por ahora).
-		imgui_draw_rect_filled_multicolor(Rect2(Vector2.ZERO, vp), HOME_BG_TOP, HOME_BG_TOP, HOME_BG_BOTTOM, HOME_BG_BOTTOM)
+		# Fondo: degradado sobrio, color sólido o imagen configurada (K11a).
+		_draw_home_background(vp)
 
 		home_icon_loads = 2
 		var u = grid_unit(vp)
@@ -1672,7 +1859,9 @@ func _draw_home(offset = 0.0):
 		push_style_color(COL_BUTTON_HOVERED, Color(0, 0, 0, 0))
 		push_style_color(COL_BUTTON_ACTIVE, Color(0, 0, 0, 0))
 		push_style_var_float(STYLE_VAR_FRAME_ROUNDING, 0.0)
-		var center_clicked = button("##home_center", monitor.size)
+		button("##home_center", monitor.size)
+		# K9: el menú de sesión se abre con el botón derecho; el izquierdo no lo abre.
+		var center_right = is_item_clicked(1)
 		var center_hover = is_item_hovered()
 		pop_style_var()
 		pop_style_color(3)
@@ -1685,15 +1874,17 @@ func _draw_home(offset = 0.0):
 		imgui_draw_rect_filled(Rect2(monitor.position + Vector2(4, 4), monitor.size - Vector2(8, 10)), HOME_BG_TOP, 0.0)
 		imgui_draw_rect_filled(Rect2(cc + Vector2(-3, u * 0.24), Vector2(6, u * 0.13)), HOME_BLOCK_LIGHT, 0.0)
 		imgui_draw_rect_filled(Rect2(cc + Vector2(-u * 0.21, u * 0.37), Vector2(u * 0.42, 4)), HOME_BLOCK_LIGHT, 0.0)
-		if center_clicked:
+		if center_right:
 			open_popup("##home_session")
+		MENU_STYLE.begin(self)
 		if begin_popup("##home_session"):
-			text_disabled("Sesión")
-			if menu_item("Salir"):
+			MENU_STYLE.chrome(self, "Sesión")
+			if MENU_STYLE.item(self, "Salir"):
 				recovery.quit(self)
-			if menu_item("Recargar el shell"):
+			if MENU_STYLE.item(self, "Recargar el shell"):
 				recovery.restart(self)
 			end_popup()
+		MENU_STYLE.end(self)
 
 		# Anillo: ACTIVITIES + favoritos, con reacomodo animado al entrar/salir ítems.
 		ring_layout = []
@@ -1722,7 +1913,7 @@ func _draw_home(offset = 0.0):
 		if ring_drag != null:
 			_draw_ring_ghost(ring_drag, mouse - ring_grab, btn_size)
 			if ring_drop != null:
-				imgui_draw_circle(ring_drop.screen + ring_drop.size * 0.5, ring_drop.size.x * 0.5 + 3.0, RING_FOCUS, 0, 2.5)
+				imgui_draw_circle(ring_drop.screen + ring_drop.size * 0.5, ring_drop.size.x * 0.5 + 3.0, accent, 0, 2.5)
 
 		# Bloque Apps: tesela U x U con bisel, como los bloques del Frame.
 		var apps_side = u
@@ -1940,7 +2131,7 @@ func _draw_ring_ghost(entry, pos, size):
 	var radius = size.x * 0.5 - 2.0
 	imgui_draw_circle_filled(c + Vector2(2.0, 3.0), radius, Color(0, 0, 0, 0.35), 0)
 	imgui_draw_circle_filled(c, radius, RING_PLATE, 0)
-	imgui_draw_circle(c, radius, RING_FOCUS, 0, 2.5)
+	imgui_draw_circle(c, radius, accent, 0, 2.5)
 	var tex = _ring_tex(entry)
 	if tex != null:
 		var side = clamp(size.x * 0.56, 64.0, 72.0)
@@ -2185,7 +2376,7 @@ func _draw_ring_item(pos, size, tex, label, state, id, starting_since = -1, appe
 		border = Color(1.0, 0.82, 0.40, 0.5 + 0.5 * glow)
 		thickness = 2.0 + 2.5 * glow
 	elif state == "focused":
-		border = RING_FOCUS
+		border = accent
 		thickness = 3.5
 	elif state == "minimized":
 		border = RING_MIN
@@ -2206,7 +2397,7 @@ func _draw_ring_item(pos, size, tex, label, state, id, starting_since = -1, appe
 	if starting_since >= 0:
 		imgui_draw_circle(c, radius + 4.0, Color(1.0, 0.85, 0.45, (0.20 + 0.35 * glow) * appear), 0, 2.0)
 	if state == "focused":
-		imgui_draw_circle(c, radius + 3.0, Color(RING_FOCUS.r, RING_FOCUS.g, RING_FOCUS.b, 0.35 * appear), 0, 2.0)
+		imgui_draw_circle(c, radius + 3.0, Color(accent.r, accent.g, accent.b, 0.35 * appear), 0, 2.0)
 	imgui_draw_circle(c, radius, edge, 0, thickness)
 	if state == "open":
 		# Señal de abierto además del color.
@@ -2383,64 +2574,382 @@ func _activate(index):
 		_toggle_service(activity)
 
 
-var service_pids = {}
+# --- Estado de servicios en segundo plano ------------------------------------
+# El hilo de render NUNCA consulta procesos (SPEC-screen-share-compass §0): un
+# worker (Thread + Mutex, como neighborhood.gd) recorre cada ~1 s las actividades
+# con "service", mide con pgrep y publica un snapshot atómico
+# {name -> {"running": bool, "pids": [int]}}. `_draw_home`/`_activity_state` sólo
+# copian ese snapshot; `service_pids` (para el portal RemoteInput) se reconcilia en
+# el hilo principal desde ese snapshot. Tras un lanzamiento hay una ventana de
+# hasta ~1 s hasta que el worker confirma; el estado optimista ya es visible en el
+# frame siguiente y `service_pids` se actualiza en el siguiente `_svc_poll()`.
+const SERVICE_REFRESH_MS = 1000        # cadencia del worker de servicios
+const SERVICE_SLEEP_STEP_MS = 100      # granularidad para que stop() no espere de más
+const SERVICE_LAUNCH_GRACE_MS = 2000   # sostiene "running" mientras el proceso arranca
+const SERVICE_STOP_GRACE_MS = 2000     # ignora pids residuales hasta que mueran
+
+var service_pids = {}               # name -> pid primario (portal RemoteInput), bajo _svc_mutex
+var _svc_mutex = Mutex.new()
+var _svc_thread = null
+var _svc_targets = []               # [{name, cmd}] fijado antes de arrancar el hilo
+var _svc_snapshot = {}              # name -> {"running": bool, "pids": [int]}
+var _svc_launch_until = {}          # name -> ticks_ms de la gracia de arranque
+var _svc_stop_until = {}            # name -> ticks_ms de la gracia tras parar
+var _svc_errors = {}                # name -> mensaje de fallo de lanzamiento
+var _svc_version = 0
+var _svc_version_seen = -1
+var _svc_want_stop = false
+var _svc_launch_threads = []        # Threads de un solo uso, reapeados en _svc_poll
+var _svc_launch_states = []         # {"done": bool} por Thread (is_active() no baja en este motor)
+
+
+func _service_cmd(activity):
+	return activity.service.replace("~/", OS.get_environment("HOME") + "/")
+
+
+# Arranca el worker una sola vez (idempotente).
+func _start_service_worker():
+	if _svc_thread != null:
+		return
+	# Las actividades con "service" son fijas de configuración; se copian acá para
+	# que el worker no lea ACTIVITIES (que el hilo principal muta con apps dinámicas).
+	_svc_targets = []
+	for a in ACTIVITIES:
+		if a.has("service"):
+			_svc_targets.append({"name": a.name, "cmd": _service_cmd(a)})
+	_svc_want_stop = false
+	_svc_thread = Thread.new()
+	_svc_thread.start(self, "_service_work")
+
+
+func _stop_service_worker():
+	_svc_mutex.lock()
+	_svc_want_stop = true
+	_svc_mutex.unlock()
+	if _svc_thread != null:
+		_svc_thread.wait_to_finish()
+		_svc_thread = null
+	for th in _svc_launch_threads:
+		th.wait_to_finish()
+	_svc_launch_threads = []
+	_svc_launch_states = []
+
+
+func _svc_stop_requested():
+	_svc_mutex.lock()
+	var s = _svc_want_stop
+	_svc_mutex.unlock()
+	return s
+
+
+# Hilo del worker: mide y publica; nunca dibuja ni toca nodos.
+func _service_work(_userdata):
+	while true:
+		if _svc_stop_requested():
+			return
+		var observed = {}
+		for t in _svc_targets:
+			observed[t.name] = _pgrep_pids(t.cmd)
+		var now = OS.get_ticks_msec()
+		_svc_mutex.lock()
+		var merged = merge_service_snapshot(observed, _svc_snapshot, now,
+			_svc_launch_until, _svc_stop_until)
+		if not snapshot_equal(merged, _svc_snapshot):
+			_svc_snapshot = merged
+			_svc_version += 1
+		_svc_mutex.unlock()
+		var waited = 0
+		while waited < SERVICE_REFRESH_MS:
+			OS.delay_msec(SERVICE_SLEEP_STEP_MS)
+			waited += SERVICE_SLEEP_STEP_MS
+			if _svc_stop_requested():
+				return
+
+
+# Única consulta de procesos: pgrep SÓLO dentro del worker.
+func _pgrep_pids(cmd):
+	var out = []
+	if OS.execute("pgrep", ["-u", OS.get_environment("USER"), "-f", "-x", cmd], true, out) != 0 or out.empty():
+		return []
+	return parse_pgrep_pids(out[0])
+
+
+# Copia el snapshot del worker al hilo principal y reconcilia `service_pids`.
+# No bloquea: sólo toma el Mutex un instante.
+func _svc_poll():
+	# Reapea los Threads de lanzamiento ya terminados (wait_to_finish no bloquea si acabaron).
+	for i in range(_svc_launch_threads.size() - 1, -1, -1):
+		# En este motor `is_active()` sigue true hasta wait_to_finish(); el fin lo
+		# publica el propio Thread con el flag `done` (bajo Mutex), sin bloquear.
+		var st = _svc_launch_states[i]
+		_svc_mutex.lock()
+		var done = st.done
+		_svc_mutex.unlock()
+		if done:
+			_svc_launch_threads[i].wait_to_finish()
+			_svc_launch_threads.remove(i)
+			_svc_launch_states.remove(i)
+	_svc_mutex.lock()
+	var version = _svc_version
+	for name in _svc_snapshot:
+		var e = _svc_snapshot[name]
+		if e.running and not e.pids.empty():
+			service_pids[name] = e.pids[0]
+		else:
+			service_pids.erase(name)
+	for name in _svc_errors:
+		activity_error = _svc_errors[name]
+	_svc_errors.clear()
+	_svc_mutex.unlock()
+	if version != _svc_version_seen:
+		_svc_version_seen = version
+		request_redraw()
+
+
+# Marca parada optimista: evita que un clic inmediato posterior (que aún leería
+# "running" del snapshot) dispare un relanzamiento; el worker confirma en <= 1 s.
+func _svc_mark_stopped(name):
+	_svc_mutex.lock()
+	_svc_snapshot[name] = {"running": false, "pids": []}
+	_svc_stop_until[name] = OS.get_ticks_msec() + SERVICE_STOP_GRACE_MS
+	_svc_launch_until.erase(name)
+	service_pids.erase(name)
+	_svc_version += 1
+	_svc_mutex.unlock()
+
+
+# Lanzamiento asíncrono: un Thread de un solo uso ejecuta la captura "sh ... & echo $!"
+# y publica el pid bajo Mutex; el hilo de render no espera.
+func _svc_launch_async(activity):
+	var name = activity.name
+	var cmd = _service_cmd(activity)
+	var log_path = OS.get_environment("XDG_RUNTIME_DIR").plus_file("gdtk-" + name.to_lower() + ".log")
+	# Marca optimista ya mismo: un segundo clic pare en vez de relanzar.
+	_svc_mutex.lock()
+	_svc_snapshot[name] = {"running": true, "pids": []}
+	_svc_launch_until[name] = OS.get_ticks_msec() + SERVICE_LAUNCH_GRACE_MS
+	_svc_stop_until.erase(name)
+	_svc_version += 1
+	_svc_mutex.unlock()
+	var th = Thread.new()
+	var state = {"done": false}
+	_svc_launch_threads.append(th)
+	_svc_launch_states.append(state)
+	th.start(self, "_svc_launch_work", {"name": name, "cmd": cmd, "log_path": log_path, "state": state})
+
+
+func _svc_launch_work(userdata):
+	var name = userdata.name
+	var cmd = userdata.cmd
+	var log_path = userdata.log_path
+	var out = []
+	# Vía sh + & para que el proceso quede colgado de init: si lo lanzara Godot directo, al
+	# morir quedaría zombie y pgrep lo seguiría dando por vivo.
+	# Con output, Godot 3 pasa el comando por popen (otro sh, args entre comillas dobles):
+	# sin escapar, ese sh externo expande $! a vacío antes de llegar al nuestro.
+	OS.execute("sh", ["-c", cmd + " >" + log_path + " 2>&1 & echo \\$!"], true, out)
+	var pid = int(String(out[0]).strip_edges()) if out.size() > 0 else 0
+	_svc_mutex.lock()
+	if pid > 0:
+		service_pids[name] = pid
+		_svc_snapshot[name] = {"running": true, "pids": [pid]}
+		_svc_launch_until[name] = OS.get_ticks_msec() + SERVICE_LAUNCH_GRACE_MS
+		_svc_errors.erase(name)
+	else:
+		_svc_snapshot[name] = {"running": false, "pids": []}
+		_svc_errors[name] = name + ": no se pudo lanzar"
+	userdata.state.done = true
+	_svc_version += 1
+	_svc_mutex.unlock()
 
 
 func _toggle_service(activity):
 	var name = activity.name
 	if _service_running(name):
+		# Parar: pids cacheados + OS.kill (barato) + estado false optimista.
 		for pid in _service_processes(name):
 			OS.kill(pid)
-		service_pids.erase(name)
+		_svc_mark_stopped(name)
+		activity_error = ""
 		return
 	if activity.has("session") and OS.get_environment("GDTK_SESSION") != activity.session:
 		activity_error = name + ": sólo en la sesión " + activity.session.to_upper()
 		return
-	# Vía sh + & para que el proceso quede colgado de init: si lo lanzara Godot directo, al
-	# morir quedaría zombie y kill -0 lo seguiría dando por vivo.
-	var cmd = activity.service.replace("~/", OS.get_environment("HOME") + "/")
-	var log_path = OS.get_environment("XDG_RUNTIME_DIR").plus_file("gdtk-" + name.to_lower() + ".log")
-	var out = []
-	# Con output, Godot 3 pasa el comando por popen (otro sh, args entre comillas dobles):
-	# sin escapar, ese sh externo expande $! a vacío antes de llegar al nuestro.
-	OS.execute("sh", ["-c", cmd + " >" + log_path + " 2>&1 & echo \\$!"], true, out)
-	var pid = int(String(out[0]).strip_edges()) if out.size() > 0 else 0
-	if pid > 0:
-		service_pids[name] = pid
-		activity_error = ""
-	else:
-		activity_error = name + ": no se pudo lanzar"
+	_svc_launch_async(activity)
 
 
+# Lectura del snapshot (sin I/O): el dibujo y el portal sólo copian el cache.
 func _service_running(name):
-	if service_pids.has(name) and OS.execute("sh", ["-c", "kill -0 " + str(service_pids[name])], true) == 0:
-		return true
-	service_pids.erase(name)
-	var pids = _service_processes(name)
-	if pids.empty():
-		return false
-	service_pids[name] = pids[0]
-	return true
+	_svc_mutex.lock()
+	var e = _svc_snapshot.get(name, null)
+	var running = e != null and e.running
+	_svc_mutex.unlock()
+	return running
 
 
 func _service_processes(name):
-	var service = ""
-	for activity in ACTIVITIES:
-		if activity.name == name:
-			service = activity.get("service", "")
-			break
-	if service == "":
-		return []
-	var cmd = service.replace("~/", OS.get_environment("HOME") + "/")
-	var out = []
-	if OS.execute("pgrep", ["-u", OS.get_environment("USER"), "-f", "-x", cmd], true, out) != 0 or out.empty():
-		return []
+	_svc_mutex.lock()
+	var e = _svc_snapshot.get(name, null)
 	var pids = []
-	for line in String(out[0]).split("\n", false):
-		var pid = int(line.strip_edges())
+	if e != null:
+		for p in e.pids:
+			pids.append(p)
+	_svc_mutex.unlock()
+	return pids
+
+
+# --- parsers puros (testeables sin I/O) --------------------------------------
+
+# Texto de pgrep (un pid por línea): enteros > 0; ignora vacías y basura.
+static func parse_pgrep_pids(text):
+	var pids = []
+	for raw in String(text).split("\n", false):
+		var line = raw.strip_edges()
+		if line == "" or not line.is_valid_integer():
+			continue
+		var pid = int(line)
 		if pid > 0:
 			pids.append(pid)
 	return pids
+
+
+# Merge puro: combina la última medición `observed` (name -> [pids]) con el
+# snapshot previo y las ventanas de gracia de lanzamiento/parada.
+static func merge_service_snapshot(observed, prev, now_ms, launch_until, stop_until):
+	var snap = {}
+	for name in observed:
+		var measured = observed[name]
+		var old = prev.get(name, null)
+		var old_running = old != null and old.running
+		var old_pids = old.pids if old != null else []
+		var running = false
+		var pids = []
+		if not measured.empty():
+			if now_ms < int(stop_until.get(name, 0)):
+				running = false   # residual tras parar: se ignora hasta que muera
+				pids = []
+			else:
+				running = true
+				pids = measured
+		elif old_running and now_ms < int(launch_until.get(name, 0)):
+			running = true        # aún no visible: se sostiene el pid optimista
+			pids = old_pids
+		snap[name] = {"running": running, "pids": pids}
+	return snap
+
+
+static func snapshot_equal(a, b):
+	if a.size() != b.size():
+		return false
+	for name in a:
+		if not b.has(name):
+			return false
+		var ea = a[name]
+		var eb = b[name]
+		if bool(ea.running) != bool(eb.running) or ea.pids.size() != eb.pids.size():
+			return false
+		for i in range(ea.pids.size()):
+			if int(ea.pids[i]) != int(eb.pids[i]):
+				return false
+	return true
+
+
+# --- Publicador mDNS del Vecindario -------------------------------------------
+# Al arrancar (nunca en _process/refresh) se anuncian los servicios gvd y
+# Deskflow con avahi-publish-service. Cada anuncio se lanza en un Thread de un
+# solo uso (mismo patrón que _svc_launch_async) que captura el pid vía
+# `sh ... & echo $!`; los pids viven en `service_pids` y se matan en _exit_tree.
+# Sin avahi no se hace nada: estado degradado, sin error.
+
+var _publisher = null       # instancia única de neighborhood_publish.gd
+var _publish_names = []     # nombres de anuncio en curso (claves en service_pids)
+var _publish_started = false
+
+
+# Hostname local como etiqueta; /etc/hostname es el respaldo si el entorno no lo
+# trae. Sólo se usa para `name`; el `hid` público es opaco (ver PUBLISH_PLAN).
+func _local_hostname():
+	var host = OS.get_environment("HOSTNAME").strip_edges()
+	if host == "":
+		var f = File.new()
+		if f.file_exists("/etc/hostname") and f.open("/etc/hostname", File.READ) == OK:
+			host = f.get_as_text().strip_edges()
+			f.close()
+	return host
+
+
+# Arranca los anuncios una sola vez. No bloquea: detect_avahi sólo mira el PATH
+# con File y cada proceso se lanza en un Thread.
+func _start_publishers():
+	if _publish_started:
+		return
+	_publish_started = true
+	_publisher = PUBLISH_MODEL.new()
+	var avahi = _publisher.detect_avahi()
+	if not avahi.available:
+		return   # degradado, sin error
+	var identity = PUBLISH_PLAN.local_identity(_local_hostname())
+	var caps = {"gvd": true, "gvd_port": 5600, "deskflow": true, "deskflow_port": 24800}
+	var plan = PUBLISH_PLAN.new().build(identity, caps, avahi.path)
+	for entry in plan.services:
+		_publish_launch(entry)
+
+
+# Lanza un anuncio sin bloquear; el pid queda en `service_pids` bajo _svc_mutex y
+# el Thread se reapea en _svc_poll (misma lista que los servicios).
+func _publish_launch(entry):
+	var name = "publish:" + String(entry.capability)
+	_svc_mutex.lock()
+	if _publish_names.has(name):
+		_svc_mutex.unlock()
+		return
+	_publish_names.append(name)
+	_svc_mutex.unlock()
+	var argv = [String(entry.prog)]
+	for a in entry.args:
+		argv.append(String(a))
+	var th = Thread.new()
+	var state = {"done": false}
+	_svc_launch_threads.append(th)
+	_svc_launch_states.append(state)
+	th.start(self, "_publish_launch_work", {"name": name, "argv": argv, "state": state})
+
+
+func _publish_launch_work(userdata):
+	var cmd = ""
+	for part in userdata.argv:
+		cmd += (" " if cmd != "" else "") + _shell_quote(part)
+	var out = []
+	# Mismo truco que _svc_launch_work: sh + & desprende el proceso para que su
+	# muerte no deje zombie en Godot, y `echo $!` devuelve el pid sin bloquear.
+	OS.execute("sh", ["-c", cmd + " >/dev/null 2>&1 & echo \\$!"], true, out)
+	var pid = int(String(out[0]).strip_edges()) if out.size() > 0 else 0
+	_svc_mutex.lock()
+	if pid > 0:
+		service_pids[userdata.name] = pid
+	userdata.state.done = true
+	_svc_mutex.unlock()
+
+
+# Cita un argumento para `sh -c` (comillas simples, escapando la propia comilla).
+func _shell_quote(s):
+	return "'" + String(s).replace("'", "'\\''") + "'"
+
+
+# Mata los anuncios vivos al cerrar/recargar el shell. Los lanzamientos en curso
+# ya quedaron esperados por _stop_service_worker() antes de llamar acá.
+func _stop_publishers():
+	_svc_mutex.lock()
+	var pids = []
+	for name in _publish_names:
+		var pid = int(service_pids.get(name, 0))
+		service_pids.erase(name)
+		if pid > 0:
+			pids.append(pid)
+	_publish_names = []
+	_svc_mutex.unlock()
+	for pid in pids:
+		OS.kill(pid)
 
 
 func _open_by_name(name):
@@ -2566,7 +3075,7 @@ func _open_wayland(activity):
 	view.rect_position = Vector2.ZERO
 	view.rect_size = vp
 	view.rect_clip_content = true
-	compositor.default_size = view.rect_size
+	compositor.default_size = _tile_rect(vp).size
 
 	var cmd = activity.wayland[0]
 	var args = PoolStringArray()
@@ -2602,6 +3111,45 @@ func _go_home():
 	view.visible = false  # los tiles siguen vivos: se vuelven a ver al enfocar una ventana
 
 
+# --- Configuración (K11a) -----------------------------------------------------
+
+func _apply_settings():
+	if settings_bridge != null:
+		accent = settings_bridge.accent
+
+
+# Reapa el Thread de lectura del puente y aplica el snapshot si cambió. Sin I/O acá.
+func settings_poll():
+	if settings_bridge == null:
+		return
+	settings_bridge.poll()
+	if settings_bridge.revision == settings_rev:
+		return
+	settings_rev = settings_bridge.revision
+	_apply_settings()
+	request_redraw()
+
+
+# Fondo del Hogar: degradado por defecto, color sólido o imagen estirada por modo.
+# La imagen la carga el puente en un Thread; acá sólo se dibuja el snapshot cacheado.
+func _draw_home_background(vp):
+	var mode = "gradient"
+	if settings_bridge != null:
+		mode = String(settings_bridge.settings.get("wallpaper", {}).get("mode", "gradient"))
+	if mode != "gradient" and mode != "solid" and settings_bridge != null and settings_bridge.has_wallpaper_image():
+		set_cursor_pos(Vector2.ZERO)
+		var r = settings_bridge.wallpaper_rect(vp)
+		set_cursor_pos(r.position)
+		image(settings_bridge.wallpaper_texture(), r.size)
+		# Velo tenue para que las etiquetas del anillo sigan legibles sobre la foto.
+		imgui_draw_rect_filled(Rect2(Vector2.ZERO, vp), Color(0.0, 0.0, 0.0, 0.30))
+		return
+	if mode == "solid" and settings_bridge != null and settings_bridge.model != null:
+		imgui_draw_rect_filled(Rect2(Vector2.ZERO, vp), settings_bridge.model.color_of_hex(settings_bridge.settings.get("wallpaper", {}).get("color", "")), 0.0)
+		return
+	imgui_draw_rect_filled_multicolor(Rect2(Vector2.ZERO, vp), HOME_BG_TOP, HOME_BG_TOP, HOME_BG_BOTTOM, HOME_BG_BOTTOM)
+
+
 # --- Vecindario --------------------------------------------------------------
 
 # Abrir la vista Vecindario desde el bloque del Frame (sin actividad abierta).
@@ -2613,6 +3161,7 @@ func _go_neighborhood():
 	if neighborhood != null:
 		neighborhood.start()   # idempotente: el hilo queda vivo mientras el shell viva
 		neighborhood.poll()
+	_refresh_direction_views()
 	neighborhood_ui.refresh(true)
 	request_redraw()
 
@@ -2621,6 +3170,7 @@ func _go_neighborhood():
 func _close_neighborhood():
 	neighborhood_view = false
 	neighborhood_ui.selected = ""
+	neighborhood_ui.selected_host = ""
 	request_redraw()
 
 
@@ -2629,6 +3179,987 @@ func _exit_tree():
 	if neighborhood != null:
 		neighborhood.stop()
 		neighborhood = null
+	_stop_service_worker()
+	# Anuncios mDNS: sus Threads ya terminaron con el worker; matar los pids vivos.
+	_stop_publishers()
+	# Buzón del handshake: detiene el worker y espera los envíos ssh en curso.
+	_stop_inbox()
+	# No perder la última escritura de direcciones: ambas son cortas y locales.
+	for th in _dir_write_threads:
+		th.wait_to_finish()
+	_dir_write_threads = []
+	_dir_write_states = []
+	# Sesiones de pantalla: mata los pids vivos y espera los lanzamientos en curso.
+	_gvd_mutex.lock()
+	var gvd_pids = gvd_session_pids.values()
+	gvd_session_pids.clear()
+	_gvd_mutex.unlock()
+	for pid in gvd_pids:
+		var p = int(pid)
+		if p > 0:
+			OS.kill(p)
+	for th in _gvd_launch_threads:
+		th.wait_to_finish()
+	_gvd_launch_threads = []
+	_gvd_launch_states = []
+	# Escrituras de config de plan pendientes: no dejarlas a medias.
+	for th in _plan_write_threads:
+		th.wait_to_finish()
+	_plan_write_threads = []
+	_plan_write_states = []
+	# Configuración: espera el Thread de lectura/carga del puente.
+	if settings_bridge != null:
+		settings_bridge.stop()
+		settings_bridge = null
+
+
+# --- Dirección por host (brújula) --------------------------------------------
+# Cablea el modelo puro de Kilo A con la vista (Kilo E) y la persistencia local.
+# El hilo de render nunca consulta: sólo normaliza (barato), vuelca el estado ya
+# disponible y delega la escritura a un Thread de un solo uso (patrón _svc_launch_async).
+
+# Ruta del archivo de direcciones: $XDG_CONFIG_HOME/gdtk/neighborhood-directions.json
+# (~/.config/gdtk/neighborhood-directions.json por defecto). "" si no hay HOME ni
+# XDG_CONFIG_HOME: sin base no se adivina una ruta.
+func _directions_path():
+	var base = OS.get_environment("XDG_CONFIG_HOME")
+	if base == "":
+		var home = OS.get_environment("HOME")
+		if home == "":
+			return ""
+		base = home + "/.config"
+	return base + "/gdtk/neighborhood-directions.json"
+
+
+# Carga inicial: texto local -> modelo normalizado. Sin archivo o inválido -> {}.
+func _load_directions():
+	host_directions = {}
+	var path = _directions_path()
+	if path == "":
+		return
+	var f = File.new()
+	if f.open(path, File.READ) != OK:
+		return
+	var txt = f.get_as_text()
+	f.close()
+	host_directions = DIRECTIONS_MODEL.parse(txt)
+
+
+# Fija o borra la dirección de un host. Pura salvo la escritura diferida.
+func _set_host_direction(host_id, dir):
+	var id = String(host_id)
+	if id == "":
+		return
+	var d = String(dir).strip_edges()
+	if d == "none":
+		host_directions.erase(id)
+	else:
+		var entry = DIRECTIONS_MODEL.sanitize_entry({"direction": d, "confirm": "unconfirmed"})
+		if entry.direction == "none":
+			host_directions.erase(id)   # dirección inválida: se borra, no se guarda
+		else:
+			host_directions[id] = entry
+	_refresh_direction_views()
+	_persist_directions()
+	request_redraw()
+
+
+# Vuelca el estado ya disponible a la vista (nunca consulta red/procesos/disco).
+func _refresh_direction_views():
+	var conflicts = DIRECTIONS_MODEL.edge_conflicts(host_directions)
+	if neighborhood_ui == null:
+		return
+	# Godot 3 no admite `"directions" in obj`; get() devuelve null si falta la var.
+	if neighborhood_ui.get("directions") != null:
+		neighborhood_ui.directions = host_directions
+	if neighborhood_ui.get("direction_conflicts") != null:
+		neighborhood_ui.direction_conflicts = conflicts
+
+
+# Serializa en el hilo principal (puro y barato) y escribe en un Thread de un solo
+# uso; el hilo de render no espera. Sin ruta válida no hay nada que persistir.
+func _persist_directions():
+	var path = _directions_path()
+	if path == "":
+		return
+	var text = DIRECTIONS_MODEL.to_json(host_directions)
+	var state = {"done": false}
+	var th = Thread.new()
+	_dir_write_threads.append(th)
+	_dir_write_states.append(state)
+	th.start(self, "_write_directions_work", {"path": path, "text": text, "state": state})
+
+
+# Sólo escribe el archivo (tmp + rename atómico); nunca toca nodos ni red.
+func _write_directions_work(userdata):
+	var path = String(userdata.get("path", ""))
+	var text = String(userdata.get("text", "{}"))
+	if path != "":
+		Directory.new().make_dir_recursive(path.get_base_dir())
+		var tmp = path + ".tmp"
+		var w = File.new()
+		if w.open(tmp, File.WRITE) != OK:
+			printerr("shell: no se pudo escribir ", tmp)
+		else:
+			w.store_string(text)
+			w.close()
+			if Directory.new().rename(tmp, path) != OK:
+				printerr("shell: no se pudo renombrar ", tmp, " a ", path)
+	# Marca de fin: publica la completitud sin que el hilo de render espere.
+	_dir_mutex.lock()
+	userdata.state.done = true
+	_dir_mutex.unlock()
+
+
+# Reapea los Threads de escritura ya terminados. En este motor `is_active()` sigue
+# en true hasta `wait_to_finish()`, así que el fin se publica con el flag `done`
+# bajo Mutex; `wait_to_finish()` sólo se llama cuando el hilo ya terminó (no bloquea).
+func _dir_poll():
+	for i in range(_dir_write_threads.size() - 1, -1, -1):
+		var state = _dir_write_states[i]
+		_dir_mutex.lock()
+		var done = state.done
+		_dir_mutex.unlock()
+		if done:
+			_dir_write_threads[i].wait_to_finish()
+			_dir_write_threads.remove(i)
+			_dir_write_states.remove(i)
+
+
+# --- Buzón del handshake de dirección (K3) ------------------------------------
+# Transporte del acuerdo N/S/E/O entre hosts por ssh (SPEC §6/§9/§14). El worker
+# escanea el buzón local (~/.config/gdtk/direction-inbox) cada INBOX_POLL_MS,
+# decodifica con handshake.decode y publica la decisión pura de cada archivo; el
+# hilo principal sólo aplica con handshake.apply sobre host_directions y persiste
+# con _persist_directions. Proponer/responder también va en Threads: nunca ssh ni
+# I/O de disco en los callbacks de render. Sin secretos.
+
+const INBOX_POLL_MS = 5000
+const INBOX_SLEEP_STEP_MS = 100
+
+
+func _start_inbox():
+	if _inbox_thread != null:
+		return
+	_inbox_mutex.lock()
+	_inbox_want_stop = false
+	_inbox_mutex.unlock()
+	_inbox_thread = Thread.new()
+	_inbox_thread.start(self, "_inbox_work")
+
+
+func _stop_inbox():
+	_inbox_mutex.lock()
+	_inbox_want_stop = true
+	_inbox_mutex.unlock()
+	if _inbox_thread != null:
+		_inbox_thread.wait_to_finish()
+		_inbox_thread = null
+	# Los envíos ssh en curso son cortos (ConnectTimeout=3): se esperan al cerrar.
+	for th in _inbox_send_threads:
+		th.wait_to_finish()
+	_inbox_send_threads = []
+	_inbox_send_states = []
+
+
+func _inbox_stopped():
+	_inbox_mutex.lock()
+	var s = _inbox_want_stop
+	_inbox_mutex.unlock()
+	return s
+
+
+func _inbox_work(_userdata):
+	while true:
+		if _inbox_stopped():
+			return
+		var found = _inbox_scan()
+		if not found.empty():
+			_inbox_mutex.lock()
+			_inbox_entries = found
+			_inbox_version += 1
+			_inbox_mutex.unlock()
+		var waited = 0
+		while waited < INBOX_POLL_MS:
+			OS.delay_msec(INBOX_SLEEP_STEP_MS)
+			waited += INBOX_SLEEP_STEP_MS
+			if _inbox_stopped():
+				return
+
+
+# Directorio del buzón local, con la misma base que las direcciones.
+func _inbox_dir():
+	var base = OS.get_environment("XDG_CONFIG_HOME")
+	if base == "":
+		var home = OS.get_environment("HOME")
+		if home == "":
+			return ""
+		base = home + "/.config"
+	return INBOX_MODEL.inbox_dir(base)
+
+
+# hid local opaco (no publica el hostname real). Vacío si no hay hostname.
+func _local_hid():
+	return String(PUBLISH_PLAN.local_identity(_local_hostname()).hid)
+
+
+# Sólo I/O de disco local en el worker: lee el buzón, decodifica y consume (borra)
+# cada archivo del handshake. NO aplica estado: publica decisiones para el frame.
+func _inbox_scan():
+	var dir = _inbox_dir()
+	if dir == "":
+		return []
+	var d = Directory.new()
+	if d.open(dir) != OK:
+		return []
+	d.list_dir_begin(true, true)   # oculta .tmp.* de la escritura atómica
+	var names = []
+	var name = d.get_next()
+	while name != "":
+		if not d.current_is_dir():
+			names.append(name)
+		name = d.get_next()
+	d.list_dir_end()
+	var local = _local_hid()
+	var out = []
+	var remove = []
+	for n in names:
+		var f = File.new()
+		if f.open(dir.plus_file(n), File.READ) != OK:
+			continue
+		var txt = f.get_as_text()
+		f.close()
+		var decoded = HANDSHAKE.decode(txt)
+		var plan = INBOX_MODEL.plan_file(n, decoded, local)
+		if bool(plan.delete):
+			remove.append(n)
+		if String(plan.action) != "ignore":
+			out.append({"action": String(plan.action), "message": decoded})
+	for n in remove:
+		d.remove(n)
+	return out
+
+
+# Copia el último lote del worker (una sola vez por versión), lo aplica con
+# handshake.apply y reapea los envíos ssh terminados. Nunca espera un hilo vivo.
+func _inbox_poll():
+	_inbox_mutex.lock()
+	var version = _inbox_version
+	var entries = []
+	if version != _inbox_consumed:
+		_inbox_consumed = version
+		entries = _inbox_entries.duplicate()
+	_inbox_mutex.unlock()
+	for i in range(_inbox_send_threads.size() - 1, -1, -1):
+		var st = _inbox_send_states[i]
+		_inbox_mutex.lock()
+		var done = st.done
+		var code = int(st.code)
+		_inbox_mutex.unlock()
+		if done:
+			_inbox_send_threads[i].wait_to_finish()
+			_inbox_send_threads.remove(i)
+			_inbox_send_states.remove(i)
+			if code != 0:
+				activity_error = "vecindario: no se pudo entregar el handshake por ssh"
+	if entries.empty():
+		return
+	var changed = false
+	for e in entries:
+		if typeof(e) != TYPE_DICTIONARY:
+			continue
+		var msg = e.get("message", {})
+		var hid = String(msg.get("from", "")).strip_edges()
+		if hid == "":
+			continue
+		host_directions[hid] = HANDSHAKE.apply(host_directions.get(hid, {}), msg)
+		changed = true
+	if changed:
+		_refresh_direction_views()
+		_persist_directions()
+		request_redraw()
+
+
+# Host del Vecindario ya descubierto (host_id -> entry del modelo). Sin poll: el
+# `_process` mantiene copiado el snapshot del hilo de discovery.
+func _neighborhood_host(host_id):
+	if neighborhood == null:
+		return null
+	var id = String(host_id)
+	for h in neighborhood.hosts:
+		if String(h.get("id", "")) == id:
+			return h
+	return null
+
+
+# Destino ssh del peer, resuelto de sus servicios DNS-SD.
+func _inbox_peer_for(host_id):
+	var host = _neighborhood_host(host_id)
+	if host == null:
+		return {"ok": false, "peer": "", "error": "host no está en el Vecindario"}
+	return INBOX_MODEL.ssh_target(host)
+
+
+# Propone una dirección al peer por su buzón ssh. Deja el entry local en
+# "proposed" (la UI ya lo muestra) y persiste; nunca bloquea el render.
+func propose_direction(host_id, direction):
+	var id = String(host_id).strip_edges()
+	if id == "":
+		return
+	var entry = DIRECTIONS_MODEL.sanitize_entry({"direction": direction, "confirm": "proposed"})
+	if String(entry.get("direction", "none")) == "none":
+		return
+	var local = _local_hid()
+	if local == "":
+		return
+	host_directions[id] = entry
+	_refresh_direction_views()
+	_persist_directions()
+	request_redraw()
+	var target = _inbox_peer_for(id)
+	if not bool(target.ok):
+		activity_error = "vecindario: " + String(target.error)
+		return
+	_send_inbox(String(target.peer), INBOX_MODEL.proposal_name(local),
+		HANDSHAKE.encode(HANDSHAKE.proposal(local, id, entry.direction)))
+
+
+# Responde la propuesta de `host_id`: acepta (confirma local) o rechaza (retira la
+# dirección) y escribe el response en el buzón ssh del proponente.
+func answer_direction(host_id, accepted):
+	var id = String(host_id).strip_edges()
+	if id == "":
+		return
+	var entry = host_directions.get(id, {})
+	if typeof(entry) != TYPE_DICTIONARY:
+		return
+	var direction = String(entry.get("direction", "none"))
+	if direction == "none":
+		return
+	var local = _local_hid()
+	if local == "":
+		return
+	if bool(accepted):
+		var confirmed = DIRECTIONS_MODEL.sanitize_entry(entry)
+		confirmed.confirm = "confirmed"
+		host_directions[id] = confirmed
+	else:
+		host_directions.erase(id)
+	_refresh_direction_views()
+	_persist_directions()
+	request_redraw()
+	var target = _inbox_peer_for(id)
+	if not bool(target.ok):
+		activity_error = "vecindario: " + String(target.error)
+		return
+	_send_inbox(String(target.peer), INBOX_MODEL.response_name(local),
+		HANDSHAKE.encode(HANDSHAKE.response(local, id, direction, bool(accepted))))
+
+
+# Lanza el envío ssh (ya con argv seguro del modelo puro) en un Thread de un solo
+# uso, reapeado en _inbox_poll. Un fallo de entrega no revierte el estado local.
+func _send_inbox(peer, remote_name, payload):
+	var plan = INBOX_MODEL.ssh_write_argv(peer, remote_name, payload)
+	if not bool(plan.ok):
+		activity_error = "vecindario: " + String(plan.error)
+		return
+	var state = {"done": false, "code": -1}
+	var th = Thread.new()
+	_inbox_send_threads.append(th)
+	_inbox_send_states.append(state)
+	th.start(self, "_inbox_send_work", {"cmd": String(plan.cmd), "args": plan.args, "state": state})
+
+
+func _inbox_send_work(userdata):
+	var out = []
+	var code = OS.execute(String(userdata.get("cmd", "ssh")), userdata.get("args", []), true, out)
+	_inbox_mutex.lock()
+	userdata.state.done = true
+	userdata.state.code = code
+	_inbox_mutex.unlock()
+
+
+# --- Acciones del Vecindario: despacho real, sin bloquear el render -------------
+# La vista sólo registra la acción; `_run_host_plan` la conecta con lo que ya
+# existe (ciclo de vida de servicios, actividad "Pantalla") y nunca ejecuta I/O en
+# el hilo de render: escrituras y lanzamientos van a Threads de un solo uso y el
+# estado se lee de caches (SPEC-screen-share-compass §0, §5–§8, §14).
+
+# Clasificación pura de planes (mecanismo + argv) y helpers de Deskflow viven en
+# host_dispatch.gd: se delegan para poder testearse headless sin cargar el shell.
+# Punto de entrada de las acciones del Vecindario. No bloquea: escrituras y
+# lanzamientos se difieren a Threads; el estado sale de caches.
+func _run_host_plan(host_id, action):
+	if typeof(action) != TYPE_DICTIONARY:
+		return
+	if not bool(action.get("enabled", false)):
+		return
+	var id = String(host_id)
+	var plan = action.get("plan", null)
+	var d = HOST_DISPATCH.dispatch_of(plan, String(action.get("id", "")))
+	match String(d.mechanism):
+		"deskflow":
+			_run_deskflow_plan(id, plan)
+		"gvd_recv":
+			# "Ver su escritorio aquí": receptor local en un tile + emisor remoto
+			# por ssh (buzón). El mismo punto corta si ya hay sesión.
+			if _screen_session_active(id):
+				_stop_gvd_screen(id)
+			else:
+				_start_gvd_screen(id, action)
+		"gvd_send":
+			# "Extender mi escritorio a él": emisor local (si es GNOME) + receptor
+			# remoto por ssh; suspende el vínculo Deskflow hacia esa dirección.
+			if _screen_session_active(id):
+				_stop_gvd_screen(id)
+			else:
+				_start_gvd_screen(id, action)
+		_:
+			print("vecindario: ", id, " · ", String(action.get("label", "")),
+				" (acción sin plan ejecutable)")
+	request_redraw()
+
+
+# Deskflow (kind "service_toggle"): el `mode` del plan decide el camino.
+#   "client": reusa la actividad "Deskflow" (toggle global) tal como hoy.
+#   "server": NO usa la actividad cliente; escribe el layout y lanza el argv del
+#             propio plan de forma rastreada (clave distinta por host).
+func _run_deskflow_plan(host_id, plan):
+	if HOST_DISPATCH.deskflow_dispatch_mode(plan) == "server":
+		_run_deskflow_server(host_id, plan)
+		return
+	var name = "Deskflow"
+	if typeof(plan) == TYPE_DICTIONARY and String(plan.get("activity", "")) != "":
+		name = String(plan.activity)
+	# Intención optimista por host (la actividad/servicio Deskflow es global).
+	host_deskflow[String(host_id)] = not bool(_service_running(name))
+	if typeof(plan) == TYPE_DICTIONARY and String(plan.get("config", "")) != "" \
+			and String(plan.get("settings_text", "")) != "":
+		# Ajustes nuevos antes del toggle: se escriben en un Thread y el toggle se
+		# dispara cuando la escritura atómica termina (sin esperar en el render).
+		_write_text_async(String(plan.config), String(plan.settings_text), name)
+		return
+	_toggle_service_by_name(name)
+
+
+# Servidor Deskflow local: el mismo botón corta la sesión si ya vive para ese host.
+# Escribe DOS archivos si vienen en el plan: el layout barrier en `plan.layout_path`
+# y los ajustes (con `externalConfigFile` apuntando al layout) en `plan.config`;
+# al terminar las escrituras atómicas lanza el argv `plan.cmd`/`plan.args` en un
+# Thread rastreado. Nunca bloquea el render.
+func _run_deskflow_server(host_id, plan):
+	var id = String(host_id)
+	var key = HOST_DISPATCH.deskflow_session_key(id)
+	if _has_tracked(key):
+		_stop_tracked(key)
+		return
+	if typeof(plan) != TYPE_DICTIONARY:
+		return
+	var launch = HOST_DISPATCH.deskflow_server_argv(plan)
+	if String(launch.cmd) == "":
+		return
+	# K17: recuerda el argv para poder restaurar el vínculo si la pantalla lo
+	# suspende temporalmente al extender el escritorio hacia ese vecino.
+	_deskflow_server_launch[id] = {"cmd": String(launch.cmd), "args": launch.args}
+	var then_launch = {"key": key, "cmd": String(launch.cmd), "args": launch.args}
+	var writes = []
+	if String(plan.get("config", "")) != "" and String(plan.get("settings_text", "")) != "":
+		writes.append({"path": String(plan.config), "text": String(plan.settings_text)})
+	if String(plan.get("layout_path", "")) != "" and String(plan.get("layout_text", "")) != "":
+		writes.append({"path": String(plan.layout_path), "text": String(plan.layout_text)})
+	if not writes.empty():
+		_write_texts_async(writes, "", then_launch)
+		return
+	_launch_tracked(key, String(launch.cmd), launch.args)
+
+
+# --- Aplicar layout de Deskflow (K5) -----------------------------------------
+# Recibe el payload del editor puro: links {direction, peer, host} y, para las
+# direcciones que se quitaron, {direction:"none", host}. Persiste las MISMAS
+# direcciones en host_directions (fuente única: de ahí derivan gvd y Deskflow)
+# con estado "confirmed", regenera ~/.config/Deskflow/deskflow-server.conf (con
+# backup .bak) y reinicia el servicio. Nunca bloquea el hilo de render: la
+# escritura va a un Thread de un solo uso reapeado por _plan_poll, que al
+# terminar reinicia con el ciclo de vida existente (_service_running/
+# _toggle_service_by_name), sin crear uno paralelo.
+func apply_deskflow_layout(links):
+	if typeof(links) != TYPE_ARRAY:
+		return
+	var clean = []
+	var dirs = {}
+	for l in links:
+		if typeof(l) != TYPE_DICTIONARY:
+			continue
+		var d = String(l.get("direction", "")).strip_edges()
+		var hid = String(l.get("host", l.get("hid", ""))).strip_edges()
+		if d == "none":
+			if hid != "":
+				dirs[hid] = DIRECTIONS_MODEL.sanitize_entry({"direction": "none"})
+			continue
+		var p = String(l.get("peer", "")).strip_edges()
+		if not LAYOUT_MODEL.valid_direction(d) or not LAYOUT_MODEL.valid_peer(p):
+			continue
+		clean.append({"direction": d, "peer": p})
+		if hid != "":
+			dirs[hid] = DIRECTIONS_MODEL.sanitize_entry({
+				"direction": d, "confirm": "confirmed", "mode": "extend",
+				"link": "deskflow+gvd",
+			})
+	# K17: mientras gvd extiende hacia una dirección, su vínculo Deskflow queda
+	# suspendido (se restaura al cortar la pantalla); no se reintroduce acá.
+	if not _gvd_link_suspended.empty():
+		var suspended = _gvd_link_suspended.values()
+		var kept = []
+		for l in clean:
+			if not suspended.has(String(l.get("direction", ""))):
+				kept.append(l)
+		clean = kept
+	if clean.empty() and dirs.empty():
+		activity_error = "layout: sin direcciones válidas"
+		return
+	# Fuente única: host_directions manda; el conf se deriva de lo mismo.
+	host_directions = DIRECTIONS_MODEL.merge(host_directions, dirs)
+	_refresh_direction_views()
+	_persist_directions()
+	activity_error = ""
+	if clean.empty():
+		request_redraw()
+		return
+	var local = _local_hostname()
+	if not LAYOUT_MODEL.valid_peer(local):
+		local = "gdtk-local"
+	var text = CONF_MODEL.build_server_conf(local, clean)
+	if text == "":
+		activity_error = "layout: no se pudo generar deskflow-server.conf"
+		return
+	var base = OS.get_environment("XDG_CONFIG_HOME")
+	if base == "":
+		var home = OS.get_environment("HOME")
+		if home == "":
+			activity_error = "layout: sin HOME/XDG_CONFIG_HOME para Deskflow"
+			return
+		base = home + "/.config"
+	var path = base + "/Deskflow/deskflow-server.conf"
+	var state = {"done": false, "then_restart_deskflow": true}
+	var th = Thread.new()
+	_plan_write_threads.append(th)
+	_plan_write_states.append(state)
+	th.start(self, "_apply_deskflow_work", {"path": path, "text": text, "state": state})
+	request_redraw()
+
+
+# Sólo I/O de archivos: backup .bak del conf previo, escritura temporal y rename
+# atómico. Nunca toca nodos, red ni procesos.
+func _apply_deskflow_work(userdata):
+	var path = String(userdata.get("path", ""))
+	var text = String(userdata.get("text", ""))
+	if path != "":
+		Directory.new().make_dir_recursive(path.get_base_dir())
+		if File.new().file_exists(path):
+			Directory.new().copy(path, path + ".bak")
+		var tmp = path + ".tmp"
+		var w = File.new()
+		if w.open(tmp, File.WRITE) != OK:
+			printerr("shell: no se pudo escribir ", tmp)
+		else:
+			w.store_string(text)
+			w.close()
+			if Directory.new().rename(tmp, path) != OK:
+				printerr("shell: no se pudo renombrar ", tmp, " a ", path)
+	_plan_mutex.lock()
+	userdata.state.done = true
+	_plan_mutex.unlock()
+
+
+# ¿Este equipo puede publicar servidor Deskflow local? Se resuelve UNA vez si
+# `deskflow-core` está en $PATH (sólo File, sin OS.execute) y se cachea: el frame
+# nunca reescanea el PATH.
+func deskflow_server_available():
+	if not _deskflow_probed:
+		_deskflow_probed = true
+		_deskflow_core = _which("deskflow-core")
+	return _deskflow_core != ""
+
+
+# Ruta absoluta de un ejecutable en $PATH, o "" si no está. Sólo File, sin shell
+# (mismo patrón que applet_keyboard._which).
+func _which(prog):
+	var name = String(prog)
+	for d in OS.get_environment("PATH").split(":", false):
+		if d != "" and File.new().file_exists(d + "/" + name):
+			return d + "/" + name
+	return ""
+
+
+# Alterna el servicio por nombre de actividad, buscando la que tenga "service".
+func _toggle_service_by_name(name):
+	var want = String(name)
+	for a in ACTIVITIES:
+		if a.has("service") and String(a.get("name", "")) == want:
+			_toggle_service(a)
+			return
+	activity_error = "Servicio desconocido: " + want
+
+
+# --- Escrituras de config de plan (Thread de un solo uso, tmp + rename) --------
+
+func _write_text_async(path, text, then_toggle = "", then_launch = null):
+	var p = String(path)
+	var t = String(then_toggle)
+	var launch = then_launch if typeof(then_launch) == TYPE_DICTIONARY else {}
+	if p == "":
+		if t != "":
+			_toggle_service_by_name(t)
+		elif not launch.empty():
+			_launch_tracked(String(launch.get("key", "")), String(launch.get("cmd", "")),
+				launch.get("args", []))
+		return
+	var state = {"done": false, "then_toggle": t, "then_launch": launch, "path": p}
+	var th = Thread.new()
+	_plan_write_threads.append(th)
+	_plan_write_states.append(state)
+	th.start(self, "_write_text_work", {"path": p, "text": String(text), "state": state})
+
+
+func _write_text_work(userdata):
+	_write_file_atomic(String(userdata.get("path", "")), String(userdata.get("text", "")))
+	_plan_mutex.lock()
+	userdata.state.done = true
+	_plan_mutex.unlock()
+
+
+# Varias escrituras atómicas en un solo Thread (servidor Deskflow: layout barrier +
+# ajustes). Mismo reap en _plan_poll que _write_text_async.
+func _write_texts_async(entries, then_toggle = "", then_launch = null):
+	var writes = []
+	if typeof(entries) == TYPE_ARRAY:
+		for e in entries:
+			if typeof(e) != TYPE_DICTIONARY:
+				continue
+			var p = String(e.get("path", ""))
+			if p != "":
+				writes.append({"path": p, "text": String(e.get("text", ""))})
+	var t = String(then_toggle)
+	var launch = then_launch if typeof(then_launch) == TYPE_DICTIONARY else {}
+	if writes.empty():
+		if t != "":
+			_toggle_service_by_name(t)
+		elif not launch.empty():
+			_launch_tracked(String(launch.get("key", "")), String(launch.get("cmd", "")),
+				launch.get("args", []))
+		return
+	var state = {"done": false, "then_toggle": t, "then_launch": launch}
+	var th = Thread.new()
+	_plan_write_threads.append(th)
+	_plan_write_states.append(state)
+	th.start(self, "_write_texts_work", {"writes": writes, "state": state})
+
+
+func _write_texts_work(userdata):
+	var writes = userdata.get("writes", [])
+	if typeof(writes) == TYPE_ARRAY:
+		for e in writes:
+			if typeof(e) == TYPE_DICTIONARY:
+				_write_file_atomic(String(e.get("path", "")), String(e.get("text", "")))
+	_plan_mutex.lock()
+	userdata.state.done = true
+	_plan_mutex.unlock()
+
+
+# Escritura atómica (tmp + rename) creando el directorio destino. Sólo I/O.
+func _write_file_atomic(path, text):
+	var p = String(path)
+	if p == "":
+		return
+	Directory.new().make_dir_recursive(p.get_base_dir())
+	var tmp = p + ".tmp"
+	var w = File.new()
+	if w.open(tmp, File.WRITE) != OK:
+		printerr("shell: no se pudo escribir ", tmp)
+		return
+	w.store_string(String(text))
+	w.close()
+	if Directory.new().rename(tmp, p) != OK:
+		printerr("shell: no se pudo renombrar ", tmp, " a ", p)
+
+
+# Reapea las escrituras de plan y ejecuta el toggle diferido una vez completadas.
+func _plan_poll():
+	for i in range(_plan_write_threads.size() - 1, -1, -1):
+		var state = _plan_write_states[i]
+		_plan_mutex.lock()
+		var done = state.done
+		_plan_mutex.unlock()
+		if done:
+			_plan_write_threads[i].wait_to_finish()
+			_plan_write_threads.remove(i)
+			_plan_write_states.remove(i)
+			var then_toggle = String(state.get("then_toggle", ""))
+			if then_toggle != "":
+				_toggle_service_by_name(then_toggle)
+			elif bool(state.get("then_restart_deskflow", false)):
+				# Reinicia reusando el ciclo de vida: parar (si vive) y arrancar.
+				var was_running = _service_running("Deskflow")
+				if was_running:
+					_toggle_service_by_name("Deskflow")
+				_toggle_service_by_name("Deskflow")
+			else:
+				var then_launch = state.get("then_launch", {})
+				if typeof(then_launch) == TYPE_DICTIONARY and not then_launch.empty():
+					_launch_tracked(String(then_launch.get("key", "")),
+						String(then_launch.get("cmd", "")), then_launch.get("args", []))
+
+
+# --- Sesiones rastreadas: gvd send y servidor Deskflow (Threads de un solo uso) -
+# Una clave por host/mecanismo: host_id para gvd, "deskflow:"+host_id para el
+# servidor Deskflow. La UI nunca consulta procesos: lee `gvd_session_pids`.
+
+func _has_tracked(key):
+	var k = String(key)
+	_gvd_mutex.lock()
+	var pid = int(gvd_session_pids.get(k, 0))
+	_gvd_mutex.unlock()
+	return pid > 0
+
+
+# Corta una sesión rastreada: olvida y mata su pid. Sin zombies.
+func _stop_tracked(key):
+	var k = String(key)
+	_gvd_mutex.lock()
+	var pid = int(gvd_session_pids.get(k, 0))
+	gvd_session_pids.erase(k)
+	_gvd_mutex.unlock()
+	if pid > 0:
+		OS.kill(pid)
+
+
+func _gvd_has_session(host_id):
+	return _has_tracked(String(host_id))
+
+
+func _stop_gvd_session(host_id):
+	_stop_tracked(String(host_id))
+
+
+# --- K17: automatización del monitor virtual (gvd) ---------------------------
+# El shell lanza/corta gvd solo: emisor local si es GNOME, receptor remoto por
+# ssh (buzón), receptor local en un tile (actividad "Pantalla"), `--position` del
+# mapa y `--cursor sway` si hay SWAYSOCK; además suspende y restaura el vínculo
+# Deskflow de esa dirección. Nada bloquea el render: los procesos van por
+# _launch_tracked (Threads) y el estado se lee de caches.
+
+func _screen_keys(host_id):
+	return GVD_LAUNCH.session_keys(host_id)
+
+
+func _screen_session_active(host_id):
+	for k in _screen_keys(host_id):
+		if _has_tracked(k):
+			return true
+	return false
+
+
+func _stop_gvd_screen(host_id):
+	var id = String(host_id)
+	for k in _screen_keys(id):
+		_stop_tracked(k)
+	_close_pantalla_window()
+	_restore_deskflow_link(id)
+
+
+func _close_pantalla_window():
+	if wayland_ids.has("Pantalla") and _id_alive(wayland_ids["Pantalla"]):
+		compositor.close(wayland_ids["Pantalla"])
+
+
+# Abre el receptor local en un tile: reutiliza la actividad wayland "Pantalla"
+# con el argv calculado (`--cursor sway` sólo si la sesión expone SWAYSOCK).
+func _open_pantalla_window(gvd_path, has_sway, port):
+	var plan = GVD_LAUNCH.local_recv_argv(gvd_path, has_sway, port)
+	if not bool(plan.get("ok", false)):
+		activity_error = "pantalla: " + String(plan.get("error", ""))
+		return
+	for i in range(ACTIVITIES.size()):
+		if String(ACTIVITIES[i].get("name", "")) == "Pantalla":
+			var wl = [String(plan.get("cmd", ""))]
+			for a in plan.get("args", []):
+				wl.append(String(a))
+			ACTIVITIES[i]["wayland"] = wl
+			_activate(i)
+			return
+	activity_error = "pantalla: actividad no disponible"
+
+
+func _direction_for(host_id):
+	var entry = host_directions.get(String(host_id), {})
+	if typeof(entry) != TYPE_DICTIONARY:
+		return ""
+	var d = String(entry.get("direction", "none")).strip_edges()
+	return d if DIRECTIONS_MODEL.valid_direction(d) else ""
+
+
+func _has_sway_socket():
+	return OS.get_environment("SWAYSOCK").strip_edges() != ""
+
+
+# Arranca una sesión de pantalla hacia `host_id`. `share_my_screen` emite local
+# (si GNOME) y abre el receptor del peer por ssh; `use_as_screen` abre el receptor
+# local en un tile y pide al peer (GNOME) que emita. Nunca bloquea.
+func _start_gvd_screen(host_id, action):
+	var id = String(host_id)
+	var plan = action.get("plan", null) if typeof(action) == TYPE_DICTIONARY else null
+	var gvd_path = GVD_LAUNCH.gvd_path_of(plan)
+	if gvd_path == "":
+		activity_error = "pantalla: no se encontró el programa de pantalla"
+		return
+	var direction = _direction_for(id)
+	var target = _inbox_peer_for(id)
+	var aid = String(action.get("id", "")) if typeof(action) == TYPE_DICTIONARY else ""
+	if aid == "share_my_screen":
+		if not GVD_LAUNCH.local_can_emit(OS.get_environment("XDG_CURRENT_DESKTOP"),
+				OS.get_environment("XDG_SESSION_TYPE")):
+			activity_error = "pantalla: este equipo no puede emitir su escritorio"
+			return
+		var peer = GVD_LAUNCH.target_host_of(plan)
+		var sp = GVD_LAUNCH.local_send_argv(gvd_path, peer,
+			GVD_LAUNCH.port_of_plan(plan), GVD_LAUNCH.position_for(direction))
+		if not bool(sp.get("ok", false)):
+			activity_error = "pantalla: " + String(sp.get("error", ""))
+			return
+		_launch_tracked(id, String(sp.get("cmd", "")), sp.get("args", []))
+		_suspend_deskflow_link(id, direction)
+		if bool(target.get("ok", false)):
+			var rp = GVD_LAUNCH.remote_recv_argv(String(target.get("peer", "")), _has_sway_socket())
+			if bool(rp.get("ok", false)):
+				_launch_tracked(GVD_LAUNCH.remote_recv_key(id),
+					String(rp.get("cmd", "")), rp.get("args", []))
+	else:
+		_open_pantalla_window(gvd_path, _has_sway_socket(), GVD_LAUNCH.port_of_plan(plan))
+		if bool(target.get("ok", false)):
+			var rp2 = GVD_LAUNCH.remote_send_argv(String(target.get("peer", "")),
+				_local_hostname(), GVD_LAUNCH.port_of_plan(plan),
+				GVD_LAUNCH.position_for(direction, true))
+			if bool(rp2.get("ok", false)):
+				_launch_tracked(GVD_LAUNCH.remote_send_key(id),
+					String(rp2.get("cmd", "")), rp2.get("args", []))
+	request_redraw()
+
+
+# Suspende el vínculo Deskflow hacia la dirección extendida: si había una sesión
+# de servidor Deskflow viva para ese host, se corta y se recuerda su argv para
+# restaurarla al cortar la pantalla. La dirección queda marcada para que un
+# layout posterior no la reintroduzca (ver apply_deskflow_layout).
+func _suspend_deskflow_link(host_id, direction):
+	var id = String(host_id)
+	_gvd_link_suspended[id] = String(direction)
+	var key = HOST_DISPATCH.deskflow_session_key(id)
+	if _has_tracked(key):
+		_stop_tracked(key)
+		if _deskflow_server_launch.has(id):
+			_gvd_link_restore[id] = true
+
+
+func _restore_deskflow_link(host_id):
+	var id = String(host_id)
+	_gvd_link_suspended.erase(id)
+	if not bool(_gvd_link_restore.get(id, false)):
+		return
+	_gvd_link_restore.erase(id)
+	var saved = _deskflow_server_launch.get(id, null)
+	if typeof(saved) != TYPE_DICTIONARY:
+		return
+	var cmd = String(saved.get("cmd", ""))
+	if cmd == "":
+		return
+	_launch_tracked(HOST_DISPATCH.deskflow_session_key(id), cmd, saved.get("args", []))
+
+
+# Lanza un plan (gvd send, servidor Deskflow) en un Thread de un solo uso; captura
+# el pid y lo publica en `gvd_session_pids` bajo `key`. Nunca en el hilo de render.
+func _launch_tracked(key, cmd, args):
+	var k = String(key)
+	var c = String(cmd).strip_edges()
+	if k == "" or c == "":
+		return
+	var state = {"done": false, "key": k, "pid": 0, "error": ""}
+	var th = Thread.new()
+	_gvd_mutex.lock()
+	_gvd_launch_threads.append(th)
+	_gvd_launch_states.append(state)
+	_gvd_mutex.unlock()
+	th.start(self, "_tracked_launch_work", {"key": k, "cmd": c, "args": args, "state": state})
+
+
+# Compatibilidad: el emisor gvd usa la clave host_id (misma maquinaria rastreada).
+func _launch_gvd_send(host_id, cmd, args):
+	_launch_tracked(String(host_id), cmd, args)
+
+
+func _tracked_launch_work(userdata):
+	var args = userdata.get("args", [])
+	if typeof(args) != TYPE_ARRAY:
+		args = []
+	var pid = int(OS.execute(String(userdata.get("cmd", "")), args, false))
+	var err = ""
+	if pid <= 0:
+		err = "no se pudo lanzar " + String(userdata.get("cmd", ""))
+	_gvd_mutex.lock()
+	if pid > 0:
+		gvd_session_pids[String(userdata.key)] = pid
+	userdata.state.pid = pid
+	userdata.state.error = err
+	userdata.state.done = true
+	_gvd_mutex.unlock()
+
+
+# Reapea los Threads de lanzamiento terminados (no bloquea).
+func _gvd_poll():
+	var reaped = false
+	for i in range(_gvd_launch_threads.size() - 1, -1, -1):
+		var state = _gvd_launch_states[i]
+		_gvd_mutex.lock()
+		var done = state.done
+		_gvd_mutex.unlock()
+		if done:
+			_gvd_launch_threads[i].wait_to_finish()
+			_gvd_launch_threads.remove(i)
+			_gvd_launch_states.remove(i)
+			reaped = true
+	if reaped:
+		request_redraw()
+
+
+# Estado de sesión del host para la UI, leído SÓLO de caches (sin consultar
+# procesos ni disco): "idle" | "starting" | "active". Cuenta las sesiones gvd
+# (emisor local, receptor/emisor remoto; ver GVD_LAUNCH.session_keys) y el
+# servidor Deskflow (clave "deskflow:"+host_id).
+func _host_session_state(host_id):
+	var id = String(host_id)
+	var session_keys = GVD_LAUNCH.session_keys(id)
+	var df_key = HOST_DISPATCH.deskflow_session_key(id)
+	_gvd_mutex.lock()
+	var active = int(gvd_session_pids.get(df_key, 0)) > 0
+	if not active:
+		for k in session_keys:
+			if int(gvd_session_pids.get(k, 0)) > 0:
+				active = true
+				break
+	var starting = false
+	for st in _gvd_launch_states:
+		if bool(st.get("done", false)):
+			continue
+		var k = String(st.get("key", ""))
+		if k == df_key or session_keys.has(k):
+			starting = true
+			break
+	_gvd_mutex.unlock()
+	if active:
+		return "active"
+	if starting:
+		return "starting"
+	if bool(host_deskflow.get(id, false)) and _service_running("Deskflow"):
+		return "active"
+	return "idle"
 
 
 # Conectar una red: siempre por nmtui en la actividad Terminal, sin pasar secretos.
@@ -2643,8 +4174,9 @@ func _open_nmtui():
 
 
 # Encender la radio desde el estado vacío: acción explícita, nunca en silencio.
+# No bloqueante: el worker de Vecindario detecta la lista nueva en su próximo ciclo.
 func _wifi_radio_on():
-	OS.execute("nmcli", ["radio", "wifi", "on"])
+	OS.execute("nmcli", ["radio", "wifi", "on"], false)
 	request_redraw()
 
 
@@ -2774,7 +4306,7 @@ func _open_unmanaged_window(id):
 	view.rect_position = Vector2.ZERO
 	view.rect_size = vp
 	view.rect_clip_content = true
-	compositor.default_size = view.rect_size
+	compositor.default_size = _tile_rect(vp).size
 
 	current_activity = activity
 	activity_instance = null
@@ -3155,9 +4687,17 @@ func _on_input_access(id, pid, app_id):
 func _from_service(pid):
 	var guard = 0
 	while pid > 1 and guard < 32:
+		_svc_mutex.lock()
+		var found = false
 		for name in service_pids:
-			if service_pids[name] == pid and _service_running(name):
-				return true
+			if service_pids[name] == pid:
+				var e = _svc_snapshot.get(name, null)
+				if e != null and e.running:
+					found = true
+					break
+		_svc_mutex.unlock()
+		if found:
+			return true
 		pid = _ppid(pid)
 		guard += 1
 	return false

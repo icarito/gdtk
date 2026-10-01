@@ -10,6 +10,7 @@ const SHAPE_TORUS = 2
 
 const HISTORY = 300
 const SURFACE_N = 25
+const MENU_STYLE = preload("res://menu_style.gd")
 
 var viewport = null
 var viewport_texture = null
@@ -157,20 +158,22 @@ func _menu_bar(ui, vp):
 	var flags = ui.WINDOW_NO_TITLE_BAR | ui.WINDOW_NO_RESIZE | ui.WINDOW_NO_MOVE | ui.WINDOW_NO_SCROLLBAR | ui.WINDOW_NO_SAVED_SETTINGS | ui.WINDOW_MENU_BAR
 	if ui.begin("##panel_menu", flags):
 		if ui.begin_menu_bar():
+			MENU_STYLE.begin(ui)
 			if ui.begin_menu("Ver"):
 				if has_demos:
-					if ui.menu_item("Demo ImGui"):
+					if MENU_STYLE.item(ui, "Demo ImGui"):
 						show_demo = not show_demo
-					if has_implot and ui.menu_item("Demo ImPlot"):
+					if has_implot and MENU_STYLE.item(ui, "Demo ImPlot"):
 						show_implot_demo = not show_implot_demo
-					if has_implot3d and ui.menu_item("Demo ImPlot3D"):
+					if has_implot3d and MENU_STYLE.item(ui, "Demo ImPlot3D"):
 						show_implot3d_demo = not show_implot3d_demo
-				if ui.menu_item("Metricas"):
+				if MENU_STYLE.item(ui, "Metricas"):
 					show_metrics = not show_metrics
 				ui.separator()
-				if ui.menu_item("Acerca de"):
+				if MENU_STYLE.item(ui, "Acerca de"):
 					ui.open_popup("acerca")
 				ui.end_menu()
+			MENU_STYLE.end(ui)
 			ui.separator()
 			ui.text("Panel gdtk")
 			ui.end_menu_bar()

@@ -11,6 +11,7 @@ func _init():
 		assert(pos.x >= 0 and pos.y >= 80 and pos.y < 520)
 	var frame = load("res://frame.gd").new()
 	assert(frame._applet_def("recursos") != null)
+	assert(frame._applet_width("recursos", 80.0) > frame._applet_width("reloj", 80.0))
 	assert(frame._applet_def("bluetooth") == null)
 	frame.free()
 	shell.free()

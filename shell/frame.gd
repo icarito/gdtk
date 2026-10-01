@@ -58,11 +58,17 @@ const MINI = 14.0        # alto de la franja de minimizar/cerrar (sólo al hover
 # cuadrado U x U de la misma rejilla, reordenable y ocultable. Lista corta de ids
 # estables; sin arquitectura genérica de providers.
 const APPLETS = [
-	{"id": "recursos", "name": "CPU · Memoria · Swap", "short": "SYS"},
+	{"id": "recursos", "name": "CPU · Memoria · Swap", "short": "SYS", "span": 2},
 	{"id": "reloj", "name": "Reloj", "short": "REL"},
 	{"id": "teclado", "name": "Teclado", "short": "TEC"},
 ]
 const APPLET_DEFAULT = ["recursos", "reloj", "teclado"]
+# Look WindowMaker de los menús verticales (popups ImGui). Sólo estilo.
+const MENU_STYLE = preload("res://menu_style.gd")
+# K10b: modelo PURO de los bloques "Compartido" (sesiones activas con vecinos).
+const SHARED_BLOCK = preload("res://shared_block.gd")
+# Grosor de la barra de estado del bloque "Compartido".
+const SHARED_W = 3.0
 
 onready var shell = get_parent()
 
@@ -80,8 +86,13 @@ var slide_since = 0
 # Layout del último frame dibujado (para el control remoto / tests).
 var sysmon = Host.sc("res://sysmon.gd").new()
 var keyboard = Host.sc("res://applet_keyboard.gd").new()
+var bluetooth = Host.sc("res://applet_bluetooth.gd").new()
 var items_layout = []
 var drawn = false
+# Desplazamiento vertical actual del Frame (0 a la vista, -alto oculto). El layout
+# de tiles lo sigue para adaptar la ventana al hueco que deja el Frame y usar toda
+# la pantalla cuando está oculto (auto-hide estilo fullscreen).
+var slide_off = 0.0
 # Teclado y drag: selección en el Frame, ventana "levantada" (tileo sin mouse),
 # y arrastre con mouse (soltar sobre otra ventana tilea; soltar fuera deshace).
 var sel = -1
@@ -108,6 +119,7 @@ var pinned_saved_dock = []
 var applets_dirty = false
 var applets_layout = []    # rects del último dibujo de los applets
 var applets_drawn = false
+var applets_add_rect = Rect2()  # celda "+" del último dibujo (para el clic derecho)
 var applet_picker_want = false
 var applet_picker_open = false
 var applet_action_want = ""
@@ -125,6 +137,16 @@ var suppress_pinned_click = ""
 # Mismo lenguaje de ease-out que el reacomodo del anillo (ver shell._ease_out).
 var bar_anim = {}
 var applet_grab = Vector2.ZERO
+# K10b: bloques "Compartido" (sesiones activas). Ephemerales: no se persisten ni
+# se reordenan; se dibujan a la izquierda de los applets. El estado sale de
+# snapshots cacheados (host_session_state y servicios), nunca de procesos.
+var shared_layout = []
+var shared_drawn = false
+var shared_menu_id = ""
+var shared_menu_want = ""
+var shared_menu_open = false
+var shared_menu_block = null
+var shared_press = ""
 # Basurero del Frame: bloque en la esquina superior derecha, visible sólo con un
 # drag activo. `trash_layout` es su rect en pantalla del último dibujo.
 var trash_layout = null
@@ -132,6 +154,12 @@ var trash_layout = null
 
 func _ready():
 	_load_applets()
+
+
+# Los applets consultan en workers; al salir del árbol no deben quedar hilos vivos.
+func _exit_tree():
+	keyboard.stop()
+	bluetooth.stop()
 
 
 # Ruta del archivo de applets: $XDG_CONFIG_HOME/gdtk/frame-applets.json
@@ -152,6 +180,16 @@ func _applet_def(id):
 
 func _applet_known(id):
 	return _applet_def(id) != null
+
+
+func _applet_span(id):
+	var a = _applet_def(id)
+	return max(1, int(a.span)) if a != null and a.has("span") else 1
+
+
+func _applet_width(id, side):
+	var span = _applet_span(id)
+	return side * float(span) + PAD * float(span - 1)
 
 
 # Carga sólo el orden visible de `bottom`; archivo ausente o corrupto -> defaults.
@@ -413,11 +451,41 @@ func _draw_app_tile(ui, app, pos, side, id, empty = false):
 	return tile
 
 
-# Primaria del applet.
+# K9 — Los menús popup (WindowMaker) se abren SÓLO con el botón derecho. El
+# izquierdo queda para la acción propia del bloque (p.ej. abrir una actividad) y
+# nunca abre menú. Helper puro para test; el equivalente de teclado (Enter/Espacio)
+# se conserva en _frame_key.
+static func menu_trigger(button_index, pressed):
+	if not pressed:
+		return ""
+	if button_index == BUTTON_RIGHT:
+		return "menu"
+	if button_index == BUTTON_LEFT:
+		return "primary"
+	return ""
+
+
+# Menú que abre el clic derecho sobre un applet: "teclado" para el applet de
+# teclado; "picker" (selector de controles del Frame) para el resto. Puro para test.
+static func applet_menu(id):
+	return "teclado" if id == "teclado" else "picker"
+
+
+# Acción propia del bloque (clic izquierdo). Ningún applet abre menú por acá: los
+# menús van con el botón derecho (ver _applet_context).
 func _applet_primary(id):
-	if id == "teclado":
+	pass
+
+
+# Menú contextual del applet (clic derecho). Mismo destino que el equivalente de
+# teclado en _frame_key (Enter/Espacio).
+func _applet_context(id):
+	if applet_menu(id) == "teclado":
 		applet_action_want = "teclado"
-		shell.request_redraw()
+	else:
+		applet_picker_want = true
+	shell.request_redraw()
+
 
 
 # Estado y valor textual de cada applet. Sin medición no se estima: "sin dato".
@@ -452,6 +520,205 @@ func _applet_pct(id):
 		"recursos":
 			return clamp(sysmon.cpu_now() / 100.0, 0.0, 1.0) if sysmon.has_cpu else -1.0
 	return -1.0
+
+
+# --- Bloques "Compartido" (K10b) --------------------------------------------
+# Sesiones activas con vecinos: pantalla y teclado y mouse. El Frame sólo dibuja
+# el snapshot que devuelve shared_block.gd; la ejecución se delega al shell. Nada
+# de procesos ni disco en este hilo: se leen los mismos caches que ya usa el
+# Vecindario (host_session_state, service_pids, host_deskflow). El portapapeles
+# dejó de ser una opción (se asume compartido con "Controlar").
+
+
+# Snapshot puro de las sesiones, a partir de los caches del shell. Sin I/O.
+func _shared_snapshot():
+	if shell == null or shell.neighborhood == null or not shell.has_method("_host_session_state"):
+		return []
+	var hosts = shell.neighborhood.get("hosts")
+	if typeof(hosts) != TYPE_ARRAY:
+		return []
+	var host_session = {}
+	var screen = {}
+	var input = {}
+	var labels = {}
+	for h in hosts:
+		if typeof(h) != TYPE_DICTIONARY:
+			continue
+		var hid = String(h.get("id", "")).strip_edges()
+		if hid == "":
+			continue
+		host_session[hid] = String(shell._host_session_state(hid))
+		screen[hid] = shell._gvd_has_session(hid) if shell.has_method("_gvd_has_session") else false
+		input[hid] = bool(shell.host_deskflow.get(hid, false))
+		labels[hid] = _shared_host_label(h, hid)
+	# Sin cache de error por equipo: no se inventa uno (el modelo soporta
+	# "errors" para cuando exista una fuente real).
+	var running = shell._service_running("Deskflow") if shell.has_method("_service_running") else false
+	return SHARED_BLOCK.from_cache(host_session, screen, input, {}, running, labels)
+
+
+# Nombre visible del equipo: el que ya resuelve el Vecindario (nunca el id opaco
+# ni un nombre interno). Cae al label del host y, por último, al id.
+func _shared_host_label(host, hid):
+	if shell.neighborhood_ui != null and shell.neighborhood_ui.has_method("host_label"):
+		var name = String(shell.neighborhood_ui.host_label(host)).strip_edges()
+		if name != "":
+			return name
+	var label = String(host.get("label", "")).strip_edges()
+	return label if label != "" else String(hid)
+
+
+func _shared_at(pos):
+	if not shared_drawn:
+		return null
+	return SHARED_BLOCK.hit(pos, shared_layout)
+
+
+# Acción primaria del bloque (clic izquierdo): ver el detalle en el Vecindario.
+func _shared_primary(block):
+	if block != null:
+		_open_shared_details(block)
+
+
+# Menú contextual (clic derecho): "Detener" / "Ver detalles".
+func _shared_action(block, action_id):
+	match String(action_id):
+		"stop":
+			_stop_shared(block)
+		"details":
+			_open_shared_details(block)
+
+
+# Corta la sesión delegando en el ciclo de vida existente del shell; no crea uno
+# paralelo. El bloque desaparece solo en el próximo snapshot cacheado.
+func _stop_shared(block):
+	if block == null:
+		return
+	var hid = String(block.host)
+	match String(block.type):
+		"screen":
+			if shell.has_method("_stop_gvd_session"):
+				shell._stop_gvd_session(hid)
+		"input":
+			shell.host_deskflow[hid] = false
+			if shell.has_method("_service_running") and shell._service_running("Deskflow") \
+					and shell.has_method("_toggle_service_by_name"):
+				shell._toggle_service_by_name("Deskflow")
+	shell.request_redraw()
+
+
+# "Ver detalles": abre el Vecindario con el equipo seleccionado.
+func _open_shared_details(block):
+	if block == null:
+		return
+	set_visible(false)
+	if shell.has_method("_go_neighborhood"):
+		shell._go_neighborhood()
+	if shell.neighborhood_ui != null:
+		shell.neighborhood_ui.selected_host = String(block.host)
+	shell.request_redraw()
+
+
+# Dibuja los bloques a la izquierda de los applets, sin pisarlos: `start_x` es el
+# fin del dock de pines y `limit_x` donde empiezan los applets. Devuelve el x final.
+func _draw_shared(ui, start_x, limit_x, side, mouse):
+	shared_layout = []
+	shared_drawn = false
+	shared_menu_open = false
+	var blocks = _shared_snapshot()
+	var cx = start_x
+	for b in blocks:
+		if cx + side > limit_x - PAD:
+			break
+		var id = String(b.id)
+		var tile = _tile(ui, Vector2(cx, 0.0), side, "shared_" + id, NX_FACE, side)
+		var rect = tile.rect
+		shared_layout.append({"id": id, "x": rect.position.x, "y": rect.position.y,
+			"w": rect.size.x, "h": rect.size.y, "block": b})
+		_draw_shared_face(ui, Vector2(cx, 0.0), rect, b, side)
+		if rect.has_point(mouse):
+			ui.begin_tooltip()
+			ui.text(String(b.title))
+			ui.text_disabled("estado: " + String(b.state_text))
+			if String(b.reason) != "":
+				ui.text(String(b.reason))
+			ui.end_tooltip()
+		cx += side + PAD
+	shared_drawn = true
+	if shared_menu_want != "":
+		shared_menu_id = shared_menu_want
+		shared_menu_want = ""
+		ui.open_popup("##shared_menu")
+	if shared_menu_id != "" and SHARED_BLOCK.block_by_id(blocks, shared_menu_id) == null:
+		shared_menu_id = ""
+	if shared_menu_id != "":
+		MENU_STYLE.begin(ui)
+		if ui.begin_popup("##shared_menu"):
+			shared_menu_open = true
+			shared_menu_block = SHARED_BLOCK.block_by_id(blocks, shared_menu_id)
+			MENU_STYLE.chrome(ui, "Compartido")
+			if shared_menu_block != null:
+				ui.text_disabled(String(shared_menu_block.title))
+				for it in SHARED_BLOCK.menu(shared_menu_block):
+					if MENU_STYLE.item(ui, String(it.label)):
+						_shared_action(shared_menu_block, String(it.id))
+			ui.end_popup()
+		MENU_STYLE.end(ui)
+	return cx
+
+
+# Cara del bloque: ícono del equipo arriba, insignia del tipo abajo-izquierda,
+# estado textual + barra. El estado se distingue por contorno/relleno/color y
+# texto, nunca sólo por color.
+func _draw_shared_face(ui, pos, rect, b, side):
+	var type = String(b.type)
+	var state = String(b.state)
+	var line = Color(0.45, 0.80, 1.0, 1.0)
+	if state == "starting":
+		line = NX_SEL
+	elif state == "error":
+		line = Color(0.95, 0.55, 0.30, 1.0)
+	var icon = shell._sugar_icon_for("Pantalla") if shell != null else null
+	var s = min(side - 30.0, 40.0)
+	if icon != null:
+		ui.set_cursor_pos(pos + Vector2((side - s) * 0.5, BEVEL + 3.0))
+		ui.image(icon, Vector2(s, s))
+	var badge = Vector2(max(14.0, side * 0.24), max(14.0, side * 0.24))
+	var badge_pos = pos + Vector2(BEVEL + 3.0, side - badge.size.y - 6.0)
+	ui.imgui_draw_rect_filled(Rect2(badge_pos, badge), Color(0.10, 0.11, 0.14, 1.0), 0.0)
+	_draw_shared_glyph(ui, Rect2(badge_pos + Vector2(2.0, 2.0), badge - Vector2(4.0, 4.0)), type, line)
+	# Texto de estado corto (el completo va en el tooltip): nunca pisa al vecino.
+	var tag = String(b.state_text)
+	if tag.length() > 6:
+		tag = tag.substr(0, 6)
+	ui.set_cursor_pos(pos + Vector2(badge_pos.x + badge.size.x + 4.0, side - badge.size.y - 3.0))
+	ui.text_colored(line, tag)
+	ui.imgui_draw_rect_filled(Rect2(rect.position + Vector2(4.0, side - SHARED_W - 1.0),
+		Vector2(side - 8.0, SHARED_W)), line, 0.0)
+
+
+# Insignia dibujada a mano del tipo de sesión (monitor / teclado / portapapeles),
+# para no depender de SVG del tema ni de texto diminuto.
+func _draw_shared_glyph(ui, r, type, col):
+	var x = r.position.x
+	var y = r.position.y
+	var w = r.size.x
+	var h = r.size.y
+	match String(type):
+		"screen":
+			ui.imgui_draw_rect_filled(Rect2(Vector2(x + w * 0.10, y + h * 0.18), Vector2(w * 0.80, h * 0.50)), col, 0.0)
+			ui.imgui_draw_rect_filled(Rect2(Vector2(x + w * 0.17, y + h * 0.25), Vector2(w * 0.66, h * 0.36)), NX_BG, 0.0)
+			ui.imgui_draw_rect_filled(Rect2(Vector2(x + w * 0.46, y + h * 0.68), Vector2(w * 0.08, h * 0.14)), col, 0.0)
+			ui.imgui_draw_rect_filled(Rect2(Vector2(x + w * 0.30, y + h * 0.82), Vector2(w * 0.40, h * 0.07)), col, 0.0)
+		"input":
+			ui.imgui_draw_rect_filled(Rect2(Vector2(x + w * 0.08, y + h * 0.34), Vector2(w * 0.84, h * 0.42)), col, 0.0)
+			ui.imgui_draw_rect_filled(Rect2(Vector2(x + w * 0.15, y + h * 0.42), Vector2(w * 0.70, h * 0.26)), NX_BG, 0.0)
+			for i in range(3):
+				ui.imgui_draw_rect_filled(Rect2(Vector2(x + w * (0.22 + 0.22 * i), y + h * 0.48), Vector2(w * 0.10, h * 0.13)), col, 0.0)
+		"clipboard":
+			ui.imgui_draw_rect_filled(Rect2(Vector2(x + w * 0.20, y + h * 0.26), Vector2(w * 0.60, h * 0.60)), col, 0.0)
+			ui.imgui_draw_rect_filled(Rect2(Vector2(x + w * 0.29, y + h * 0.36), Vector2(w * 0.42, h * 0.42)), NX_BG, 0.0)
+			ui.imgui_draw_rect_filled(Rect2(Vector2(x + w * 0.36, y + h * 0.15), Vector2(w * 0.28, h * 0.16)), col, 0.0)
 
 
 # --- Bloques WindowMaker/NeXT -----------------------------------------------
@@ -501,14 +768,16 @@ func _item_icon(item):
 
 # Botón-tesela: la interacción la maneja ImGui (colores transparentes) y el bisel se
 # dibuja a mano encima. Devuelve el click y el rect en pantalla. `held` es el hundido.
-func _tile(ui, pos, side, id, face = NX_FACE):
+func _tile(ui, pos, side, id, face = NX_FACE, h = -1.0):
+	if h < 0.0:
+		h = side
 	ui.set_cursor_pos(pos)
-	var r = Rect2(ui.get_cursor_screen_pos(), Vector2(side, side))
+	var r = Rect2(ui.get_cursor_screen_pos(), Vector2(side, h))
 	ui.push_style_color(ui.COL_BUTTON, Color(0, 0, 0, 0))
 	ui.push_style_color(ui.COL_BUTTON_HOVERED, Color(0, 0, 0, 0))
 	ui.push_style_color(ui.COL_BUTTON_ACTIVE, Color(0, 0, 0, 0))
 	ui.push_style_var_float(ui.STYLE_VAR_FRAME_ROUNDING, 0.0)
-	var clicked = ui.button("##" + id, Vector2(side, side))
+	var clicked = ui.button("##" + id, Vector2(side, h))
 	var held = ui.is_item_active()
 	var hover = ui.is_item_hovered()
 	ui.pop_style_var()
@@ -561,6 +830,7 @@ func set_visible(v):
 		lifted = null
 		applet_press = null
 		applet_drag = null
+		shared_press = ""
 	# Desde _input (tecla tragada, ImGui no la ve) nadie más pide el frame que lo muestra.
 	shell.request_redraw()
 	shell.last_activity = OS.get_ticks_msec()
@@ -730,13 +1000,26 @@ func _input(event):
 				return
 			return
 		if event.button_index == BUTTON_RIGHT:
-			# El menú contextual abre la composición del Frame.
-			var right_applet = _applet_at(mouse_pos)
-			if event.pressed and not applet_picker_open and right_applet != null:
-				applet_picker_want = true
-				shell.request_redraw()
-				get_tree().set_input_as_handled()
-				return
+			# K9: el botón derecho abre el menú contextual del bloque (nunca el
+			# izquierdo). En un applet abre su menú; en la celda "+" el selector de
+			# controles; en un bloque "Compartido", Detener / Ver detalles.
+			if menu_trigger(event.button_index, event.pressed) == "menu" and not applet_picker_open:
+				var right_applet = _applet_at(mouse_pos)
+				if right_applet != null:
+					_applet_context(right_applet)
+					get_tree().set_input_as_handled()
+					return
+				if _applet_add_at(mouse_pos):
+					applet_picker_want = true
+					shell.request_redraw()
+					get_tree().set_input_as_handled()
+					return
+				var right_shared = _shared_at(mouse_pos)
+				if right_shared != null:
+					shared_menu_want = String(right_shared.id)
+					shell.request_redraw()
+					get_tree().set_input_as_handled()
+					return
 		if event.button_index == BUTTON_LEFT:
 			mouse_down = event.pressed
 			if event.pressed:
@@ -769,10 +1052,25 @@ func _input(event):
 					shell.request_redraw()
 					get_tree().set_input_as_handled()
 					return
+				# Bloque "Compartido": la primaria (detalle) se resuelve al soltar.
+				var hit_shared = _shared_at(mouse_pos)
+				if hit_shared != null and not shared_menu_open:
+					shared_press = String(hit_shared.id)
+					shell.request_redraw()
+					get_tree().set_input_as_handled()
+					return
 				drag_candidate = _item_at(mouse_pos)
 				drag_from = mouse_pos
 				dragging = null
 			else:
+				# Soltar un bloque "Compartido": primaria (ver detalle) si sigue bajo
+				# el puntero; nunca inicia arrastre (los bloques no se reordenan).
+				if shared_press != "":
+					var cur_shared = _shared_at(mouse_pos)
+					var pressed = shared_press
+					shared_press = ""
+					if cur_shared != null and String(cur_shared.id) == pressed:
+						_shared_primary(cur_shared.block)
 				if app_drag != null:
 					if is_trash(mouse_pos):
 						# Basurero: desfija la app (no la desinstala).
@@ -1011,7 +1309,7 @@ func _frame_key(code, event):
 		elif event.control and code == KEY_RIGHT:
 			_applet_move(id, 1)
 		elif code == KEY_ENTER or code == KEY_KP_ENTER or code == KEY_SPACE:
-			_applet_primary(id)
+			_applet_context(id)
 		elif code == KEY_DELETE:
 			_applet_set_visible(id, false)
 		else:
@@ -1047,9 +1345,14 @@ func _applet_hit(pos):
 	if not applets_drawn:
 		return null
 	for it in applets_layout:
-		if pos.x >= it.x and pos.x < it.x + it.w and pos.y >= it.y and pos.y < it.y + it.w:
+		if pos.x >= it.x and pos.x < it.x + it.w and pos.y >= it.y and pos.y < it.y + it.h:
 			return it
 	return null
+
+
+# Celda "+" del último dibujo (abre el selector de controles con clic derecho).
+func _applet_add_at(pos):
+	return applets_drawn and applets_add_rect.size.x > 0.0 and applets_add_rect.has_point(pos)
 
 
 # Índice de inserción entre applets: cuántos (del dibujo anterior, sin el arrastrado)
@@ -1180,11 +1483,14 @@ func _draw_applets(ui, vp, off, mouse):
 	ui.imgui_draw_rect_filled(Rect2(Vector2(0.0, by), Vector2(vp.x, side)), NX_BG, 0.0)
 	if app_drag != null and mouse.y >= by:
 		ui.imgui_draw_rect_filled(Rect2(Vector2(0.0, by), Vector2(vp.x, 3.0)), NX_SEL, 0.0)
-	_draw_pinned(ui, pinned_dock, PAD, side, "dock")
+	var dock_end = _draw_pinned(ui, pinned_dock, PAD, side, "dock")
 	var n = applets_visible.size()
-	var step = side + PAD
-	var total_w = n * step + side + PAD
+	var total_w = side + PAD
+	for id in applets_visible:
+		total_w += _applet_width(id, side) + PAD
 	var x = max(PAD, vp.x - PAD - total_w)
+	# K10b: sesiones activas a la izquierda de los applets, sin taparlos.
+	_draw_shared(ui, dock_end, x, side, mouse)
 	var y = 0.0
 	var n_items = running().size()
 	var now = OS.get_ticks_msec()
@@ -1192,52 +1498,67 @@ func _draw_applets(ui, vp, off, mouse):
 	var order = applets_visible
 	if applet_drag != null:
 		order = _order_with_gap(applets_visible, applet_drag, _applet_slot(mouse.x, prev))
+	var ax = x
 	for i in range(n):
 		var id = order[i]
-		var pos = Vector2(_bar_x("app_" + id, x + i * step, now), y)
+		var w = _applet_width(id, side)
+		var pos = Vector2(_bar_x("app_" + id, ax, now), y)
 		ui.set_cursor_pos(pos)
 		var o = ui.get_cursor_screen_pos()
-		applets_layout.append({"id": id, "x": o.x, "y": o.y, "w": side})
+		applets_layout.append({"id": id, "x": o.x, "y": o.y, "w": w, "h": side})
 		if id == applet_drag:
+			ax += w + PAD
 			continue
-		_draw_applet(ui, id, pos, o, side, visible and (n_items + i) == sel and applet_drag == null, mouse)
-	# Celda "+": abre la lista de controles (fijar/quitar), pulsable con mouse o teclado.
-	var add_x = x + n * step
+		_draw_applet(ui, id, pos, o, w, side, visible and (n_items + i) == sel and applet_drag == null, mouse)
+		ax += w + PAD
+	# Celda "+": abre la lista de controles sólo con clic derecho (K9); el
+	# izquierdo no hace nada. El teclado la abre con Enter/Espacio.
+	var add_x = ax
 	var add_b = _tile(ui, Vector2(add_x, y), side, "applets_add")
-	var add_scr = add_b.rect.position
-	if add_b.clicked or applet_picker_want:
+	applets_add_rect = add_b.rect
+	if applet_picker_want:
 		applet_picker_want = false
 		ui.open_popup("##applets_add")
 	ui.set_cursor_pos(Vector2(add_x, y) + Vector2((side - 7.0 * ui.get_imgui_scale()) * 0.5, (side - 13.0 * ui.get_imgui_scale()) * 0.5))
 	ui.text_colored(NX_TEXT, "+")
 	if visible and sel == n_items + n:
 		_frame_focus(ui, add_b.rect, NX_SEL)
+	MENU_STYLE.begin(ui)
 	if ui.begin_popup("##applets_add"):
 		applet_picker_open = true
-		ui.text_disabled("Controles del Frame")
+		MENU_STYLE.chrome(ui, "Controles del Frame")
+		ui.text_disabled("Fijar / quitar")
 		for a in APPLETS:
-			if ui.menu_item(a.name, "", applets_visible.has(a.id)):
+			if MENU_STYLE.item(ui, a.name, "", applets_visible.has(a.id)):
 				_applet_set_visible(a.id, not applets_visible.has(a.id))
 		ui.end_popup()
+	MENU_STYLE.end(ui)
 	if applet_action_want != "":
 		ui.open_popup("##applet_" + applet_action_want)
 		applet_action_want = ""
+	MENU_STYLE.begin(ui)
 	if ui.begin_popup("##applet_teclado"):
+		MENU_STYLE.chrome(ui, "Teclado")
 		ui.text_disabled("Distribución · próxima sesión")
 		for layout in ["es", "latam", "us"]:
-			if ui.menu_item({"es":"Español (ES)", "latam":"Latinoamericano (LAT)", "us":"Inglés (US)"}[layout]):
+			if MENU_STYLE.item(ui, {"es":"Español (ES)", "latam":"Latinoamericano (LAT)", "us":"Inglés (US)"}[layout]):
 				keyboard.choose(layout)
 				shell.request_redraw()
 		ui.text_disabled(keyboard.detail)
 		ui.end_popup()
+	MENU_STYLE.end(ui)
 	# Hueco del applet arrastrado, resaltado (Esc cancela; el fantasma va al cursor).
 	if applet_drag != null:
 		var gi = order.find(applet_drag)
 		if gi >= 0:
-			ui.set_cursor_pos(Vector2(x + gi * step, y))
+			var gx = x
+			for j in range(gi):
+				gx += _applet_width(order[j], side) + PAD
+			var gw = _applet_width(applet_drag, side)
+			ui.set_cursor_pos(Vector2(gx, y))
 			var gscr = ui.get_cursor_screen_pos()
-			ui.imgui_draw_rect_filled(Rect2(gscr, Vector2(side, side)), Color(1, 1, 1, 0.06), 0.0)
-			ui.imgui_draw_rect_filled(Rect2(gscr + Vector2(0.0, side - 3.0), Vector2(side, 3.0)), NX_SEL, 0.0)
+			ui.imgui_draw_rect_filled(Rect2(gscr, Vector2(gw, side)), Color(1, 1, 1, 0.06), 0.0)
+			ui.imgui_draw_rect_filled(Rect2(gscr + Vector2(0.0, side - 3.0), Vector2(gw, 3.0)), NX_SEL, 0.0)
 	ui.end()
 	ui.pop_style_var()
 	applets_drawn = true
@@ -1245,12 +1566,12 @@ func _draw_applets(ui, vp, off, mouse):
 
 # Un applet: bloque cuadrado U x U con bisel; el estado va por color de la barra/
 # etiqueta además del valor textual (nunca sólo color). Tooltip con el nombre completo.
-func _draw_applet(ui, id, pos, scr, side, is_sel, mouse, is_ghost = false):
+func _draw_applet(ui, id, pos, scr, w, side, is_sel, mouse, is_ghost = false):
 	var a = _applet_def(id)
 	if a == null:
 		return
 	var state = _applet_state(id)
-	var b = _tile(ui, pos, side, "app_" + id)
+	var b = _tile(ui, pos, w, "app_" + id, NX_FACE, side)
 	var rect = b.rect
 	if applet_drag == id and not is_ghost:
 		return
@@ -1266,24 +1587,25 @@ func _draw_applet(ui, id, pos, scr, side, is_sel, mouse, is_ghost = false):
 	elif state == "error" or state == "no_disponible":
 		line = Color(0.95, 0.55, 0.30, 1.0)
 	# Placa común: los recursos y el reloj aprovechan toda la celda.
-	var g = min(ICON_MIN, side - 2.0 * BEVEL - 6.0)
-	var gp_scr = scr + Vector2((side - g) * 0.5, BEVEL + 3.0)
-	var gp_loc = pos + Vector2((side - g) * 0.5, BEVEL + 3.0)
-	ui.imgui_draw_rect_filled(Rect2(gp_scr, Vector2(g, g)), Color(0.10, 0.11, 0.14, 1.0), 0.0)
+	var gp_w = max(24.0, w - 2.0 * BEVEL - 6.0)
+	var gp_h = max(24.0, side - 2.0 * BEVEL - 6.0)
+	var gp_scr = scr + Vector2((w - gp_w) * 0.5, BEVEL + 3.0)
+	var gp_loc = pos + Vector2((w - gp_w) * 0.5, BEVEL + 3.0)
+	ui.imgui_draw_rect_filled(Rect2(gp_scr, Vector2(gp_w, gp_h)), Color(0.10, 0.11, 0.14, 1.0), 0.0)
 	var v = _applet_value(id)
 	if id == "recursos":
-		_draw_resources(ui, gp_scr, gp_loc, g)
+		_draw_resources(ui, gp_scr, gp_loc, gp_w, gp_h)
 	elif id == "reloj":
-		_draw_clock(ui, gp_scr, gp_loc, g, v)
+		_draw_clock(ui, gp_scr, gp_loc, gp_w, gp_h, v)
 	else:
 		ui.set_cursor_pos(gp_loc + Vector2(4.0, 3.0))
 		ui.text_colored(NX_TEXT_DIM, a.short)
 		var vw = v.length() * 7.0 * ui.get_imgui_scale()
-		ui.set_cursor_pos(gp_loc + Vector2(max(3.0, (g - vw) * 0.5), g * 0.45))
+		ui.set_cursor_pos(gp_loc + Vector2(max(3.0, (gp_w - vw) * 0.5), gp_h * 0.45))
 		ui.text_colored(NX_TEXT, v)
 	var pct = _applet_pct(id)
 	if pct >= 0.0:
-		var bw = (side - 8.0) * clamp(pct, 0.0, 1.0)
+		var bw = (w - 8.0) * clamp(pct, 0.0, 1.0)
 		ui.imgui_draw_rect_filled(Rect2(rect.position + Vector2(4.0, side - 6.0), Vector2(bw, 3.0)), line, 0.0)
 	if mouse.x >= rect.position.x and mouse.x < rect.end.x and mouse.y >= rect.position.y and mouse.y < rect.end.y:
 		ui.begin_tooltip()
@@ -1296,25 +1618,27 @@ func _draw_applet(ui, id, pos, scr, side, is_sel, mouse, is_ghost = false):
 		ui.end_tooltip()
 
 
-func _draw_resources(ui, scr, loc, size):
+func _draw_resources(ui, scr, loc, w, h):
+	var graph_h = h * 0.44
 	var line = PoolVector2Array()
 	for i in range(sysmon.cpu.size()):
-		line.append(scr + Vector2(3.0 + (size - 6.0) * float(i + sysmon.HISTORY - sysmon.cpu.size()) / float(sysmon.HISTORY - 1),
-			26.0 - 22.0 * clamp(sysmon.cpu[i], 0.0, 100.0) / 100.0))
+		line.append(scr + Vector2(3.0 + (w - 6.0) * float(i + sysmon.HISTORY - sysmon.cpu.size()) / float(sysmon.HISTORY - 1),
+			3.0 + graph_h - graph_h * clamp(sysmon.cpu[i], 0.0, 100.0) / 100.0))
 	if line.size() > 1:
 		ui.imgui_draw_polyline(line, Color(0.35, 0.8, 1.0, 1.0), 1.5)
-	ui.set_cursor_pos(loc + Vector2(3.0, 28.0))
+	ui.set_cursor_pos(loc + Vector2(3.0, h * 0.48))
 	ui.text_colored(NX_TEXT, "C%s M%s" % [str(int(round(sysmon.cpu_now()))) if sysmon.has_cpu else "--",
 		str(int(round(sysmon.ram))) if sysmon.has_ram else "--"])
-	ui.set_cursor_pos(loc + Vector2(3.0, 43.0))
+	ui.set_cursor_pos(loc + Vector2(3.0, h * 0.70))
 	ui.text_colored(NX_TEXT_DIM, "S%02d" % int(round(sysmon.swap)) if sysmon.has_swap else "S --")
 	if sysmon.has_ram:
-		ui.imgui_draw_rect_filled(Rect2(scr + Vector2(28.0, 47.0), Vector2((size - 32.0) * clamp(sysmon.ram / 100.0, 0.0, 1.0), 3.0)), Color(0.5, 0.9, 0.45, 1.0), 0.0)
+		ui.imgui_draw_rect_filled(Rect2(scr + Vector2(w * 0.44, h * 0.76), Vector2((w * 0.52) * clamp(sysmon.ram / 100.0, 0.0, 1.0), 3.0)), Color(0.5, 0.9, 0.45, 1.0), 0.0)
 
 
-func _draw_clock(ui, scr, loc, size, value):
-	var center = scr + Vector2(size * 0.5, size * 0.40)
-	var radius = min(size * 0.32, 19.0)
+func _draw_clock(ui, scr, loc, w, h, value):
+	var size = min(w, h)
+	var center = scr + Vector2(w * 0.5, h * 0.40)
+	var radius = size * 0.32
 	ui.imgui_draw_circle(center, radius, NX_TEXT_DIM, 32, 1.5)
 	var t = OS.get_time()
 	for hand in [
@@ -1323,7 +1647,7 @@ func _draw_clock(ui, scr, loc, size, value):
 		var tip = center + Vector2(cos(hand.angle), sin(hand.angle)) * hand.length
 		ui.imgui_draw_polyline(PoolVector2Array([center, tip]), NX_FOCUS, hand.width)
 	ui.imgui_draw_circle_filled(center, 2.0, NX_SEL, 0)
-	ui.set_cursor_pos(loc + Vector2((size - value.length() * 7.0 * ui.get_imgui_scale()) * 0.5, size - 15.0))
+	ui.set_cursor_pos(loc + Vector2((w - value.length() * 7.0 * ui.get_imgui_scale()) * 0.5, h - 15.0 * ui.get_imgui_scale()))
 	ui.text_colored(NX_TEXT, value)
 
 
@@ -1461,6 +1785,8 @@ func draw(ui):
 		items_layout = []
 		applets_layout = []
 		applets_drawn = false
+		shared_layout = []
+		shared_drawn = false
 		trash_layout = null
 		return
 	var home = shell.current_activity == null
@@ -1508,10 +1834,13 @@ func draw(ui):
 	pinned_prev = pinned_layout.duplicate()
 	pinned_layout = []
 	var off = _slide(visible or home, now)
+	slide_off = off
 	drawn = off > -bh
 	if not drawn:
 		applets_layout = []
 		applets_drawn = false
+		shared_layout = []
+		shared_drawn = false
 		trash_layout = null
 		return
 
@@ -1657,7 +1986,7 @@ func _draw_drag_tile(ui, side):
 		_draw_app_tile(ui, app_drag, pos, side, "drag_app")
 	else:
 		ui.set_cursor_pos(pos)
-		_draw_applet(ui, applet_drag, pos, ui.get_cursor_screen_pos(), side, false, Vector2(-1, -1), true)
+		_draw_applet(ui, applet_drag, pos, ui.get_cursor_screen_pos(), _applet_width(applet_drag, side), side, false, Vector2(-1, -1), true)
 	ui.end_tooltip()
 	ui.pop_style_var()
 
