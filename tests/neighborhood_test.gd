@@ -58,5 +58,22 @@ func _init():
 	pos = nb.relax_capsules(pos, hw, hh, 2.0, 48, 0.02)
 	check("20 redes: ninguna cápsula se solapa", not nb.capsules_overlap(pos, hw, hh, 2.0))
 
+	# Hosts DNS-SD de gdtk: `_read_hosts()` delega en el modelo puro. Acá se verifica
+	# el parseo desde texto avahi -rtp equivalente (sin invocar avahi-browse real).
+	var hosts_model = load("res://neighborhood_hosts.gd").new()
+	var avahi = PoolStringArray([
+		"=;eth0;IPv4;Tengu GVD;_gdtk-gvd._udp;local;tengu.local;192.168.1.20;5600;\"v=1\";\"hid=h1\";\"name=Tengu\";\"kind=laptop\"",
+		"=;eth0;IPv4;Tengu Deskflow;_gdtk-deskflow._tcp;local;tengu.local;192.168.1.20;24800;v=1;hid=h1;name=Tengu;kind=laptop",
+		"=;eth0;IPv4;Tengu Clip;_gdtk-clip._tcp;local;tengu.local;192.168.1.20;9911;v=1;hid=h1;name=Tengu;kind=laptop",
+	]).join("\n")
+	var gdtk_hosts = hosts_model.model_from_text(avahi)
+	check("avahi: un host por hid", gdtk_hosts.size() == 1)
+	var h = gdtk_hosts[0] if gdtk_hosts.size() == 1 else {}
+	var caps = h.get("capabilities", {})
+	check("avahi: capacidades gvd/deskflow/clip", caps.has("gvd") and caps.has("deskflow")
+		and caps.has("clip"))
+	check("avahi: tres servicios gdtk y otros ignorados", h.get("services", []).size() == 3
+		and hosts_model.parse_services("=;eth0;IPv4;Web;_http._tcp;local;x.local;10.0.0.1;80;v=1").empty())
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

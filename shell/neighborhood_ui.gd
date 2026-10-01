@@ -1,20 +1,85 @@
 extends Control
 
-# Vista simbólica: el modelo de Wi-Fi sigue en neighborhood.gd; aquí sólo hay
-# anillos, iconos SVG y botones nativos con foco/tooltip.
+# K10a — Vecindario: un solo mapa 2D (rediseño).
+#
+# Centro "Este equipo" con ícono de monitor; vecinos como nodos circulares
+# grandes ubicados por su dirección (N arriba, S abajo, E derecha, O izquierda,
+# pegados al anillo medio; sin dirección: anillo exterior, atenuados). El Wi-Fi
+# es infraestructura: puntos chicos en los anillos + "Red: <SSID>".
+#
+# Interacción:
+#   - arrastrar un vecino hacia un lado lo imanta a esa dirección y la guarda
+#     en host_directions como confirmada (misma fuente que Pantalla y Teclado y
+#     mouse), vía el shell;
+#   - clic izquierdo = seleccionar (resalta + rótulo de estado en español);
+#   - clic derecho = menú popup estilo WindowMaker (paleta de menu_style.gd)
+#     con acciones en lenguaje humano; las deshabilitadas muestran su razón.
+#
+# La geometría y el vocabulario viven en el helper puro neighborhood_map.gd;
+# acá sólo se dibuja el snapshot y se delega la ejecución al shell. Nada de I/O
+# ni procesos en refresh()/_draw()/_process(): los snapshots ya vienen de
+# neighborhood.gd (Thread) y de las cachés del shell.
+
+const MAP = preload("res://neighborhood_map.gd")
+const MENU = preload("res://menu_style.gd")
+
 const BG = Color(0.055, 0.065, 0.095, 1.0)
 const RING = Color(0.60, 0.69, 0.82, 0.20)
+const RING_MID = Color(0.60, 0.69, 0.82, 0.30)
 const TEXT = Color(0.91, 0.94, 0.98, 1.0)
-const ICON_SIZE = 58.0
+const TEXT_DIM = Color(0.62, 0.70, 0.82, 1.0)
+const HIGHLIGHT = Color(1.0, 0.84, 0.43, 1.0)
+const NODE_BG = Color(0.10, 0.13, 0.20, 1.0)
+const NODE_RING = Color(0.60, 0.69, 0.82, 0.40)
+const NODE_SEL = Color(1.0, 0.84, 0.43, 1.0)
+const NODE_DIM_ALPHA = 0.45
+const CENTER_PLATE = Color(0.14, 0.18, 0.27, 1.0)
+const CENTER_MONITOR = Color(0.78, 0.82, 0.90, 1.0)
+const CENTER_ICON = "sugar/computer-xo"
+const WIFI_DOT = Color(0.55, 0.64, 0.80, 0.65)
+const WIFI_DOT_ACTIVE = Color(1.0, 0.84, 0.43, 0.95)
+
+# Menú contextual (estilo WindowMaker; mismas medidas que menu_style.gd).
+const MENU_W = 248.0
+const MENU_TITLE_H = 20.0
+const MENU_ROW_H = 26.0
+const MENU_SEP_H = 8.0
+const MENU_REASON_H = 15.0
+const MENU_PAD = 6.0
+const MENU_PAD_X = 8.0
+
+const HOST_FALLBACK_ICONS = ["sugar/network-wired", "sugar/computer-xo", "network-connected"]
 
 var shell = null
 var model = null
-var selected = ""
+var selected = ""            # SSID (compatibilidad; el Wi-Fi ya no se selecciona)
+var selected_host = ""       # id del vecino seleccionado
 var drawn_version = -1
 var drawn_size = Vector2.ZERO
 var center = Vector2.ZERO
 var radius = 0.0
-var points = []
+var wifi_points = []
+var host_nodes = []
+var directions = {}          # hid -> entry {"direction","confirm",...} (lo puebla el shell)
+var direction_conflicts = [] # lista de {"direction","hids":[..]} (la puebla el shell)
+var _actions = null          # instancia perezosa de neighborhood_actions.gd
+var _directions_model = null # instancia perezosa de neighborhood_directions.gd
+var _icon_cache = {}         # nombre de ícono -> ruta resuelta (evita I/O repetido)
+
+# Arrastre (imán a una dirección al soltar).
+var _drag_id = ""
+var _drag_from = Vector2.ZERO
+var _drag_now = Vector2.ZERO
+var _dragging = false
+
+# Menú contextual.
+var _menu_host = null
+var _menu_items = []
+var _menu_rows = []
+var _menu_rect = Rect2()
+var _menu_open_pos = Vector2.ZERO
+var _menu_hover = -1
+var _since_ms = -1
 
 
 func refresh(force = false):
@@ -26,92 +91,681 @@ func refresh(force = false):
 	drawn_version = model.version
 	drawn_size = vp
 	rect_size = vp
+	mouse_filter = Control.MOUSE_FILTER_STOP
+	if _since_ms < 0:
+		_since_ms = OS.get_ticks_msec()
 	for child in get_children():
 		child.free()
-	points = []
-	var bar = shell.frame_bar_h(vp)
+	wifi_points = []
+	host_nodes = []
+	var bar = _bar()
+	var networks = model.networks if model.get("networks") != null else []
+	var hosts = model.hosts if model.get("hosts") != null else []
+	var radii = MAP.map_radii(vp, bar)
 	center = vp * 0.5
-	radius = max(60.0, min(vp.x * 0.36, (vp.y - 2.0 * bar - 130.0) * 0.5))
-	var active = null
-	for net in model.networks:
-		if net.in_use:
-			active = net
-			break
-	var center_icon = "network-connected" if active != null else "network-off"
-	_make_icon(self, center_icon, center - Vector2(30, 30), 60.0)
-	var title = "Vecindario"
-	_label(title, Vector2(16, bar + 10), 220)
-	if active != null:
-		_label(active.ssid, center + Vector2(-90, 38), 180)
-	elif model.networks.empty():
-		_label(model.status_line(), center + Vector2(-130, 40), 260)
-		if model.status == "off":
-			var enable = _button("Encender Wi-Fi", center + Vector2(-72, 65), Vector2(144, 32))
-			enable.connect("pressed", shell, "_wifi_radio_on")
-	var desired = []
-	for net in model.networks:
-		var r = lerp(radius * 0.42, radius, clamp(float(net.r_frac), 0.0, 1.0))
-		desired.append(center + Vector2(cos(net.angle), sin(net.angle)) * r)
-	var half = []
-	for i in range(desired.size()):
-		half.append(ICON_SIZE * 0.5)
-	if desired.size() > 1:
-		desired = model.relax_capsules(desired, half, half, 4.0, 48, 0.02)
-	for i in range(model.networks.size()):
-		var net = model.networks[i]
-		var pos = Vector2(clamp(desired[i].x, ICON_SIZE, vp.x - ICON_SIZE),
-			clamp(desired[i].y, bar + ICON_SIZE, vp.y - bar - ICON_SIZE))
-		points.append({"pos": pos, "selected": net.ssid == selected, "active": net.in_use})
-		var hit = _button("", pos - Vector2(ICON_SIZE, ICON_SIZE) * 0.5, Vector2(ICON_SIZE, ICON_SIZE))
-		hit.hint_tooltip = net.ssid + (" · conectada" if net.in_use else "") + "\n" + str(int(net.dbm)) + " dBm"
-		hit.connect("pressed", self, "_select", [net.ssid])
-		_make_icon(hit, "network-connected" if net.in_use else "network-open" if net.security == "" else "network-secure", Vector2(4, 4), ICON_SIZE - 8.0)
-	var chosen = null
-	for net in model.networks:
-		if net.ssid == selected:
-			chosen = net
-			break
-	if chosen != null:
-		var caption = chosen.ssid + (" · conectada" if chosen.in_use else " · abierta" if chosen.security == "" else " · protegida")
-		_label(caption, Vector2(vp.x * 0.5 - 170, bar + 12), 230)
-		if not chosen.in_use:
-			var connect_button = _button("Conectar", Vector2(vp.x * 0.5 + 68, bar + 8), Vector2(92, 32))
-			connect_button.connect("pressed", shell, "_open_nmtui")
+	radius = radii.outer
+	wifi_points = MAP.wifi_dots(networks, vp, bar)
+	host_nodes = MAP.map_layout(hosts, directions, vp, bar)
+
+	_label("Vecindario", Vector2(16, bar + 10), 220)
+	_label(MAP.CENTER_TITLE, center + Vector2(-90, 34), 180, Label.ALIGN_CENTER)
+	_label(local_name(), center + Vector2(-90, 54), 180, Label.ALIGN_CENTER, TEXT_DIM)
+	_make_icon(self, CENTER_ICON, center - Vector2(26, 26), 52.0)
+	var wifi_text = MAP.wifi_label(networks)
+	if wifi_text != "":
+		_label(wifi_text, Vector2(16, bar + 34), 360, Label.ALIGN_LEFT, TEXT_DIM)
+
+	for node in host_nodes:
+		var host = node.host
+		var id = String(node.id)
+		var c = Vector2(node.center)
+		var size = float(node.size)
+		_label(host_label(host), Vector2(c.x - 80, c.y + size * 0.5 + 4), 160, Label.ALIGN_CENTER)
+		_make_icon(self, _host_icon(host), node.pos + Vector2(4, 4), size - 8.0)
+		if id == selected_host:
+			var status = MAP.direction_status_text(compass_state(id), compass_direction(id))
+			var session = _session_badge(id)
+			if session != "":
+				status += " · " + session
+			_label(status, Vector2(c.x - 110, c.y + size * 0.5 + 22), 220, Label.ALIGN_CENTER, HIGHLIGHT)
+
+	if host_nodes.empty():
+		var msg = MAP.empty_message(host_nodes.size(), _elapsed_ms())
+		if msg != "":
+			_label(msg, center + Vector2(-160, 92), 320, Label.ALIGN_CENTER, TEXT_DIM)
+
+	if _menu_host != null:
+		_build_menu_rows()
 	update()
 
 
-func _select(ssid):
-	selected = ssid
+func _elapsed_ms():
+	if _since_ms < 0:
+		return 0
+	return OS.get_ticks_msec() - _since_ms
+
+
+func _bar():
+	if shell != null and shell.has_method("frame_bar_h"):
+		return float(shell.frame_bar_h(get_viewport_rect().size))
+	return 64.0
+
+
+# --- Entrada ---------------------------------------------------------------
+
+func _ready():
+	connect("visibility_changed", self, "_on_visibility_changed")
+
+
+# Al abrir la vista se reinicia el mensaje de "Buscando…" y se cierra cualquier
+# menú que hubiera quedado de la visita anterior.
+func _on_visibility_changed():
+	if not visible:
+		return
+	_since_ms = -1
+	_close_menu()
 	call_deferred("refresh", true)
 
 
-func _button(caption, pos, size):
-	var button = Button.new()
-	button.text = caption
-	button.flat = caption == ""
-	button.rect_position = pos
-	button.rect_min_size = size
-	button.rect_size = size
-	button.focus_mode = Control.FOCUS_ALL
-	add_child(button)
-	return button
+func _gui_input(event):
+	if event is InputEventMouseButton:
+		_on_mouse_button(event)
+	elif event is InputEventMouseMotion:
+		_on_mouse_motion(event)
+	elif event is InputEventKey and event.pressed and not event.echo:
+		_on_key(event)
 
 
-func _label(caption, pos, width):
+func _on_mouse_button(event):
+	var pos = Vector2(event.position)
+	if event.button_index == BUTTON_RIGHT and event.pressed:
+		if _menu_host != null and _menu_rect.has_point(pos):
+			return
+		var node = MAP.hit_node(pos, host_nodes)
+		if node != null:
+			_open_menu(node.host, pos)
+			accept_event()
+		elif _menu_host != null:
+			_close_menu()
+			update()
+		return
+	if event.button_index != BUTTON_LEFT:
+		return
+	if _menu_host != null:
+		if event.pressed and _menu_rect.has_point(pos):
+			var row = _menu_row_at(pos)
+			if row != null:
+				_activate_row(row)
+			accept_event()
+			return
+		if event.pressed:
+			_close_menu()
+			update()
+			return
+	if event.pressed:
+		var hit = MAP.hit_node(pos, host_nodes)
+		if hit != null:
+			selected_host = String(hit.id)
+			_drag_id = String(hit.id)
+			_drag_from = Vector2(hit.center)
+			_drag_now = pos
+			_dragging = false
+		else:
+			selected_host = ""
+			_drag_id = ""
+		update()
+		call_deferred("refresh", true)
+	else:
+		if _drag_id != "":
+			if _dragging:
+				var dir = MAP.drag_direction(_drag_from, pos)
+				if dir != "":
+					_apply_direction(_drag_id, dir)
+			_drag_id = ""
+			_dragging = false
+			update()
+
+
+func _on_mouse_motion(event):
+	if _menu_host != null and _menu_rect.has_point(Vector2(event.position)):
+		var row = _menu_row_at(Vector2(event.position))
+		var idx = _menu_rows.find(row) if row != null else -1
+		if idx != _menu_hover:
+			_menu_hover = idx
+			update()
+		return
+	if _drag_id != "" and (int(event.button_mask) & BUTTON_LEFT) != 0:
+		_drag_now = Vector2(event.position)
+		if not _dragging and (_drag_now - _drag_from).length() > 8.0:
+			_dragging = true
+		update()
+
+
+func _on_key(event):
+	if event.scancode == KEY_ESCAPE and _menu_host != null:
+		_close_menu()
+		update()
+		accept_event()
+		return
+	if _menu_host == null and selected_host != "" \
+			and (event.scancode == KEY_ENTER or event.scancode == KEY_KP_ENTER or event.scancode == KEY_SPACE):
+		var node = _node_by_id(selected_host)
+		if node != null:
+			_open_menu(node.host, Vector2(node.center) + Vector2(float(node.size) * 0.5, 0.0))
+			accept_event()
+
+
+# --- Imán de dirección ------------------------------------------------------
+
+# Aplica una dirección confirmada. La fuente es host_directions (misma que usan
+# Pantalla y Teclado y mouse); el shell la persiste y regenera el layout. Sin
+# shell (headless/tests) sólo se actualiza el snapshot local.
+func _apply_direction(host_id, direction):
+	var id = String(host_id)
+	if id == "":
+		return
+	var d = String(direction)
+	if d == "none":
+		directions.erase(id)
+	else:
+		directions[id] = _directions().sanitize_entry({
+			"direction": d, "confirm": "confirmed", "mode": "extend"})
+	if shell != null and shell.has_method("apply_deskflow_layout"):
+		shell.apply_deskflow_layout(_layout_links_for(id, d))
+	call_deferred("refresh", true)
+	update()
+
+
+# Links para el layout: el cambio más las direcciones ya confirmadas (con su
+# nombre visible como peer). Determinista y sin I/O.
+func _layout_links_for(changed_id, changed_dir):
+	var links = []
+	var ids = []
+	if typeof(directions) == TYPE_DICTIONARY:
+		ids = directions.keys()
+	if not ids.has(String(changed_id)):
+		ids.append(String(changed_id))
+	for k in ids:
+		var id = String(k)
+		var dir = ""
+		if id == String(changed_id):
+			dir = String(changed_dir)
+		else:
+			var entry = directions.get(id, {})
+			if typeof(entry) == TYPE_DICTIONARY and String(entry.get("confirm", "")) == "confirmed":
+				dir = String(entry.get("direction", ""))
+		if dir == "":
+			continue
+		if dir == "none":
+			if id == String(changed_id):
+				links.append({"direction": "none", "host": id})
+			continue
+		if not MAP.valid_direction(dir):
+			continue
+		links.append({"direction": dir, "host": id, "peer": MAP.safe_peer(_label_for_id(id))})
+	return links
+
+
+func _label_for_id(id):
+	var host = _host_by_id(model.hosts if model != null else [], id)
+	return host_label(host) if host != null else String(id)
+
+
+# --- Menú contextual (clic derecho) ----------------------------------------
+
+func _open_menu(host, at):
+	if typeof(host) != TYPE_DICTIONARY:
+		return
+	selected_host = String(host.get("id", ""))
+	_menu_host = host
+	_menu_items = MAP.neighbor_menu(host, _host_actions(host), compass_direction(selected_host),
+		MAP.debug_enabled(OS.get_environment("GDTK_DEBUG")))
+	_menu_open_pos = Vector2(at)
+	_menu_hover = -1
+	_build_menu_rows()
+	update()
+
+
+func _close_menu():
+	_menu_host = null
+	_menu_items = []
+	_menu_rows = []
+	_menu_rect = Rect2()
+	_menu_hover = -1
+
+
+func _row_height(item):
+	if String(item.get("kind", "")) == "separator":
+		return MENU_SEP_H
+	var h = MENU_ROW_H
+	if String(item.get("reason", "")) != "":
+		h += MENU_REASON_H
+	return h
+
+
+func _build_menu_rows():
+	_menu_rows = []
+	if _menu_host == null:
+		return
+	var vp = rect_size
+	if vp.x <= 0.0 or vp.y <= 0.0:
+		vp = Vector2(1280.0, 800.0)
+	var total = MENU_TITLE_H + MENU_PAD * 2.0
+	for item in _menu_items:
+		total += _row_height(item)
+	var x = clamp(_menu_open_pos.x, 0.0, max(0.0, vp.x - MENU_W))
+	var y = clamp(_menu_open_pos.y, 0.0, max(0.0, vp.y - total))
+	_menu_rect = Rect2(Vector2(x, y), Vector2(MENU_W, total))
+	var ry = y + MENU_TITLE_H + MENU_PAD
+	for item in _menu_items:
+		var rh = _row_height(item)
+		if String(item.get("kind", "")) == "separator":
+			_menu_rows.append({"rect": Rect2(Vector2(x, ry), Vector2(MENU_W, rh)), "item": null})
+		else:
+			_menu_rows.append({"rect": Rect2(Vector2(x, ry), Vector2(MENU_W, MENU_ROW_H)), "item": item})
+			if String(item.get("reason", "")) != "":
+				_menu_rows.append({"rect": Rect2(Vector2(x, ry + MENU_ROW_H), Vector2(MENU_W, MENU_REASON_H)),
+					"item": null, "reason": String(item.get("reason", ""))})
+		ry += rh
+
+
+func _menu_row_at(pos):
+	for row in _menu_rows:
+		var item = row.get("item", null)
+		if item != null and Rect2(row.rect).has_point(pos):
+			return row
+	return null
+
+
+func _activate_row(row):
+	var item = row.get("item", null)
+	if item == null or not bool(item.get("enabled", false)):
+		return
+	var host_id = String(_menu_host.get("id", ""))
+	var kind = String(item.get("kind", ""))
+	if kind == "action":
+		_run_host_action(host_id, item.action)
+	elif kind == "direction":
+		_apply_direction(host_id, String(item.get("direction", "none")))
+	_close_menu()
+	update()
+
+
+# --- Acciones (delegadas al shell; nunca ejecutan nada acá) ------------------
+
+func _run_host_action(host_id, action):
+	var label = String(action.get("label", ""))
+	if not bool(action.get("enabled", false)):
+		print("vecindario: ", host_id, " · ", label, " no disponible: ", String(action.get("reason", "")))
+		return
+	if shell != null and shell.has_method("_run_host_plan"):
+		shell._run_host_plan(String(host_id), action)
+		return
+	var plan = action.get("plan", null)
+	var cmd = ""
+	if plan != null and _actions_script() != null:
+		cmd = _actions_script().format_command(plan)
+	if cmd == "":
+		print("vecindario: ", host_id, " · ", label, " (acción sin comando)")
+		return
+	print("vecindario: ", host_id, " · ", label, " (sólo plan, no se ejecuta): ", cmd)
+
+
+# --- Contexto y acciones puras (API conservada) ------------------------------
+
+func _host_actions(host):
+	var script = _actions_script()
+	if script == null:
+		return []
+	var ctx = _local_context()
+	var id = String(host.get("id", ""))
+	var entry = directions.get(id, null)
+	if typeof(entry) == TYPE_DICTIONARY:
+		var d = compass_direction(id)
+		if d != "none":
+			ctx.direction = d
+			ctx.direction_confirm = String(entry.get("confirm", "unconfirmed"))
+	if _in_conflict(id):
+		ctx.direction_conflict = true
+	# Emisor gdtk habilitado (GVD_SESSION.EMITTER_ENABLED): con gvd local resuelto y
+	# un host confiable se ofrece también "Extender mi escritorio a él".
+	if String(ctx.get("gvd_path", "")) != "" and not bool(host.get("degraded", false)):
+		ctx.gvd_sender = true
+	# Servidor local disponible resuelto una vez por el shell (cached, sin escanear
+	# PATH por frame). Sin shell (headless) no se toca el contexto.
+	if shell != null and shell.has_method("deskflow_server_available"):
+		ctx.deskflow_server = shell.deskflow_server_available()
+	return script.host_actions(host, ctx)
+
+
+func _actions_script():
+	if _actions == null:
+		_actions = load("res://neighborhood_actions.gd").new()
+	return _actions
+
+
+# Contexto local mínimo: HOME y la ruta del receptor de pantalla resuelta por
+# candidatos sólo si el archivo existe. Sin nada ejecutable, las acciones quedan
+# deshabilitadas. La lectura ocurre en el clic, nunca en refresh()/_draw().
+func _local_context():
+	var home = OS.get_environment("HOME")
+	var ctx = {"home": home, "local_name": local_name()}
+	var script = _actions_script()
+	if script == null:
+		return ctx
+	var candidates = script.gvd_path_candidates(home)
+	var exists = {}
+	var f = File.new()
+	for c in candidates:
+		var p = String(c)
+		if p.begins_with("/") and f.file_exists(p):
+			exists[p] = true
+	var resolved = script.resolve_gvd_path(candidates, exists)
+	if resolved != "":
+		ctx.gvd_path = resolved
+	return ctx
+
+
+func local_name():
+	if shell != null and shell.has_method("_local_hostname"):
+		var h = String(shell._local_hostname()).strip_edges()
+		if h != "":
+			return h
+	var env = OS.get_environment("HOSTNAME").strip_edges()
+	return env if env != "" else "gdtk-local"
+
+
+func _host_by_id(hosts, id):
+	if id == "":
+		return null
+	for h in hosts:
+		if String(h.get("id", "")) == id:
+			return h
+	return null
+
+
+func _node_by_id(id):
+	for node in host_nodes:
+		if String(node.id) == String(id):
+			return node
+	return null
+
+
+# --- Compás de dirección por host (SPEC-screen-share-compass) ----------------
+# Estado puro sobre `directions`/`direction_conflicts`; el shell (worker) los
+# puebla. Ningún helper consulta red, procesos ni disco.
+
+func _directions():
+	if _directions_model == null:
+		_directions_model = load("res://neighborhood_directions.gd").new()
+	return _directions_model
+
+
+func compass_direction(host_id):
+	var id = String(host_id)
+	if not directions.has(id):
+		return "none"
+	var entry = directions[id]
+	if typeof(entry) != TYPE_DICTIONARY:
+		return "none"
+	var d = String(entry.get("direction", "none")).strip_edges()
+	if not _directions().valid_direction(d) or d == "none":
+		return "none"
+	return d
+
+
+func _in_conflict(host_id):
+	if typeof(direction_conflicts) != TYPE_ARRAY:
+		return false
+	for c in direction_conflicts:
+		if typeof(c) != TYPE_DICTIONARY:
+			continue
+		var hids = c.get("hids", [])
+		if typeof(hids) == TYPE_ARRAY and hids.has(host_id):
+			return true
+	return false
+
+
+func compass_state(host_id):
+	var id = String(host_id)
+	if _in_conflict(id):
+		return "conflicto"
+	if compass_direction(id) == "none":
+		return "sin_direccion"
+	if String(directions[id].get("confirm", "unconfirmed")).strip_edges() == "confirmed":
+		return "confirmada"
+	return "propuesta"
+
+
+# Badge corto (API conservada; la UI usa direction_status_text para español).
+func compass_badge(host_id):
+	match compass_state(host_id):
+		"conflicto":
+			return "conflicto"
+		"sin_direccion":
+			return "sin dirección"
+		"confirmada":
+			return "confirmada: " + compass_direction(host_id)
+		_:
+			return "propuesta: " + compass_direction(host_id)
+
+
+func host_session_state(host_id):
+	if shell != null and shell.has_method("_host_session_state"):
+		return String(shell._host_session_state(String(host_id)))
+	return "idle"
+
+
+func _session_badge(host_id):
+	match host_session_state(host_id):
+		"active":
+			return "sesión: activa"
+		"starting":
+			return "sesión: iniciando"
+		_:
+			return ""
+
+
+# Propuesta de dirección (sin confirmar): conserva la API usada por el modelo de
+# direcciones. El menú del mapa usa _apply_direction (confirmada) para colocar.
+func _select_direction(host_id, dir):
+	var id = String(host_id)
+	var d = String(dir)
+	if d == "none":
+		directions.erase(id)
+	else:
+		directions[id] = {"direction": d, "confirm": "unconfirmed"}
+	if shell != null and shell.has_method("_set_host_direction"):
+		shell._set_host_direction(id, dir)
+	call_deferred("refresh", true)
+
+
+# --- Tooltip / nombre / ícono (helpers de UI) --------------------------------
+
+func _host_tooltip(host):
+	var lines = [host_label(host)]
+	var state = String(host.get("state", "")).strip_edges()
+	var human = _human_state(state)
+	if human != "":
+		lines.append("estado: " + human)
+	var badge = _session_badge(String(host.get("id", "")))
+	if badge != "":
+		lines.append(badge)
+	if MAP.debug_enabled(OS.get_environment("GDTK_DEBUG")):
+		lines.append("tipo: " + String(host.get("kind", "")))
+		lines.append("id: " + String(host.get("id", "")))
+	return PoolStringArray(lines).join("\n")
+
+
+func _human_state(state):
+	match String(state):
+		"visto":
+			return "a la vista"
+		"perdido":
+			return "fuera de alcance"
+		"guardado":
+			return "conocido"
+	return String(state)
+
+
+# Icono existente si lo hay; si no, los candidatos de respaldo y, por último, el
+# ícono de red del repo. Cachea por nombre para no repetir I/O.
+func _host_icon(host):
+	var name = String(host.get("icon", "")) if typeof(host) == TYPE_DICTIONARY else ""
+	if _icon_cache.has(name):
+		return String(_icon_cache[name])
+	var f = File.new()
+	var candidates = []
+	if name != "":
+		candidates.append(name)
+		candidates.append("sugar/" + name)
+	candidates.append_array(HOST_FALLBACK_ICONS)
+	var resolved = "sugar/computer-xo"
+	for n in candidates:
+		if f.file_exists("res://icons/" + n + ".svg"):
+			resolved = n
+			break
+	_icon_cache[name] = resolved
+	return resolved
+
+
+# Nombre corto del host: prefiere el `name` del servicio (lo que el vecino se
+# llama a sí mismo) antes que el label o el id opaco. Puro.
+func host_label(host):
+	if typeof(host) != TYPE_DICTIONARY:
+		return ""
+	var caps = host.get("capabilities", {})
+	if typeof(caps) == TYPE_DICTIONARY:
+		for cap in caps.values():
+			if typeof(cap) != TYPE_DICTIONARY:
+				continue
+			var txt = cap.get("txt", {})
+			if typeof(txt) != TYPE_DICTIONARY:
+				continue
+			var name = String(txt.get("name", "")).strip_edges()
+			if name != "":
+				return name
+	var label = String(host.get("label", "")).strip_edges()
+	if label != "":
+		return label
+	return String(host.get("id", ""))
+
+
+func _host_initial(label):
+	var s = String(label).strip_edges()
+	if s == "":
+		return "?"
+	return s.substr(0, 1).to_upper()
+
+
+# --- Dibujo ------------------------------------------------------------------
+
+func _draw():
+	draw_rect(Rect2(Vector2.ZERO, rect_size), BG)
+	var bar = _bar()
+	var radii = MAP.map_radii(rect_size, bar)
+	for r in [radii.inner, radii.mid, radii.outer]:
+		draw_arc(center, float(r), 0.0, TAU, 96, RING_MID if r == radii.mid else RING, 1.0)
+	for dot in wifi_points:
+		draw_circle(Vector2(dot.pos), MAP.WIFI_DOT_RADIUS + (1.0 if bool(dot.in_use) else 0.0),
+			WIFI_DOT_ACTIVE if bool(dot.in_use) else WIFI_DOT)
+	_draw_center_plate()
+	for node in host_nodes:
+		if _dragging and String(node.id) == _drag_id:
+			continue
+		_draw_node(node, Vector2(node.center), float(node.size))
+	if _dragging:
+		var drag_node = _node_by_id(_drag_id)
+		if drag_node != null:
+			var dir = MAP.drag_direction(_drag_from, _drag_now)
+			if dir != "":
+				var target = MAP.directional_center(dir, 0, 1, center, float(radii.mid))
+				draw_arc(target, 22.0, 0.0, TAU, 32, NODE_SEL, 2.0)
+			_draw_node(drag_node, _drag_now, float(drag_node.size))
+	_draw_menu()
+
+
+func _draw_center_plate():
+	draw_circle(center, 28.0, CENTER_PLATE)
+	draw_arc(center, 28.0, 0.0, TAU, 48, NODE_RING, 2.0)
+	var m = Rect2(center + Vector2(-16, -12), Vector2(32, 24))
+	draw_rect(m, CENTER_MONITOR)
+	draw_rect(Rect2(m.position + Vector2(3, 3), m.size - Vector2(6, 8)), BG)
+	draw_rect(Rect2(center + Vector2(-5, 12), Vector2(10, 3)), CENTER_MONITOR)
+	draw_rect(Rect2(center + Vector2(-9, 15), Vector2(18, 3)), CENTER_MONITOR)
+
+
+func _draw_node(node, c, size):
+	var r = size * 0.5
+	var bg = NODE_BG
+	var ring = NODE_RING
+	if bool(node.dimmed):
+		bg = Color(bg.r, bg.g, bg.b, NODE_DIM_ALPHA)
+		ring = Color(ring.r, ring.g, ring.b, NODE_DIM_ALPHA)
+	if String(node.id) == selected_host:
+		ring = NODE_SEL
+	draw_circle(c, r, bg)
+	draw_arc(c, r, 0.0, TAU, 48, ring, 2.0)
+	if String(node.id) == selected_host:
+		draw_arc(c, r + 4.0, 0.0, TAU, 48, NODE_SEL, 2.0)
+
+
+func _draw_menu():
+	if _menu_host == null:
+		return
+	var font = get_font("font", "Label")
+	if font == null:
+		return
+	var b = 2.0
+	_bevel(_menu_rect, MENU.FACE, MENU.LIGHT, MENU.DARK, b)
+	var title = Rect2(_menu_rect.position + Vector2(b, b), Vector2(_menu_rect.size.x - 2.0 * b, MENU_TITLE_H))
+	_bevel(title, MENU.TITLE_BG, MENU.LIGHT, MENU.DARK, 1.0)
+	var tw = font.get_string_size("Vecino").x
+	draw_string(font, title.position + Vector2((title.size.x - tw) * 0.5, 14.0), "Vecino", MENU.TITLE_TEXT)
+	var idx = 0
+	for row in _menu_rows:
+		var rect = Rect2(row.rect)
+		var item = row.get("item", null)
+		if item == null:
+			if row.has("reason"):
+				draw_string(font, rect.position + Vector2(MENU_PAD_X + 10.0, 11.0), String(row.reason), MENU.TEXT_DISABLED)
+			else:
+				draw_rect(Rect2(rect.position + Vector2(MENU_PAD_X, rect.size.y * 0.5), Vector2(rect.size.x - 2.0 * MENU_PAD_X, 1.0)), MENU.DARK)
+			idx += 1
+			continue
+		var enabled = bool(item.get("enabled", false))
+		if idx == _menu_hover and enabled:
+			draw_rect(rect, MENU.HILITE)
+		var color = MENU.TEXT if enabled else MENU.TEXT_DISABLED
+		draw_string(font, rect.position + Vector2(MENU_PAD_X + 10.0, 17.0), String(item.get("label", "")), color)
+		idx += 1
+
+
+func _bevel(rect, face, light, dark, b):
+	draw_rect(rect, face)
+	draw_rect(Rect2(rect.position, Vector2(rect.size.x, b)), light)
+	draw_rect(Rect2(rect.position, Vector2(b, rect.size.y)), light)
+	draw_rect(Rect2(Vector2(rect.position.x, rect.end.y - b), Vector2(rect.size.x, b)), dark)
+	draw_rect(Rect2(Vector2(rect.end.x - b, rect.position.y), Vector2(b, rect.size.y)), dark)
+
+
+# --- Nodos nativos auxiliares ------------------------------------------------
+
+func _label(caption, pos, width, align = Label.ALIGN_LEFT, color = TEXT):
 	var label = Label.new()
 	label.text = caption
 	label.rect_position = pos
 	label.rect_size = Vector2(width, 22)
 	label.clip_text = true
+	label.align = align
 	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	label.add_color_override("font_color", TEXT)
+	label.add_color_override("font_color", color)
 	add_child(label)
 
 
 func _make_icon(parent, name, pos, size):
 	var path = "res://icons/" + name + ".svg"
-	if OS.get_current_video_driver() == OS.VIDEO_DRIVER_GLES3 \
-			and ClassDB.class_exists("SlugVector2D") and ClassDB.class_exists("SlugVector"):
+	if ClassDB.class_exists("SlugVector2D") and ClassDB.class_exists("SlugVector"):
 		var vector = ClassDB.instance("SlugVector")
 		vector.set_svg_path(path)
 		if vector.is_valid():
@@ -121,6 +775,8 @@ func _make_icon(parent, name, pos, size):
 			icon.set_centered(false)
 			parent.add_child(icon)
 			icon.position = pos
+			if icon is Control:
+				icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			return
 	var image = Image.new()
 	if image.load(path) != OK:
@@ -135,13 +791,3 @@ func _make_icon(parent, name, pos, size):
 	icon.rect_position = pos
 	icon.rect_size = Vector2(size, size)
 	parent.add_child(icon)
-
-
-func _draw():
-	draw_rect(Rect2(Vector2.ZERO, rect_size), BG)
-	for fraction in [0.48, 0.74, 1.0]:
-		draw_arc(center, radius * fraction, 0.0, TAU, 64, RING, 1.0)
-	for point in points:
-		if point.selected or point.active:
-			draw_arc(point.pos, ICON_SIZE * 0.5 + 3.0, 0.0, TAU, 32,
-				Color(1.0, 0.84, 0.43, 1.0) if point.active else TEXT, 2.0)

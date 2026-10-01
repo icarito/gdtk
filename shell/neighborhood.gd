@@ -1,9 +1,10 @@
 extends Reference
 
-# Vecindario: lectura de Wi-Fi (NetworkManager vía nmcli) y de los vecinos de la red
-# local (ip -4 neigh show), sin exponer secretos ni salida cruda. Las funciones de
-# parseo y de geometría simbólica son puras (static): el hilo de fondo sólo las usa
-# para refrescar cada ~20 s y la vista lee el último resultado sin bloquear el frame.
+# Vecindario: lectura de Wi-Fi (NetworkManager vía nmcli) y de los hosts DNS-SD de
+# gdtk (avahi-browse -> shell/neighborhood_hosts.gd), sin exponer secretos ni salida
+# cruda. Las funciones de parseo y de geometría simbólica son puras (static): el
+# hilo de fondo sólo las usa para refrescar cada ~20 s y la vista lee el último
+# resultado sin bloquear el frame.
 #
 # Sólo estado: conectar abre `nmtui connect` fuera de esta vista (shell._open_nmtui),
 # nunca se pasan contraseñas por argumentos ni se guardan acá.
@@ -11,6 +12,13 @@ extends Reference
 const REFRESH_MS = 20000      # refresco normal del listado
 const RESCAN_MS = 60000       # rescan best-effort una vez por minuto
 const SLEEP_STEP_MS = 100     # granularidad para que stop() no espere de más
+
+# Hosts DNS-SD de gdtk: el modelo puro vive en neighborhood_hosts.gd, acá sólo se
+# invoca avahi-browse de forma acotada. Si no está o falla, no hay hosts y el
+# Wi-Fi sigue igual.
+const HOSTS_SCRIPT = preload("res://neighborhood_hosts.gd")
+const PUBLISH_PLAN = preload("res://neighborhood_publish_plan.gd")
+const GDTK_SERVICES = ["_gdtk-gvd._udp", "_gdtk-deskflow._tcp", "_gdtk-clip._tcp"]
 
 # Cápsula de un nodo en la vista: el disco del AP más el alto de su etiqueta
 # (SSID arriba, dBm abajo). La separación de la geometría simbólica usa la cápsula,
@@ -20,18 +28,22 @@ const NODE_HALF_H = 50.0      # media altura (64 x 100 px: disco + etiqueta deba
 const LABEL_TAIL = 18.0       # alto extra bajo el disco ocupado por el texto
 
 var networks = []             # lista de nodos "red" (ESS), copiada por poll()
-var hosts = []                # vecinos de la red local, copiada por poll()
+var hosts = []                # hosts DNS-SD de gdtk, copiada por poll()
 var status = ""               # "", "ok", "empty", "off", "no_nmcli", "error"
 var version = 0               # sube cuando el hilo escribió un resultado nuevo
 
 var _mutex = Mutex.new()
 var _thread = null
 var _want_stop = false
+var _hosts_model = null        # instancia diferida de HOSTS_SCRIPT (sólo hilo)
 var _nets = []
 var _hosts = []
 var _status = ""
 var _version = 0
 var _rescan_at = -RESCAN_MS
+var _local_ready = false      # identidad local resuelta una sola vez (hilo)
+var _local_hid = ""
+var _local_name = ""
 
 
 # --- ciclo de vida -----------------------------------------------------------
@@ -140,14 +152,48 @@ func _scan():
 		"nets": nets, "hosts": _read_hosts()}
 
 
+# Hosts del Vecindario: servicios DNS-SD de gdtk resueltos con avahi-browse
+# (`-r` resolver, `-t` termina tras el volcado, `-p` parseable), nunca vecinos ARP
+# como objetos de acción. Es acotado: si avahi-browse no existe o falla se
+# devuelve [] sin salida cruda ni secretos, y el Wi-Fi no se ve afectado.
 func _read_hosts():
 	var out = []
-	if OS.execute("ip", ["-4", "neigh", "show"], true, out) != 0:
+	if OS.execute("sh", ["-c", "command -v avahi-browse >/dev/null 2>&1"]) != 0:
 		return []
 	var text = ""
-	for line in out:
-		text += str(line) + "\n"
-	return parse_neigh(text)
+	for svc in GDTK_SERVICES:
+		out = []
+		if OS.execute("avahi-browse", ["-rtp", svc], true, out) != 0:
+			continue
+		for line in out:
+			text += str(line) + "\n"
+	if text.strip_edges() == "":
+		return []
+	if _hosts_model == null:
+		_hosts_model = HOSTS_SCRIPT.new()
+	_ensure_local_identity()
+	var hosts = _hosts_model.model_from_text(text)
+	# El host local se descubre a sí mismo por mDNS: se filtra del modelo con la
+	# misma identidad que publica el Vecindario (hid opaco + hostname visible).
+	return HOSTS_SCRIPT.exclude_local(hosts, _local_hid, _local_name)
+
+
+# Identidad local (hid opaco + hostname) resuelta una vez. Misma regla que el
+# shell (_local_hostname -> PUBLISH_PLAN.local_identity) sin cargar shell.gd en
+# tests ni exponer secretos.
+func _ensure_local_identity():
+	if _local_ready:
+		return
+	_local_ready = true
+	var host = OS.get_environment("HOSTNAME").strip_edges()
+	if host == "":
+		var f = File.new()
+		if f.file_exists("/etc/hostname") and f.open("/etc/hostname", File.READ) == OK:
+			host = f.get_as_text().strip_edges()
+			f.close()
+	var identity = PUBLISH_PLAN.local_identity(host)
+	_local_hid = String(identity.hid)
+	_local_name = String(identity.name)
 
 
 # --- parseo puro -------------------------------------------------------------
@@ -381,7 +427,9 @@ static func capsules_overlap(pts, half_w, half_h, gap = 0.0):
 	return false
 
 
-# Vecinos IPv4 de la red local: REACHABLE/STALE, sin FAILED ni INCOMPLETE.
+# Vecinos IPv4 de la red local (ip -4 neigh show): REACHABLE/STALE, sin FAILED ni
+# INCOMPLETE. Se mantiene por compatibilidad y para las autopruebas; el campo
+# público `hosts` ya no usa ARP sino hosts DNS-SD (model_from_text).
 static func parse_neigh(text):
 	var out = []
 	for raw in text.split("\n", false):
