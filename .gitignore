@@ -6,3 +6,5 @@ __pycache__/
 kilo_run.log
 kilo_*.log
 .frt-baseline/
+# Copia local generada al correr el proyecto desde un HOME no estándar (no versionar).
+/icarito-none/
