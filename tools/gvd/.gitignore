@@ -1,0 +1,9 @@
+# binario compilado del lector de cursor (se compila desde gvd-cursor.c)
+gvd-cursor
+
+# temporales de Python
+__pycache__/
+*.pyc
+
+# logs de ejecuciones de agentes
+kilo_*.log
