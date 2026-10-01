@@ -123,6 +123,15 @@ texto**, nunca sólo por color.
 - Deskflow muere → `_service_running` borra su pid → `apagado`; primaria relanza.
 - `nmcli` caído → bloque `enlace` marcado «sin dato» si está fijado.
 
+**Contrato de no-bloqueo (duro).** El hilo de render/UI (`frame.gd._process/draw`)
+nunca ejecuta `OS.execute` con captura ni consultas de estado: `bluetoothctl`,
+`localectl`, `nmcli`, `pgrep`, `kill`, `/proc`, `/sys` y lecturas de archivo van por
+worker/cache/snapshot con TTL, y el applet dibuja el último snapshot (o «sin dato» si
+venció). El timeout corto no es excusa: si un applet necesita `OS.execute`, es que
+corre en el hilo equivocado. Contrato completo, alcance y puntos bloqueantes (B6–B8,
+más Deskflow B1–B3) en `SPEC-screen-share-compass.md` §14. Ningún trabajo con
+credenciales (ssh/JSON-RPC) toca la UI.
+
 ## Accesibilidad
 
 - Texto y valor siempre presentes; el color no carga identidad ni estado. Los íconos
