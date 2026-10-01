@@ -16,6 +16,7 @@ import argparse
 import glob
 import json
 import os
+import select
 import shutil
 import signal
 import socket
@@ -60,6 +61,16 @@ APP_ID = U.APP_ID
 CURSOR_HELPER = "gvd-cursor"
 CURSOR_HELPER_SRC = "gvd-cursor.c"
 CURSOR_MAX_HZ = 120.0
+
+# Captura wlroots (sway/gdtk): helper wlr-screencopy que escribe frames crudos por
+# stdout. Sustituye a PipeWire/Mutter cuando el escritorio no es GNOME.
+CAPTURE_HELPER = "gvd-capture"
+CAPTURE_HELPER_SRC = "gvd-capture.c"
+CAPTURE_PROTO_DIR = "protocols"
+CAPTURE_PROTO_C = "wlr-screencopy-unstable-v1-protocol.c"
+CAPTURE_PROTO_H = "wlr-screencopy-unstable-v1-client-protocol.h"
+CAPTURE_FORMATS = {"XR24": "BGRx", "AR24": "BGRA"}
+POSITIONS = ("right", "left", "above", "below")
 
 # cursor-mode de Mutter ScreenCast
 CURSOR_MODE = {"hidden": 0, "embedded": 1, "separate": 2}
@@ -149,6 +160,81 @@ def ensure_cursor_helper():
     return out
 
 
+def _capture_deps_ok():
+    """gcc + wayland-client + el codigo de protocolo vendorizado."""
+    if not shutil.which("gcc"):
+        return False, "falta gcc"
+    proto = os.path.join(HERE, CAPTURE_PROTO_DIR)
+    if not os.path.exists(os.path.join(proto, CAPTURE_PROTO_C)):
+        return False, "falta el codigo del protocolo wlr-screencopy"
+    try:
+        subprocess.check_output(["pkg-config", "--exists", "wayland-client"])
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False, "falta wayland-client (dev)"
+    return True, ""
+
+
+def ensure_capture_helper():
+    """Compila gvd-capture.c + el protocolo wlr-screencopy si hace falta."""
+    src = os.path.join(HERE, CAPTURE_HELPER_SRC)
+    out = os.path.join(HERE, CAPTURE_HELPER)
+    proto = os.path.join(HERE, CAPTURE_PROTO_DIR)
+    proto_c = os.path.join(proto, CAPTURE_PROTO_C)
+    if not os.path.exists(src):
+        log(f"[!] falta {src}")
+        return None
+    ok, why = _capture_deps_ok()
+    if not ok:
+        log(f"[!] captura wlroots no disponible: {why}")
+        return None
+    newest = max(os.path.getmtime(src), os.path.getmtime(proto_c))
+    if os.path.exists(out) and os.path.getmtime(out) >= newest:
+        return out
+    try:
+        cflags = subprocess.check_output(
+            ["pkg-config", "--cflags", "wayland-client"], text=True).split()
+        libs = subprocess.check_output(
+            ["pkg-config", "--libs", "wayland-client"], text=True).split()
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        log(f"[!] pkg-config wayland-client: {e}")
+        return None
+    cmd = ["gcc", "-O2", "-o", out, src, proto_c, "-I", proto] + cflags + libs
+    log("[*] compilando captura wlroots: " + " ".join(cmd))
+    if subprocess.run(cmd).returncode != 0:
+        log("[!] compilacion de gvd-capture fallo")
+        return None
+    return out
+
+
+def wlr_capture_available():
+    if not os.environ.get("WAYLAND_DISPLAY"):
+        return False
+    ok, _ = _capture_deps_ok()
+    if not ok:
+        return False
+    return ensure_capture_helper() is not None
+
+
+def wlr_capture_ready():
+    """Como above pero sin compilar: solo deps + sesion Wayland (para caps)."""
+    if not os.environ.get("WAYLAND_DISPLAY"):
+        return False
+    ok, _ = _capture_deps_ok()
+    return ok
+
+
+def detect_capture_backend(choice="auto"):
+    """auto: Mutter si el escritorio es GNOME; si no, wlroots (sway/gdtk)."""
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
+    if choice == "mutter":
+        return "mutter"
+    if choice == "wlr":
+        return "wlr" if wlr_capture_available() else None
+    if "GNOME" in desktop:
+        return "mutter"
+    return "wlr" if wlr_capture_available() else "mutter"
+
+
 class CursorSender:
     """Lee x/y de gvd-cursor (stdout: 'x y id') y manda UDP al puerto+1."""
 
@@ -223,6 +309,11 @@ class Sender:
         self.proc = None
         self.cursor = None
         self.stopping = False
+        # Backend de captura: Mutter/PipeWire (GNOME) o wlroots (sway/gdtk).
+        self.backend = detect_capture_backend(getattr(args, "capture", "auto"))
+        self.capture = None       # proceso gvd-capture (solo wlr)
+        self.capture_hdr = None   # (fourcc, width, height, stride)
+        self.virtual = None       # SwayVirtualOutput (solo wlr --virtual)
         # K18: si Mutter cambia la disposicion/tamano del monitor virtual o la
         # sesion ScreenCast se corta, se recrea sesion+pipeline sin relanzar.
         self.monitors_changed = False
@@ -412,7 +503,7 @@ class Sender:
             log(f"[!] ApplyMonitorsConfig: {e.message}")
 
     # -- gst
-    def build_pipeline(self):
+    def build_pipeline(self, source=None):
         a = self.a
         enc, use_va = choose_encoder(a.encoder)
         log(f"[+] encoder elegido: {enc}")
@@ -424,9 +515,11 @@ class Sender:
         raw_caps = f"video/x-raw,framerate={fps}/1,interlace-mode=progressive"
         if enc != "va":
             raw_caps += ",format=I420"
-        e = [GST, "-q", "pipewiresrc", f"path={self.node_id}",
-             "do-timestamp=true", "provide-clock=false", "keepalive-time=200", "!",
-             "videoconvert", "!"]
+        if source is None:
+            source = ["pipewiresrc", f"path={self.node_id}",
+                      "do-timestamp=true", "provide-clock=false",
+                      "keepalive-time=200", "!"]
+        e = [GST, "-q"] + list(source) + ["videoconvert", "!"]
         # videorate may stop a quiet virtual monitor after PipeWire keepalive frames.
         # Keep it as an opt-in limiter for experiments instead of the default path.
         if os.environ.get("GVD_VIDEORATE") == "1":
@@ -497,10 +590,150 @@ class Sender:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
         self.proc = None
+        if self.capture is not None:
+            try:
+                self.capture.stdout.close()
+            except (OSError, AttributeError):
+                pass
+            if self.capture.poll() is None:
+                self.capture.terminate()
+                try:
+                    self.capture.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self.capture.kill()
+            self.capture = None
+        self.capture_hdr = None
+        if self.virtual is not None:
+            self.virtual.destroy()
+            self.virtual = None
         self.stop_session()
         self.node_id = None
         self.session_path = None
         self.stream_path = None
+
+    # -- captura wlroots (sway/gdtk), sin Mutter ni PipeWire
+    def _read_capture_header(self, timeout=6.0):
+        fd = self.capture.stderr.fileno()
+        deadline = time.monotonic() + timeout
+        buf = b""
+        while time.monotonic() < deadline:
+            r, _, _ = select.select([fd], [], [], 0.2)
+            if not r:
+                if self.capture.poll() is not None:
+                    return None
+                continue
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                return None
+            buf += chunk
+            for raw in buf.split(b"\n"):
+                line = raw.decode("utf-8", "replace").strip()
+                if line.startswith("GVDCAP1"):
+                    return line
+        return None
+
+    def _drain_capture_stderr(self):
+        try:
+            for raw in self.capture.stderr:
+                msg = raw.decode("utf-8", "replace").strip()
+                if msg:
+                    log("[capture] " + msg)
+        except (OSError, ValueError):
+            pass
+
+    def _start_wlr_capture(self):
+        helper = ensure_capture_helper()
+        if not helper:
+            log("[!] sin captura wlroots")
+            return False
+        # --virtual: monitor headless de sway -> extension real del escritorio
+        # (igual que el Meta-* de Mutter). Sin --virtual se comparte un output real.
+        if getattr(self.a, "virtual", False) and self.virtual is None:
+            self.virtual = SwayVirtualOutput(self.a.position,
+                                             self.a.width, self.a.height)
+            if self.virtual.create() is None:
+                self.virtual = None
+                return False
+        output = self.virtual.name if self.virtual else getattr(self.a, "output", "")
+        # overlay-cursor=1 mete el cursor en el frame (gvd-capture lo pide al
+        # compositor): el video ya sale con puntero, sin canal separado.
+        argv = [helper, "--fps", str(self.a.fps), "--overlay-cursor", "1"]
+        if output:
+            argv += ["--output", output]
+        log("[*] captura: " + " ".join(argv))
+        self.capture = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE)
+        line = self._read_capture_header()
+        if line is None:
+            log("[!] sin cabecera de captura wlroots")
+            return False
+        parts = line.split()
+        try:
+            fourcc, width, height, stride = parts[1], int(parts[2]), int(parts[3]), int(parts[4])
+        except (IndexError, ValueError):
+            log("[!] cabecera de captura invalida: " + line)
+            return False
+        fmt = CAPTURE_FORMATS.get(fourcc, "BGRx")
+        self.capture_hdr = (fmt, width, height, stride)
+        threading.Thread(target=self._drain_capture_stderr, daemon=True).start()
+        log(f"[+] captura wlroots {fmt} {width}x{height}")
+        return True
+
+    def _create_and_stream_wlr(self):
+        if not self._start_wlr_capture():
+            return False, None
+        fmt, width, height, _stride = self.capture_hdr
+        source = ["fdsrc", "fd=0", "!", "rawvideoparse", f"format={fmt}",
+                  f"width={width}", f"height={height}",
+                  f"framerate={self.a.fps}/1", "!"]
+        cmd = self.build_pipeline(source=source)
+        log("[*] send: " + " ".join(cmd))
+        child_cmd = [sys.executable, os.path.abspath(__file__), "__gst_child__", *cmd[2:]]
+        # gst lee los frames crudos del stdout del helper.
+        self.proc = subprocess.Popen(child_cmd, stdin=self.capture.stdout)
+        return True, (width, height)
+
+    def run_wlr(self):
+        rc = 0
+        first = True
+        try:
+            while not self.stopping:
+                ok, size = self._create_and_stream_wlr()
+                if not ok:
+                    self._teardown_stream()
+                    plan = U.sender_restart_plan(self.attempt + 1, first=first)
+                    if not plan["ok"]:
+                        rc = 2
+                        break
+                    self.attempt += 1
+                    log(f"[*] reintento wlr en {plan['delay']:.0f}s "
+                        f"({self.attempt}/{U.MAX_RESTARTS})")
+                    self._sleep_interruptible(plan["delay"])
+                    first = False
+                    continue
+                if first:
+                    self._notify_receiver_size(size)
+                first = False
+                while not self.stopping and self.proc is not None \
+                        and self.proc.poll() is None \
+                        and self.capture is not None and self.capture.poll() is None:
+                    time.sleep(0.2)
+                if self.stopping:
+                    self._teardown_stream()
+                    break
+                gst_rc = self.proc.returncode if self.proc else "?"
+                cap_rc = self.capture.returncode if self.capture else "?"
+                log(f"[!] emisor wlr termino (gst rc={gst_rc}, capture rc={cap_rc})")
+                self._teardown_stream()
+                plan = U.sender_restart_plan(self.attempt + 1, first=False)
+                if not plan["ok"]:
+                    rc = 2
+                    break
+                self.attempt += 1
+                self._sleep_interruptible(plan["delay"])
+        finally:
+            self._teardown_stream()
+        return rc
 
     def _create_and_stream(self, apply_position):
         # Al recrear, si el monitor virtual aun existe se adopta su tamano: la
@@ -535,6 +768,9 @@ class Sender:
         return True, size
 
     def run(self):
+        log(f"[*] backend de captura: {self.backend}")
+        if self.backend == "wlr":
+            return self.run_wlr()
         self.conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
         self.subscribe_monitors()
         first = True
@@ -602,6 +838,8 @@ class Sender:
             self.cursor = None
         if self.proc is not None and self.proc.poll() is None:
             self.proc.terminate()
+        if self.capture is not None and self.capture.poll() is None:
+            self.capture.terminate()
 
 
 # ---------------------------------------------------------------------- recv
@@ -666,12 +904,92 @@ def _find_sway_socket():
     if path and os.path.exists(path):
         return path
     uid = os.getuid()
-    for pat in (f"/run/user/{uid}/sway-ipc.*.sock",
-                "/run/user/*/sway-ipc.*.sock"):
+    patterns = []
+    rt = os.environ.get("XDG_RUNTIME_DIR")
+    if rt:
+        patterns.append(os.path.join(rt, "sway-ipc.*.sock"))
+    patterns += [f"/run/user/{uid}/sway-ipc.*.sock",
+                 "/run/user/*/sway-ipc.*.sock"]
+    for pat in patterns:
         hits = sorted(glob.glob(pat))
         if hits:
             return hits[0]
     return None
+
+
+def _sway_cmd(sock, *words):
+    """Ejecuta un comando de sway y devuelve (ok, salida). Sin shell."""
+    try:
+        out = subprocess.run(["swaymsg", "-s", sock, *words],
+                             capture_output=True, text=True, timeout=6)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"[!] swaymsg: {e}")
+        return False, ""
+    return out.returncode == 0, out.stdout
+
+
+def _sway_outputs(sock):
+    ok, out = _sway_cmd(sock, "-t", "get_outputs")
+    if not ok:
+        return None
+    try:
+        return json.loads(out)
+    except ValueError:
+        return None
+
+
+class SwayVirtualOutput:
+    """Monitor virtual en sway (y por tanto en gdtk con sesion sway): crea un
+    output headless con `create_output`, lo ubica en la direccion pedida y lo
+    desmonta al terminar. Asi el escritorio se EXTIENDE (no se espeja) tambien
+    desde gdtk, igual que el monitor Meta-* de Mutter."""
+
+    def __init__(self, direction, width, height):
+        self.direction = direction if direction in POSITIONS else "right"
+        self.width, self.height = int(width), int(height)
+        self.name = None
+
+    def create(self):
+        sock = _find_sway_socket()
+        if not sock:
+            log("[!] --virtual requiere sway (SWAYSOCK); no encontrado")
+            return None
+        before = _sway_outputs(sock) or []
+        names_before = {o.get("name") for o in before}
+        ok, _ = _sway_cmd(sock, "create_output")
+        if not ok:
+            log("[!] sway create_output fallo")
+            return None
+        after = _sway_outputs(sock) or []
+        new = [o for o in after if o.get("name") not in names_before]
+        if not new:
+            log("[!] sway no reporto el output virtual nuevo")
+            return None
+        self.name = new[0].get("name")
+        _sway_cmd(sock, "output", self.name, "resolution",
+                  f"{self.width}x{self.height}")
+        _sway_cmd(sock, "output", self.name, "bg", "#000000")
+        max_x = max((o["rect"]["x"] + o["rect"]["width"] for o in before), default=0)
+        max_y = max((o["rect"]["y"] + o["rect"]["height"] for o in before), default=0)
+        pos = {
+            "right": (max_x, 0),
+            "left": (-self.width, 0),
+            "above": (0, -self.height),
+            "below": (0, max_y),
+        }[self.direction]
+        _sway_cmd(sock, "output", self.name, "position", str(pos[0]), str(pos[1]))
+        log(f"[+] monitor virtual sway: {self.name} {self.width}x{self.height} "
+            f"{self.direction} @ {pos}")
+        return self.name
+
+    def destroy(self):
+        if not self.name:
+            return
+        sock = _find_sway_socket()
+        if sock:
+            _sway_cmd(sock, "output", self.name, "unplug")
+            log(f"[*] monitor virtual {self.name} desmontado")
+        self.name = None
 
 
 class SwayCursor:
@@ -1146,7 +1464,16 @@ def build_caps():
             "gvd_cursor_bin": os.path.exists(os.path.join(HERE, CURSOR_HELPER)),
         },
         "send": {
-            "platform": "GNOME Wayland/Mutter ScreenCast",
+            "platform": "Mutter ScreenCast (GNOME) o wlroots wlr-screencopy "
+                        "(sway/gdtk)",
+            "backends": {
+                "mutter": "GNOME Wayland/Mutter ScreenCast",
+                "wlr": "wlroots wlr-screencopy (sway, gdtk)",
+            },
+            "wlr_ready": wlr_capture_ready(),
+            "wlr_virtual": bool(_find_sway_socket()),
+            "wlr_capture_c": os.path.exists(os.path.join(HERE, CAPTURE_HELPER_SRC)),
+            "wlr_capture_bin": os.path.exists(os.path.join(HERE, CAPTURE_HELPER)),
             "encoders": {
                 "x264": gst_has_element("x264enc"),
                 "va": gst_has_element("vah264enc") and
@@ -1288,6 +1615,12 @@ def build_parser():
                    choices=["right", "left", "above", "below"])
     s.add_argument("--encoder", default="auto",
                    choices=["auto", "va", "x264"])
+    s.add_argument("--capture", default="auto", choices=["auto", "mutter", "wlr"],
+                   help="backend de captura: auto detecta GNOME(Mutter) o wlroots")
+    s.add_argument("--output", default="",
+                   help="nombre del output wlroots a capturar (default: el primero)")
+    s.add_argument("--virtual", action="store_true",
+                   help="--capture wlr: crear un monitor headless de sway (extension real)")
     s.add_argument("--local", action="store_true")
     s.add_argument("--stats", action="store_true",
                    help="imprime fps (solo --local)")

@@ -39,11 +39,29 @@ static func position_for(direction, invert = false):
 	return DIRECTIONS.to_gvd_position(d)
 
 
-# ¿Este equipo puede emitir pantalla? gvd `send` necesita GNOME Wayland/Mutter.
-static func local_can_emit(desktop, session_type = "wayland"):
-	var d = String(desktop).strip_edges().to_upper()
+# Backend de emisión local: "mutter" si el escritorio es GNOME Wayland (ScreenCast
+# por PipeWire), "wlr" si es un compositor wlroots (gdtk, sway, river, hyprland,
+# wayfire, niri, labwc...) donde gvd captura con wlr-screencopy. "" si no puede
+# emitir (X11, sin sesión gráfica). Puro: sólo mira variables de entorno.
+const WLR_DESKTOPS = ["gdtk", "sway", "river", "hyprland", "wayfire", "niri",
+	"labwc", "phoc", "miracle", "waybox"]
+
+static func local_emit_backend(desktop, session_type = "wayland"):
+	var d = String(desktop).strip_edges().to_lower()
 	var s = String(session_type).strip_edges().to_lower()
-	return d.find("GNOME") >= 0 and (s == "" or s == "wayland")
+	if s != "" and s != "wayland":
+		return ""
+	if d.find("gnome") >= 0:
+		return "mutter"
+	for name in WLR_DESKTOPS:
+		if d.find(name) >= 0:
+			return "wlr"
+	return ""
+
+
+# ¿Este equipo puede emitir pantalla? Con Mutter (GNOME) o con wlroots (gdtk/sway).
+static func local_can_emit(desktop, session_type = "wayland"):
+	return local_emit_backend(desktop, session_type) != ""
 
 
 # Ruta de gvd dentro de un plan puro de neighborhood_actions: `python3 <ruta.py>`
@@ -84,15 +102,21 @@ static func target_host_of(plan):
 
 
 # Plan del emisor LOCAL ("Extender mi escritorio a él"): `gvd send --host <peer>`
-# con `--position` si el mapa la conoce. Delega en neighborhood_actions.
-static func local_send_argv(gvd_path, peer, port = 0, position = ""):
+# con `--position` si el mapa la conoce. Delega en neighborhood_actions. Con
+# `wlr_virtual` (sesión wlroots con sway: gdtk/sway) se agrega `--virtual` para
+# que gvd cree un monitor headless y el escritorio se EXTIENDA, no se espeje.
+static func local_send_argv(gvd_path, peer, port = 0, position = "", wlr_virtual = false):
 	var pos = String(position).strip_edges()
 	if pos != "" and not valid_position(pos):
 		return _bad("posición inválida: " + pos)
 	var opts = {}
 	if pos != "":
 		opts["position"] = pos
-	return ACTIONS.gvd_send_plan(gvd_path, peer, port, opts)
+	var plan = ACTIONS.gvd_send_plan(gvd_path, peer, port, opts)
+	if bool(wlr_virtual) and bool(plan.get("ok", false)) \
+			and typeof(plan.get("args", [])) == TYPE_ARRAY:
+		plan["args"].append("--virtual")
+	return plan
 
 
 # Plan del receptor LOCAL ("Ver su escritorio aquí"): `gvd recv --sink auto`
@@ -254,9 +278,13 @@ static func selftest():
 	ok = ok and position_for("east", true) == "left"
 	ok = ok and position_for("none") == "" and position_for("up") == ""
 
-	# Emisor local: sólo GNOME Wayland.
+	# Emisor local: GNOME (Mutter) o cualquier compositor wlroots (gdtk/sway...).
 	ok = ok and local_can_emit("GNOME") and local_can_emit("ubuntu:GNOME", "wayland")
-	ok = ok and not local_can_emit("sway") and not local_can_emit("GNOME", "x11")
+	ok = ok and local_emit_backend("GNOME") == "mutter"
+	ok = ok and local_can_emit("gdtk") and local_emit_backend("gdtk") == "wlr"
+	ok = ok and local_can_emit("sway") and local_emit_backend("sway") == "wlr"
+	ok = ok and not local_can_emit("GNOME", "x11")
+	ok = ok and not local_can_emit("XFCE")
 	ok = ok and not local_can_emit("")
 
 	# Extracción del plan.
@@ -286,6 +314,10 @@ static func selftest():
 	ok = ok and not local_send_argv("/home/u/Proyectos/gvd/gvd.py", "tengu.local", 0,
 		"diagonal").ok
 	ok = ok and not local_send_argv("~/gvd/gvd.py", "tengu.local", 0, "").ok
+	# wlr_virtual agrega --virtual al argv del emisor (extensión real desde sway).
+	var spv = local_send_argv("/home/u/Proyectos/gvd/gvd.py", "tengu.local", 5600, "right", true)
+	ok = ok and spv.args.find("--virtual") >= 0 and spv.args.find("--position") >= 0
+	ok = ok and sp.args.find("--virtual") < 0
 
 	# Receptor remoto por ssh: sin shell-injection y con la variante de cursor.
 	var rr = remote_recv_argv("tengu.local", false)

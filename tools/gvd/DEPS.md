@@ -5,12 +5,29 @@ externo. Se resuelve en `shell/neighborhood_actions.gd` (`gvd_path_candidates`):
 primero `~/gdtk/tools/gvd/gvd.py` (instalado por `deploy.sh`), luego los checkouts viejos.
 El stream RTP/H.264/UDP o H.264/TCP **no cifra ni autentica**: sólo LAN confiable.
 
-## Emisor (`gvd.py send`) — hoy sólo en un escritorio GNOME/Mutter
+## Emisor (`gvd.py send`) — Mutter (GNOME) o wlroots (gdtk/sway)
+El backend se elige con `--capture auto|mutter|wlr` (auto por `XDG_CURRENT_DESKTOP`):
+- **mutter** (GNOME Wayland): monitor virtual `Meta-*` + ScreenCast por PipeWire.
+- **wlr** (gdtk, sway, river, hyprland...): captura el output con `wlr-screencopy`
+  vía `gvd-capture` (shm), sin monitor virtual ni PipeWire. El cursor va incrustado
+  (`overlay-cursor=1`). Con `--virtual` (y `SWAYSOCK`) crea un monitor headless de
+  sway (`create_output`) y lo ubica con `--position`: extiende de verdad el
+  escritorio, como el `Meta-*` de Mutter; al terminar lo desmonta (`unplug`).
+
+Común:
 - python3 + `python-gobject` (gi: Gio, GLib)
-- GNOME Mutter ScreenCast (org.gnome.Mutter.ScreenCast) y PipeWire (`pipewire`, `libpipewire` + `pkg-config libpipewire-0.3`)
-- `gst-launch-1.0` con plugins: `gst-plugin-pipewire`, `gst-plugins-base/good/bad/ugly`
+- `gst-launch-1.0` con plugins: `gst-plugins-base/good/bad/ugly` (y `gst-plugin-pipewire` sólo en el path Mutter)
 - Codificador: `gst-plugin-va` (vah264enc, VA-API Intel/AMD) o `gst-plugins-ugly` (x264enc)
-- `gcc` + `pkg-config` para compilar `gvd-cursor` (cursor separado) desde `gvd-cursor.c`
+- `gcc` + `pkg-config` para compilar helpers desde fuente
+
+Sólo path Mutter:
+- GNOME Mutter ScreenCast (org.gnome.Mutter.ScreenCast) y PipeWire (`pipewire`, `libpipewire` + `pkg-config libpipewire-0.3`)
+- `gcc` + `pkg-config libpipewire-0.3` para compilar `gvd-cursor` (cursor separado)
+
+Sólo path wlroots:
+- `gcc` + `pkg-config wayland-client` para compilar `gvd-capture`; el protocolo
+  `wlr-screencopy-unstable-v1` está vendorizado en `protocols/` (headers generados,
+  ya no hace falta `wayland-scanner` ni `wlr-protocols`).
 
 ## Receptor (`gvd.py recv`) — gdtk, sway, cualquier Wayland/X11
 - python3 + `python-gobject`
@@ -22,4 +39,5 @@ El stream RTP/H.264/UDP o H.264/TCP **no cifra ni autentica**: sólo LAN confiab
   (`WAYLAND_DISPLAY=wayland-N` del shell), no en el del compositor padre.
 
 ## Detección
-`python3 gvd.py caps --json` lista lo disponible sin abrir streams.
+`python3 gvd.py caps --json` lista lo disponible sin abrir streams (incluye
+`send.backends`, `send.wlr_ready` y `send.wlr_capture_bin`).

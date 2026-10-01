@@ -4202,8 +4202,14 @@ func _start_gvd_screen(host_id, action):
 			activity_error = "pantalla: este equipo no puede emitir su escritorio"
 			return
 		var peer = GVD_LAUNCH.target_host_of(plan)
+		# gdtk/sway (wlroots): captura por wlr-screencopy. Con sway se extiende de
+		# verdad creando un monitor headless (--virtual); GNOME usa su Meta-*.
+		var backend = GVD_LAUNCH.local_emit_backend(
+			OS.get_environment("XDG_CURRENT_DESKTOP"),
+			OS.get_environment("XDG_SESSION_TYPE"))
+		var wlr_virtual = backend == "wlr" and _has_sway_socket()
 		var sp = GVD_LAUNCH.local_send_argv(gvd_path, peer,
-			GVD_LAUNCH.port_of_plan(plan), GVD_LAUNCH.position_for(direction))
+			GVD_LAUNCH.port_of_plan(plan), GVD_LAUNCH.position_for(direction), wlr_virtual)
 		if not bool(sp.get("ok", false)):
 			activity_error = "pantalla: " + String(sp.get("error", ""))
 			return

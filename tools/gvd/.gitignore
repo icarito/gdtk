@@ -1,6 +1,9 @@
 # binario compilado del lector de cursor (se compila desde gvd-cursor.c)
 gvd-cursor
 
+# binario compilado de la captura wlroots (se compila desde gvd-capture.c)
+gvd-capture
+
 # temporales de Python
 __pycache__/
 *.pyc

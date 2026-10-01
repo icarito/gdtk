@@ -63,6 +63,35 @@ class StreamTest(unittest.TestCase):
             tx.set_state(Gst.State.NULL)
             rx.set_state(Gst.State.NULL)
 
+    # -- backend de captura wlroots (sway/gdtk), sin PipeWire -------------------
+    def test_wlr_source_pipeline(self):
+        args = gvd.build_parser().parse_args([
+            "send", "--encoder", "x264", "--capture", "wlr", "--host", "127.0.0.1"])
+        sender = gvd.Sender.__new__(gvd.Sender)
+        sender.a, sender.node_id = args, 0
+        source = ["fdsrc", "fd=0", "!", "rawvideoparse", "format=BGRx",
+                  "width=1280", "height=800", "framerate=30/1", "!"]
+        cmd = sender.build_pipeline(source=source)
+        self.assertIn("rawvideoparse", cmd)
+        self.assertNotIn("pipewiresrc", cmd)
+        self.assertIn("x264enc", cmd)
+        self.assertIn("rtph264pay", cmd)
+        # El formato wl_shm XR24/AR24 mapea a BGRx/BGRA.
+        self.assertEqual(gvd.CAPTURE_FORMATS["XR24"], "BGRx")
+        self.assertEqual(gvd.CAPTURE_FORMATS["AR24"], "BGRA")
+
+    def test_detect_capture_backend(self):
+        with patch.dict(gvd.os.environ, {"XDG_CURRENT_DESKTOP": "GNOME",
+                                         "WAYLAND_DISPLAY": "wayland-0"}):
+            self.assertEqual(gvd.detect_capture_backend("auto"), "mutter")
+        with patch.dict(gvd.os.environ, {"XDG_CURRENT_DESKTOP": "gdtk"}):
+            with patch.object(gvd, "wlr_capture_available", return_value=True):
+                self.assertEqual(gvd.detect_capture_backend("auto"), "wlr")
+            with patch.object(gvd, "wlr_capture_available", return_value=False):
+                self.assertEqual(gvd.detect_capture_backend("auto"), "mutter")
+        with patch.object(gvd, "wlr_capture_available", return_value=False):
+            self.assertIsNone(gvd.detect_capture_backend("wlr"))
+
     def test_retimestamp_repeated_source_pts(self):
         pipeline = Gst.parse_launch(
             "videotestsrc is-live=true num-buffers=12 ! "

@@ -1,6 +1,6 @@
 [Desktop Entry]
 Name=gdtk (Sugar-like)
-Comment=Sugar-like shell sobre Godot/ImGui bajo cage
-Exec=/run/media/icarito/DATA/icarito/Proyectos/gdtk/session/gdtk-session
+Comment=Shell tipo Sugar sobre Godot/ImGui con compositor wlroots embebido
+Exec=env GDTK_VIDEO_DRIVER=GLES2 /run/media/icarito/DATA/icarito/Proyectos/gdtk/session/gdtk-session-sway
 Type=Application
 DesktopNames=gdtk

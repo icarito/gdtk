@@ -26,11 +26,16 @@ func _init():
 	check("valid_position rechaza basura",
 		not mod.valid_position("diagonal") and not mod.valid_position(""))
 
-	# Sólo GNOME Wayland puede emitir localmente.
+	# GNOME (Mutter) y compositores wlroots (gdtk/sway) pueden emitir.
 	check("emisor local en GNOME Wayland",
 		mod.local_can_emit("GNOME") and mod.local_can_emit("ubuntu:GNOME", "wayland"))
-	check("sway/x11 no emiten",
-		not mod.local_can_emit("sway") and not mod.local_can_emit("GNOME", "x11"))
+	check("GNOME elige Mutter", mod.local_emit_backend("GNOME") == "mutter")
+	check("gdtk/sway emiten por wlroots",
+		mod.local_can_emit("gdtk") and mod.local_emit_backend("gdtk") == "wlr"
+		and mod.local_can_emit("sway") and mod.local_emit_backend("sway") == "wlr")
+	check("x11 y escritorios sin emisor no emiten",
+		not mod.local_can_emit("GNOME", "x11") and not mod.local_can_emit("XFCE")
+		and not mod.local_can_emit(""))
 
 	# Extracción del plan real de neighborhood_actions.
 	var A = load("res://neighborhood_actions.gd")
