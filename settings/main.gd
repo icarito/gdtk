@@ -13,6 +13,7 @@ const STYLE = preload("res://ui/style.gd")
 
 const PAGES = [
 	{"id": "keyboard", "label": "Teclado", "path": "res://pages/keyboard.gd"},
+	{"id": "touchpad", "label": "Desplazamiento", "path": "res://pages/touchpad.gd"},
 	{"id": "locale", "label": "Idioma", "path": "res://pages/locale.gd"},
 	{"id": "accent", "label": "Color de acento", "path": "res://pages/accent.gd"},
 	{"id": "wallpaper", "label": "Fondo de pantalla", "path": "res://pages/wallpaper.gd"},

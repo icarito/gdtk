@@ -55,7 +55,12 @@ const WALLPAPER_MODE_LABELS = {
 const WALLPAPER_DEFAULT_COLOR = "#0f1118"
 const WALLPAPER_DEFAULT = {"mode": "gradient", "color": WALLPAPER_DEFAULT_COLOR, "path": ""}
 
-const FIELDS = ["keyboard", "locale", "accent", "wallpaper"]
+# Táctil: dirección del desplazamiento de dos dedos. "Natural" (como en un móvil)
+# queda activo por defecto; el valor vive en settings.json y lo aplica la sesión/sway
+# (`session/input-settings.sh`) y la app en vivo (swaymsg).
+const NATURAL_SCROLL_DEFAULT = true
+
+const FIELDS = ["keyboard", "locale", "accent", "wallpaper", "natural_scroll"]
 
 const HEX_CHARS = "0123456789abcdef"
 
@@ -69,6 +74,7 @@ func defaults():
 		"locale": LOCALE_DEFAULT,
 		"accent": ACCENT_DEFAULT,
 		"wallpaper": WALLPAPER_DEFAULT.duplicate(true),
+		"natural_scroll": NATURAL_SCROLL_DEFAULT,
 	}
 
 
@@ -84,6 +90,7 @@ func normalize(data):
 	out["locale"] = locale_id(data.get("locale", ""))
 	out["accent"] = accent_hex(data.get("accent", ""))
 	out["wallpaper"] = wallpaper(data.get("wallpaper", {}))
+	out["natural_scroll"] = nat_scroll(data.get("natural_scroll", null))
 	for k in data.keys():
 		if not out.has(k):
 			out[k] = data[k]
@@ -181,6 +188,40 @@ func wallpaper_kind(w):
 	return "solid"
 
 
+# Bool tolerante para natural_scroll: acepta bool real y las formas de texto/número
+# que pueda dejar un archivo escrito a mano; ante cualquier otra cosa, el default.
+func nat_scroll(v):
+	if v is bool:
+		return v
+	if v is String:
+		var s = v.strip_edges().to_lower()
+		if s in ["false", "0", "no", "off", ""]:
+			return false
+		if s in ["true", "1", "yes", "on"]:
+			return true
+		return NATURAL_SCROLL_DEFAULT
+	if v is float or v is int:
+		return int(v) != 0
+	return NATURAL_SCROLL_DEFAULT
+
+
+# Argumentos de `swaymsg` para fijar la dirección del scroll. El scroll natural no
+# es sólo de touchpad: también aplica al mouse/TrackPoint (`type:pointer`), así que
+# se devuelven los dos comandos. Puro (no ejecuta nada): lo usan la app, el shell
+# (en vivo) y los tests.
+func natural_scroll_cmds(value):
+	var v = "enabled" if nat_scroll(value) else "disabled"
+	return [
+		["input", "type:touchpad", "natural_scroll", v],
+		["input", "type:pointer", "natural_scroll", v],
+	]
+
+
+# Compatibilidad: primer comando (touchpad).
+func natural_scroll_cmd(value):
+	return natural_scroll_cmds(value)[0]
+
+
 # --- Serialización ------------------------------------------------------------
 
 func to_json(d):
@@ -209,7 +250,7 @@ func locale_file_content(locale):
 # Los cambios de teclado e idioma no son en vivo: la UI avisa que aplican al
 # reiniciar. Acento y fondo sí se aplican al instante en el shell.
 func is_live(field):
-	return field == "accent" or field == "wallpaper"
+	return field == "accent" or field == "wallpaper" or field == "natural_scroll"
 
 
 func restart_notice(field):
@@ -271,6 +312,15 @@ func selftest():
 	assert(locale_file_content("en_US") == "LANG=en_US.UTF-8\n")
 	assert(is_live("accent") and is_live("wallpaper"))
 	assert(not is_live("keyboard") and not is_live("locale"))
+	assert(d.natural_scroll == NATURAL_SCROLL_DEFAULT)
+	assert(nat_scroll("false") == false and nat_scroll("on") == true)
+	assert(nat_scroll(0) == false and nat_scroll(1) == true)
+	assert(nat_scroll("cosa") == NATURAL_SCROLL_DEFAULT)
+	assert(natural_scroll_cmd(false) == ["input", "type:touchpad", "natural_scroll", "disabled"])
+	assert(natural_scroll_cmd(true) == ["input", "type:touchpad", "natural_scroll", "enabled"])
+	var nsc = natural_scroll_cmds(false)
+	assert(nsc.size() == 2 and nsc[0][1] == "type:touchpad" and nsc[1][1] == "type:pointer"
+		and nsc[1][3] == "disabled", "scroll natural también para pointer")
 	var r = wallpaper_rect("fill", Vector2(100, 50), Vector2(200, 200))
 	assert(r.size == Vector2(400, 200))
 	assert(r.position == Vector2(-100, 0))

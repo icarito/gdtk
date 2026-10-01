@@ -28,6 +28,12 @@ func _init():
 	check("default idioma", d.locale == S.LOCALE_DEFAULT)
 	check("default acento en paleta", d.accent in S.ACCENT_PALETTE)
 	check("default fondo sin imagen", d.wallpaper.path == "")
+	check("default scroll natural activo", d.natural_scroll == true and S.NATURAL_SCROLL_DEFAULT)
+	check("scroll natural tolera false de texto", S.nat_scroll("false") == false and S.nat_scroll("on") == true)
+	check("scroll natural cae al default con basura", S.nat_scroll("cosa") == S.NATURAL_SCROLL_DEFAULT)
+	check("argumentos de scroll natural",
+		S.natural_scroll_cmd(false) == ["input", "type:touchpad", "natural_scroll", "disabled"]
+		and S.natural_scroll_cmd(true) == ["input", "type:touchpad", "natural_scroll", "enabled"])
 
 	# Hex: válidos, normalización y rechazos.
 	check("hex sin # aceptado", S.valid_hex("AABBCC") == "#aabbcc")

@@ -3297,6 +3297,22 @@ func _go_home():
 func _apply_settings():
 	if settings_bridge != null:
 		accent = settings_bridge.accent
+		_apply_input_settings()
+
+
+# Aplica en vivo al compositor (sway) los ajustes de entrada cuando cambia
+# settings.json, sin reiniciar la sesión: hoy el scroll natural, que no es sólo de
+# touchpad sino también del mouse/TrackPoint (`type:pointer`). Sólo sway; sin
+# SWAYSOCK no hace nada (el valor igual queda para el próximo arranque).
+func _apply_input_settings():
+	if settings_bridge == null or settings_bridge.model == null:
+		return
+	if OS.get_environment("SWAYSOCK").strip_edges() == "":
+		return
+	var nat = settings_bridge.model.nat_scroll(
+		settings_bridge.settings.get("natural_scroll", null))
+	for cmd in settings_bridge.model.natural_scroll_cmds(nat):
+		OS.execute("swaymsg", cmd, false)
 
 
 # Reapa el Thread de lectura del puente y aplica el snapshot si cambió. Sin I/O acá.
