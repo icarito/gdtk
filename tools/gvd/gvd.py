@@ -51,6 +51,12 @@ DEFAULT_BITRATE = 8000
 DEFAULT_JITTER_MS = 30
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+import gvd_util as U  # noqa: E402  (K18: logica pura, sin GI/Mutter)
+
+WINDOW_TITLE = U.WINDOW_TITLE
+APP_ID = U.APP_ID
 CURSOR_HELPER = "gvd-cursor"
 CURSOR_HELPER_SRC = "gvd-cursor.c"
 CURSOR_MAX_HZ = 120.0
@@ -217,6 +223,12 @@ class Sender:
         self.proc = None
         self.cursor = None
         self.stopping = False
+        # K18: si Mutter cambia la disposicion/tamano del monitor virtual o la
+        # sesion ScreenCast se corta, se recrea sesion+pipeline sin relanzar.
+        self.monitors_changed = False
+        self.sub_ids = []
+        self.attempt = 0
+        self.last_size = (int(args.width), int(args.height))
 
     # -- D-Bus helpers
     def _call(self, service, path, iface, method, params=None, timeout=10000):
@@ -252,9 +264,37 @@ class Sender:
         def on_added(_conn, _sender, _path, _iface, _sig, params, _data):
             self.node_id = params.unpack()[0]
             log(f"[+] PipeWireStreamAdded -> node id = {self.node_id}")
-        self.conn.signal_subscribe(SC_NAME, STREAM_IFACE, "PipeWireStreamAdded",
-                                   self.stream_path, None,
-                                   Gio.DBusSignalFlags.NONE, on_added, None)
+        self.sub_ids.append(self.conn.signal_subscribe(
+            SC_NAME, STREAM_IFACE, "PipeWireStreamAdded", self.stream_path,
+            None, Gio.DBusSignalFlags.NONE, on_added, None))
+
+    # K18: al cambiar la disposicion/tamano desde "Pantallas" de GNOME hay que
+    # releer el tamano del monitor virtual y recrear sesion+pipeline.
+    def subscribe_monitors(self):
+        def on_changed(_conn, _sender, _path, _iface, _sig, _params, _data):
+            if not self.monitors_changed:
+                log("[*] MonitorsChanged: recreo la sesion de pantalla")
+            self.monitors_changed = True
+        self.sub_ids.append(self.conn.signal_subscribe(
+            DC_NAME, DC_IFACE, "MonitorsChanged", DC_PATH,
+            None, Gio.DBusSignalFlags.NONE, on_changed, None))
+
+    def unsubscribe(self):
+        for sid in self.sub_ids:
+            try:
+                self.conn.signal_unsubscribe(sid)
+            except GLib.Error:
+                pass
+        self.sub_ids = []
+
+    def read_virtual_size(self):
+        """Tamano actual del monitor virtual (Meta-*) en GetCurrentState, o None."""
+        try:
+            _serial, monitors, _logical, _props = self.get_state()
+        except GLib.Error as e:
+            log(f"[!] GetCurrentState: {e.message}")
+            return None
+        return U.virtual_monitor_size(monitors)
 
     def start_session(self):
         self._call(SC_NAME, self.session_path, SESSION_IFACE, "Start", None)
@@ -426,19 +466,60 @@ class Sender:
             log("[!] --stats no aplica al send por red (solo --local)")
         return e
 
-    def run(self):
-        self.conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    def _notify_receiver_size(self, size):
+        """Primer paquete UDP de control en el puerto del cursor (K18)."""
+        if not size or self.a.local:
+            return
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.sendto(U.encode_size_control(size[0], size[1]),
+                        (self.a.host, self.a.port + 1))
+            sock.close()
+            log(f"[*] aviso al receptor: video {size[0]}x{size[1]}")
+        except OSError as e:
+            log(f"[!] no pude avisar el tamano nuevo: {e}")
+
+    def _sleep_interruptible(self, seconds):
+        deadline = time.monotonic() + max(0.0, seconds)
+        while not self.stopping and time.monotonic() < deadline:
+            time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+
+    def _teardown_stream(self):
+        if self.cursor is not None:
+            log("[*] deteniendo lector de cursor")
+            self.cursor.stop()
+            self.cursor = None
+        if self.proc is not None and self.proc.poll() is None:
+            log("[*] terminando pipeline")
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+        self.proc = None
+        self.stop_session()
+        self.node_id = None
+        self.session_path = None
+        self.stream_path = None
+
+    def _create_and_stream(self, apply_position):
+        # Al recrear, si el monitor virtual aun existe se adopta su tamano: la
+        # nueva captura sigue el layout que la persona acaba de ajustar.
+        if not apply_position:
+            size = self.read_virtual_size()
+            if size:
+                self.a.width, self.a.height = size
         self.create_session()
         self.record_virtual()
         self.subscribe_stream()
         self.start_session()
         if self.node_id is None:
-            log("[!] sin node id: abortando")
-            self.stop_session()
-            return 2
+            log("[!] sin node id")
+            return False, None
         time.sleep(1.5)
-        self.move_virtual(self.a.position)
-
+        if apply_position:
+            self.move_virtual(self.a.position)
+        size = self.read_virtual_size() or (self.a.width, self.a.height)
         cmd = self.build_pipeline()
         log("[*] send: " + " ".join(cmd))
         env = None
@@ -451,25 +532,56 @@ class Sender:
         self.proc = subprocess.Popen(child_cmd, env=env)
         if self.a.cursor_mode == "separate" and not self.a.local:
             self.start_cursor()
+        return True, size
+
+    def run(self):
+        self.conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        self.subscribe_monitors()
+        first = True
+        rc = 0
         try:
-            while self.proc.poll() is None:
+            while not self.stopping:
+                self.monitors_changed = False
+                if not first:
+                    self.attempt += 1
+                    plan = U.sender_restart_plan(self.attempt, first=False)
+                    if not plan["ok"]:
+                        log("[!] demasiados reintentos de screencast; me detengo")
+                        rc = 2
+                        break
+                    log(f"[*] recreando sesion+pipeline en {plan['delay']:.0f}s "
+                        f"(intento {self.attempt}/{U.MAX_RESTARTS})")
+                    self._sleep_interruptible(plan["delay"])
+                    if self.stopping:
+                        break
+                ok, size = self._create_and_stream(apply_position=first)
+                if not ok:
+                    self._teardown_stream()
+                    first = False
+                    continue
+                # `--position` solo en la primera creacion: no se pisa el layout
+                # que la persona acaba de ajustar. Si el tamano cambio, se avisa.
+                if not first and U.size_changed(self.last_size, size):
+                    self._notify_receiver_size(size)
+                self.last_size = size
+                while self.proc is not None and self.proc.poll() is None:
+                    if self.stopping or self.monitors_changed:
+                        break
+                    time.sleep(0.2)
                 if self.stopping:
+                    self._teardown_stream()
                     break
-                time.sleep(0.2)
+                if self.monitors_changed:
+                    log("[*] releyendo el layout de pantallas de Mutter")
+                else:
+                    log(f"[!] pipeline del emisor termino "
+                        f"rc={self.proc.returncode}")
+                self._teardown_stream()
+                first = False
         finally:
-            if self.cursor is not None:
-                log("[*] deteniendo lector de cursor")
-                self.cursor.stop()
-                self.cursor = None
-            if self.proc.poll() is None:
-                log("[*] terminando pipeline")
-                self.proc.terminate()
-                try:
-                    self.proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self.proc.kill()
-        self.stop_session()
-        return 0
+            self.unsubscribe()
+            self._teardown_stream()
+        return rc
 
     def start_cursor(self):
         helper = ensure_cursor_helper()
@@ -521,10 +633,11 @@ def ffplay_command(args):
 
 
 def recv_pipeline(args, sink, stats):
+    # K18: el receptor es una ventana normal, nunca fullscreen; el shell la
+    # coloca en el hueco central. `force-aspect-ratio` mantiene la proporcion
+    # dentro del slot que le da el compositor.
     inner = [sink, "sync=false"]
-    if sink == "waylandsink":
-        inner += ["fullscreen=true"]
-    else:
+    if sink in VIDEO_SINKS:
         inner += ["force-aspect-ratio=true"]
     rtp_caps = 'application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000'
     if args.transport == "tcp":
@@ -638,6 +751,17 @@ class SwayCursor:
         return (int(round(ox + x * sx)), int(round(oy + y * sy)))
 
     # -- threads
+    def set_video_size(self, width, height):
+        """Actualiza el tamano del video: el cursor se reescala en `_map`."""
+        try:
+            w, h = int(width), int(height)
+        except (TypeError, ValueError):
+            return
+        if w <= 0 or h <= 0 or (w, h) == (self.video_w, self.video_h):
+            return
+        log(f"[*] cursor: video ahora {w}x{h}")
+        self.video_w, self.video_h = w, h
+
     def _recv_loop(self):
         while not self.stopping:
             try:
@@ -646,9 +770,15 @@ class SwayCursor:
                 continue
             except OSError:
                 break
-            if len(data) < 8:
+            msg = U.read_datagram(data)
+            if msg is None:
                 continue
-            x, y, seq = struct.unpack("!HHI", data[:8])
+            kind, value = msg
+            if kind == "size":
+                # Control de tamano del emisor: reescala el cursor sin cortar el proceso.
+                self.set_video_size(value[0], value[1])
+                continue
+            x, y, seq = value
             if seq > self.last_seq or self.last_seq - seq > 0x7FFFFFFF:
                 self.last_seq = seq
                 self.latest = (x, y)
@@ -706,6 +836,251 @@ class SwayCursor:
                 pass
 
 
+VIDEO_SINKS = ("glimagesink", "xvimagesink", "waylandsink")
+
+
+# ---------------------------------------------------------------- recv in-process
+
+class GstReceiver:
+    """Pipeline gst del receptor en el proceso actual (K18).
+
+    Correr el pipeline dentro de gvd permite fijar titulo/app_id de la ventana
+    (waylandsink usa g_get_prgname) y vigilar los cuadros decodificados: si no
+    llega ninguno en ~5 s, o si cambia el tamano del video (fin de la sesion
+    ScreenCast del emisor / reajuste de layout), se reinicia SOLO el pipeline,
+    sin tocar el proceso ni el cursor. El cursor se reescala con el tamano nuevo.
+    """
+
+    TICK_MS = 250
+
+    def __init__(self, args, sink, cursor=None):
+        self.a = args
+        self.sink = sink
+        self.cursor = cursor
+        self.gst = None
+        self.pipeline = None
+        self.loop = None
+        self.timer = 0
+        self.max_timer = 0
+        self.restart_timer = 0
+        self.lock = threading.Lock()
+        self.last_buffer = None
+        self.video_size = None
+        self.expected = (int(args.video_w), int(args.video_h))
+        self.attempt = 0
+        self.restart_want = False
+        self.stopping = False
+        self.failed = False
+
+    # -- pipeline
+    def _build(self):
+        elements = recv_pipeline(self.a, self.sink, self.a.stats)[2:]
+        try:
+            return self.gst.parse_launch(" ".join(elements))
+        except GLib.Error as e:
+            log(f"[!] GStreamer: {e.message}")
+            return None
+
+    def _sink_element(self):
+        target = SINK_ELEMENTS.get(self.sink, self.sink)
+        it = self.pipeline.iterate_elements()
+        while True:
+            res, el = it.next()
+            if res != self.gst.IteratorResult.OK:
+                break
+            factory = el.get_factory()
+            if factory is not None and factory.get_name() == target:
+                return el
+        return None
+
+    def _attach(self):
+        el = self._sink_element()
+        if el is None:
+            return
+        pad = el.get_static_pad("sink")
+        if pad is None:
+            return
+        pad.add_probe(self.gst.PadProbeType.BUFFER, self._on_buffer_probe)
+        pad.add_probe(self.gst.PadProbeType.EVENT_DOWNSTREAM, self._on_event_probe)
+
+    def _on_buffer_probe(self, _pad, _info):
+        with self.lock:
+            self.last_buffer = time.monotonic()
+        return self.gst.PadProbeReturn.OK
+
+    def _on_event_probe(self, _pad, info):
+        event = info.get_event()
+        if event is None or event.type != self.gst.EventType.CAPS:
+            return self.gst.PadProbeReturn.OK
+        caps = event.parse_caps()
+        if caps is None:
+            return self.gst.PadProbeReturn.OK
+        size = U.parse_caps_size(str(caps.to_string()))
+        if size is None:
+            return self.gst.PadProbeReturn.OK
+        with self.lock:
+            self.video_size = size
+            if U.size_changed(self.expected, size):
+                self.restart_want = True
+        return self.gst.PadProbeReturn.OK
+
+    def _start_pipeline(self):
+        self.pipeline = self._build()
+        if self.pipeline is None:
+            self.failed = True
+            self.request_stop()
+            return False
+        self._attach()
+        if self.pipeline.set_state(self.gst.State.PLAYING) == \
+                self.gst.StateChangeReturn.FAILURE:
+            log("[!] GStreamer no pudo iniciar el pipeline del receptor")
+            self._stop_pipeline()
+            self.failed = True
+            self.request_stop()
+            return False
+        with self.lock:
+            self.last_buffer = None
+            self.video_size = None
+            self.restart_want = False
+        return True
+
+    def _stop_pipeline(self):
+        if self.pipeline is not None:
+            self.pipeline.set_state(self.gst.State.NULL)
+            self.pipeline = None
+
+    # -- watchdog
+    def _tick(self):
+        if self.stopping:
+            return True
+        if self.restart_timer:
+            return True  # ya hay un reinicio programado: no apilar otro
+        now = time.monotonic()
+        with self.lock:
+            last = self.last_buffer
+            observed = self.video_size
+            want = self.restart_want
+        if last is not None and now - last < U.STALL_TIMEOUT:
+            self.attempt = 0  # volvio a fluir: el backoff arranca de nuevo
+        elif not want and U.should_restart(now, last, self.expected, observed):
+            want = True
+        if want:
+            self._restart()
+        return True
+
+    def _restart(self):
+        with self.lock:
+            self.restart_want = False
+            self.last_buffer = None  # evita re-disparar con datos viejos
+            size = self.video_size
+        self.attempt += 1
+        delay = U.backoff_delay(self.attempt)
+        if size is not None:
+            self.expected = size
+            if self.cursor is not None:
+                self.cursor.set_video_size(size[0], size[1])
+        log(f"[*] recv: reinicio pipeline ({self.attempt}) en {delay:.0f}s "
+            f"video={self.expected[0]}x{self.expected[1]}")
+        self._stop_pipeline()
+        self.restart_timer = GLib.timeout_add(int(delay * 1000), self._restart_now)
+
+    def _restart_now(self):
+        self.restart_timer = 0
+        if self.stopping:
+            return False
+        self._start_pipeline()
+        return False
+
+    def _on_max_seconds(self):
+        self.max_timer = 0
+        self.request_stop()
+        return False
+
+    def request_stop(self):
+        self.stopping = True
+        if self.loop is not None:
+            self.loop.quit()
+
+    def _install_signals(self):
+        def on_signal(_sig, _frame):
+            self.request_stop()
+        signal.signal(signal.SIGINT, on_signal)
+        signal.signal(signal.SIGTERM, on_signal)
+
+    def run(self):
+        gi.require_version("Gst", "1.0")
+        from gi.repository import Gst
+        self.gst = Gst
+        Gst.init(None)
+        # waylandsink toma titulo y app_id de g_get_prgname(): se fija aqui para
+        # que el shell reconozca la ventana como "Pantalla compartida".
+        GLib.set_prgname(WINDOW_TITLE)
+        GLib.set_application_name(WINDOW_TITLE)
+        if not self._start_pipeline():
+            return 2
+        self.loop = GLib.MainLoop()
+        self._install_signals()
+        self.timer = GLib.timeout_add(self.TICK_MS, self._tick)
+        if self.a.max_seconds:
+            self.max_timer = GLib.timeout_add(int(self.a.max_seconds * 1000),
+                                              self._on_max_seconds)
+        self.loop.run()
+        for src in (self.timer, self.max_timer, self.restart_timer):
+            if src:
+                GLib.source_remove(src)
+        self.timer = self.max_timer = self.restart_timer = 0
+        self._stop_pipeline()
+        return 2 if self.failed else 0
+
+
+def _run_recv_subprocess(args, sink):
+    """Sink externo (ffplay) o fallback gst-launch: sin watchdog ni titulo."""
+    env = dict(os.environ)
+    if args.stats:
+        env["GST_DEBUG"] = "fpsdisplaysink:5"
+    cmd = ffplay_command(args) if sink == "ffplay" else \
+        recv_pipeline(args, sink, args.stats)
+    log(f"[*] recv sink={sink}: " + " ".join(cmd))
+    proc = subprocess.Popen(cmd, env=env)
+    t0 = time.monotonic()
+    state = {"stop": False}
+
+    def on_signal(_sig, _frame):
+        state["stop"] = True
+
+    old_int = signal.signal(signal.SIGINT, on_signal)
+    old_term = signal.signal(signal.SIGTERM, on_signal)
+    try:
+        while proc.poll() is None:
+            if state["stop"]:
+                break
+            if args.max_seconds and time.monotonic() - t0 > args.max_seconds:
+                break
+            time.sleep(0.2)
+    finally:
+        signal.signal(signal.SIGINT, old_int)
+        signal.signal(signal.SIGTERM, old_term)
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        return 0
+    return proc.returncode if proc.returncode else 0
+
+
+def _run_recv_gst(args, sink, cursor):
+    try:
+        gi.require_version("Gst", "1.0")
+        from gi.repository import Gst
+    except (ValueError, ImportError) as e:
+        log(f"[!] sin GStreamer en proceso ({e}); uso gst-launch externo")
+        return _run_recv_subprocess(args, sink)
+    Gst.init(None)
+    return GstReceiver(args, sink, cursor).run()
+
+
 def run_recv(args):
     if args.sink == "ffplay" and args.transport != "tcp":
         log("[!] --sink ffplay requiere --transport tcp")
@@ -724,31 +1099,13 @@ def run_recv(args):
                                 sock_path)
             if not cursor.start():
                 cursor = None
-    env = dict(os.environ)
-    if args.stats:
-        env["GST_DEBUG"] = "fpsdisplaysink:5"
     try:
-        for i, sink in enumerate(sinks):
-            cmd = ffplay_command(args) if sink == "ffplay" else recv_pipeline(args, sink, args.stats)
-            log(f"[*] recv sink={sink}: " + " ".join(cmd))
-            proc = subprocess.Popen(cmd, env=env)
-            t0 = time.monotonic()
-            try:
-                while proc.poll() is None:
-                    if args.max_seconds and \
-                            time.monotonic() - t0 > args.max_seconds:
-                        break
-                    time.sleep(0.2)
-            except KeyboardInterrupt:
-                pass
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
+        for sink in sinks:
+            rc = _run_recv_subprocess(args, sink) if sink == "ffplay" \
+                else _run_recv_gst(args, sink, cursor)
+            if rc == 0:
                 return 0
-            log(f"[!] {sink} termino rc={proc.returncode}, probando siguiente")
+            log(f"[!] {sink} termino rc={rc}, probando siguiente")
     finally:
         if cursor is not None:
             cursor.stop()
@@ -972,14 +1329,13 @@ def main():
         if args.jitter_ms < 0:
             raise SystemExit("[!] --jitter-ms debe ser >= 0")
         try:
-            args.video_w, args.video_h = parse_size(args.video_size)
-        except ValueError:
-            args.video_w, args.video_h = 1280, 800
+            args.video_w, args.video_h = U.parse_size(args.video_size) \
+                or U.DEFAULT_VIDEO_SIZE
+        except (TypeError, ValueError):
+            args.video_w, args.video_h = U.DEFAULT_VIDEO_SIZE
 
-        def on_recv_signal(_sig, _frame):
-            raise KeyboardInterrupt
-        signal.signal(signal.SIGINT, on_recv_signal)
-        signal.signal(signal.SIGTERM, on_recv_signal)
+        # run_recv instala sus propias señales (GstReceiver o el sink externo);
+        # no se pisa con una que aborte el pipeline en medio del reinicio.
         try:
             return run_recv(args)
         except KeyboardInterrupt:

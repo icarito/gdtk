@@ -25,6 +25,7 @@ python3 gvd.py send --host tengu.local          # 1280x800@30, 8 Mbps, a la dere
 | Archivo | Qué es |
 |---|---|
 | `gvd.py` | La herramienta (`send`/`recv`/`caps`). |
+| `gvd_util.py` | Lógica pura (tamaños, backoff, paquete de control, decision de reinicio); test `tests/gvd_resize_test.py` con `python3`, sin Mutter. |
 | `gvd-cursor.c` | Helper C (libpipewire) que lee `SPA_META_Cursor`; `send` lo compila a `gvd-cursor` (ignorado en git). |
 | `extend-tengu.sh` | Atajo emisor→tengu. |
 | `DESIGN.md` | Diseño de integración con gdtk/Vecindario y decisiones abiertas. |
@@ -93,7 +94,10 @@ UDP en `port+1` (5601); `recv` mueve el cursor nativo de sway con i3-ipc (`seat 
 set x y`), descubriendo `$SWAYSOCK` o, si falta, un glob `/run/user/<uid>/sway-ipc.*.sock`.
 `--cursor none` lo desactiva; sin sway disponible sigue sin cursor (avisa una vez).
 
-Sinks en tengu: `ffplay` para TCP; `glimagesink` (ventana, Wayland y X11), `waylandsink` (con `fullscreen`), `xvimagesink` (sólo X11).
+Sinks en tengu: `ffplay` para TCP; `glimagesink` (ventana, Wayland y X11), `waylandsink` (ventana normal, sin fullscreen) y `xvimagesink` (sólo X11). El receptor corre el pipeline GStreamer en su propio proceso y se presenta como la ventana **"Pantalla compartida"** (app_id estable), para que el shell la coloque en el hueco central del Frame como cualquier ventana.
+
+### Receptor resistente a cambios de layout (K18)
+Si no llega ningún cuadro decodificado en ~5 s, o si cambia el tamaño del video (por ejemplo al reajustar la disposición desde "Pantallas" de GNOME, cuando Mutter corta la sesión ScreenCast), el receptor **reinicia sólo su pipeline GStreamer** (no el proceso): rearma el sink, vuelve a engancharse al keyframe y reescala el cursor al tamaño nuevo. El reinicio usa backoff 1→5 s y no se rinde si el video vuelve a fluir. El emisor, al detectar `MonitorsChanged` o el fin de la sesión, recrea sesión y pipeline (backoff 1→5 s, máx. 5 intentos), reaplica `--position` sólo en la primera creación y avisa al receptor del tamaño nuevo con un paquete de control en el puerto del cursor.
 
 ## Integración con gdtk / Vecindario
 gdtk debe tratar a gvd como proceso externo. En desarrollo, buscar primero
@@ -143,7 +147,7 @@ Si luego se agrega mDNS, anunciar `_gvd._udp` con TXT mínimo como
 ## Formato en el cable (contrato para interoperar)
 RTP/UDP o H.264 Annex B/TCP en el puerto 5600, H.264 constrained-baseline (baseline con x264), SPS/PPS repetidos (`config-interval=-1`), keyframe completo cada 1 s de video, sin intra-refresh. UDP usa `payload=96`, `clock-rate=90000`, `mtu=1200`. El receptor debe usar el mismo transporte. Sin cifrado ni autenticación: sólo LAN de confianza.
 
-Cursor (si el emisor usa `--cursor-mode separate`): UDP puerto 5601, datagramas de 8 bytes big-endian `x:u16 y:u16 seq:u32` en píxeles del stream; el receptor descarta `seq` viejo y aplica sólo el último.
+Cursor (si el emisor usa `--cursor-mode separate`): UDP puerto 5601, datagramas de 8 bytes big-endian `x:u16 y:u16 seq:u32` en píxeles del stream; el receptor descarta `seq` viejo y aplica sólo el último. En el mismo puerto el emisor puede mandar un **paquete de control de tamaño** de 12 bytes (`GVDS` + ancho u16 + alto u16 + 4 reservados) tras recrear la sesión; el receptor lo distingue por longitud/magia, reescala el cursor y reinicia el pipeline con el video nuevo.
 
 ## Medido (PoC)
 ~30 fps (mín ~20 con escritorio quieto). CPU de tengu (Core2 L9400, decode H.264 por software): ~26–30 % de 2 cores. Encoder en A: VA-API.
