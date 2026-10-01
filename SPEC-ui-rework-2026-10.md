@@ -187,3 +187,28 @@ Tareas:
    `tools/gvd/gvd_util.py` con test `tests/gvd_resize_test.py` ejecutable con python3, sin Mutter.
 Write set: tools/gvd/*, shell/shell.gd (sólo colocación/maximizar de esa ventana por título), tests.
 No tocar el comportamiento de otras ventanas. Verificar con tools/verify_all.sh y python3 tests/gvd_resize_test.py.
+
+## K19 — Pin / autohide de las barras del Frame
+Pedido del usuario (2026-10-01): cada barra (superior e inferior) tiene un feature de
+**pin** (autohide). Con autohide la barra se muestra al acercar el mouse pero se
+**superpone** a las ventanas: la ventana usa todo el espacio disponible que deja la
+barra respectiva y **no se redimensiona** cuando la barra aparece. Con pin la barra
+queda siempre visible y **reserva** su franja: las ventanas no se colocan debajo ni
+encima de ella. Por defecto ambas barras van con autohide, **sincronizado**.
+Tareas:
+1. `shell/content_layout.gd`: la ventana (top-level) y los diálogos usan
+   `content_rect(viewport, block, frame_edges)` con sólo los lados que el Frame
+   reserva. Sin lados (autohide) -> viewport completo; barra fijada -> reserva su
+   franja. Eliminar el seguimiento del deslizamiento (el autohide no reflowea).
+2. `shell/frame.gd`: estado y persistencia por barra en `frame-applets.json`
+   (`"pin": {"top": bool, "bottom": bool}`, default false/false), deslizamiento por
+   barra, `reserved_edges()`, `toggle_pin(key)`, botón chincheta en cada barra y en el
+   menú de Controles, y atajos Super+P / Super+Shift+P.
+3. `shell/shell.gd`: `_tile_rect` = `content_rect` con los lados reservados; quitar
+   `frame_follow`/`_frame_slide`.
+4. Ajuste fino ideal (paso siguiente): si cambia el tamaño del tile del receptor gvd,
+   avisar al emisor para redimensionar acá el monitor virtual (receptor -> emisor), de
+   modo que la ventana y el video sigan 1:1 sin escalar.
+
+Write set: shell/content_layout.gd, shell/frame.gd, shell/shell.gd, tests/content_rect_test.gd.
+Verificar con tools/verify_all.sh y e2e remoto (pin por barra cambia la geometría del tile).
