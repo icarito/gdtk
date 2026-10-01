@@ -41,20 +41,12 @@ func _init():
 	var sides = S.content_rect(Vector2(1280, 800), 80.0, {"left": true, "right": true})
 	check("sólo laterales", _eq(sides, Rect2(80, 0, 1120, 800)))
 
-	# Zona de una ventana top-level (tile) en modo tiled: bajo la barra superior y
-	# alto completo hasta el borde inferior. Sigue el deslizamiento del Frame: a la
-	# vista deja la barra, oculto usa toda la pantalla (auto-hide tipo fullscreen).
-	var tile = S.tile_rect(Vector2(1280, 800), 80.0)
-	check("tile: bajo la barra superior, alto completo", _eq(tile, Rect2(0, 80, 1280, 720)))
-	check("tile no reserva la barra inferior", tile.end.y == 800.0)
-	check("tile con Frame oculto usa toda la pantalla",
-		_eq(S.tile_rect(Vector2(1280, 800), 80.0, -80.0), Rect2(0, 0, 1280, 800)))
-	check("tile a medio deslizar sigue el borde",
-		_eq(S.tile_rect(Vector2(1280, 800), 80.0, -40.0), Rect2(0, 40, 1280, 760)))
-	check("tile sin bloque ocupa el viewport",
-		_eq(S.tile_rect(Vector2(1280, 800), 0.0), Rect2(0, 0, 1280, 800)))
-	check("tile viewport chico no da negativos",
-		S.tile_rect(Vector2(0, 0), 80.0).size == Vector2.ZERO)
+	# Con autohide (sin lados reservados) la ventana usa todo el viewport; una barra
+	# fijada (pin) reserva su franja. El autohide no redimensiona la ventana.
+	check("autohide: viewport completo", _eq(S.content_rect(Vector2(1280, 800), 80.0, {}), Rect2(0, 0, 1280, 800)))
+	check("pin superior reserva su franja", _eq(S.content_rect(Vector2(1280, 800), 80.0, {"top": true}), Rect2(0, 80, 1280, 720)))
+	check("pin inferior reserva su franja", _eq(S.content_rect(Vector2(1280, 800), 80.0, {"bottom": true}), Rect2(0, 0, 1280, 720)))
+	check("ambas barras fijadas: hueco entre las dos", _eq(S.content_rect(Vector2(1280, 800), 80.0, {"top": true, "bottom": true}), Rect2(0, 80, 1280, 640)))
 
 	# Sin lados ocupados: viewport completo.
 	check("sin Frame -> viewport completo",

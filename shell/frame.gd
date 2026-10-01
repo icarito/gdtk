@@ -80,19 +80,21 @@ var swallowed = {}
 var hot_timer = false
 # Pulsación de Super retenida mientras no se sepa si es un toque solo.
 var super_press = null
-# Deslizamiento: último estado dibujado (visible u Home) y cuándo cambió.
-var shown = false
-var slide_since = 0
-# Layout del último frame dibujado (para el control remoto / tests).
-var sysmon = Host.sc("res://sysmon.gd").new()
-var keyboard = Host.sc("res://applet_keyboard.gd").new()
-var bluetooth = Host.sc("res://applet_bluetooth.gd").new()
-var items_layout = []
-var drawn = false
-# Desplazamiento vertical actual del Frame (0 a la vista, -alto oculto). El layout
-# de tiles lo sigue para adaptar la ventana al hueco que deja el Frame y usar toda
-# la pantalla cuando está oculto (auto-hide estilo fullscreen).
-var slide_off = 0.0
+# Pin/autohide de cada barra (K19): por defecto AMBAS con autohide (se ocultan
+# solas y se muestran al acercar el mouse, superponiéndose a las ventanas sin
+# redimensionarlas). Una barra fijada (pin) queda siempre visible y RESERVA su
+# franja: las ventanas no se colocan debajo/encima de ella. El autohide está
+# sincronizado (una sola señal `visible`), pero el pin es por barra.
+var pin_top_bar = false
+var pin_bottom_bar = false
+var pin_saved_top = false
+var pin_saved_bottom = false
+# Deslizamiento por barra: último estado dibujado (mostrada u oculta) y cuándo
+# cambió. Antes eran un solo `shown`/`slide_since` compartido por las dos barras.
+var shown_top = false
+var shown_bottom = false
+var slide_since_top = 0
+var slide_since_bottom = 0
 # Teclado y drag: selección en el Frame, ventana "levantada" (tileo sin mouse),
 # y arrastre con mouse (soltar sobre otra ventana tilea; soltar fuera deshace).
 var sel = -1
@@ -105,6 +107,12 @@ var mouse_down = false
 var mouse_pos = Vector2.ZERO
 var slide_instant = false  # aparecer sin animación (Alt+Tab)
 var show_until = 0         # ms hasta el que el Frame no se auto-oculta (Alt+Tab)
+# Layout del último frame dibujado (para el control remoto / tests).
+var sysmon = Host.sc("res://sysmon.gd").new()
+var keyboard = Host.sc("res://applet_keyboard.gd").new()
+var bluetooth = Host.sc("res://applet_bluetooth.gd").new()
+var items_layout = []
+var drawn = false
 # Applets del borde inferior: orden visible persistido (no es items_layout, que sigue
 # siendo sólo de ventanas para el control remoto). `applets_future` conserva ids
 # desconocidos del archivo para una versión futura.
@@ -219,6 +227,13 @@ func _load_applets():
 							target.append(id)
 	pinned_saved_top = pinned_top.duplicate()
 	pinned_saved_dock = pinned_dock.duplicate()
+	# Pin de barras (K19): default autohide (false) si el archivo no lo trae.
+	var pins = applets_raw.get("pin", {})
+	if typeof(pins) == TYPE_DICTIONARY:
+		pin_top_bar = bool(pins.get("top", false))
+		pin_bottom_bar = bool(pins.get("bottom", false))
+	pin_saved_top = pin_top_bar
+	pin_saved_bottom = pin_bottom_bar
 	if not applets_raw.empty():
 		var bottom = applets_raw.get("bottom", null)
 		if typeof(bottom) == TYPE_ARRAY:
@@ -258,7 +273,8 @@ func _save_applets():
 	var bottom = applets_visible.duplicate()
 	for id in applets_future:
 		bottom.append(id)
-	if _same_list(bottom, applets_saved_bottom) and _same_list(pinned_top, pinned_saved_top) and _same_list(pinned_dock, pinned_saved_dock):
+	if _same_list(bottom, applets_saved_bottom) and _same_list(pinned_top, pinned_saved_top) and _same_list(pinned_dock, pinned_saved_dock) \
+			and pin_top_bar == pin_saved_top and pin_bottom_bar == pin_saved_bottom:
 		applets_dirty = false
 		return
 	var path = _applets_path()
@@ -267,6 +283,7 @@ func _save_applets():
 	applets_raw["bottom"] = bottom
 	applets_raw["top"] = pinned_top
 	applets_raw["dock"] = pinned_dock
+	applets_raw["pin"] = {"top": pin_top_bar, "bottom": pin_bottom_bar}
 	var tmp = path + ".tmp"
 	var w = File.new()
 	if w.open(tmp, File.WRITE) != OK:
@@ -280,6 +297,8 @@ func _save_applets():
 	applets_saved_bottom = bottom
 	pinned_saved_top = pinned_top.duplicate()
 	pinned_saved_dock = pinned_dock.duplicate()
+	pin_saved_top = pin_top_bar
+	pin_saved_bottom = pin_bottom_bar
 	applets_dirty = false
 
 
@@ -1195,6 +1214,12 @@ func _input(event):
 			shell.request_redraw()
 			_gulp(code)
 			return
+		if code == KEY_P:
+			# Super+P fija/auto-oculta la barra superior; Super+Shift+P, la inferior.
+			super_press = null
+			toggle_pin("bottom" if event.shift else "top")
+			_gulp(code)
+			return
 	if event.pressed:
 		_super_used()
 	if not event.pressed:
@@ -1485,7 +1510,8 @@ func _draw_applets(ui, vp, off, mouse):
 		ui.imgui_draw_rect_filled(Rect2(Vector2(0.0, by), Vector2(vp.x, 3.0)), NX_SEL, 0.0)
 	var dock_end = _draw_pinned(ui, pinned_dock, PAD, side, "dock")
 	var n = applets_visible.size()
-	var total_w = side + PAD
+	# La franja reserva además la celda "+" y la del pin (extremo derecho).
+	var total_w = (side + PAD) * 2
 	for id in applets_visible:
 		total_w += _applet_width(id, side) + PAD
 	var x = max(PAD, vp.x - PAD - total_w)
@@ -1523,10 +1549,19 @@ func _draw_applets(ui, vp, off, mouse):
 	ui.text_colored(NX_TEXT, "+")
 	if visible and sel == n_items + n:
 		_frame_focus(ui, add_b.rect, NX_SEL)
+	# Pin de la barra inferior (K19): fija la franja o vuelve al autohide.
+	if _draw_pin_toggle(ui, Vector2(add_x + side + PAD, y), side, pin_bottom_bar, "pin_bottom"):
+		toggle_pin("bottom")
+		entered = true
 	MENU_STYLE.begin(ui)
 	if ui.begin_popup("##applets_add"):
 		applet_picker_open = true
 		MENU_STYLE.chrome(ui, "Controles del Frame")
+		ui.text_disabled("Barras · auto-ocultar o fijar")
+		if MENU_STYLE.item(ui, "Barra superior fija", "", pin_top_bar):
+			toggle_pin("top")
+		if MENU_STYLE.item(ui, "Barra inferior fija", "", pin_bottom_bar):
+			toggle_pin("bottom")
 		ui.text_disabled("Fijar / quitar")
 		for a in APPLETS:
 			if MENU_STYLE.item(ui, a.name, "", applets_visible.has(a.id)):
@@ -1833,109 +1868,135 @@ func draw(ui):
 	# (el de este frame se rearma durante el dibujo).
 	pinned_prev = pinned_layout.duplicate()
 	pinned_layout = []
-	var off = _slide(visible or home, now)
-	slide_off = off
-	drawn = off > -bh
+	# Autohide sincronizado (una señal `visible`), con pin por barra: una barra
+	# fijada queda siempre a la vista; una con autohide sigue a `visible`/Home.
+	var want_top = home or visible or pin_top_bar
+	var want_bottom = home or visible or pin_bottom_bar
+	var off_top = _slide(want_top, now, "top")
+	var off_bottom = _slide(want_bottom, now, "bottom")
+	slide_instant = false
+	var top_drawn = off_top > -bh
+	var bottom_drawn = off_bottom > -bh
+	drawn = top_drawn or bottom_drawn
 	if not drawn:
+		items_layout = []
 		applets_layout = []
 		applets_drawn = false
 		shared_layout = []
 		shared_drawn = false
 		trash_layout = null
 		return
+	if not top_drawn:
+		# Barra superior fuera: no hay layout de ventanas en pantalla.
+		items_layout = []
+		trash_layout = null
+	if not bottom_drawn:
+		applets_layout = []
+		applets_drawn = false
+		shared_layout = []
+		shared_drawn = false
 
 	# Teselas cuadradas de lado U (alto de la barra).
 	var side = bh
-	ui.push_style_var_vec2(ui.STYLE_VAR_WINDOW_PADDING, Vector2.ZERO)
-	ui.set_next_window_pos(Vector2(0.0, off), true)
-	ui.set_next_window_size(Vector2(vp.x, bh), true)
-	var flags = ui.WINDOW_NO_DECORATION | ui.WINDOW_NO_MOVE | ui.WINDOW_NO_SAVED_SETTINGS | ui.WINDOW_NO_SCROLLBAR | ui.WINDOW_NO_BACKGROUND
 	var chosen = null
 	var to_close = null
 	var to_minimize = null
-	if ui.begin("##frame", flags):
-		# Fondo NeXT de la franja superior.
-		ui.imgui_draw_rect_filled(Rect2(Vector2.ZERO, Vector2(vp.x, bh)), NX_BG, 0.0)
-		if app_drag != null and mouse.y <= bh:
-			ui.imgui_draw_rect_filled(Rect2(Vector2(0.0, off + bh - 3.0), Vector2(vp.x, 3.0)), NX_SEL, 0.0)
-		var y = (bh - side) * 0.5
-		var x = PAD
-		if _draw_home_tile(ui, Vector2(x, y), side):
-			set_visible(false)
-			shell._go_home()
-		x += side + PAD
-		# Vecindario: bloque cuadrado que sólo abre la vista del Wi-Fi.
-		if _draw_neighborhood_tile(ui, Vector2(x, y), side):
-			set_visible(false)
-			shell._go_neighborhood()
-		x += side + PAD
-		x = _draw_pinned(ui, pinned_top, x, side, "top")
-
-		var items = running()
-		# La selección recorre las ventanas y después los applets (y la celda "+").
-		var app_total = items.size() + applets_visible.size() + 1
-		if sel < 0 or sel >= app_total:
-			sel = -1
-			for i in range(items.size()):
-				if _is_current(items[i]):
-					sel = i
-			if sel < 0:
-				sel = 0
-		# Objetivo del arrastre/levantado, para resaltarlo al dibujar.
-		var drop_id = -1
-		if dragging != null:
-			var t = _item_at(mouse_pos)
-			if t != null and t.id >= 0 and t.id != dragging.id:
-				drop_id = t.id
-		elif lifted != null:
-			drop_id = lifted.id
-
-		var index = 0
-		for item in items:
-			var current = _is_current(item)
-			var is_sel = visible and index == sel and dragging == null
-			var is_drop = (item.id >= 0 and item.id == drop_id)
-			var res = _draw_window_tile(ui, Vector2(x, y), side, item, current, is_sel, is_drop, mouse)
-			if res.close:
-				to_close = item
-			elif res.minimize:
-				to_minimize = item
-			elif res.clicked:
-				chosen = item
-			items_layout.append({"title": item.title, "id": item.id, "current": current,
-				"minimized": item.minimized, "screen": item.screen, "x": x, "y": y + off,
-				"w": side, "h": side, "min_x": x, "close_x": x + side, "hit_w": side})
+	if top_drawn:
+		ui.push_style_var_vec2(ui.STYLE_VAR_WINDOW_PADDING, Vector2.ZERO)
+		ui.set_next_window_pos(Vector2(0.0, off_top), true)
+		ui.set_next_window_size(Vector2(vp.x, bh), true)
+		var flags = ui.WINDOW_NO_DECORATION | ui.WINDOW_NO_MOVE | ui.WINDOW_NO_SAVED_SETTINGS | ui.WINDOW_NO_SCROLLBAR | ui.WINDOW_NO_BACKGROUND
+		if ui.begin("##frame", flags):
+			# Fondo NeXT de la franja superior.
+			ui.imgui_draw_rect_filled(Rect2(Vector2.ZERO, Vector2(vp.x, bh)), NX_BG, 0.0)
+			if app_drag != null and mouse.y <= bh:
+				ui.imgui_draw_rect_filled(Rect2(Vector2(0.0, off_top + bh - 3.0), Vector2(vp.x, 3.0)), NX_SEL, 0.0)
+			var y = (bh - side) * 0.5
+			var x = PAD
+			if _draw_home_tile(ui, Vector2(x, y), side):
+				set_visible(false)
+				shell._go_home()
 			x += side + PAD
-			index += 1
+			# Vecindario: bloque cuadrado que sólo abre la vista del Wi-Fi.
+			if _draw_neighborhood_tile(ui, Vector2(x, y), side):
+				set_visible(false)
+				shell._go_neighborhood()
+			x += side + PAD
+			x = _draw_pinned(ui, pinned_top, x, side, "top")
 
-		# Chip flotante mientras se arrastra, se levanta o se mueve una ventana con Super.
-		var ghost = dragging if dragging != null else lifted
-		var ghost_title = ghost.title if ghost != null else ""
-		if win_drag != null:
-			for it in items:
-				if it.id == win_drag.id:
-					ghost_title = it.title
-					break
-		if ghost_title != "":
-			# Mismo anclaje que el bloque: chip de arrastre pegado al cursor.
-			ui.set_next_window_pos(mouse_pos, true)
-			ui.begin_tooltip()
-			ui.text(ghost_title)
-			ui.end_tooltip()
-		# Basurero: esquina superior derecha de la barra, visible SÓLO mientras hay
-		# un drag activo (app, applet, ventana o anillo). Es zona de soltado.
-		trash_layout = null
-		if _drag_active():
-			ui.set_cursor_pos(Vector2(vp.x - side - PAD, y))
-			var tr = Rect2(ui.get_cursor_screen_pos(), Vector2(side, side))
-			trash_layout = tr
-			var hot_trash = tr.has_point(mouse_pos)
-			_bevel(ui, tr, Color(0.34, 0.20, 0.22, 1.0) if hot_trash else NX_FACE, false)
-			_draw_trash_glyph(ui, tr, Color(0.98, 0.52, 0.46, 1.0) if hot_trash else NX_TEXT)
-	ui.end()
-	ui.pop_style_var()
+			var items = running()
+			# La selección recorre las ventanas y después los applets (y la celda "+").
+			var app_total = items.size() + applets_visible.size() + 1
+			if sel < 0 or sel >= app_total:
+				sel = -1
+				for i in range(items.size()):
+					if _is_current(items[i]):
+						sel = i
+				if sel < 0:
+					sel = 0
+			# Objetivo del arrastre/levantado, para resaltarlo al dibujar.
+			var drop_id = -1
+			if dragging != null:
+				var t = _item_at(mouse_pos)
+				if t != null and t.id >= 0 and t.id != dragging.id:
+					drop_id = t.id
+			elif lifted != null:
+				drop_id = lifted.id
 
-	_draw_applets(ui, vp, off, mouse)
+			var index = 0
+			for item in items:
+				var current = _is_current(item)
+				var is_sel = visible and index == sel and dragging == null
+				var is_drop = (item.id >= 0 and item.id == drop_id)
+				var res = _draw_window_tile(ui, Vector2(x, y), side, item, current, is_sel, is_drop, mouse)
+				if res.close:
+					to_close = item
+				elif res.minimize:
+					to_minimize = item
+				elif res.clicked:
+					chosen = item
+				items_layout.append({"title": item.title, "id": item.id, "current": current,
+					"minimized": item.minimized, "screen": item.screen, "x": x, "y": y + off_top,
+					"w": side, "h": side, "min_x": x, "close_x": x + side, "hit_w": side})
+				x += side + PAD
+				index += 1
+
+			# Chip flotante mientras se arrastra, se levanta o se mueve una ventana con Super.
+			var ghost = dragging if dragging != null else lifted
+			var ghost_title = ghost.title if ghost != null else ""
+			if win_drag != null:
+				for it in items:
+					if it.id == win_drag.id:
+						ghost_title = it.title
+						break
+			if ghost_title != "":
+				# Mismo anclaje que el bloque: chip de arrastre pegado al cursor.
+				ui.set_next_window_pos(mouse_pos, true)
+				ui.begin_tooltip()
+				ui.text(ghost_title)
+				ui.end_tooltip()
+			# Basurero: esquina superior derecha de la barra, visible SÓLO mientras hay
+			# un drag activo (app, applet, ventana o anillo). Es zona de soltado.
+			trash_layout = null
+			var pin_x = vp.x - side - PAD
+			if _drag_active():
+				ui.set_cursor_pos(Vector2(pin_x, y))
+				var tr = Rect2(ui.get_cursor_screen_pos(), Vector2(side, side))
+				trash_layout = tr
+				var hot_trash = tr.has_point(mouse_pos)
+				_bevel(ui, tr, Color(0.34, 0.20, 0.22, 1.0) if hot_trash else NX_FACE, false)
+				_draw_trash_glyph(ui, tr, Color(0.98, 0.52, 0.46, 1.0) if hot_trash else NX_TEXT)
+				pin_x -= side + PAD  # el basurero ocupa el extremo derecho
+			# Pin de la barra superior: fija la franja (deja de auto-ocultarse y las
+			# ventanas reservan su alto) o vuelve al autohide.
+			if _draw_pin_toggle(ui, Vector2(pin_x, y), side, pin_top_bar, "pin_top"):
+				toggle_pin("top")
+				entered = true
+		ui.end()
+		ui.pop_style_var()
+
+	if bottom_drawn:
+		_draw_applets(ui, vp, off_bottom, mouse)
 	_draw_drag_tile(ui, bh)
 
 	# Cerrar/minimizar tienen prioridad sobre cambiar: las mini-teselas van encima
@@ -1971,6 +2032,33 @@ func _draw_trash_glyph(ui, r, col):
 	ui.imgui_draw_polyline(PoolVector2Array([Vector2(x + w * 0.58, y + w * 0.42), Vector2(x + w * 0.56, y + w * 0.70)]), col, 1.0, false)
 
 
+# Botón de pin de una barra (K19): tesela con glifo de chincheta. Cara resaltada
+# cuando la barra está fijada. Devuelve true si se hizo clic.
+func _draw_pin_toggle(ui, pos, side, pinned, id):
+	ui.set_cursor_pos(pos)
+	var b = _tile(ui, pos, side, id)
+	if pinned:
+		_frame_focus(ui, b.rect, NX_FOCUS)
+	var face = NX_CUR if pinned else NX_TEXT
+	_draw_pin_glyph(ui, b.rect, face)
+	return b.clicked
+
+
+# Chincheta: cabeza (rombo/triángulo), cuerpo y aguja, dibujados a mano.
+func _draw_pin_glyph(ui, r, col):
+	var x = r.position.x
+	var y = r.position.y
+	var w = r.size.x
+	var cx = x + w * 0.5
+	ui.imgui_draw_rect_filled(Rect2(Vector2(cx - w * 0.09, y + w * 0.22), Vector2(w * 0.18, w * 0.34)), col, 0.0)
+	ui.imgui_draw_polyline(PoolVector2Array([
+		Vector2(x + w * 0.30, y + w * 0.40),
+		Vector2(x + w * 0.70, y + w * 0.40),
+		Vector2(cx, y + w * 0.20),
+		Vector2(x + w * 0.30, y + w * 0.40)]), col, 1.5, true)
+	ui.imgui_draw_polyline(PoolVector2Array([Vector2(cx, y + w * 0.56), Vector2(cx, y + w * 0.78)]), col, 2.0, false)
+
+
 func _draw_drag_tile(ui, side):
 	if app_drag == null and applet_drag == null:
 		return
@@ -1996,21 +2084,36 @@ func _hot_wake():
 	shell.request_redraw()
 
 
-# Desplazamiento vertical del Frame: 0 quieto a la vista, -barra fuera. Mientras
-# desliza pide frames y mantiene despierto el loop; al terminar deja de pedirlos.
-func _slide(want, now):
+# Desplazamiento vertical de una barra: 0 quieta a la vista, -alto fuera. `key`
+# ("top"/"bottom") separa el estado de cada barra. Mientras desliza pide frames y
+# mantiene despierto el loop; al terminar deja de pedirlos.
+func _slide(want, now, key = "top"):
 	var bh = _vh()
+	var is_top = key == "top"
+	var shown = shown_top if is_top else shown_bottom
+	var since = slide_since_top if is_top else slide_since_bottom
 	if want and slide_instant:
-		slide_instant = false
 		shown = true
-		slide_since = now - SLIDE_MS
+		since = now - SLIDE_MS
+		if is_top:
+			shown_top = true
+			slide_since_top = since
+		else:
+			shown_bottom = true
+			slide_since_bottom = since
 		return 0.0
 	if want != shown:
 		shown = want
 		# Si cambia a mitad de camino, sigue desde donde está.
-		var done = min(now - slide_since, SLIDE_MS)
-		slide_since = now - (SLIDE_MS - done)
-	var k = clamp(float(now - slide_since) / SLIDE_MS, 0.0, 1.0)
+		var done = min(now - since, SLIDE_MS)
+		since = now - (SLIDE_MS - done)
+		if is_top:
+			shown_top = shown
+			slide_since_top = since
+		else:
+			shown_bottom = shown
+			slide_since_bottom = since
+	var k = clamp(float(now - since) / SLIDE_MS, 0.0, 1.0)
 	if k < 1.0:
 		shell.request_redraw()
 		shell.last_activity = now
@@ -2018,6 +2121,27 @@ func _slide(want, now):
 	if not shown:
 		p = 1.0 - p
 	return -bh * (1.0 - p)
+
+
+# Lados que el Frame RESERVA para las ventanas: sólo las barras fijadas (pin).
+# Con autohide (default) no reserva nada: la barra se superpone a la ventana sin
+# redimensionarla. Lo consulta el layout de tiles/diálogos del shell.
+func reserved_edges():
+	return {"top": pin_top_bar, "bottom": pin_bottom_bar}
+
+
+# Fija/auto-oculta una barra (pin). Al fijar aparece de inmediato (sin deslizar) y
+# las ventanas se reacomodan al hueco reservado; al soltar vuelve al autohide.
+func toggle_pin(key):
+	if key == "bottom":
+		pin_bottom_bar = not pin_bottom_bar
+	else:
+		pin_top_bar = not pin_top_bar
+	if pin_top_bar or pin_bottom_bar:
+		slide_instant = true
+	applets_dirty = true
+	_save_applets()
+	shell.request_redraw()
 
 
 # Cambio de vista (Home <-> app, anillo <-> grilla, entre apps): fundido de FADE_MS

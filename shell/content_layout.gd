@@ -9,10 +9,10 @@ extends Reference
 # fuente y no repitan rests.
 #
 # Es puro: sin I/O, sin procesos, sin estado global. Sólo geometría determinista:
-#   - content_rect(viewport, block, frame_edges): rect central de contenido (diálogos).
-#   - tile_rect(viewport, block, slide): zona de una ventana top-level en modo tiled:
-#     bajo la barra superior y alto completo hasta el borde inferior, siguiendo el
-#     deslizamiento del Frame (con el Frame oculto usa toda la pantalla).
+#   - content_rect(viewport, block, frame_edges): rect central de contenido. Las
+#     ventanas (top-level) y los diálogos usan SÓLO los lados que el Frame reserva:
+#     con autohide (default) no reserva nada y la ventana usa todo el viewport; una
+#     barra fijada (pin) reserva su franja. El autohide no redimensiona la ventana.
 #   - clamp_inside(outer, pos, size): encaja un rect (p. ej. un diálogo) dentro del
 #     hueco, alineándolo si no cabe (la capa recortada termina el trabajo).
 #
@@ -33,23 +33,6 @@ static func content_rect(viewport, block, frame_edges):
 	var w = max(vp.x - left - right, 0.0)
 	var h = max(vp.y - top - bottom, 0.0)
 	return Rect2(origin + Vector2(left, top), Vector2(w, h))
-
-
-# Zona de una ventana top-level (tile) en modo tiled: empieza en el borde inferior
-# de la barra superior y llega hasta el borde inferior de la pantalla; la barra
-# inferior de applets flota encima (no se reserva). `slide` es el desplazamiento
-# del Frame (0 a la vista, -block oculto): la ventana sigue ese borde, así con el
-# Frame oculto usa toda la pantalla, como el auto-hide del fullscreen de un
-# navegador. La limitación a las dos barras es SÓLO para diálogos (content_rect).
-static func tile_rect(viewport, block, slide = 0.0):
-	var origin = _viewport_origin(viewport)
-	var vp = _viewport_size(viewport)
-	if vp.x <= 0.0 or vp.y <= 0.0:
-		return Rect2()
-	var b = max(float(block), 0.0)
-	var top = clamp(b + float(slide), 0.0, b)
-	var h = max(vp.y - top, 0.0)
-	return Rect2(origin + Vector2(0.0, top), Vector2(vp.x, h))
 
 
 # Encaja un rect (origen `pos`, tamaño `size`) dentro de `outer`: lo recorta para que
@@ -123,11 +106,11 @@ static func selftest():
 	assert(content_rect(Rect2(10, 20, 1000, 600), 50.0, ["top", "left"])
 		== Rect2(60, 70, 950, 550), "origen del Rect2")
 	assert(clamp_inside(all4, Vector2(-99, -99), Vector2(100, 100)) == all4.position, "encaje")
-	# Tile: bajo la barra superior, alto completo; con el Frame oculto, pantalla entera.
-	assert(tile_rect(Vector2(1280, 800), 80.0) == Rect2(0, 80, 1280, 720), "tile a la vista")
-	assert(tile_rect(Vector2(1280, 800), 80.0, -80.0) == Rect2(0, 0, 1280, 800), "tile Frame oculto")
-	assert(tile_rect(Vector2(1280, 800), 80.0, -40.0) == Rect2(0, 40, 1280, 760), "tile a medio deslizar")
-	assert(tile_rect(Vector2(1280, 800), 0.0) == Rect2(0, 0, 1280, 800), "tile sin bloque")
+	# Con autohide (sin lados reservados) la ventana usa todo el viewport; una barra
+	# fijada reserva su franja. No hay deslizamiento: no se redimensiona al mostrarse.
+	assert(content_rect(Vector2(1280, 800), 80.0, {}) == Rect2(0, 0, 1280, 800), "autohide: viewport completo")
+	assert(content_rect(Vector2(1280, 800), 80.0, {"top": true}) == Rect2(0, 80, 1280, 720), "pin superior reserva")
+	assert(content_rect(Vector2(1280, 800), 80.0, {"bottom": true}) == Rect2(0, 0, 1280, 720), "pin inferior reserva")
 	return true
 
 

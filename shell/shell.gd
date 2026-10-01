@@ -17,7 +17,7 @@ var ACTIVITIES = [
 	# hardcodear una sola ubicación.
 	# K18: el receptor usa un título fijo ("Pantalla compartida") y se trata como
 	# una ventana normal; `match` lo asocia por ese título aunque el comando sea `python3`.
-	{"name": "Pantalla", "match": ["Pantalla compartida"], "wayland": ["sh", "-c", "for c in \"$HOME/gdtk/tools/gvd/gvd.py\" \"$HOME/Proyectos/gvd/gvd.py\" \"$HOME/gvd/gvd.py\" \"$(command -v gvd 2>/dev/null)\"; do [ -n \"$c\" ] && [ -f \"$c\" ] && exec python3 \"$c\" recv --sink wayland; done; echo 'vecindario: gvd no encontrado (recv)' >&2"]},
+	{"name": "Pantalla", "match": ["Pantalla compartida"], "wayland": ["sh", "-c", "for c in \"$HOME/gdtk/tools/gvd/gvd.py\" \"$HOME/Proyectos/gvd/gvd.py\" \"$HOME/gvd/gvd.py\" \"$(command -v gvd 2>/dev/null)\"; do [ -n \"$c\" ] && [ -f \"$c\" ] && exec python3 \"$c\" recv --sink auto; done; echo 'vecindario: gvd no encontrado (recv)' >&2"]},
 	# 'Salir' ya no es una actividad del anillo: es una acción de sesión del ícono central
 	# del Hogar (ver _draw_home / popup ##home_session).
 ]
@@ -212,10 +212,6 @@ var tile_nodes = {}      # id -> Control (contenedor de capas de la ventana)
 var tile_rects = {}      # id -> Rect2 en coords de la vista
 var tile_fit = {}        # id -> {"scale", "offset"}: transform del contenido (para input)
 var tile_anim = {}       # id -> {"from": Vector2, "since": int}
-# El Frame desliza: los tiles siguen su borde (posición directa) para no pelear con
-# el easing; con el Frame oculto ocupan toda la pantalla.
-var frame_follow = false
-var frame_off_prev = 0.0
 var tile_fade = {}       # id -> ms en que apareció (fade-in)
 var tile_intro = {}      # id -> true: falta su primera textura para animar la entrada
 var expose = false
@@ -339,32 +335,28 @@ func frame_bar_h(vp):
 	return max(64.0, floor(u * 0.5))
 
 
-# --- K12: hueco central del Frame --------------------------------------------
-# Lados que reserva el Frame para diálogos/ventanas hijas (K12): las dos barras.
-# La limitación de tamaño es SÓLO para diálogos, nunca para top-levels; los
-# laterales quedan soportados para cuando el Frame dibuje bloques a los costados.
+# --- K12/K19: hueco del Frame ------------------------------------------------
+# Lados que el Frame RESERVA para las ventanas: sólo las barras fijadas (pin).
+# Con autohide (default en ambas) no reserva nada y la barra se superpone a la
+# ventana sin redimensionarla; una barra fijada ocupa su franja y la ventana no
+# se coloca debajo/encima de ella. Lo decide el propio Frame (frame.reserved_edges).
 func _frame_edges():
-	return {"top": true, "bottom": true}
-
-
-# Deslizamiento actual del Frame (0 a la vista, -alto oculto). El layout de tiles
-# lo sigue para adaptarse al hueco que deja el Frame y usar toda la pantalla
-# cuando está oculto.
-func _frame_slide():
 	if frame == null or not is_instance_valid(frame):
-		return 0.0
-	return frame.slide_off
+		return {}
+	return frame.reserved_edges()
 
 
-# Rect de una ventana top-level en modo tiled: bajo la barra superior, alto
-# completo hasta el borde inferior, siguiendo el deslizamiento del Frame.
+# Rect de las ventanas top-level y de los diálogos: el viewport menos las barras
+# fijadas. No sigue el deslizamiento del autohide (por eso las ventanas no se
+# redimensionan al mostrarse la barra).
 func _tile_rect(vp):
-	return CONTENT_LAYOUT.tile_rect(vp, frame_bar_h(vp), _frame_slide())
-
-
-# Hueco central del Frame (diálogos y ventanas hijas): entre las dos barras.
-func _content_rect(vp):
 	return CONTENT_LAYOUT.content_rect(vp, frame_bar_h(vp), _frame_edges())
+
+
+# Hueco central del Frame para diálogos/ventanas hijas (mismo criterio: sólo
+# reserva lo fijado). Se mantiene el nombre por claridad de los llamadores.
+func _content_rect(vp):
+	return _tile_rect(vp)
 
 
 # Ícono del botón Inicio del Frame (Sugar: símbolo de hogar).
@@ -1001,11 +993,6 @@ func _content_fit(csize, ssize, cpos):
 func _update_tiles():
 	view.rect_size = get_viewport_rect().size
 	compositor.default_size = _tile_rect(view.rect_size).size
-	# Sigue el deslizamiento del Frame: mientras se mueve, los tiles se reubican
-	# directo (sin animación propia) para no quedar desfasados del borde.
-	var foff = _frame_slide()
-	frame_follow = abs(foff - frame_off_prev) > 0.01
-	frame_off_prev = foff
 	if expose:
 		_compute_expose_layout()
 	else:
@@ -1124,7 +1111,7 @@ func _update_tile(id, now):
 	# Durante el paneo (Super+rueda) se posiciona directo, sin animación, para que el
 	# movimiento continuo no pelee con el easing.
 	var pos = rect.position
-	if pan_active or instant_switch or home_slide_since >= 0 or frame_follow:
+	if pan_active or instant_switch or home_slide_since >= 0:
 		tile_anim.erase(id)
 	elif tile_anim.has(id):
 		var a = tile_anim[id]
