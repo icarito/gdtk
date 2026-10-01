@@ -22,6 +22,7 @@ extends Control
 
 const MAP = preload("res://neighborhood_map.gd")
 const MENU = preload("res://menu_style.gd")
+const INBOX = preload("res://neighborhood_inbox.gd")
 
 const BG = Color(0.055, 0.065, 0.095, 1.0)
 const RING = Color(0.60, 0.69, 0.82, 0.20)
@@ -445,8 +446,8 @@ func _host_actions(host):
 		ctx.gvd_sender = true
 	# Canal autorizado (ssh/buzón) hacia este host: habilita las acciones de
 	# pantalla cuando el peer anuncia state=capable (abre su receptor on-demand).
-	if shell != null and shell.has_method("provision_channel_for"):
-		ctx.provision_channel = bool(shell.provision_channel_for(String(host.get("id", ""))))
+	# Se resuelve del propio host (misma dirección que usará el emisor por ssh).
+	ctx.provision_channel = bool(INBOX.ssh_target(host).get("ok", false))
 	# Servidor local disponible resuelto una vez por el shell (cached, sin escanear
 	# PATH por frame). Sin shell (headless) no se toca el contexto.
 	if shell != null and shell.has_method("deskflow_server_available"):
