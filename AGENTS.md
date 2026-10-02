@@ -142,6 +142,24 @@ tests/scripts que las usan (`shell.gd`) fallan al parsear con
 - El tray/GUI de `deskflow` es Qt y puede fallar en Wayland
   (`Could not load the Qt platform plugin "wayland"`): **no** es fatal para el core.
 
+Notas del InputCapture (server Deskflow ↔ sway), verificadas e2e:
+- Deskflow (`EiScreen`) en modo receptor SOLO procesa motion **relativo**
+  (`onAbsMotionEvent` es un no-op): `eis_server.c` debe mandar `EIS_DEVICE_CAP_POINTER`
+  antes que `POINTER_ABSOLUTE` (que igual hace falta para que calcule el tamaño por la
+  region).
+- En su primer motion tras `Activated`, Deskflow llama `Release()` **sin posición** y en
+  el mismo evento dispara el switch: obedecerlo apagaba la captura y re-activaba en
+  bucle. gdtk lo ignora ~250 ms tras activar y el resto de releases heredan la
+  histéresis del borde (`released_edge`), más una ventana anti-retorno (300 ms) que
+  anula el delta contrario a la dirección de cruce.
+- El shell corre como cliente de **sway**, que clava el puntero en el borde y vuelve
+  `event.relative` ~0: mientras la captura EIS está activa, `shell.gd` pide pointer
+  lock (`Input.MOUSE_MODE_CAPTURED` → SDL relative) y lo suelta al volver al escritorio.
+- Los clientes (`use_remote`) usan el path RemoteDesktop (sender) y reconectan solos; el
+  server en bastion se relanza ~5 s si muere (tick del shell). Contraseña/edición fina de
+  los rangos de borde: `settings/pages/displays.gd` + `shell/screen_layout.link_ranges`
+  → `deskflow_conf.build_server_conf` emite `left(80,100)=cupid(0,20)`.
+
 ### Reglas para agentes futuros
 
 - Editar y commitear **sólo en el repo** (`~/Proyectos/gdtk`), con write set explícito.
