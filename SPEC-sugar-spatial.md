@@ -26,10 +26,14 @@ el modelo de navegación. La presentación en botones alargados del Frame es tra
    internas siguen identificadas por nombre; las ventanas minimizadas se listan
    después, atenuadas y sin fingir que ocupan una pantalla. El foco actual conserva
    el resaltado existente. Esto también alinea Alt+Tab con el mapa visual.
-2. **Exposé (`shell/tiles_ui.gd`)**. Mantener sus tarjetas y navegación actuales.
-   Dibujar bajo ellas un indicador por pantalla, abarcando todas las tarjetas de
-   un grupo, con índice y total. La selección de una ventana no debe hacer parecer
-   que las demás ventanas de su pantalla viven en otro lugar.
+2. **Exposé (`shell/tiles_ui.gd`)**. Es un "zoom out" del escritorio: cada pantalla se
+   dibuja como una miniatura COMPLETA del viewport, en su proporción real y con sus
+   ventanas en la posición/tamaño reales (escalados), y todas las pantallas van en su
+   fila espacial, encogidas para entrar a la vista. Un marco y un número (índice/total)
+   identifican cada pantalla. Clic elige la ventana (cambia a su pantalla y la enfoca);
+   el botón de cerrar de la miniatura y Delete cierran sin salir del exposé. La
+   selección de una ventana no debe hacer parecer que las demás de su pantalla viven
+   en otro lugar.
 3. Respetar `fullscreen`, Home, ventanas internas y el caso sin ventanas: no mostrar
    indicadores de pantallas inexistentes. No alterar tamaño, input ni cierre de apps.
 4. **Hogar en la fila**. El Hogar es la ranura `units.size()` (también sin ventanas):

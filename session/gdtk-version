@@ -1,0 +1,198 @@
+#!/bin/sh
+# Gestor del store de versiones del shell gdtk (Fase 1: versionado + rollback).
+# Guarda snapshots inmutables del arbol de app bajo content/<id>/ y mueve punteros
+# atomicos current/last_good. La capa estable (este script, gdtk-supervisor y
+# gdtk-preflight) nunca se versiona: si un snapshot rompe el arranque, el
+# supervisor puede volver a last_good.
+# Uso: gdtk-version <snapshot|list|current|where|use|tag|good|rollback|gc>
+set -eu
+
+STORE="${GDTK_STORE:-${XDG_DATA_HOME:-$HOME/.local/share}/gdtk}"
+CONTENT="$STORE/content"
+CURRENT="$STORE/current"
+LAST_GOOD="$STORE/last_good"
+LOCK="$STORE/.lock"
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+BASE="$(cd "$SELF_DIR/.." && pwd)"
+APPS="shell addons settings mcp tools session"
+PROMOTE_AFTER=20
+
+say() { echo "$*"; }
+die() { echo "gdtk-version: $*" >&2; exit 1; }
+
+command -v jq >/dev/null 2>&1 || die "requiere jq"
+mkdir -p "$STORE" "$CONTENT"
+
+lock() { exec 9>"$LOCK"; flock -n 9 || die "otra operacion del store esta en curso"; }
+
+stamp() { date '+%Y%m%d-%H%M%S'; }
+
+git_of() {
+	[ -d "$1/.git" ] || return 0
+	git -C "$1" rev-parse --short HEAD 2>/dev/null || true
+}
+
+# id nuevo = git short (+ -dirty) y, si colisiona, -N. ASCII seguro para symlinks.
+new_id() {
+	_src="$1"; _git="$(git_of "$_src")"; _id="${_git:-$(stamp)}"
+	if [ -n "$_git" ] && [ -n "$(git -C "$_src" status --porcelain 2>/dev/null)" ]; then
+		_id="$_id-dirty"
+	fi
+	_n=1; _base="$_id"
+	while [ -e "$CONTENT/$_id" ]; do _id="$_base-$_n"; _n=$((_n + 1)); done
+	echo "$_id"
+}
+
+# Acepta id completo o prefijo unico.
+resolve_id() {
+	[ -n "${1:-}" ] || return 1
+	[ -d "$CONTENT/$1" ] && { echo "$1"; return 0; }
+	_matches=""
+	for _d in "$CONTENT"/*; do
+		[ -d "$_d" ] || continue
+		case "$(basename "$_d")" in "$1"*) _matches="$_matches $(basename "$_d")";; esac
+	done
+	set -- $_matches
+	[ -n "${1:-}" ] || return 1
+	[ "$#" -eq 1 ] || return 2
+	echo "$1"
+}
+
+meta() { echo "$CONTENT/$1/meta.json"; }
+
+link_atomic() { # link_atomic <destino> <id>
+	ln -s "content/$2" "$1.tmp.$$"
+	mv -Tf "$1.tmp.$$" "$1"
+}
+
+id_of_link() { [ -L "$1" ] && basename "$(readlink "$1")" || true; }
+
+cmd_snapshot() {
+	src="$BASE"; note=""; want_use=0; check=1; forced_id=""
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+			--from) src="$2"; shift 2;;
+			--note) note="$2"; shift 2;;
+			--id) forced_id="$2"; shift 2;;
+			--use) want_use=1; shift;;
+			--no-check) check=0; shift;;
+			--force) check=0; shift;;
+			*) die "snapshot: opcion desconocida $1";;
+		esac
+	done
+	src="$(cd "$src" && pwd)"
+	[ -d "$src/shell" ] || die "no encuentro $src/shell (usa --from DIR)"
+	lock
+	id="${forced_id:-$(new_id "$src")}"
+	[ ! -e "$CONTENT/$id" ] || die "ya existe $id"
+	dest="$CONTENT/$id"
+	mkdir -p "$dest"
+	for a in $APPS; do
+		[ -d "$src/$a" ] || continue
+		rsync -a --delete \
+			--exclude '.import' --exclude '*crash*' --exclude '__pycache__' --exclude '.git' \
+			"$src/$a" "$dest/"
+	done
+	jq -n --arg id "$id" --arg created "$(date '+%F %T')" --arg git "$(git_of "$src")" \
+		--arg note "$note" --arg src "$src" \
+		'{id:$id, created:$created, git:$git, note:$note, src:$src, tags:[], status:"candidate"}' \
+		>"$dest/meta.json"
+	if [ "$check" -eq 1 ] && [ -x "$SELF_DIR/gdtk-preflight" ]; then
+		if ! "$SELF_DIR/gdtk-preflight" "$dest" >"$dest/.preflight.log" 2>&1; then
+			cat "$dest/.preflight.log" >&2
+			rm -rf "$dest"
+			die "preflight fallo; snapshot descartado (usa --no-check para forzar)"
+		fi
+		rm -f "$dest/.preflight.log"
+	fi
+	say "snapshot $id -> $dest"
+	if [ "$want_use" -eq 1 ]; then do_use "$id"; fi
+	return 0
+}
+
+cmd_list() {
+	printf '%-28s %-10s %-12s %s\n' ID ESTADO TAGS NOTA
+	for d in "$CONTENT"/*; do
+		[ -d "$d" ] || continue
+		n="$(basename "$d")"
+		printf '%-28s %-10s %-12s %s\n' "$n" \
+			"$(jq -r '.status // "?"' "$d/meta.json" 2>/dev/null)" \
+			"$(jq -r '(.tags // []) | join(",")' "$d/meta.json" 2>/dev/null)" \
+			"$(jq -r '.note // ""' "$d/meta.json" 2>/dev/null)"
+	done
+	cur="$(id_of_link "$CURRENT")"; lg="$(id_of_link "$LAST_GOOD")"
+	say "current=$( [ -n "$cur" ] && echo "$cur" || echo none )  last_good=$( [ -n "$lg" ] && echo "$lg" || echo none )"
+}
+
+cmd_current() { id_of_link "$CURRENT"; }
+cmd_where() { [ -L "$CURRENT" ] && readlink -f "$CURRENT"; }
+
+do_use() { # sin lock: para llamar desde dentro de otra operacion que ya lo tiene
+	link_atomic "$CURRENT" "$1"
+	say "current -> $1"
+}
+
+cmd_use() {
+	id="$(resolve_id "${1:-}")" || die "version desconocida: ${1:-}"
+	lock
+	do_use "$id"
+}
+
+cmd_tag() {
+	tag="${1:-}"; [ -n "$tag" ] || die "uso: tag <nombre> [id]"
+	id="$(resolve_id "${2:-$(id_of_link "$CURRENT")}")" || die "version desconocida"
+	[ -f "$(meta "$id")" ] || die "sin meta.json en $id"
+	lock
+	tmp="$(mktemp)"; jq --arg t "$tag" '.tags = ((.tags // []) + [$t] | unique)' "$(meta "$id")" >"$tmp"
+	mv "$tmp" "$(meta "$id")"
+	say "$id tags: $(jq -r '.tags | join(",")' "$(meta "$id")")"
+}
+
+cmd_good() {
+	id="$(resolve_id "${1:-$(id_of_link "$CURRENT")}")" || die "version desconocida"
+	[ -f "$(meta "$id")" ] || die "sin meta.json en $id"
+	lock
+	tmp="$(mktemp)"; jq '.status = "good" | .tags = ((.tags // []) + ["good"] | unique)' "$(meta "$id")" >"$tmp"
+	mv "$tmp" "$(meta "$id")"
+	link_atomic "$LAST_GOOD" "$id"
+	say "last_good -> $id"
+}
+
+cmd_rollback() {
+	id="$(id_of_link "$LAST_GOOD")"
+	[ -n "$id" ] || { say "no hay last_good; no puedo volver"; exit 3; }
+	cmd_use "$id"
+}
+
+cmd_gc() {
+	keep="${1:-2}"
+	lock
+	cur="$(id_of_link "$CURRENT")"; lg="$(id_of_link "$LAST_GOOD")"
+	kept_good=0
+	for d in "$CONTENT"/*; do
+		[ -d "$d" ] || continue
+		n="$(basename "$d")"
+		[ "$n" = "$cur" ] && continue
+		[ "$n" = "$lg" ] && continue
+		if [ "$(jq -r '.status // ""' "$d/meta.json" 2>/dev/null)" = "good" ]; then
+			kept_good=$((kept_good + 1))
+			[ "$kept_good" -le "$keep" ] && continue
+		fi
+		say "borro $n"
+		rm -rf "$d"
+	done
+}
+
+action="${1:-}"; [ "$#" -gt 0 ] && shift || true
+case "$action" in
+	snapshot) cmd_snapshot "$@";;
+	list) cmd_list;;
+	current) cmd_current;;
+	where) cmd_where;;
+	use) cmd_use "$@";;
+	tag) cmd_tag "$@";;
+	good) cmd_good "$@";;
+	rollback) cmd_rollback;;
+	gc) cmd_gc "$@";;
+	*) say "uso: gdtk-version <snapshot|list|current|where|use|tag|good|rollback|gc>"; exit 2;;
+esac

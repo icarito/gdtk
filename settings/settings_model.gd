@@ -7,8 +7,7 @@ extends Reference
 # patrón que host.gd::sc): no hay `preload` entre proyectos.
 #
 # Reglas: sin I/O, sin procesos, sin dependencias del shell. Sólo normaliza,
-# valida, serializa y calcula geometría. Todo lo visible usa lenguaje humano
-# (nada de gvd/deskflow/mDNS ni nombres internos).
+# valida, serializa y calcula geometría. Todo lo visible usa lenguaje humano.
 
 const VERSION = 1
 
@@ -60,7 +59,47 @@ const WALLPAPER_DEFAULT = {"mode": "gradient", "color": WALLPAPER_DEFAULT_COLOR,
 # (`session/input-settings.sh`) y la app en vivo (swaymsg).
 const NATURAL_SCROLL_DEFAULT = true
 
-const FIELDS = ["keyboard", "locale", "accent", "wallpaper", "natural_scroll"]
+# Apariencia del Frame y del Hogar (SPEC-sugar-frame-blocks).
+#   bevel:  factor sobre el ancho de bisel automático. El ancho base ya escala con
+#           la unidad de rejilla (y por lo tanto con la pantalla); este factor sólo
+#           lo engrosa o adelgaza. 1.0 = el actual.
+#   flat:   bloques planos: el relieve 3D aparece sólo al pasar el mouse o hundir.
+#   emboss: íconos del sistema (Inicio/Vecindario) y burbujas del anillo con
+#           relieve grabado dentro del bloque.
+const BEVEL_MIN = 0.5
+const BEVEL_MAX = 2.0
+const BEVEL_DEFAULT = 1.0
+const APPEARANCE_DEFAULT = {
+	"bevel": 1.0,
+	"flat": false,
+	"emboss": true,
+}
+
+# Escala de la interfaz: factor sobre la escala automática (por resolución). También
+# se exporta a los toolkits (GTK/GNOME con GDK_SCALE/GDK_DPI_SCALE, Qt, Firefox) para
+# que las apps no queden con UI diminuta en pantallas densas. 1.0 = sin cambios.
+const UI_SCALE_MIN = 0.75
+const UI_SCALE_MAX = 2.0
+const UI_SCALE_DEFAULT = 1.0
+const UI_SCALE_CURSOR_BASE = 24.0
+
+const CONTROL_MODES = ["off", "use_remote", "share_here"]
+const CONTROL_MODE_LABELS = {
+	"off": "Desactivado",
+	"use_remote": "Usar el teclado y mouse de otro equipo",
+	"share_here": "Permitir que otros equipos usen este teclado y mouse",
+}
+const CONTROL_DEFAULT = {
+	"mode": "off",
+	"host": "",
+	"port": 24800,
+	"auto": false,
+	"name": "",
+}
+const HOST_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.:-_%[]"
+const NAME_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+
+const FIELDS = ["keyboard", "locale", "accent", "wallpaper", "natural_scroll", "deskflow", "appearance", "ui_scale"]
 
 const HEX_CHARS = "0123456789abcdef"
 
@@ -75,6 +114,9 @@ func defaults():
 		"accent": ACCENT_DEFAULT,
 		"wallpaper": WALLPAPER_DEFAULT.duplicate(true),
 		"natural_scroll": NATURAL_SCROLL_DEFAULT,
+		"deskflow": CONTROL_DEFAULT.duplicate(true),
+		"appearance": APPEARANCE_DEFAULT.duplicate(true),
+		"ui_scale": UI_SCALE_DEFAULT,
 	}
 
 
@@ -91,6 +133,9 @@ func normalize(data):
 	out["accent"] = accent_hex(data.get("accent", ""))
 	out["wallpaper"] = wallpaper(data.get("wallpaper", {}))
 	out["natural_scroll"] = nat_scroll(data.get("natural_scroll", null))
+	out["deskflow"] = deskflow(data.get("deskflow", {}))
+	out["appearance"] = appearance(data.get("appearance", {}))
+	out["ui_scale"] = ui_scale_value(data.get("ui_scale", null))
 	for k in data.keys():
 		if not out.has(k):
 			out[k] = data[k]
@@ -205,6 +250,115 @@ func nat_scroll(v):
 	return NATURAL_SCROLL_DEFAULT
 
 
+func deskflow(v):
+	if typeof(v) != TYPE_DICTIONARY:
+		v = {}
+	var out = CONTROL_DEFAULT.duplicate(true)
+	var mode = String(v.get("mode", out.mode)).strip_edges()
+	if CONTROL_MODES.has(mode):
+		out.mode = mode
+	out.host = host_name(v.get("host", ""))
+	out.port = tcp_port(v.get("port", out.port))
+	out.auto = bool_value(v.get("auto", out.auto), false)
+	out.name = screen_name(v.get("name", ""))
+	if out.mode == "use_remote" and out.host == "":
+		out.mode = "off"
+	return out
+
+
+func host_name(v):
+	if not (v is String):
+		return ""
+	var s = v.strip_edges()
+	if s == "" or s.length() > 255:
+		return ""
+	for i in range(s.length()):
+		if HOST_CHARS.find(s.substr(i, 1)) < 0:
+			return ""
+	return s
+
+
+func tcp_port(v):
+	var p = int(v)
+	return p if p >= 1 and p <= 65535 else int(CONTROL_DEFAULT.port)
+
+
+func screen_name(v):
+	if not (v is String):
+		return ""
+	var s = v.strip_edges()
+	if s == "" or s.length() > 63 or s.begins_with(".") or s.begins_with("-") \
+			or s.ends_with(".") or s.ends_with("-"):
+		return ""
+	for i in range(s.length()):
+		if NAME_CHARS.find(s.substr(i, 1)) < 0:
+			return ""
+	return s
+
+
+func bool_value(v, fallback):
+	if v is bool:
+		return v
+	if v is String:
+		var s = v.strip_edges().to_lower()
+		if s in ["true", "1", "yes", "on"]:
+			return true
+		if s in ["false", "0", "no", "off", ""]:
+			return false
+	if v is float or v is int:
+		return int(v) != 0
+	return bool(fallback)
+
+
+# Apariencia del Frame/Hogar normalizada. `bevel` es un factor (0.5..2.0) sobre el
+# bisel automático; `flat` y `emboss` son booleanos tolerantes.
+func appearance(a):
+	if typeof(a) != TYPE_DICTIONARY:
+		a = {}
+	var out = APPEARANCE_DEFAULT.duplicate(true)
+	out.bevel = bevel_scale(a.get("bevel", out.bevel))
+	out.flat = bool_value(a.get("flat", out.flat), out.flat)
+	out.emboss = bool_value(a.get("emboss", out.emboss), out.emboss)
+	return out
+
+
+func bevel_scale(v):
+	if not (v is float or v is int or v is String):
+		return BEVEL_DEFAULT
+	var f = float(v)
+	if f <= 0.0:
+		return BEVEL_DEFAULT
+	return clamp(f, BEVEL_MIN, BEVEL_MAX)
+
+
+# Factor de escala de UI normalizado (0.75..2.0). Un valor inválido cae al default.
+func ui_scale_value(v):
+	if not (v is float or v is int or v is String):
+		return UI_SCALE_DEFAULT
+	var f = float(v)
+	if f <= 0.0:
+		return UI_SCALE_DEFAULT
+	return clamp(f, UI_SCALE_MIN, UI_SCALE_MAX)
+
+
+# Variables de entorno para que el resto del escritorio escale igual que el shell.
+# GTK/GNOME usan GDK_SCALE (entero) + GDK_DPI_SCALE (fracción); Qt y el cursor sus
+# propias variables. Puro y testeable.
+func ui_scale_env(factor):
+	var f = ui_scale_value(factor)
+	var gdk = floor(f)
+	if gdk < 1.0:
+		gdk = 1.0
+	var dpi = f / gdk
+	return {
+		"GDK_SCALE": str(int(gdk)),
+		"GDK_DPI_SCALE": str(dpi),
+		"QT_SCALE_FACTOR": str(f),
+		"QT_AUTO_SCREEN_SCALE_FACTOR": "0",
+		"XCURSOR_SIZE": str(int(round(UI_SCALE_CURSOR_BASE * f))),
+	}
+
+
 # Argumentos de `swaymsg` para fijar la dirección del scroll. El scroll natural no
 # es sólo de touchpad: también aplica al mouse/TrackPoint (`type:pointer`), así que
 # se devuelven los dos comandos. Puro (no ejecuta nada): lo usan la app, el shell
@@ -250,7 +404,8 @@ func locale_file_content(locale):
 # Los cambios de teclado e idioma no son en vivo: la UI avisa que aplican al
 # reiniciar. Acento y fondo sí se aplican al instante en el shell.
 func is_live(field):
-	return field == "accent" or field == "wallpaper" or field == "natural_scroll"
+	return field == "accent" or field == "wallpaper" or field == "natural_scroll" \
+		or field == "deskflow" or field == "appearance" or field == "ui_scale"
 
 
 func restart_notice(field):
@@ -310,14 +465,39 @@ func selftest():
 	assert(wallpaper_kind({"mode": "fill", "path": ""}) == "solid")
 	assert(keyboard_file_content("es") == "XKB_DEFAULT_LAYOUT=es\n")
 	assert(locale_file_content("en_US") == "LANG=en_US.UTF-8\n")
-	assert(is_live("accent") and is_live("wallpaper"))
+	assert(is_live("accent") and is_live("wallpaper") and is_live("deskflow"))
 	assert(not is_live("keyboard") and not is_live("locale"))
 	assert(d.natural_scroll == NATURAL_SCROLL_DEFAULT)
 	assert(nat_scroll("false") == false and nat_scroll("on") == true)
 	assert(nat_scroll(0) == false and nat_scroll(1) == true)
 	assert(nat_scroll("cosa") == NATURAL_SCROLL_DEFAULT)
+	assert(d.deskflow.mode == "off" and d.deskflow.port == 24800 and not d.deskflow.auto)
+	var df = deskflow({"mode": "use_remote", "host": "bastion.local", "port": "24801",
+		"auto": "on", "name": "tengu"})
+	assert(df.mode == "use_remote" and df.host == "bastion.local" and df.port == 24801
+		and df.auto and df.name == "tengu")
+	assert(deskflow({"mode": "use_remote", "host": ""}).mode == "off")
+	assert(deskflow({"mode": "share_here", "host": "bad host", "port": 70000}).port == 24800)
+	assert(host_name("bad host") == "" and host_name("fe80::1") == "fe80::1")
+	assert(screen_name("bad name") == "" and screen_name("bastion") == "bastion")
 	assert(natural_scroll_cmd(false) == ["input", "type:touchpad", "natural_scroll", "disabled"])
 	assert(natural_scroll_cmd(true) == ["input", "type:touchpad", "natural_scroll", "enabled"])
+	var a0 = appearance({})
+	assert(a0.bevel == BEVEL_DEFAULT and not a0.flat and a0.emboss)
+	var a1 = appearance({"bevel": "1.5", "flat": "on", "emboss": "off"})
+	assert(a1.bevel == 1.5 and a1.flat and not a1.emboss)
+	assert(appearance({"bevel": 9.0}).bevel == BEVEL_MAX)
+	assert(appearance({"bevel": 0.01}).bevel == BEVEL_MIN)
+	assert(appearance({"bevel": "no"}).bevel == BEVEL_DEFAULT)
+	assert(is_live("appearance"))
+	assert(ui_scale_value(null) == UI_SCALE_DEFAULT and ui_scale_value(0.0) == UI_SCALE_DEFAULT)
+	assert(ui_scale_value(9.0) == UI_SCALE_MAX and ui_scale_value(0.1) == UI_SCALE_MIN)
+	var env = ui_scale_env(1.25)
+	assert(env.GDK_SCALE == "1" and env.GDK_DPI_SCALE == "1.25" and env.QT_SCALE_FACTOR == "1.25")
+	assert(env.XCURSOR_SIZE == "30")
+	var env2 = ui_scale_env(2.0)
+	assert(env2.GDK_SCALE == "2" and env2.GDK_DPI_SCALE == "1")
+	assert(is_live("ui_scale"))
 	var nsc = natural_scroll_cmds(false)
 	assert(nsc.size() == 2 and nsc[0][1] == "type:touchpad" and nsc[1][1] == "type:pointer"
 		and nsc[1][3] == "disabled", "scroll natural también para pointer")

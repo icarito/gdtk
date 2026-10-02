@@ -161,48 +161,35 @@ func _init():
 		kinds.append(String(it.get("kind", "")))
 		if String(it.get("kind", "")) != "separator":
 			labels.append(String(it.get("label", "")))
-	check("menú con separador", kinds.has("separator"))
 	check("menú traduce acciones", labels.has("Ver su escritorio aquí")
 		and labels.has("Extender mi escritorio a él"))
-	check("menú con los cuatro rumbos y quitar",
-		labels.has("Colocar al Norte") and labels.has("Colocar al Sur")
-		and labels.has("Colocar al Este") and labels.has("Colocar al Oeste")
-		and labels.has("Quitar de la disposición"))
+	check("menú sin edición de posición",
+		not labels.has("Colocar al Norte") and not labels.has("Colocar al Sur")
+		and not labels.has("Colocar al Este") and not labels.has("Colocar al Oeste")
+		and not labels.has("Quitar de la disposición"))
 	var menu_clean = true
 	for it in menu:
 		if MAP.has_internal_terms(String(it.get("label", ""))) or MAP.has_internal_terms(String(it.get("reason", ""))):
 			menu_clean = false
 	check("menú sin vocabulario interno", menu_clean)
-	var east_item = null
-	var none_item = null
 	var disabled_item = null
 	for it in menu:
-		if String(it.get("id", "")) == "direction:east":
-			east_item = it
-		elif String(it.get("id", "")) == "direction:none":
-			none_item = it
-		elif String(it.get("id", "")) == "share_my_screen":
+		if String(it.get("id", "")) == "share_my_screen":
 			disabled_item = it
-	check("rumbo actual deshabilitado con razón",
-		not bool(east_item.enabled) and String(east_item.reason) == "ya está al Este")
-	check("quitar disponible si tiene posición", bool(none_item.enabled))
 	check("acción no disponible con razón humana",
 		not bool(disabled_item.enabled) and String(disabled_item.reason) == "no tiene el receptor de pantalla")
-	var no_dir_menu = MAP.neighbor_menu({"id": "h2"}, [], "none", false)
-	var none_item2 = null
-	for it in no_dir_menu:
-		if String(it.get("id", "")) == "direction:none":
-			none_item2 = it
-	check("quitar deshabilitado sin posición",
-		not bool(none_item2.enabled) and String(none_item2.reason) == "sin posición asignada")
 	var debug_menu = MAP.neighbor_menu({"id": "h1", "capabilities": {"gvd": {}}}, [], "none", true)
 	var has_debug = false
 	for it in debug_menu:
 		if String(it.get("kind", "")) == "debug":
 			has_debug = true
 	check("ítems de depuración sólo con GDTK_DEBUG", has_debug)
-	check("sin depuración por defecto",
-		MAP.neighbor_menu({"id": "h1"}, [], "none", false)[0].kind != "debug")
+	var plain_menu = MAP.neighbor_menu({"id": "h1"}, [], "none", false)
+	var plain_debug = false
+	for it in plain_menu:
+		if String(it.get("kind", "")) == "debug":
+			plain_debug = true
+	check("sin depuración por defecto", not plain_debug)
 
 	# Nombre de peer seguro para el layout.
 	check("safe_peer limpia espacios", MAP.safe_peer("Tengu Uno") == "Tengu_Uno")

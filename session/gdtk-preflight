@@ -1,0 +1,39 @@
+#!/bin/sh
+# Preflight de un contenido versionado: compila todos los .gd y verifica que el
+# binario tenga los modulos esperados. Se corre antes de promover una version
+# (lo llama gdtk-version snapshot) y a mano para diagnosticar un arranque roto.
+# Uso: gdtk-preflight [<content-dir>]
+set -eu
+
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+BASE="$(cd "$SELF_DIR/.." && pwd)"
+STORE="${GDTK_STORE:-${XDG_DATA_HOME:-$HOME/.local/share}/gdtk}"
+CONTENT="${1:-}"
+[ -n "$CONTENT" ] || CONTENT="$( [ -L "$STORE/current" ] && readlink -f "$STORE/current" || true )"
+[ -n "$CONTENT" ] || CONTENT="${GDTK_HOME:-$BASE}"
+
+die() { echo "gdtk-preflight: $*" >&2; exit 3; }
+
+[ -f "$CONTENT/shell/project.godot" ] || die "no encuentro $CONTENT/shell/project.godot"
+
+GODOT="${GDTK_GODOT:-}"
+if [ -z "$GODOT" ]; then
+	if [ -x "$BASE/bin/godot-gdtk" ]; then
+		GODOT="$BASE/bin/godot-gdtk"
+	else
+		GODOT="/home/icarito/Proyectos/godot3-box3d/godot-dev/bin/godot.frt.opt.debug.x86_64.gdtklite"
+	fi
+fi
+[ -x "$GODOT" ] || die "binario no ejecutable: $GODOT"
+
+out="$("$GODOT" --no-window --path "$CONTENT/shell" -s "$SELF_DIR/gdtk-preflight.gd" 2>&1)"
+rc=$?
+printf '%s\n' "$out" | grep '^FAIL' || true
+printf '%s\n' "$out" | grep '^preflight:' || true
+[ "$rc" -eq 0 ] || die "scripts no compilan (rc=$rc)"
+
+# Fase 3 pineara el runtime desde un manifiesto; por ahora solo avisamos.
+for sym in ImGuiCanvas SlugVector2D; do
+	grep -q "$sym" "$GODOT" 2>/dev/null || echo "gdtk-preflight: WARN falta $sym en $GODOT" >&2
+done
+exit 0

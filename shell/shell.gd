@@ -1,8 +1,6 @@
 extends ImGuiCanvas
 
 var ACTIVITIES = [
-	{"name": "Chat", "script": "res://activities/chat.gd"},
-	{"name": "Panel", "script": "res://activities/panel.gd"},
 	{"name": "Terminal", "wayland": ["alacritty"]},
 	{"name": "Gears", "wayland": ["es2gears_wayland"]},
 	{"name": "GTK", "wayland": ["gtk4-widget-factory"]},
@@ -33,6 +31,9 @@ const DIRECTIONS_MODEL = preload("res://neighborhood_directions.gd")
 # real de servidor; el shell sólo los consume al aplicar.
 const LAYOUT_MODEL = preload("res://deskflow_layout.gd")
 const CONF_MODEL = preload("res://deskflow_conf.gd")
+const DESKFLOW_SETTINGS = preload("res://deskflow_settings.gd")
+const SCREEN_LAYOUT = preload("res://screen_layout.gd")
+const SERVICE_STATE = preload("res://service_state.gd")
 # Sesión de pantalla gvd (Kilo F2): modelo puro de estados/planes/clasificación que
 # usa el despacho de acciones del Vecindario (no ejecuta nada por sí mismo).
 const GVD_SESSION = preload("res://gvd_session.gd")
@@ -55,6 +56,12 @@ const HANDSHAKE = preload("res://neighborhood_handshake.gd")
 const CONTENT_LAYOUT = preload("res://content_layout.gd")
 # Tipo de equipo local (kind de Vecindario) para el ícono de "Este equipo"/Inicio.
 const DEVICE_KIND = preload("res://device_kind.gd")
+# Lazy focus follows mouse (Feature Tiles): política pura de cambio de foco al
+# mover el puntero sobre la vista; el shell sólo aplica la decisión.
+const FOCUS_FOLLOW = preload("res://focus_follow.gd")
+# Exposé como "zoom out" del escritorio: layout puro (proporciones reales) por
+# workspace, ordenado como la fila de pantallas.
+const EXPOSE_LAYOUT = preload("res://expose_layout.gd")
 
 onready var compositor = Host.compositor
 var view = null          # Control que dibuja las ventanas (se crea en _ready)
@@ -101,6 +108,12 @@ var dialog_boxes = {}
 # Toplevels sin padre y sin launch pendiente: esperan app_id/titulo para crear
 # la actividad dinamica (en `added` todavia no se conocen).
 var unmanaged = []
+# Tiempo de espera antes de tratar un toplevel suelto como ventana nueva: un
+# dialogo de otro proceso (p. ej. el selector de archivos del portal) puede
+# declarar su padre (xdg-foreign) un frame despues de `added`. Durante esa
+# ventana no se crea actividad/workspace.
+const DIALOG_GRACE_MS = 300
+var unmanaged_since = {}
 
 # Home: fila(s) de actividades o grilla de apps instaladas (Tab alterna).
 var apps = Host.sc("res://apps.gd").new()
@@ -113,6 +126,9 @@ var home_icon_loads = 0
 # (sin duplicar) + estos favoritos resueltos por `apps`.
 var ring_favorites = []
 var ring_saved = []
+# Orden de último uso (MRU) del anillo: nombres de actividad, el más reciente al
+# final. El anillo lista primero lo que está abierto/activo, ordenado por esto.
+var activity_mru = []
 # Layout animado del anillo: posición mostrada por nombre, animación en curso e
 # instante de entrada (fade/escala breve). Se limpia cuando el ítem sale.
 var ring_pos = {}
@@ -133,6 +149,11 @@ var _rotate_sensor = null
 var neighborhood = null
 var neighborhood_ui = null
 var neighborhood_view = false
+# Transición Hogar <-> Vecindario con metáfora de zoom del ícono central:
+# 0 = Hogar, 1 = Vecindario. El Vecindario escala/aparece desde el centro.
+var nb_zoom = 0.0
+var nb_zoom_target = 0.0
+const ZOOM_MS = 220.0
 var nb_version = -1
 # Dirección por host (brújula): hid -> entry normalizado de DIRECTIONS_MODEL.
 # Se persiste en $XDG_CONFIG_HOME/gdtk/neighborhood-directions.json sin bloquear.
@@ -171,6 +192,7 @@ var _deskflow_server_launch = {}  # hid -> {cmd, args} para restaurar el servido
 # (File.file_exists, sin OS.execute) y no se recalcula por frame.
 var _deskflow_probed = false  # ya se escaneó $PATH una vez
 var _deskflow_core = ""       # ruta de deskflow-core en $PATH, o "" si no está
+var _deskflow_input_capture = false  # server Wayland: portal InputCapture disponible
 # Escrituras de config de plan (p. ej. layout Deskflow) con toggle/lanzamiento diferido
 # hasta que la escritura atómica termine; patrón _persist_directions/_dir_poll sin bloquear.
 var _plan_write_threads = []
@@ -179,12 +201,25 @@ var _plan_mutex = Mutex.new()
 # Deskflow por host: intención en memoria, nunca implícita ni automática. El
 # portapapeles dejó de ser una opción (se asume compartido con "Controlar").
 var host_deskflow = {}        # host_id -> bool (intención; la actividad es global)
+var _deskflow_settings_key = ""
+var _deskflow_auto_key = ""
+var _deskflow_role = "client"
+# Autoarranque por defecto: el portal de la sesión se reinicia al arrancar y tumba una
+# sesión InputCapture recién abierta; el primer arranque se difiere y, si el proceso
+# muere igual, el tick reintenta con cooldown (ver _deskflow_arm/_deskflow_tick).
+var _deskflow_want = false        # el autoarranque quiere el servicio corriendo
+var _deskflow_retry_at = 0        # ticks_ms: no intentar arrancar antes de
+var _deskflow_retries = 0
 
 # Configuración (K11a): puente a ~/.config/gdtk/settings.json, releído en un Thread
 # con TTL (sin I/O en el frame). El render sólo copia accent/fondo del snapshot.
 var settings_bridge = null
 var settings_rev = -1
 var accent = Color(0.55, 0.80, 1.0, 1.0)  # RING_FOCUS por defecto; ver _apply_settings
+# Apariencia (bisel/plano/relieve) desde Settings; la consumen el Hogar y el Frame.
+var appearance = {"bevel": 1.0, "flat": false, "emboss": true}
+# Escala de UI configurable (factor sobre la automática por resolución).
+var ui_scale_factor = 1.0
 
 # Input remoto por libei (Deskflow, lan-mouse): EIS + portal RemoteDesktop en el módulo.
 var remote_input = null
@@ -197,6 +232,10 @@ var input_button_count = 0
 var input_touch_count = 0
 var input_last_button = {}
 var input_last_key = {}
+# Pointer lock (SDL relative): mientras Deskflow captura el input local, el puntero del
+# compositor queda clavado en el borde y `event.relative` se vuelve ~0. Con capturado,
+# sway manda movimiento relativo crudo y el cursor remoto sí avanza (ver RemoteInput).
+var mouse_locked = false
 var last_key_target = -1  # última ventana que recibió teclas (para reenviar sueltas)
 
 # --- Pantallas ---
@@ -221,7 +260,9 @@ var tile_fade = {}       # id -> ms en que apareció (fade-in)
 var tile_intro = {}      # id -> true: falta su primera textura para animar la entrada
 var expose = false
 var expose_sel = 0
-var expose_cards = {}    # id -> Rect2 de la tarjeta en exposé
+var expose_cards = {}    # id -> Rect2 de la ventana en exposé (coords de vista)
+var expose_unit_cards = []  # Rect2 de cada workspace (pantalla) en exposé
+var expose_hover = -1    # id de la ventana bajo el puntero en exposé (-1 = ninguna)
 var ghosts = []          # cierres/minimizados animados: {"node", "from", "to", "since"}
 var ghost_layer = null   # capa por encima de apps y Home para el fantasma de cierre
 # Rect (coords de vista) del ícono que lanzó la próxima ventana: ancla la animación de
@@ -233,6 +274,13 @@ var pending_origin_since = 0
 var starting = {}
 # SVG de Sugar ya rasterizados: "nombre|stroke|fill" -> ImageTexture.
 var sugar_icons = {}
+# Íconos Slug por clave (GLES3): textura de Viewport + el SlugVector que la respalda.
+var slug_icons = {}
+var slug_vectors = {}
+# Tamaño en px del TTF ya horneado (-1 = sin cargar).
+var ui_font_px = -1.0
+# El daemon de auto-rotación se arranca una sola vez (ver _maybe_start_rotate).
+var rotate_autostarted = false
 # Animación de transformación (entrar/salir de exposé): id -> {"from_pos", "from_scale", "since"}.
 var view_anim = {}
 # Pantalla completa (Alt+F11): la ventana enfocada ocupa todo y se esconde el Frame.
@@ -242,9 +290,7 @@ var split_weight = {}
 var handles = []         # asas de la franja enfocada: {"x", "y", "h", "i", "left", "right"}
 var hover_handle = null
 var resize_handle = null
-var expose_scroll = 0.0  # exposé: fila única con scroll horizontal
-var expose_scroll_target = 0.0
-var expose_auto = true   # true = centrar la seleccionada; false = scroll manual (rueda)
+var expose_scroll = 0.0  # exposé: reservado (todo entra en pantalla; la rueda navega)
 var pan = 0.0            # scroll suave entre workspaces (Super+rueda): offset continuo
 var pan_active = false   # true mientras se panea; cae al más cercano al soltar Super
 # Hogar como pantalla extra al final de la fila (índice units.size()): su deslizamiento
@@ -267,6 +313,10 @@ const FOCUS_FLASH_MS = 260
 const HANDLE_HIT = 7.0
 const EXPOSE_PAD = 28.0
 const EXPOSE_GAP = 18.0
+# Zoom out: escala máxima del workspace (con uno solo, para que se note el achique).
+const EXPOSE_MAX_SCALE = 0.62
+# Lado del botón de cerrar de cada ventana en exposé (se ajusta al tamaño de la tarjeta).
+const EXPOSE_CLOSE_MAX = 22.0
 const MOD_KEYS = [KEY_CONTROL, KEY_SHIFT, KEY_ALT, KEY_META, KEY_SUPER_L, KEY_SUPER_R]
 
 # Hogar: fila(s) de favoritos centradas (SPEC-sugar-home-visual). Pareja XO para la
@@ -302,12 +352,22 @@ const RING_FAVORITE = Color(0.66, 0.68, 0.76, 0.95)
 const LAYOUT_MS = 220
 const RING_INTRO_MS = 260
 const DRAG_PX = 8.0
+# Distribución del anillo en espiral de ángulo áureo, con jitter determinista.
+const GOLDEN_ANGLE = 2.399963229728653  # PI * (3 - sqrt(5))
+const RING_JITTER_A = 0.18
+const RING_JITTER_R = 0.05
+# Hasta esta cantidad, un solo círculo ordenado; más, espiral (bubbles).
+const RING_CIRCLE_MAX = 7
 
 # Íconos Sugar: los SVG traen un DOCTYPE con entidades &stroke_color;/&fill_color;.
 # Se cargan como texto, se sustituyen por los colores pedidos y se rasterizan a una
 # ImageTexture cacheada (el motor no expone load_svg_from_string en este árbol).
 const SUGAR_DIR = "res://icons/sugar/"
 const SUGAR_RASTER = 192  # px del SVG al rasterizar (se dibuja a ~120)
+const SLUG_RASTER = 256   # px del SVG al renderizar con Slug (GLES3)
+# Texto nítido: TTF cargado en runtime y horneado al tamaño exacto (ver _sync_ui_font).
+const UI_FONT_FILE = "res://fonts/DejaVuSans.ttf"
+const UI_FONT_PX = 16.0   # px a escala 1 (U=80); el resto sale de ui_scale
 # Íconos nuevos (The Noun Project, ver icons/np/CREDITS.txt): PNG 200 px claros
 # con transparencia. El rasterizador de Sugar no aplica (no son SVG con
 # entidades), así que se cargan como ImageTexture y se cachean aparte.
@@ -321,9 +381,7 @@ const DEVICE_ICONS = {
 }
 # Actividades sin ícono XDG con un ícono Sugar razonable (el resto usa inicial).
 const SUGAR_ACTIVITY_ICONS = {
-	"Panel": "preferences-system",
 	"Gears": "emblem-busy",
-	"Chat": "document-send",
 	"Deskflow": "network-wired",
 	"Pantalla": "computer-xo",
 	"Configuración": "preferences-system",
@@ -340,7 +398,7 @@ const STARTING_PERIOD_S = 1.2
 # El mínimo de 80 garantiza que el ícono de 64 entre holgado en cualquier resolución.
 # Todo bloque/salto del Hogar y del Frame sale de acá; no se repiten números.
 func grid_unit(vp):
-	return max(80.0, floor(min(vp.x, vp.y) / 10.0))
+	return max(80.0, floor(min(vp.x, vp.y) / 10.0)) * ui_scale_factor
 
 
 # Unidad base de la grilla: con U=80 la UI está a escala 1. La resolución ya escala
@@ -351,7 +409,7 @@ func grid_unit(vp):
 const GRID_BASE = 80.0
 
 func ui_scale(vp):
-	return clamp(grid_unit(vp) / GRID_BASE, 1.0, 3.0)
+	return clamp(grid_unit(vp) / GRID_BASE, 0.5, 4.0)
 
 
 # Mantiene la escala de UI sincronizada con el viewport (barato e idempotente).
@@ -359,6 +417,36 @@ func _sync_ui_scale():
 	var want = ui_scale(get_viewport_rect().size)
 	if abs(want - get_imgui_scale()) > 0.01:
 		imgui_scale = want
+	_sync_ui_font(want)
+
+
+# TTF nítido: se hornea al tamaño exacto (px base * escala) y el motor queda con
+# FontGlobalScale=1 (font_scale_override), así el atlas no se reescala al dibujar.
+# La fuente por defecto de ImGui es un bitmap de 13 px y se ve borrosa al agrandar.
+func _sync_ui_font(scale):
+	var px = round(UI_FONT_PX * scale)
+	if abs(px - ui_font_px) < 0.5:
+		return
+	if not File.new().file_exists(UI_FONT_FILE):
+		return
+	ui_font_px = px
+	var idx = add_font(UI_FONT_FILE, px, "default")
+	if idx >= 0:
+		set_default_font(idx)
+		# Recién con la fuente horneada al tamaño exacto se fija FontGlobalScale=1:
+		# así el atlas no se reescala. Si el TTF no carga, se deja la fuente por
+		# defecto escalada (borrosa pero del tamaño correcto). call() por si el
+		# método no está en un binario viejo.
+		if has_method("set_font_scale_override"):
+			call("set_font_scale_override", 1.0)
+
+
+# Ancho real del texto con la fuente activa (proporcional). Centrar estimando
+# chars*7 desalineaba con el TTF. Fallback si el binario no trae calc_text_size.
+func _text_w(s):
+	if has_method("calc_text_size"):
+		return call("calc_text_size", s).x
+	return s.length() * 7.0 * get_imgui_scale()
 
 
 # Alto de las barras del Frame (superior e inferior). Una unidad completa; si la
@@ -389,10 +477,11 @@ func _tile_rect(vp):
 	return CONTENT_LAYOUT.content_rect(vp, frame_bar_h(vp), _frame_edges())
 
 
-# Hueco central del Frame para diálogos/ventanas hijas (mismo criterio: sólo
-# reserva lo fijado). Se mantiene el nombre por claridad de los llamadores.
+# Área de los diálogos: el viewport menos un bloque por cada lado (siempre, no
+# sólo lo que el Frame reserva). Los diálogos flotan sobre su ventana host dentro
+# de este rect y conservan el tamaño natural que pide el cliente.
 func _content_rect(vp):
-	return _tile_rect(vp)
+	return CONTENT_LAYOUT.dialog_area(vp, frame_bar_h(vp))
 
 
 # Ícono del equipo local: el mismo `kind` que publica el Vecindario (o "unknown",
@@ -483,7 +572,20 @@ func _ready():
 	view_layer.add_child(view)
 	view.connect("gui_input", self, "_on_view_input")
 	# Hijo después de Remote: su _input corre antes que el de ImGui (F6, Alt+Tab).
-	frame = Host.sc("res://frame.gd").new()
+	# .new() sobre un script nulo aborta la expresión y saltaría el fail-fast, así
+	# que se resuelve el script primero y se instancia sólo si compiló.
+	var frame_script = Host.sc("res://frame.gd")
+	if frame_script == null:
+		push_error("gdtk: frame.gd no compiló; abortando el arranque")
+		get_tree().quit(1)
+		return
+	frame = frame_script.new()
+	# Fail-fast: si frame.gd no compila no hay UI; salir con código !=0 para que el
+	# supervisor lo cuente como caída y pueda volver a la última versión buena.
+	if frame == null or not is_instance_valid(frame):
+		push_error("gdtk: frame.gd no compiló; abortando el arranque")
+		get_tree().quit(1)
+		return
 	frame.name = "Frame"
 	add_child(frame)
 	_load_ring()
@@ -497,25 +599,38 @@ func _ready():
 	neighborhood_ui.model = neighborhood
 	neighborhood_ui.visible = false
 	view_layer.add_child(neighborhood_ui)
+	# El Vecindario cachea desde el arranque: abrir la vista no debe disparar el
+	# primer scan de Wi-Fi/hosts, sólo mostrar el snapshot ya disponible.
+	neighborhood.start()
 	# Brújula: carga local (sin red) y vuelca el modelo a la vista ya creada.
 	_load_directions()
 	_refresh_direction_views()
+	# Configuración (K11a): puente a settings.json (lectura en Thread con TTL).
+	# Se aplica antes de servicios y mDNS: Deskflow ajusta comando, rol publicado y
+	# autoarranque desde Settings.
+	settings_bridge = Host.sc("res://settings_bridge.gd").new()
+	if settings_bridge != null:
+		settings_bridge.reload_now()
+		_apply_settings()
+		ACTIVITIES.append({"name": "Configuración", "wayland": settings_bridge.launch_argv()})
+	# Limpieza de arranque: si ya hay un deskflow-core del usuario (sesión previa,
+	# lanzado a mano o dejado por una recarga), se mata ANTES de arrancar el worker
+	# para no duplicar la instancia ni pelear por puerto/input. Sólo corre una vez,
+	# acá en _ready; nunca en _process ni en el worker propio (§0/§14).
+	_reap_stray_deskflow()
 	# Servicios: worker de fondo que mide pgrep/kill -0 y publica un snapshot; el
 	# dibujo y el portal RemoteInput sólo leen ese cache (nunca esperan al frame).
 	_start_service_worker()
+	# Si Settings pidió autoarrancar Deskflow, la primera aplicación sólo dejó el
+	# comando/rol listos porque el worker aún no existía. Reaplicar acá hace la
+	# escritura+arranque desde el ciclo normal de servicios.
+	_apply_deskflow_settings()
 	# Anuncio mDNS de la identidad local (gvd/Deskflow) fuera del frame; sin avahi
 	# queda degradado y silencioso.
 	_start_publishers()
 	# Buzón del handshake de dirección: worker propio con TTL que publica el
 	# resultado; el frame sólo copia (nunca ssh en el hilo de render, §14).
 	_start_inbox()
-	# Configuración (K11a): puente a settings.json (lectura en Thread con TTL).
-	# La actividad "Configuración" relanza este binario con --path settings.
-	settings_bridge = Host.sc("res://settings_bridge.gd").new()
-	if settings_bridge != null:
-		settings_bridge.reload_now()
-		_apply_settings()
-		ACTIVITIES.append({"name": "Configuración", "wayland": settings_bridge.launch_argv()})
 	# Notificaciones y demás layer-shell, encima de todo (después del Frame: su _input va antes).
 	add_child(Host.sc("res://layers.gd").new())
 
@@ -560,8 +675,9 @@ func _ready():
 	# request_redraw() (commits Wayland, señales, control remoto) o al cambiar el minuto (reloj).
 	# Los tests con --screenshot cuentan frames: ahí se deja el modo histórico.
 	if screenshot_path == "":
-		# Nada periódico: el reloj pide su frame justo cuando cambia el minuto.
-		update_hz = 0.001
+		# Piso liviano para que el control remoto TCP y los workers sigan respirando
+		# aun sin input ni commits Wayland. El sleep idle ya limita esto a ~4 Hz.
+		update_hz = 4.0
 		input_hz = 60.0
 		_arm_clock()
 	# El colector del HUD corría en cada vuelta del loop (60/s) aunque nada cambie.
@@ -705,6 +821,22 @@ var last_activity = 0
 # no se entera de que cambió el contenido): se rearma el frame siguiente.
 func _process(_delta):
 	var now = OS.get_ticks_msec()
+	# Transición de zoom Hogar <-> Vecindario (metáfora del ícono central). El
+	# objetivo sigue SIEMPRE a `neighborhood_view`: cualquier salida (abrir una app,
+	# la grilla de Apps, _go_home) vuelve a 0 y el Vecindario se retira.
+	nb_zoom_target = 1.0 if neighborhood_view else 0.0
+	if abs(nb_zoom - nb_zoom_target) > 0.001:
+		var step = (_delta * 1000.0) / ZOOM_MS
+		if step <= 0.0:
+			step = 0.15
+		if nb_zoom < nb_zoom_target:
+			nb_zoom = min(nb_zoom_target, nb_zoom + step)
+		else:
+			nb_zoom = max(nb_zoom_target, nb_zoom - step)
+		request_redraw()
+	elif nb_zoom != nb_zoom_target:
+		nb_zoom = nb_zoom_target
+		request_redraw()
 	if compositor.commit_count != last_commits:
 		last_commits = compositor.commit_count
 		last_activity = now
@@ -721,6 +853,8 @@ func _process(_delta):
 				request_redraw()
 	# Servicios: copia el snapshot del worker (sin consultar procesos acá).
 	_svc_poll()
+	# Deskflow por defecto: reintenta el arranque si debía correr y no está.
+	_deskflow_tick(now)
 	# Escrituras de dirección: reapea los Threads ya terminados (no bloquea).
 	_dir_poll()
 	# Buzón del handshake de dirección: aplica el snapshot del worker y reapea los
@@ -754,29 +888,44 @@ func _redraw_on_signal(_id):
 func _imgui_frame():
 	# Antes de dibujar: el texto sigue el tamaño de la grilla (fuentes escaladas).
 	_sync_ui_scale()
-	# Actividades internas animadas (Panel con animación) piden frames continuos.
+	# Auto-rotación: arrancar el daemon una vez (sway o X11, según la sesión).
+	_maybe_start_rotate()
+	# X11 sin window manager: al rotar (xrandr) el root cambia de tamaño pero la
+	# ventana no se redimensiona sola; el shell se ajusta.
+	if OS.get_environment("GDTK_SESSION") == "x11":
+		_x11_follow_screen()
+	# Actividades internas animadas piden frames continuos.
 	if activity_instance != null and activity_instance.get("animate"):
 		request_redraw()
 	recovery.tick(self)
 	_process_unmanaged()
 	_tick_home_slide()
 	# Fundido al cambiar de vista (ver frame.transition); 0 = ImGuiStyleVar_Alpha.
-	var fade = frame.transition()
+	# Si el Frame no cargó (p. ej. frame.gd no compila), no hay transición que
+	# aplicar: se dibuja opaco en vez de reventar cada frame.
+	var fade = frame.transition() if frame != null and is_instance_valid(frame) else 1.0
 	if fade < 1.0:
 		push_style_var_float(0, fade)
-	if current_activity == null:
-		if neighborhood_view:
-			neighborhood_ui.refresh()
+	# En exposé el ImGui no dibuja la vista de fondo (Hogar/actividad): las miniaturas
+	# del escritorio van en la capa de abajo y el fondo oscuro las enmarca.
+	if not expose:
+		if current_activity == null:
+			# Durante el zoom Hogar -> Vecindario se sigue dibujando el Hogar detrás,
+			# para que el Vecindario aparezca escalando sobre él (no sobre negro).
+			if neighborhood_view and nb_zoom >= 0.999:
+				neighborhood_ui.refresh()
+			else:
+				_draw_home(_home_x(_units()))
+				if neighborhood_view:
+					neighborhood_ui.refresh()
 		else:
-			_draw_home(_home_x(_units()))
-	else:
-		_draw_activity()
-		# Paneo/animación hacia el Hogar: se dibuja deslizándose junto a las ventanas.
-		if _home_anim_active() or pan_active:
-			var hx = _home_x(_units())
-			var vp = get_viewport_rect().size
-			if hx > -vp.x and hx < vp.x:
-				_draw_home(hx)
+			_draw_activity()
+			# Paneo/animación hacia el Hogar: se dibuja deslizándose junto a las ventanas.
+			if _home_anim_active() or pan_active:
+				var hx = _home_x(_units())
+				var vp = get_viewport_rect().size
+				if hx > -vp.x and hx < vp.x:
+					_draw_home(hx)
 	if fade < 1.0:
 		pop_style_var()
 
@@ -785,8 +934,21 @@ func _imgui_frame():
 	# vista también se muestra para el paneo/animación que trae o lleva al Hogar.
 	tile_mode = current_activity != null and current_activity.has("wayland") and not tiles.empty()
 	var row = tile_mode or (not tiles.empty() and (_home_anim_active() or pan_active))
+	# Exposé: las miniaturas necesitan la vista visible aunque no haya una actividad
+	# wayland enfocada (p. ej. abierto desde el Hogar), para poder elegir/cerrar.
+	if expose and not tiles.empty():
+		row = true
 	view.visible = row
-	neighborhood_ui.visible = neighborhood_view and current_activity == null
+	# Vecindario con zoom: visible también mientras cierra/anima (nb_zoom > 0).
+	var nb_vp = get_viewport_rect().size
+	neighborhood_ui.visible = current_activity == null and not expose and (neighborhood_view or nb_zoom > 0.01)
+	if neighborhood_ui.visible:
+		var zk = lerp(0.72, 1.0, _ease_out(nb_zoom))
+		neighborhood_ui.rect_pivot_offset = nb_vp * 0.5
+		neighborhood_ui.rect_scale = Vector2(zk, zk)
+		neighborhood_ui.modulate = Color(1, 1, 1, clamp(nb_zoom, 0.0, 1.0))
+		# Al cerrar sigue visible para animar, pero no debe capturar el mouse.
+		neighborhood_ui.mouse_filter = Control.MOUSE_FILTER_STOP if neighborhood_view else Control.MOUSE_FILTER_IGNORE
 	if row:
 		_update_tiles()
 	instant_switch = false  # ya se reubicaron sin animación en este frame
@@ -798,7 +960,10 @@ func _imgui_frame():
 	if expose_bg != null:
 		expose_bg.rect_size = get_viewport_rect().size
 		expose_bg.visible = expose
-	frame.draw(self)
+	# En exposé no se dibujan las barras del Frame: taparían las miniaturas (el fondo
+	# oscuro y los marcos las resaltan).
+	if not expose:
+		frame.draw(self)
 	_update_ghosts(OS.get_ticks_msec())
 
 	_draw_input_requests()
@@ -1003,37 +1168,91 @@ func _resize_to(h, mouse_x):
 	split_weight[h.right] = wsum * (1.0 - frac)
 
 
-# Exposé: TODAS las tarjetas en una sola fila horizontal, en el mismo orden que la franja
-# de workspaces (`tiles`); si no entran, scroll horizontal (rueda) o centra la elegida.
+# Rects de las ventanas de UNA pantalla en coordenadas locales del workspace (origen
+# (0,0), tamaño del viewport), sin depender del estado de paneo. Misma partición que
+# _split_rects: una ventana ocupa el área de contenido; una franja partida reparte por
+# pesos con TILE_GAP. Lo usa el exposé para escalar cada ventana a su lugar real.
+func _unit_local_layout(members):
+	var out = {}
+	var vp = get_viewport_rect().size
+	var area = _tile_rect(vp)
+	if members.size() == 1:
+		out[members[0]] = area
+		return out
+	if members.empty():
+		return out
+	var gap = TILE_GAP
+	var total = 0.0
+	for m in members:
+		total += max(_weight(m), 0.001)
+	var avail = area.size.x - gap * float(members.size() + 1)
+	var x = area.position.x + gap
+	for i in range(members.size()):
+		var w = avail * max(_weight(members[i]), 0.001) / total
+		out[members[i]] = Rect2(x, area.position.y, w, area.size.y)
+		x += w + gap
+	return out
+
+
+# Exposé = "zoom out" del escritorio: cada workspace (pantalla) se dibuja como una
+# miniatura completa del viewport, con sus ventanas en la posición y proporción reales,
+# y TODOS los workspaces van en una fila en su orden espacial (el mismo del paneo),
+# escalados para entrar a la vista. La lógica de escalado/proporción vive en
+# expose_layout.gd (pura y testeable).
 func _compute_expose_layout():
 	expose_cards.clear()
-	var n = tiles.size()
+	expose_unit_cards = []
+	var units = _units()
+	var n = units.size()
 	if n == 0:
+		expose_sel = 0
 		return
+	expose_sel = int(clamp(expose_sel, 0, max(tiles.size() - 1, 0)))
 	var vp = get_viewport_rect().size
-	expose_sel = int(clamp(expose_sel, 0, max(n - 1, 0)))
-	var ch = vp.y - EXPOSE_PAD * 2.0
-	var cw = clamp(vp.x * 0.6, 240.0, 720.0)
-	var total = EXPOSE_PAD * 2.0 + float(n) * cw + float(max(n - 1, 0)) * EXPOSE_GAP
-	var max_scroll = max(total - vp.x, 0.0)
-	if expose_auto:
-		var sel_left = EXPOSE_PAD + float(expose_sel) * (cw + EXPOSE_GAP)
-		expose_scroll_target = clamp(sel_left + cw * 0.5 - vp.x * 0.5, 0.0, max_scroll)
-	else:
-		expose_scroll_target = clamp(expose_scroll_target, 0.0, max_scroll)
-	expose_scroll = lerp(expose_scroll, expose_scroll_target, 0.25)
-	if abs(expose_scroll - expose_scroll_target) > 0.5:
-		request_redraw()
-	for i in range(n):
-		var x = EXPOSE_PAD + float(i) * (cw + EXPOSE_GAP) - expose_scroll
-		expose_cards[tiles[i]] = Rect2(x, EXPOSE_PAD, cw, ch)
+	var local = []
+	for u in units:
+		local.append(_unit_local_layout(u))
+	var plan = EXPOSE_LAYOUT.plan(vp, local, EXPOSE_PAD, EXPOSE_GAP, EXPOSE_MAX_SCALE)
+	expose_unit_cards = plan["units"]
+	expose_cards = plan["cards"]
+	# tile_rects queda con la geometría REAL local de cada ventana: la necesita
+	# _update_tile para reescalar la miniatura sin distorsionar el contenido.
+	for u in range(units.size()):
+		for id in local[u].keys():
+			tile_rects[id] = local[u][id]
 
 
-# Rueda en exposé: desplaza la tira sin cambiar la selección.
+# Rueda en exposé: como todo entra en pantalla, navega la selección (no hace scroll).
 func _expose_scroll_by(px):
-	expose_auto = false
-	expose_scroll_target += px
-	request_redraw()
+	_expose_move(1 if px > 0.0 else -1)
+
+
+# Ventana bajo el punto en exposé (-1 si ninguna).
+func _expose_hit(pos):
+	for id in tiles:
+		var card = expose_cards.get(id)
+		if card != null and card.has_point(pos):
+			return id
+	return -1
+
+
+# Rect del botón de cerrar de una ventana en exposé (arriba a la derecha), ajustado al
+# tamaño de la miniatura. null si la ventana no está en exposé o es muy chica.
+func _expose_close_rect(id):
+	var card = expose_cards.get(id)
+	if card == null or card.size.x < 12.0 or card.size.y < 12.0:
+		return null
+	var d = clamp(min(card.size.x, card.size.y) * 0.20, 12.0, EXPOSE_CLOSE_MAX)
+	var m = max(2.0, d * 0.14)
+	return Rect2(card.end.x - d - m, card.position.y + m, d, d)
+
+
+func _expose_close_hit(pos):
+	for id in tiles:
+		var r = _expose_close_rect(id)
+		if r != null and r.grow(2.0).has_point(pos):
+			return id
+	return -1
 
 
 func _tile_node(id):
@@ -1099,6 +1318,8 @@ func _update_tiles():
 			tile_nodes.erase(id)
 			tile_rects.erase(id)
 			expose_cards.erase(id)
+			if expose_hover == id:
+				expose_hover = -1
 			tile_anim.erase(id)
 			tile_fade.erase(id)
 			tile_intro.erase(id)
@@ -1127,13 +1348,12 @@ func _update_tile(id, now):
 
 	if expose:
 		# Miniatura: se escala el nodo entero (la app conserva su tamaño de tile) y se
-		# centra, animando desde su transform de pantalla (ver _toggle_expose).
+		# centra, animando desde su transform de pantalla (ver _toggle_expose). El
+		# tamaño real por ventana está en tile_rects (lo dejó _compute_expose_layout).
 		var card = expose_cards.get(id, Rect2(Vector2.ZERO, view.rect_size))
-		var size = node.rect_size
-		if size.x <= 0.0 or size.y <= 0.0:
-			size = card.size
-		var s = min(min(card.size.x / max(size.x, 1.0), card.size.y / max(size.y, 1.0)), 1.0)
-		var tpos = card.position + (card.size - size * s) * 0.5
+		node.rect_size = rect.size
+		var s = min(min(card.size.x / max(rect.size.x, 1.0), card.size.y / max(rect.size.y, 1.0)), 1.0)
+		var tpos = card.position + (card.size - rect.size * s) * 0.5
 		var a = view_anim.get(id)
 		if a != null:
 			var e = _ease(float(now - a.since) / EXPOSE_MS)
@@ -1181,7 +1401,12 @@ func _update_tile(id, now):
 		var e = _ease(k)
 		var from = info.get("from")
 		if from == null:
-			from = Rect2(Vector2(view.rect_size.x, rect.position.y), rect.size)
+			if info.get("scale_in", false):
+				# Desminimizar: crece en su lugar (sin traslación desde el borde).
+				var s0 = 0.78
+				from = Rect2(rect.position + rect.size * (0.5 - 0.5 * s0), rect.size * s0)
+			else:
+				from = Rect2(Vector2(view.rect_size.x, rect.position.y), rect.size)
 		var s = lerp(_intro_scale(from, rect), 1.0, e)
 		var center = (from.position + from.size * 0.5).linear_interpolate(rect.position + rect.size * 0.5, e)
 		var pos = center - rect.size * s * 0.5
@@ -1336,12 +1561,14 @@ func _focus_tile(id):
 	pan_active = false
 	home_slide_since = -1
 	apps_view = false
-	# Enfocar una minimizada la restaura (así el teclado puede traerlas de vuelta).
-	if minimized.has(id):
+	# Enfocar una minimizada la restaura (así el teclado puede traerlas de vuelta);
+	# la vuelta usa entrada por escala (no deslizamiento desde el borde/Frame).
+	var restoring = minimized.has(id)
+	if restoring:
 		minimized.erase(id)
 	if not tiles.has(id):
 		tiles.append(id)
-		tile_intro[id] = _new_intro()
+		tile_intro[id] = _new_intro(restoring)
 	# Enfocar otra ventana sale de pantalla completa.
 	if fullscreen_id >= 0 and fullscreen_id != id:
 		fullscreen_id = -1
@@ -1578,9 +1805,9 @@ func _rebuild_tiles(units):
 
 func _toggle_expose(on):
 	expose = on
+	expose_hover = -1
 	if on:
 		expose_sel = max(tiles.find(focused_tile), 0)
-		expose_auto = true
 		release_modifiers()  # no dejar Ctrl/Shift pegados en la app al entrar
 	# El pasaje se anima: cada ventana arranca desde su transform actual (pantalla o tarjeta).
 	var now = OS.get_ticks_msec()
@@ -1595,7 +1822,6 @@ func _expose_move(step):
 	if tiles.empty():
 		return
 	expose_sel = posmod(expose_sel + step, tiles.size())
-	expose_auto = true  # al cambiar la selección, se recentra
 	request_redraw()
 
 
@@ -1707,6 +1933,23 @@ func _toggle_minimize_focused():
 	elif current_activity != null and tiles.has(id):
 		_minimize_window(id)
 	request_redraw()
+
+
+# Super+W / botón de cerrar del exposé: cierre educado (xdg_toplevel.close). La app
+# puede preguntar antes de irse.
+func _close_window_id(id):
+	if id >= 0 and _id_alive(id):
+		compositor.close(id)
+	request_redraw()
+
+
+# Cierra la ventana enfocada (mismo efecto que Alt+F4). Sin foco de ventana, prueba la
+# wayland actual; si no hay, no hace nada.
+func _close_focused():
+	var id = focused_tile
+	if id < 0 or not _id_alive(id):
+		id = _current_wayland_id()
+	_close_window_id(id)
 
 
 # Alt+F11: pantalla completa de la ventana enfocada (ocupa todo, se esconde el Frame).
@@ -1892,16 +2135,23 @@ func _root_of(id):
 	return id
 
 
-# Bisel clásico de 2px del Hogar (claro arriba/izq, oscuro abajo/der); `pressed` lo
+# Bisel clásico del Hogar (claro arriba/izq, oscuro abajo/der); `pressed` lo
 # invierte. Mismo lenguaje que los bloques del Frame. `r` en coords de pantalla.
+# El grosor escala con la UI y el factor de Apariencia (antes 2 px fijos, que en
+# pantallas densas quedaba como un hilo).
+func _home_bevel_w():
+	return max(1.0, round(HOME_BEVEL * get_imgui_scale() * float(appearance.get("bevel", 1.0))))
+
+
 func _draw_home_bevel(r, face, pressed):
 	imgui_draw_rect_filled(r, face, 0.0)
+	var b = _home_bevel_w()
 	var light = HOME_BLOCK_DARK if pressed else HOME_BLOCK_LIGHT
 	var dark = HOME_BLOCK_LIGHT if pressed else HOME_BLOCK_DARK
-	imgui_draw_rect_filled(Rect2(r.position, Vector2(r.size.x, HOME_BEVEL)), light, 0.0)
-	imgui_draw_rect_filled(Rect2(r.position, Vector2(HOME_BEVEL, r.size.y)), light, 0.0)
-	imgui_draw_rect_filled(Rect2(Vector2(r.position.x, r.end.y - HOME_BEVEL), Vector2(r.size.x, HOME_BEVEL)), dark, 0.0)
-	imgui_draw_rect_filled(Rect2(Vector2(r.end.x - HOME_BEVEL, r.position.y), Vector2(HOME_BEVEL, r.size.y)), dark, 0.0)
+	imgui_draw_rect_filled(Rect2(r.position, Vector2(r.size.x, b)), light, 0.0)
+	imgui_draw_rect_filled(Rect2(r.position, Vector2(b, r.size.y)), light, 0.0)
+	imgui_draw_rect_filled(Rect2(Vector2(r.position.x, r.end.y - b), Vector2(r.size.x, b)), dark, 0.0)
+	imgui_draw_rect_filled(Rect2(Vector2(r.end.x - b, r.position.y), Vector2(b, r.size.y)), dark, 0.0)
 
 
 # `offset` corre el Hogar dentro de la fila de pantallas: 0 en su lugar, ±ancho fuera
@@ -1929,14 +2179,14 @@ func _draw_home(offset = 0.0):
 		var pad = 0.0  # bloques pegados al borde, igual que el Frame (sin margen de 1px)
 		var btn_size = Vector2(u * 1.25, u * 1.25)
 		var entries = _ring_entries()
-		var layout = _orbit_layout(vp, entries.size())
+		var layout = _orbit_layout(vp, entries.size(), entries)
 		_ring_prune(entries)
 
 		# El equipo propio ocupa el centro de la órbita; las apps quedan alrededor.
 		# El ícono central (figura XO/monitor) ya no es decorativo: abre el menú de
 		# sesión (Salir/Recargar), porque 'Salir' dejó de ser actividad del anillo.
 		var cc = vp * 0.5
-		var monitor = Rect2(cc - Vector2(u * 0.38, u * 0.30), Vector2(u * 0.76, u * 0.54))
+		var monitor = Rect2(cc - Vector2(u * 0.45, u * 0.45), Vector2(u * 0.90, u * 0.90))
 		set_cursor_pos(monitor.position)
 		push_style_color(COL_BUTTON, Color(0, 0, 0, 0))
 		push_style_color(COL_BUTTON_HOVERED, Color(0, 0, 0, 0))
@@ -1948,20 +2198,32 @@ func _draw_home(offset = 0.0):
 		var center_hover = is_item_hovered()
 		pop_style_var()
 		pop_style_color(3)
-		var monitor_face = HOME_BLOCK_LIGHT
+		var center_face = HOME_BLOCK_LIGHT
 		if center_hover:
-			monitor_face = monitor_face.linear_interpolate(Color(1, 1, 1, monitor_face.a), 0.10)
+			center_face = center_face.linear_interpolate(Color(1, 1, 1, center_face.a), 0.10)
 		if center_hover:
-			set_tooltip("Sesión · Salir / Recargar")
-		imgui_draw_rect_filled(monitor, monitor_face, 2.0)
-		imgui_draw_rect_filled(Rect2(monitor.position + Vector2(4, 4), monitor.size - Vector2(8, 10)), HOME_BG_TOP, 0.0)
-		imgui_draw_rect_filled(Rect2(cc + Vector2(-3, u * 0.24), Vector2(6, u * 0.13)), HOME_BLOCK_LIGHT, 0.0)
-		imgui_draw_rect_filled(Rect2(cc + Vector2(-u * 0.21, u * 0.37), Vector2(u * 0.42, 4)), HOME_BLOCK_LIGHT, 0.0)
+			set_tooltip("Este equipo · Configuración / Sesión")
+		# Mismo ícono y placa que el centro del Vecindario: un solo "Este equipo".
+		var cr = min(monitor.size.x, monitor.size.y) * 0.5 - 2.0
+		imgui_draw_circle_filled(cc + Vector2(0.0, 3.0), cr, Color(0, 0, 0, 0.35), 0)
+		imgui_draw_circle_filled(cc, cr, center_face, 0)
+		imgui_draw_circle(cc, cr, HOME_BLOCK_DARK, 0, 2.0)
+		var dev_tex = local_device_icon_tex()
+		if dev_tex != null:
+			var ds = cr * 1.20
+			set_cursor_pos(cc - Vector2(ds, ds) * 0.5)
+			image(dev_tex, Vector2(ds, ds))
+		else:
+			set_cursor_pos(cc - Vector2(7.0, 13.0) * 0.5)
+			text_colored(HOME_BLOCK_TEXT, "H")
 		if center_right:
 			open_popup("##home_session")
 		MENU_STYLE.begin(self)
 		if begin_popup("##home_session"):
-			MENU_STYLE.chrome(self, "Sesión")
+			MENU_STYLE.chrome(self, "Este equipo")
+			if MENU_STYLE.item(self, "Configuración"):
+				_open_by_name("Configuración")
+			separator()
 			if _rotate_has_sensor() and begin_menu("Pantalla"):
 				if MENU_STYLE.item(self, "Rotar a la izquierda"):
 					_rotate_screen("left")
@@ -2065,25 +2327,18 @@ func _rotate_run(args):
 		OS.execute(exe, args, false)
 
 
-# ¿Hay acelerómetro? Se escanea una vez y se cachea (sin I/O por frame).
+# ¿Hay acelerómetro? Se consulta una vez y se cachea. No se lee el sysfs con File:
+# los archivos de sysfs reportan tamaño 0 y get_as_text() devuelve vacío (además
+# ensucia el log con "r != len"); grep sí lee el contenido.
 func _rotate_has_sensor():
 	if _rotate_sensor != null:
 		return _rotate_sensor
 	_rotate_sensor = false
-	var dir = Directory.new()
-	if dir.open("/sys/bus/iio/devices") == OK:
-		dir.list_dir_begin()
-		var n = dir.get_next()
-		while n != "":
-			if n.begins_with("iio:device"):
-				var f = File.new()
-				var p = "/sys/bus/iio/devices/" + n + "/name"
-				if f.file_exists(p) and f.open(p, File.READ) == OK:
-					if f.get_as_text().find("accel") != -1:
-						_rotate_sensor = true
-						break
-			n = dir.get_next()
-		dir.list_dir_end()
+	var out = []
+	var rc = OS.execute("sh",
+		["-c", "grep -qs accel /sys/bus/iio/devices/iio:device*/name 2>/dev/null"],
+		true, out)
+	_rotate_sensor = (rc == 0)
 	return _rotate_sensor
 
 
@@ -2103,6 +2358,25 @@ func _rotate_set_auto(on):
 		_rotate_run(["auto"])   # instancia única: no duplica el daemon
 	else:
 		_rotate_run(["hold", "on"])
+
+
+# Arranca el daemon de auto-rotación una sola vez, si hay sensor y el auto está activo.
+# Lo hace el shell (no sway.conf) para que funcione en cualquier sesión: el script
+# elige el backend sway/xrandr según el entorno.
+func _maybe_start_rotate():
+	if rotate_autostarted:
+		return
+	rotate_autostarted = true
+	if _rotate_has_sensor() and _rotate_auto_on():
+		_rotate_run(["auto"])
+
+
+# En X11 sin WM la ventana no sigue el tamaño del root al rotar; se ajusta acá.
+func _x11_follow_screen():
+	var scr = OS.get_screen_size()
+	if scr.x > 0.0 and scr != get_viewport_rect().size:
+		OS.window_size = scr
+		OS.window_position = Vector2.ZERO
 
 
 # --- Anillo: entradas, favoritos y layout animado --------------------------------
@@ -2166,32 +2440,76 @@ func add_ring_favorite(app_id):
 func _app_by_id(id):
 	if not apps.scanned:
 		apps.scan()
+	var want = String(id)
 	for a in apps.apps:
-		if a.id == id:
+		if a.id == want:
+			return a
+	# Tolerante: el prefijo del id puede cambiar entre escaneos/versiones. Se acepta
+	# el mismo nombre de archivo base o el mismo nombre visible.
+	var base = want.get_file()
+	for a in apps.apps:
+		if String(a.id).get_file() == base or String(a.name) == want:
 			return a
 	return null
+
+
+# Entrada de favorito a partir de un id, aunque la app no se resuelva: así el
+# favorito SIEMPRE aparece en el anillo (con monograma si no hay ícono). `app`
+# mínima con las claves que espera el resto (tex/icon_tried/cmd/exec).
+func _favorite_entry(id):
+	var app = _app_by_id(id)
+	if app != null:
+		return app
+	var nm = String(id).get_file().get_basename()
+	if nm == "":
+		nm = String(id)
+	return {
+		"id": String(id), "name": nm, "exec": "", "cmd": "", "icon": "",
+		"categories": "", "key": nm.to_lower(), "wm_class": "", "tex": null,
+		"icon_tried": true, "unresolved": true,
+	}
 
 
 # Entradas del anillo: primeras las actividades de ACTIVITIES (orden fijo), después
 # los favoritos resueltos por `apps`. Sin duplicar por nombre (una app abierta ya
 # figura como actividad dinámica).
+# Entradas del anillo, DINÁMICAS: sólo lo que está abierto/activo (sin Launcher ni
+# demos del catálogo), ordenado por último uso, más los favoritos de la persona en
+# su orden guardado. "Configuración" vive en el submenú del ícono central.
 func _ring_entries():
 	var out = []
 	var seen = {}
+	var open = []
 	for act in ACTIVITIES:
+		if act.has("quit") and act.quit:
+			continue
+		if String(act.name) == "Configuración":
+			continue
+		if _activity_state(act) == "closed" and not starting.has(act.name):
+			continue
 		if seen.has(act.name):
 			continue
 		seen[act.name] = true
+		open.append(act)
+	open.sort_custom(self, "_mru_before")
+	for act in open:
 		out.append({"kind": "activity", "id": act.name, "name": act.name, "activity": act, "app": null})
 	if not apps.scanned:
 		apps.scan()
 	for id in ring_favorites:
-		var app = _app_by_id(id)
-		if app == null or seen.has(app.name):
+		var app = _favorite_entry(id)
+		if seen.has(app.name):
 			continue
 		seen[app.name] = true
 		out.append({"kind": "favorite", "id": app.id, "name": app.name, "activity": null, "app": app})
 	return out
+
+
+# Comparador MRU para sort_custom: el más reciente primero (final de activity_mru).
+func _mru_before(a, b):
+	var ia = activity_mru.find(String(a.name))
+	var ib = activity_mru.find(String(b.name))
+	return ia > ib
 
 
 func _ring_tex(e):
@@ -2270,6 +2588,11 @@ func _ease_out(k):
 # de arranque de las wayland cerradas.
 func _ring_activate(e, pos, size):
 	if e.kind == "favorite":
+		if String(e.app.get("cmd", "")) == "":
+			# Favorito sin app resuelta (no instalada o id desactualizado): no hay
+			# comando para lanzar; se intenta por nombre y si no, queda el aviso.
+			_open_by_name(e.name)
+			return
 		_launch_app(e.app)
 		return
 	var i = _activity_named(e.name)
@@ -2392,27 +2715,57 @@ func _finish_ring_drag(pos):
 
 # Posiciones de las actividades en órbitas alrededor de la computadora.
 func _home_layout(vp):
-	return _orbit_layout(vp, ACTIVITIES.size())
+	return _orbit_layout(vp, ACTIVITIES.size(), ACTIVITIES)
 
 
-func _orbit_layout(vp, n):
+# Distribución del anillo: pocas → un círculo ordenado alrededor del equipo central;
+# muchas → espiral de ángulo áureo con dispersión orgánica (burbujas). El orden es
+# el de `entries` (ya viene por último uso). Limita cada posición al lienzo.
+func _orbit_layout(vp, n, entries = []):
 	var out = []
 	if n <= 0:
 		return out
 	var u = grid_unit(vp)
 	var btn = u * 1.25
 	var top = frame_bar_h(vp)
-	var radius = min(vp.x * 0.32, (vp.y - 2.0 * top - btn - 32.0) * 0.5)
-	var inner_count = min(n, 7)
+	var cx = vp.x * 0.5
+	var cy = vp.y * 0.5
+	var avail_x = min(cx, vp.x - cx)
+	var avail_y = min(cy - (top + 2.0), (vp.y - top - 18.0) - cy)
+	if n <= RING_CIRCLE_MAX:
+		# Círculo: orden y simetría. El radio deja libre el equipo central y el borde.
+		var rad = max(btn * 1.15, min(avail_x, avail_y) - btn * 0.5)
+		rad = min(rad, min(avail_x, avail_y) * 0.92)
+		for i in range(n):
+			var a = -PI * 0.5 + TAU * float(i) / float(n)
+			var center = Vector2(cx + cos(a) * rad, cy + sin(a) * rad)
+			out.append(_ring_clamp(center, btn, vp, top))
+		return out
+	var margin = 10.0
+	var rx = max(btn * 1.4, (vp.x - btn) * 0.5 - margin)
+	var ry = max(btn * 1.4, (vp.y - 2.0 * top - btn) * 0.5 - margin)
+	var f_in = clamp(max(u * 0.62, btn * 0.85) / max(rx, ry), 0.12, 0.60)
 	for i in range(n):
-		var count = inner_count if i < inner_count else n - inner_count
-		var slot = i if i < inner_count else i - inner_count
-		var r = radius if i < inner_count else radius * 1.45
-		var a = (-PI * 0.5 if i < inner_count else 0.0) + TAU * float(slot) / float(count)
-		var center = vp * 0.5 + Vector2(cos(a) * r, sin(a) * r)
-		out.append(Vector2(clamp(center.x - btn * 0.5, 2.0, vp.x - btn - 2.0),
-			clamp(center.y - btn * 0.5, top + 2.0, vp.y - top - btn - 18.0)))
+		var t = (float(i) + 0.5) / float(n)
+		var f = lerp(f_in, 1.0, sqrt(t))
+		var a = -PI * 0.5 + GOLDEN_ANGLE * float(i)
+		var jr = 0.0
+		var ja = 0.0
+		if i < entries.size() and typeof(entries[i]) == TYPE_DICTIONARY:
+			var h = abs(String(entries[i].get("name", "")).hash())
+			ja = (float(h % 1000) / 1000.0 - 0.5) * RING_JITTER_A
+			jr = (float(int(h / 1000) % 1000) / 1000.0 - 0.5) * RING_JITTER_R
+		var ff = clamp(f + jr, f_in, 1.0)
+		var aa = a + ja
+		var center = Vector2(cx + cos(aa) * rx * ff, cy + sin(aa) * ry * ff)
+		out.append(_ring_clamp(center, btn, vp, top))
 	return out
+
+
+# Pasa un centro de ítem (lado `btn`) a la esquina, dentro del lienzo.
+func _ring_clamp(center, btn, vp, top):
+	return Vector2(clamp(center.x - btn * 0.5, 2.0, vp.x - btn - 2.0),
+		clamp(center.y - btn * 0.5, top + 2.0, vp.y - top - btn - 18.0))
 
 
 # Insignia de identidad del Frame: figura XO + nombre de usuario, cacheada como
@@ -2453,10 +2806,53 @@ func _load_np_icon(name):
 
 # Rasteriza un SVG de Sugar a ImageTexture cacheada. Reemplaza las entidades
 # &stroke_color;/&fill_color; por los colores XO, quita el DOCTYPE y lo carga.
+# Slug dibuja el SVG como vector (nítido a cualquier escala) y sólo funciona en
+# GLES3. Se rinde en un Viewport transparente y su ViewportTexture se usa como ícono
+# en ImGui (image() ya flipea las ViewportTexture). En GLES2 se cae al rasterizado.
+func _slug_ok():
+	return ClassDB.class_exists("SlugVector") and ClassDB.class_exists("SlugVector2D") \
+		and OS.get_current_video_driver() == OS.VIDEO_DRIVER_GLES3
+
+
+func _load_sugar_slug(name, stroke, fill):
+	var key = name + "|" + stroke.to_html(false) + "|" + fill.to_html(false)
+	if slug_icons.has(key):
+		return slug_icons[key]
+	var vector = ClassDB.instance("SlugVector")
+	vector.set_svg_path(SUGAR_DIR + name + ".svg")
+	# Los SVG Sugar marcan los paints con las entidades &fill_color;/&stroke_color;,
+	# que Slug reconoce: se recolorean sin reescribir el archivo.
+	vector.set_fill_color(fill)
+	vector.set_stroke_color(stroke)
+	if not vector.is_valid():
+		return null
+	var vp = Viewport.new()
+	vp.size = Vector2(SLUG_RASTER, SLUG_RASTER)
+	vp.usage = Viewport.USAGE_2D
+	vp.transparent_bg = true
+	vp.render_target_update_mode = Viewport.UPDATE_ALWAYS
+	var icon = ClassDB.instance("SlugVector2D")
+	icon.set_vector(vector)
+	icon.set_size(float(SLUG_RASTER))
+	icon.set_centered(true)
+	icon.position = Vector2(SLUG_RASTER, SLUG_RASTER) * 0.5
+	vp.add_child(icon)
+	add_child(vp)
+	slug_vectors[key] = vector
+	var tex = vp.get_texture()
+	slug_icons[key] = tex
+	return tex
+
+
 func _load_sugar_svg(name, stroke, fill):
 	var key = name + "|" + stroke.to_html(false) + "|" + fill.to_html(false)
 	if sugar_icons.has(key):
 		return sugar_icons[key]
+	if _slug_ok():
+		var slug = _load_sugar_slug(name, stroke, fill)
+		if slug != null:
+			sugar_icons[key] = slug
+			return slug
 	var text = _sugar_svg_text(name, stroke, fill)
 	if text == "":
 		return null
@@ -2567,7 +2963,16 @@ func _draw_ring_item(pos, size, tex, label, state, id, starting_since = -1, appe
 	plate.a *= appear
 	var edge = border
 	edge.a *= appear
+	# Relieve de burbuja flotante (Apariencia → relieve): sombra proyectada
+	# abajo-derecha y brillo especular arriba-izquierda antes de la placa.
+	var relief = bool(appearance.get("emboss", true))
+	if relief:
+		imgui_draw_circle_filled(c + Vector2(radius * 0.16, radius * 0.20), radius,
+			Color(0.0, 0.0, 0.0, 0.34 * appear), 0)
 	imgui_draw_circle_filled(c, radius, plate, 0)
+	if relief:
+		imgui_draw_circle_filled(c - Vector2(radius * 0.28, radius * 0.32), radius * 0.58,
+			Color(0.82, 0.90, 1.0, 0.10 * appear), 0)
 	if starting_since >= 0:
 		imgui_draw_circle(c, radius + 4.0, Color(1.0, 0.85, 0.45, (0.20 + 0.35 * glow) * appear), 0, 2.0)
 	if state == "focused":
@@ -2614,7 +3019,7 @@ func _draw_ring_item(pos, size, tex, label, state, id, starting_since = -1, appe
 
 	var lab = RING_LABEL if (state != "closed" and state != "minimized") else RING_LABEL_DIM
 	lab.a *= appear
-	set_cursor_pos(pos + Vector2((size.x - label.length() * cw) * 0.5, size.y + 3.0))
+	set_cursor_pos(pos + Vector2((size.x - _text_w(label)) * 0.5, size.y + 3.0))
 	text_colored(lab, label)
 	return clicked
 
@@ -2658,8 +3063,8 @@ func _activity_tex(activity):
 
 # Ícono de una ventana sin actividad cargada (o cuya actividad no tiene ícono):
 # primero el XDG del programa por el app_id del toplevel; si no hay, el Sugar por
-# nombre; y por último un genérico de computadora (antes usaba "document-send", el
-# sobre de Chat, y por eso varias ventanas aparecían con ese ícono).
+# nombre; y por último un genérico de computadora (antes usaba "document-send",
+# que es el ícono de enviar de Sugar, y varias ventanas lo mostraban por error).
 func _window_icon(id, name):
 	if id >= 0:
 		var app_id = compositor.get_app_id(id)
@@ -2748,8 +3153,21 @@ func _draw_activity():
 		end()
 
 
+# Marca una actividad como la más reciente (para el orden del anillo).
+func _touch_mru(name):
+	var n = String(name)
+	if n == "":
+		return
+	activity_mru.erase(n)
+	activity_mru.append(n)
+	# Tope defensivo: no hace falta recordar más que lo que puede mostrarse.
+	while activity_mru.size() > 64:
+		activity_mru.pop_front()
+
+
 func _activate(index):
 	var activity = ACTIVITIES[index]
+	_touch_mru(activity.name)
 	if activity.has("quit") and activity.quit:
 		recovery.quit(self)
 		return
@@ -2780,6 +3198,12 @@ const SERVICE_REFRESH_MS = 1000        # cadencia del worker de servicios
 const SERVICE_SLEEP_STEP_MS = 100      # granularidad para que stop() no espere de más
 const SERVICE_LAUNCH_GRACE_MS = 2000   # sostiene "running" mientras el proceso arranca
 const SERVICE_STOP_GRACE_MS = 2000     # ignora pids residuales hasta que mueran
+# Deskflow por defecto: xdg-desktop-portal se reinicia al arrancar la sesión y eso
+# tumba la sesión InputCapture recién abierta. El primer arranque espera a que se
+# asiente y, si el proceso muere igual, se reintenta con cooldown acotado.
+const DESKFLOW_BOOT_DELAY_MS = 15000
+const DESKFLOW_RETRY_MS = 6000
+const DESKFLOW_RETRY_MAX_MS = 60000
 
 var service_pids = {}               # name -> pid primario (portal RemoteInput), bajo _svc_mutex
 var _svc_mutex = Mutex.new()
@@ -2806,13 +3230,20 @@ func _start_service_worker():
 		return
 	# Las actividades con "service" son fijas de configuración; se copian acá para
 	# que el worker no lea ACTIVITIES (que el hilo principal muta con apps dinámicas).
-	_svc_targets = []
-	for a in ACTIVITIES:
-		if a.has("service"):
-			_svc_targets.append({"name": a.name, "cmd": _service_cmd(a)})
+	_refresh_service_targets()
 	_svc_want_stop = false
 	_svc_thread = Thread.new()
 	_svc_thread.start(self, "_service_work")
+
+
+func _refresh_service_targets():
+	var targets = []
+	for a in ACTIVITIES:
+		if a.has("service"):
+			targets.append({"name": a.name, "cmd": _service_cmd(a)})
+	_svc_mutex.lock()
+	_svc_targets = targets
+	_svc_mutex.unlock()
 
 
 func _stop_service_worker():
@@ -2841,13 +3272,16 @@ func _service_work(_userdata):
 		if _svc_stop_requested():
 			return
 		var observed = {}
-		for t in _svc_targets:
+		_svc_mutex.lock()
+		var targets = _svc_targets.duplicate(true)
+		_svc_mutex.unlock()
+		for t in targets:
 			observed[t.name] = _pgrep_pids(t.cmd)
 		var now = OS.get_ticks_msec()
 		_svc_mutex.lock()
-		var merged = merge_service_snapshot(observed, _svc_snapshot, now,
+		var merged = SERVICE_STATE.merge_service_snapshot(observed, _svc_snapshot, now,
 			_svc_launch_until, _svc_stop_until)
-		if not snapshot_equal(merged, _svc_snapshot):
+		if not SERVICE_STATE.snapshot_equal(merged, _svc_snapshot):
 			_svc_snapshot = merged
 			_svc_version += 1
 		_svc_mutex.unlock()
@@ -2859,13 +3293,31 @@ func _service_work(_userdata):
 				return
 
 
-# Única consulta de procesos: pgrep SÓLO dentro del worker.
+# Consulta regular de procesos: pgrep corre sólo en el worker de servicios.
 func _pgrep_pids(cmd):
 	var out = []
 	if OS.execute("pgrep", ["-u", OS.get_environment("USER"), "-f", "-x", cmd], true, out) != 0 or out.empty():
 		return []
-	return parse_pgrep_pids(out[0])
+	return SERVICE_STATE.parse_pgrep_pids(out[0])
 
+
+# Pids del usuario cuyo NOMBRE de ejecutable coincide exactamente (pgrep -x sin -f):
+# sirve para barrer deskflow-core sin depender de la línea de comandos completa (que
+# cambia entre client/server y configs). comando seguro, sin sh ni shell injection.
+func _pgrep_name_pids(name):
+	var out = []
+	if OS.execute("pgrep", ["-u", OS.get_environment("USER"), "-x", name], true, out) != 0 or out.empty():
+		return []
+	return SERVICE_STATE.parse_pgrep_pids(out[0])
+
+
+# Arranque: saca cualquier deskflow-core ajeno antes de que gdtk monitoree o lance el
+# propio. El ciclo de vida propio sigue siendo `_toggle_service`/`service_pids`;
+# esto sólo limpia los que ya venían de antes y no duplica lógica.
+func _reap_stray_deskflow():
+	for proc in ["deskflow-core", "deskflow"]:
+		for pid in SERVICE_STATE.stray_deskflow_pids(_pgrep_name_pids(proc), service_pids.values()):
+			OS.kill(pid)
 
 # Copia el snapshot del worker al hilo principal y reconcilia `service_pids`.
 # No bloquea: sólo toma el Mutex un instante.
@@ -2963,11 +3415,19 @@ func _toggle_service(activity):
 		for pid in _service_processes(name):
 			OS.kill(pid)
 		_svc_mark_stopped(name)
+		if name == "Deskflow":
+			_deskflow_want = false   # parada deliberada: no reintentar
+			_deskflow_retry_at = 0
 		activity_error = ""
 		return
 	if activity.has("session") and OS.get_environment("GDTK_SESSION") != activity.session:
 		activity_error = name + ": sólo en la sesión " + activity.session.to_upper()
 		return
+	if String(activity.get("service", "")).strip_edges() == "":
+		activity_error = name + ": apagado o no disponible en esta sesión"
+		return
+	if name == "Deskflow":
+		_deskflow_want = true
 	_svc_launch_async(activity)
 
 
@@ -2989,62 +3449,6 @@ func _service_processes(name):
 			pids.append(p)
 	_svc_mutex.unlock()
 	return pids
-
-
-# --- parsers puros (testeables sin I/O) --------------------------------------
-
-# Texto de pgrep (un pid por línea): enteros > 0; ignora vacías y basura.
-static func parse_pgrep_pids(text):
-	var pids = []
-	for raw in String(text).split("\n", false):
-		var line = raw.strip_edges()
-		if line == "" or not line.is_valid_integer():
-			continue
-		var pid = int(line)
-		if pid > 0:
-			pids.append(pid)
-	return pids
-
-
-# Merge puro: combina la última medición `observed` (name -> [pids]) con el
-# snapshot previo y las ventanas de gracia de lanzamiento/parada.
-static func merge_service_snapshot(observed, prev, now_ms, launch_until, stop_until):
-	var snap = {}
-	for name in observed:
-		var measured = observed[name]
-		var old = prev.get(name, null)
-		var old_running = old != null and old.running
-		var old_pids = old.pids if old != null else []
-		var running = false
-		var pids = []
-		if not measured.empty():
-			if now_ms < int(stop_until.get(name, 0)):
-				running = false   # residual tras parar: se ignora hasta que muera
-				pids = []
-			else:
-				running = true
-				pids = measured
-		elif old_running and now_ms < int(launch_until.get(name, 0)):
-			running = true        # aún no visible: se sostiene el pid optimista
-			pids = old_pids
-		snap[name] = {"running": running, "pids": pids}
-	return snap
-
-
-static func snapshot_equal(a, b):
-	if a.size() != b.size():
-		return false
-	for name in a:
-		if not b.has(name):
-			return false
-		var ea = a[name]
-		var eb = b[name]
-		if bool(ea.running) != bool(eb.running) or ea.pids.size() != eb.pids.size():
-			return false
-		for i in range(ea.pids.size()):
-			if int(ea.pids[i]) != int(eb.pids[i]):
-				return false
-	return true
 
 
 # --- Publicador mDNS del Vecindario -------------------------------------------
@@ -3082,7 +3486,8 @@ func _start_publishers():
 	if not avahi.available:
 		return   # degradado, sin error
 	var identity = PUBLISH_PLAN.local_identity(_local_hostname(), local_device_kind())
-	var caps = {"gvd": true, "gvd_port": 5600, "deskflow": true, "deskflow_port": 24800}
+	var caps = {"gvd": true, "gvd_port": 5600, "deskflow": true, "deskflow_port": 24800,
+		"deskflow_role": _deskflow_role}
 	var plan = PUBLISH_PLAN.new().build(identity, caps, avahi.path)
 	for entry in plan.services:
 		_publish_launch(entry)
@@ -3309,7 +3714,23 @@ func _go_home():
 func _apply_settings():
 	if settings_bridge != null:
 		accent = settings_bridge.accent
+		appearance = settings_bridge.appearance()
+		ui_scale_factor = settings_bridge.ui_scale()
+		_apply_ui_scale_env()
 		_apply_input_settings()
+		_apply_deskflow_settings()
+
+
+# Exporta la escala de UI a los toolkits para que las apps (Firefox, GTK, Qt) no
+# queden diminutas en pantallas densas. `OS.set_environment` alcanza a los procesos
+# que el shell lanza después (wayland/actividades). Requiere reabrir las apps ya
+# abiertas para que tomen la variable.
+func _apply_ui_scale_env():
+	if settings_bridge == null or settings_bridge.model == null:
+		return
+	var env = settings_bridge.model.ui_scale_env(settings_bridge.settings.get("ui_scale", 1.0))
+	for k in env.keys():
+		OS.set_environment(String(k), String(env[k]))
 
 
 # Aplica en vivo al compositor (sway) los ajustes de entrada cuando cambia
@@ -3325,6 +3746,186 @@ func _apply_input_settings():
 		settings_bridge.settings.get("natural_scroll", null))
 	for cmd in settings_bridge.model.natural_scroll_cmds(nat):
 		OS.execute("swaymsg", cmd, false)
+
+
+func _apply_deskflow_settings():
+	if settings_bridge == null or settings_bridge.model == null:
+		return
+	var cfg = settings_bridge.model.deskflow(settings_bridge.settings.get("deskflow", {}))
+	var mode = String(cfg.get("mode", "off"))
+	var effective_mode = mode
+	# El gate se pregunta en cada aplicación de settings, pero el resultado se cachea
+	# en deskflow_server_available(): el portal lo sube RemoteInput al arrancar y ahí
+	# queda, así que el cacheo no puede quedar viejo respecto a lo que hay en el bus.
+	if mode == "share_here" and not deskflow_server_available():
+		effective_mode = "off"
+		activity_error = "Deskflow servidor requiere el portal InputCapture y el shell no pudo registrarlo (ver RemoteInput en shell.log)."
+	elif activity_error.begins_with("Deskflow servidor requiere el portal InputCapture"):
+		activity_error = ""
+	_deskflow_role = "server" if effective_mode == "share_here" else "client"
+	var home = OS.get_environment("HOME")
+	if home == "":
+		return
+	var local = _deskflow_local_name(String(cfg.get("name", "")))
+	var service = _deskflow_service_for(effective_mode, home)
+	# Sólo una baja explícita (mode off) desarma el autoarranque; si el portal todavía
+	# no está listo (effective_mode off por disponibilidad) el tick sigue reintentando.
+	if String(service).strip_edges() == "" and mode == "off":
+		_deskflow_want = false
+	var activity = _deskflow_activity()
+	if activity != null and String(activity.get("service", "")) != service:
+		activity.service = service
+		_refresh_service_targets()
+	var key = effective_mode + "|" + String(cfg.get("host", "")) + "|" + str(int(cfg.get("port", 24800))) \
+		+ "|" + local + "|" + service + "|auto=" + str(bool(cfg.get("auto", false))) \
+		+ "|" + _settings_layout_key()
+	var writes = _deskflow_config_writes(effective_mode, cfg, home, local)
+	if writes.empty():
+		if _svc_thread != null and _service_running("Deskflow"):
+			_toggle_service_by_name("Deskflow")
+		return
+	var auto_key = key + "|auto=" + str(bool(cfg.get("auto", false)))
+	var auto = bool(cfg.get("auto", false))
+	if auto and _svc_thread == null:
+		_write_texts_async(writes)
+		return
+	if key == _deskflow_settings_key:
+		# Ajustes sin cambios: sólo rearma el deseo de autoarranque (el tick arranca).
+		if auto and auto_key != _deskflow_auto_key:
+			_deskflow_auto_key = auto_key
+			_deskflow_arm()
+		elif not auto:
+			_deskflow_want = false
+		return
+	_deskflow_settings_key = key
+	if auto:
+		if auto_key != _deskflow_auto_key:
+			_deskflow_auto_key = auto_key
+		_deskflow_arm()
+	else:
+		_deskflow_want = false
+	_write_texts_async(writes)
+
+
+# Marca que el autoarranque quiere el servicio corriendo y difiere el primer intento
+# para que xdg-desktop-portal termine de reiniciarse al arrancar la sesión.
+func _deskflow_arm():
+	_deskflow_want = true
+	if _deskflow_retry_at == 0:
+		_deskflow_retry_at = OS.get_ticks_msec() + DESKFLOW_BOOT_DELAY_MS
+
+
+# Reintenta el arranque por defecto: si el servicio debía correr y no está (p. ej. lo
+# tumbó el reinicio del portal), lo relanza con cooldown acotado. No bloquea: usa el
+# mismo ciclo de vida que la UI (_toggle_service_by_name).
+func _deskflow_tick(now):
+	# Re-deriva la intención de los settings vigentes: si auto sigue activo y el modo
+	# no es off, el servicio debe correr. Así un snapshot transitorio que lo apagó se
+	# corrige solo en el próximo frame.
+	if settings_bridge != null and settings_bridge.model != null:
+		var cfg = settings_bridge.model.deskflow(settings_bridge.settings.get("deskflow", {}))
+		if bool(cfg.get("auto", false)) and String(cfg.get("mode", "off")) != "off":
+			if not _deskflow_want:
+				_deskflow_arm()
+		else:
+			_deskflow_want = false
+	if not _deskflow_want:
+		return
+	if _service_running("Deskflow"):
+		_deskflow_retries = 0
+		return
+	if now < _deskflow_retry_at:
+		return
+	# Backoff exponencial acotado: nunca se rinde (el portal puede tardar), pero deja
+	# de insistir rápido si algo está mal configurado.
+	var shift = _deskflow_retries if _deskflow_retries < 5 else 5
+	_deskflow_retries += 1
+	_deskflow_retry_at = now + min(DESKFLOW_RETRY_MS * (1 << shift), DESKFLOW_RETRY_MAX_MS)
+	_toggle_service_by_name("Deskflow")
+
+
+func _deskflow_activity():
+	for a in ACTIVITIES:
+		if a.has("service") and String(a.get("name", "")) == "Deskflow":
+			return a
+	return null
+
+
+func _deskflow_service_for(mode, home):
+	match String(mode):
+		"share_here":
+			return "deskflow-core server --new-instance -s " \
+				+ home.plus_file("gdtk").plus_file("deskflow-server-settings.ini")
+		"use_remote":
+			return "deskflow-core client --new-instance -s " \
+				+ home.plus_file("gdtk").plus_file("deskflow-client.conf")
+	return ""
+
+
+func _deskflow_config_writes(mode, cfg, home, local):
+	var writes = []
+	var port = int(cfg.get("port", 24800))
+	match String(mode):
+		"use_remote":
+			var text = DESKFLOW_SETTINGS.build_client_settings(local, String(cfg.get("host", "")), port)
+			if text != "":
+				writes.append({"path": home.plus_file("gdtk").plus_file("deskflow-client.conf"), "text": text})
+		"share_here":
+			var layout_path = _deskflow_layout_path()
+			var layout_text = CONF_MODEL.build_server_conf(local, _settings_deskflow_links())
+			var settings_text = DESKFLOW_SETTINGS.build_server_settings(local, layout_path, port)
+			if layout_text != "" and settings_text != "":
+				writes.append({"path": layout_path, "text": layout_text})
+				writes.append({"path": home.plus_file("gdtk").plus_file("deskflow-server-settings.ini"),
+					"text": settings_text})
+	return writes
+
+
+func _deskflow_layout_path():
+	var base = OS.get_environment("XDG_CONFIG_HOME")
+	if base == "":
+		base = OS.get_environment("HOME").plus_file(".config")
+	return base.plus_file("Deskflow").plus_file("deskflow-server.conf")
+
+
+func _deskflow_local_name(requested):
+	var name = String(requested).strip_edges()
+	if name == "":
+		name = _local_hostname()
+	if not LAYOUT_MODEL.valid_peer(name):
+		name = "gdtk-local"
+	return name
+
+
+func _settings_deskflow_links():
+	if settings_bridge == null:
+		return []
+	var layout = settings_bridge.settings.get("screens", {})
+	var links = SCREEN_LAYOUT.local_links(layout)
+	var lay = SCREEN_LAYOUT.normalize_layout(layout)
+	var out = []
+	for l in links:
+		var p = String(l.get("peer", "")).strip_edges()
+		var d = String(l.get("direction", ""))
+		if not (LAYOUT_MODEL.valid_direction(d) and LAYOUT_MODEL.valid_peer(p)):
+			continue
+		var item = {"direction": d, "peer": p}
+		# Rango porcentual del tramo compartido (como el Deskflow original) para que
+		# vincular pantallas de distinta resolución sea lógico.
+		var peer_sc = SCREEN_LAYOUT.screen_by_id(lay, p)
+		if peer_sc != null and lay.local != null:
+			var r = SCREEN_LAYOUT.link_ranges(lay.local, peer_sc)
+			if not r.empty() and String(r.get("direction", "")) == d:
+				item["local_range"] = r.local_range
+				item["peer_range"] = r.peer_range
+		out.append(item)
+	return out
+
+
+func _settings_layout_key():
+	if settings_bridge == null:
+		return ""
+	return SCREEN_LAYOUT.to_json(settings_bridge.settings.get("screens", {}))
 
 
 # Reapa el Thread de lectura del puente y aplica el snapshot si cambió. Sin I/O acá.
@@ -3366,9 +3967,9 @@ func _go_neighborhood():
 	if current_activity != null or apps_view:
 		_go_home()
 	neighborhood_view = true
+	nb_zoom_target = 1.0
 	expose = false
 	if neighborhood != null:
-		neighborhood.start()   # idempotente: el hilo queda vivo mientras el shell viva
 		neighborhood.poll()
 	_refresh_direction_views()
 	neighborhood_ui.refresh(true)
@@ -3378,6 +3979,7 @@ func _go_neighborhood():
 # Volver al Hogar desde el Vecindario (Esc, el bloque Inicio o el mismo bloque).
 func _close_neighborhood():
 	neighborhood_view = false
+	nb_zoom_target = 0.0
 	neighborhood_ui.selected = ""
 	neighborhood_ui.selected_host = ""
 	request_redraw()
@@ -3982,12 +4584,26 @@ func _apply_deskflow_work(userdata):
 
 # ¿Este equipo puede publicar servidor Deskflow local? Se resuelve UNA vez si
 # `deskflow-core` está en $PATH (sólo File, sin OS.execute) y se cachea: el frame
-# nunca reescanea el PATH.
+# nunca reescanea el PATH. En sesión gdtk el portal InputCapture lo implementa
+# este mismo proceso (RemoteInput), así que el chequeo real es si la interfaz
+# quedó registrada en el bus, no si existe el .portal.
 func deskflow_server_available():
 	if not _deskflow_probed:
 		_deskflow_probed = true
 		_deskflow_core = _which("deskflow-core")
-	return _deskflow_core != ""
+		_deskflow_input_capture = _input_capture_portal_available()
+	return _deskflow_core != "" and _deskflow_input_capture
+
+
+func _input_capture_portal_available():
+	var desktop = OS.get_environment("XDG_CURRENT_DESKTOP").to_lower()
+	if desktop.find("gdtk") < 0:
+		return true
+	# El .portal sólo declara interfaces: lo que atiende Deskflow es lo que hay en
+	# el bus. RemoteInput registra InputCapture sólo si sd-bus levantó bien (ver
+	# eis_server_error). Se consulta Host.remote_input y no `remote_input` porque
+	# el shell lo asigna recién al final de su setup, después del primer gate.
+	return Host.remote_input != null and Host.remote_input.has_input_capture()
 
 
 # Ruta absoluta de un ejecutable en $PATH, o "" si no está. Sólo File, sin shell
@@ -4140,7 +4756,7 @@ func _stop_tracked(key):
 	gvd_session_pids.erase(k)
 	_gvd_mutex.unlock()
 	if pid > 0:
-		OS.kill(pid)
+		OS.execute("kill", ["-TERM", str(pid)], true)
 
 
 func _gvd_has_session(host_id):
@@ -4437,6 +5053,68 @@ func _wifi_disconnect(ssid):
 	OS.execute("nmcli", ["connection", "down", "id", s], false)
 
 
+# --- Bluetooth (proveedor del Vecindario) ------------------------------------
+# Acciones con bluetoothctl, no bloqueantes: el worker de Vecindario relee el
+# estado en el próximo refresco (que se pide explícitamente tras cada acción).
+# Sin bluetoothctl en $PATH no se hace nada. La dirección se valida para no
+# confundirla con una opción de bluetoothctl.
+
+func _bt_connect(addr):
+	_bt_cmd(["connect", addr])
+
+
+func _bt_disconnect(addr):
+	_bt_cmd(["disconnect", addr])
+
+
+# Vincular: pair + trust, y luego connect (el worker refleja el resultado).
+func _bt_pair(addr):
+	if not _bt_valid(addr):
+		return
+	_bt_run(["pair", addr])
+	_bt_run(["trust", addr])
+	_bt_run(["connect", addr])
+	_bt_after()
+
+
+func _bt_forget(addr):
+	_bt_cmd(["remove", addr])
+
+
+# Buscar dispositivos cercanos (scan acotado por --timeout).
+func _bt_scan():
+	if _which("bluetoothctl") == "":
+		return
+	OS.execute(_which("bluetoothctl"), ["--timeout", "8", "scan", "on"], false)
+	_bt_after()
+
+
+func _bt_cmd(args):
+	if not _bt_valid(String(args[1])):
+		return
+	_bt_run(args)
+	_bt_after()
+
+
+func _bt_run(args):
+	var bin = _which("bluetoothctl")
+	if bin == "":
+		return
+	OS.execute(bin, args, false)
+
+
+# Pide al worker del Vecindario un refresco y repinta (la barra y el mapa).
+func _bt_after():
+	if neighborhood != null and neighborhood.has_method("request_refresh"):
+		neighborhood.request_refresh()
+	request_redraw()
+
+
+func _bt_valid(addr):
+	var a = String(addr).strip_edges()
+	return a != "" and not a.begins_with("-") and a.length() <= 64
+
+
 # Las actividades tipo script pueden tener recursos propios (p.ej. un viewport
 # 3D). Se les da la opcion de liberarlos al salir de la actividad; la
 # instancia (su estado) sigue en script_instances y los recrea al volver.
@@ -4496,6 +5174,7 @@ func _on_toplevel_added(id):
 			return
 	# Sin actividad (o sin coincidencia con app_id/título): se creara una dinamica.
 	unmanaged.append(id)
+	unmanaged_since[id] = OS.get_ticks_msec()
 
 
 # xdg-activation (p.ej. clic en una notificación): la ventana pasa al frente.
@@ -4533,18 +5212,25 @@ func _process_unmanaged():
 		var id = unmanaged[i]
 		if not _id_alive(id):
 			unmanaged.remove(i)
+			unmanaged_since.erase(id)
 			continue
 		# El padre llega en el commit inicial, despues de `added`: si aparecio,
-		# es un dialogo, no una actividad dinamica.
+		# es un dialogo, no una actividad dinamica. Los dialogos de otro proceso
+		# (portal) pueden declararlo (xdg-foreign) un frame despues: se espera
+		# una gracia corta antes de decidir que es una ventana suelta.
 		if compositor.get_parent_id(id) > 0:
 			unmanaged.remove(i)
+			unmanaged_since.erase(id)
 			_add_dialog(id)
 			continue
 		var app_id = compositor.get_app_id(id)
 		var title = compositor.get_title(id)
 		if app_id == "" and title == "":
 			continue
+		if OS.get_ticks_msec() - int(unmanaged_since.get(id, 0)) < DIALOG_GRACE_MS:
+			continue
 		unmanaged.remove(i)
+		unmanaged_since.erase(id)
 		if _activity_for_window(id) != "":
 			continue
 		_open_unmanaged_window(id)
@@ -4583,12 +5269,13 @@ func _add_tile(id):
 
 # Entrada animada: si hay un ícono de origen reciente, escala desde él; si no, desde el
 # borde derecho (mismo tamaño). `ready` pasa a true con la primera textura.
-func _new_intro():
+# `scale_in`: crece en su lugar (desminimizar), sin traslación desde el borde.
+func _new_intro(scale_in = false):
 	var from = null
-	if pending_origin != null and OS.get_ticks_msec() - pending_origin_since < 4000:
+	if not scale_in and pending_origin != null and OS.get_ticks_msec() - pending_origin_since < 4000:
 		from = pending_origin
 	pending_origin = null
-	return {"from": from, "since": OS.get_ticks_msec(), "ready": false, "rect": Rect2()}
+	return {"from": from, "since": OS.get_ticks_msec(), "ready": false, "rect": Rect2(), "scale_in": scale_in}
 
 
 func _activity_for_window(id):
@@ -4644,6 +5331,7 @@ func _on_toplevel_removed(id):
 		return
 
 	unmanaged.erase(id)
+	unmanaged_since.erase(id)
 	var removed_name = ""
 	for name in wayland_ids.keys():
 		if wayland_ids[name] == id:
@@ -4704,11 +5392,25 @@ func _on_view_input(event):
 	if window_dragging:
 		return
 	if expose:
+		# Zoom out del escritorio: hover para mostrar el botón de cerrar, clic para
+		# elegir una ventana (cambia a su pantalla y la enfoca) o cerrarla.
+		if event is InputEventMouseMotion:
+			var over = _expose_hit(event.position)
+			if over != expose_hover:
+				expose_hover = over
+				request_redraw()
+			return
 		if event is InputEventMouseButton and event.pressed:
-			var hit = _view_hit_test(event.position)
-			if hit.id >= 0:
-				expose_sel = tiles.find(hit.id)
+			var cid = _expose_close_hit(event.position)
+			if cid >= 0:
+				_close_window_id(cid)
+				expose_hover = -1
+				return
+			var hit = _expose_hit(event.position)
+			if hit >= 0:
+				expose_sel = tiles.find(hit)
 				_expose_commit()
+			return
 		return
 	if event is InputEventMouseMotion:
 		# Asa de redimensión de la franja: primero la arrastra, después sólo la insinúa.
@@ -4723,6 +5425,7 @@ func _on_view_input(event):
 		var hit = _view_hit_test(event.position)
 		if hit.id < 0:
 			return
+		_focus_follow(hit)
 		compositor.pointer_motion(hit.id, hit.pos)
 	elif event is InputEventMouseButton:
 		# Con Super la rueda es para el shell (cambiar de workspace), no para la app.
@@ -4754,16 +5457,32 @@ func _on_view_input(event):
 				_focus_tile(hit.id)
 
 
+# Lazy focus follows mouse: al mover el puntero sobre otra ventana (o su diálogo)
+# se le da el foco; no reenfoca la misma ni restaura una minimizada. Sólo se llama
+# con movimiento real del puntero (ver _on_view_input), nunca al abrir una ventana
+# bajo un cursor quieto. La decisión vive en focus_follow.gd (puro, testeable).
+func _focus_follow(hit):
+	var d = FOCUS_FOLLOW.decide(focused_tile, focused_dialog, hit.id, hit.dialog, minimized.has(hit.id))
+	if int(d.target) < 0:
+		return
+	if int(d.dialog) > 0:
+		focused_dialog = int(d.dialog)
+		compositor.focus(int(d.dialog))
+		request_redraw()
+	else:
+		focused_dialog = 0
+		_focus_tile(int(d.target))
+
+
 # Hit-test de arriba hacia abajo: el dialogo mas reciente que contenga el puntero; si no,
 # el tile bajo el puntero (cada ventana tiene su rect). En exposé, la tarjeta.
 func _view_hit_test(pos):
 	if expose:
-		for id in tiles:
-			var card = expose_cards.get(id)
-			if card != null and card.has_point(pos):
-				expose_sel = tiles.find(id)
-				request_redraw()
-				return {"id": id, "pos": Vector2.ZERO, "dialog": 0}
+		var id = _expose_hit(pos)
+		if id >= 0:
+			expose_sel = tiles.find(id)
+			request_redraw()
+			return {"id": id, "pos": Vector2.ZERO, "dialog": 0}
 		return {"id": -1, "pos": Vector2.ZERO, "dialog": 0}
 	for i in range(dialogs.size() - 1, -1, -1):
 		var d = dialogs[i]
@@ -4795,6 +5514,39 @@ func _view_hit_test(pos):
 # home ImGui marca todo como manejado y a _unhandled_input no llega nada.
 func _input(event):
 	last_activity = OS.get_ticks_msec()
+	# InputCapture toma exclusivamente el hardware local. Los eventos EIS que entran
+	# desde otro equipo tienen DEVICE_ID y nunca deben volver a Deskflow.
+	if remote_input != null and event.device != RemoteInput.DEVICE_ID:
+		var captured = false
+		var now = OS.get_ticks_msec()
+		if event is InputEventMouseMotion:
+			captured = remote_input.capture_motion(event.position, event.relative, now)
+		elif event is InputEventMouseButton:
+			if event.button_index == BUTTON_WHEEL_UP and event.pressed:
+				captured = remote_input.capture_scroll(0.0, -1.0, now)
+			elif event.button_index == BUTTON_WHEEL_DOWN and event.pressed:
+				captured = remote_input.capture_scroll(0.0, 1.0, now)
+			elif event.button_index == BUTTON_WHEEL_LEFT and event.pressed:
+				captured = remote_input.capture_scroll(-1.0, 0.0, now)
+			elif event.button_index == BUTTON_WHEEL_RIGHT and event.pressed:
+				captured = remote_input.capture_scroll(1.0, 0.0, now)
+			else:
+				captured = remote_input.capture_button(event.button_index, event.pressed, now)
+		elif event is InputEventKey:
+			var physical = event.physical_scancode if event.physical_scancode != 0 else event.scancode
+			captured = remote_input.capture_key(physical, event.pressed, now)
+		if captured:
+			# Captura activa: pointer lock para recibir deltas crudos del compositor
+			# (sway clava el puntero en el borde y sin esto `relative` es ~0).
+			if not mouse_locked:
+				Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+				mouse_locked = true
+			get_tree().set_input_as_handled()
+			return
+		if mouse_locked:
+			# Deskflow soltó el control: devolver puntero y cursor al escritorio local.
+			Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
+			mouse_locked = false
 	if event is InputEventMouseMotion:
 		input_motion_count += 1
 		# Drag del anillo (Hogar): el clic normal lo resuelve ImGui; acá sólo se

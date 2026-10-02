@@ -83,9 +83,9 @@ texto**, nunca sólo por color.
 
 ## Interacción, fijado y orden
 
-- **Fijar/quitar**: un botón `+` al final de la zona de applets abre la lista de
-  controles disponibles; pulsar fija/desfija (marca de verificación). Quitar un applet no
-  borra su estado ni la config del sistema.
+- **Fijar/quitar**: clic derecho sobre un applet (o sobre el resto de la franja
+  inferior) abre la lista de controles disponibles; pulsar fija/desfija (marca de
+  verificación). Quitar un applet no borra su estado ni la config del sistema.
 - **Ordenar**: arrastrar un bloque horizontalmente con el mouse; el destino se marca y
   Esc cancela (mismo gesto que el reordenamiento de ventanas en `frame.gd`). Con teclado,
   flechas mueven la selección y Ctrl+←/→ mueven el applet elegido en el orden.
@@ -109,8 +109,8 @@ texto**, nunca sólo por color.
 
 ## Muestreo, coste y fallos
 
-- Se muestrea sólo con el Frame visible o en Home, como `sysmon` hoy; nunca oculto, nunca
-  por frame. `/proc` y reloj a 1 s; `bluetoothctl`, `nmcli`, `localectl` y `swaymsg` a
+- Se muestrea mientras alguna franja con applets esté a la vista (Frame abierto, Home o
+  barra fijada); nunca oculto, nunca por frame. `/proc` y reloj a 1 s; `bluetoothctl`, `nmcli`, `localectl` y `swaymsg` a
   ≥ 5 s (lanzan procesos: el X200 es lento). Cada muestra que cambia llama
   `request_redraw()`; sin cambios, el shell duerme (`IDLE_MS`).
 - Binario/adaptador ausente → `no_disponible` con motivo; no reintenta en bucle.

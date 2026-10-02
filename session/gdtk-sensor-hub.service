@@ -1,0 +1,14 @@
+[Unit]
+Description=Habilita el sensor hub del Surface Pro 3 (acelerómetro) sin el táctil N-Trig dañado
+Documentation=file:/usr/local/lib/gdtk/gdtk-sensor-hub
+After=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/gdtk/gdtk-sensor-hub
+# iio-sensor-proxy publica AccelerometerOrientation por D-Bus para gdtk-rotate.
+ExecStartPost=-/usr/bin/systemctl start iio-sensor-proxy
+
+[Install]
+WantedBy=multi-user.target

@@ -16,8 +16,10 @@ const PAGES = [
 	{"id": "touchpad", "label": "Desplazamiento", "path": "res://pages/touchpad.gd"},
 	{"id": "locale", "label": "Idioma", "path": "res://pages/locale.gd"},
 	{"id": "accent", "label": "Color de acento", "path": "res://pages/accent.gd"},
+	{"id": "appearance", "label": "Apariencia", "path": "res://pages/appearance.gd"},
 	{"id": "wallpaper", "label": "Fondo de pantalla", "path": "res://pages/wallpaper.gd"},
 	{"id": "displays", "label": "Pantallas", "path": "res://pages/displays.gd"},
+	{"id": "shared_control", "label": "Compartir control", "path": "res://pages/shared_control.gd"},
 ]
 
 var model = null

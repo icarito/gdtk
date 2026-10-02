@@ -43,13 +43,34 @@ func _init():
 	check("posiciones dentro del lienzo", in_bounds)
 	check("_home_layout coincide con ACTIVITIES", shell._home_layout(Vector2(1024, 600)).size() == shell.ACTIVITIES.size())
 
-	# 3) Entradas del anillo: actividades primero; favoritos sin app resuelta se omiten.
+	# 3) Entradas del anillo DINÁMICAS: las cerradas no aparecen; sólo las activas
+	# (más favoritos resueltos). "Configuración" vive en el submenú del centro.
+	var closed = shell._ring_entries()
+	var closed_names = []
+	for e in closed:
+		closed_names.append(e.name)
+	check("anillo sin actividades cerradas", not closed_names.has("Terminal") and not closed_names.has("Configuración"))
+	shell.script_instances["Prueba"] = {}
+	shell.ACTIVITIES.append({"name": "Prueba", "script": "res://x.gd", "dynamic": true})
+	shell._touch_mru("Prueba")
 	var entries = shell._ring_entries()
-	var kinds_ok = true
-	for i in range(shell.ACTIVITIES.size()):
-		if entries[i].kind != "activity":
-			kinds_ok = false
-	check("entradas del anillo empiezan por actividades", kinds_ok and entries.size() >= shell.ACTIVITIES.size())
+	var has_open = false
+	for e in entries:
+		if e.kind == "activity" and e.name == "Prueba":
+			has_open = true
+	check("anillo muestra la actividad abierta", has_open)
+	check("MRU ordena la más reciente primero", shell._mru_before({"name": "Prueba"}, {"name": "Terminal"}))
+	shell.script_instances.erase("Prueba")
+	shell.ACTIVITIES.pop_back()
+	# Favorito sin app resuelta: igual aparece en el anillo (monograma, sin lanzar).
+	shell.ring_favorites = ["zzz-noexiste.desktop"]
+	var fe = shell._ring_entries()
+	var has_fav = false
+	for e in fe:
+		if e.kind == "favorite":
+			has_fav = true
+	check("favorito sin resolver igual aparece", has_fav)
+	shell.ring_favorites = []
 
 	# 4) Persistencia de favoritos (tmp + rename) y recarga.
 	shell.ring_favorites = ["zzz-a.desktop", "zzz-b.desktop"]
@@ -147,7 +168,7 @@ func _init():
 	shell.ring_drag = {"kind": "favorite", "app": {"id": "a"}, "name": "A"}
 	shell._finish_ring_drag(Vector2(950, 40))
 	check("basurero borra el favorito", shell.ring_favorites == ["b"])
-	shell.ring_drag = {"kind": "activity", "app": null, "name": "Chat"}
+	shell.ring_drag = {"kind": "activity", "app": null, "name": "Terminal"}
 	shell._finish_ring_drag(Vector2(950, 40))
 	check("basurero no borra una actividad", shell.ring_favorites == ["b"])
 	shell.ring_drag = null

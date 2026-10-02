@@ -48,7 +48,8 @@ y `modules/wayland/wl_server.h`.
   (`menu_style.gd: FACE/LIGHT/DARK/TITLE_BG/ACTIVE`, bisel 2px, título 16px).
 - **Interacciones existentes a conservar**: Alt+M minimiza, Alt+F10 maximiza (saca del
   grupo para llenar `content_rect`), Alt+F11 pantalla completa, Super+←/→ tilea,
-  Super+arrastrar mueve al Frame, exposé (Super+W), drag al basurero cierra.
+  Super+arrastrar mueve al Frame, exposé (toque de Super), Super+W / Alt+F4 cierran,
+  drag al basurero cierra.
 
 El rediseño **no tira** este modelo: agrega un segundo modelo de colocación (flotante)
 y un chrome, y reutiliza foco/minimizar/cerrar/exposé.

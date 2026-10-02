@@ -57,6 +57,13 @@ public:
 	void respond(int p_id, bool p_allow);
 	bool is_pending(int p_id) const;
 	int get_client_count() const;
+	// 1 si el backend del portal InputCapture quedó registrado en el bus de la sesión.
+	bool has_input_capture() const;
+	// Eventos locales para el portal InputCapture. DEVICE_ID se filtra en GDScript.
+	bool capture_motion(const Vector2 &p_pos, const Vector2 &p_relative, uint64_t p_time);
+	bool capture_button(int p_button, bool p_pressed, uint64_t p_time);
+	bool capture_scroll(double p_x, double p_y, uint64_t p_time);
+	bool capture_key(uint32_t p_scancode, bool p_pressed, uint64_t p_time);
 
 	RemoteInput();
 	~RemoteInput();

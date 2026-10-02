@@ -92,10 +92,16 @@ static func _link_less(a, b):
 
 
 # Ordena links por direccion (north,east,south,west) y luego peer. Determinista.
+# Conserva los rangos porcentuales opcionales (local/peer) que usa el servidor.
 static func sort_links(links):
 	var out = []
 	for l in links:
-		out.append({"direction": String(l.direction), "peer": String(l.peer)})
+		var item = {"direction": String(l.direction), "peer": String(l.peer)}
+		if l.has("local_range"):
+			item["local_range"] = l.local_range
+		if l.has("peer_range"):
+			item["peer_range"] = l.peer_range
+		out.append(item)
 	var i = 1
 	while i < out.size():
 		var cur = out[i]
@@ -119,7 +125,12 @@ static func _edge_less(a, b):
 static func _sort_edges(edges):
 	var out = []
 	for e in edges:
-		out.append({"edge": String(e.edge), "peer": String(e.peer)})
+		var item = {"edge": String(e.edge), "peer": String(e.peer)}
+		if e.has("lr"):
+			item["lr"] = e.lr
+		if e.has("pr"):
+			item["pr"] = e.pr
+		out.append(item)
 	var i = 1
 	while i < out.size():
 		var cur = out[i]
@@ -143,25 +154,38 @@ static func _screens_block(names):
 	return lines.join("\n")
 
 
+# Rango Deskflow "(a,b)" en porcentajes 0..100; "" si no hay rango (borde completo).
+static func _range_text(rng):
+	if typeof(rng) != TYPE_ARRAY or rng.size() != 2:
+		return ""
+	return "(" + str(int(round(float(rng[0])))) + "," + str(int(round(float(rng[1])))) + ")"
+
+
+static func _link_text(edge, peer, local_rng, peer_rng):
+	return String(edge) + _range_text(local_rng) + " = " + String(peer) + _range_text(peer_rng)
+
+
 static func _links_block(local, clean, peers):
 	var lines = PoolStringArray()
 	lines.append("section: links")
 	var local_edges = []
 	for l in clean:
-		local_edges.append({"edge": edge_of(l.direction), "peer": l.peer})
+		local_edges.append({"edge": edge_of(l.direction), "peer": l.peer,
+			"lr": l.get("local_range"), "pr": l.get("peer_range")})
 	local_edges = _sort_edges(local_edges)
 	lines.append("\t" + String(local) + ":")
 	for e in local_edges:
-		lines.append("\t\t" + String(e.edge) + " = " + String(e.peer))
+		lines.append("\t\t" + _link_text(e.edge, e.peer, e.lr, e.pr))
 	for p in peers:
 		var inv = []
 		for l in clean:
 			if String(l.peer) == String(p):
-				inv.append({"edge": _opposite_edge(edge_of(l.direction)), "peer": local})
+				inv.append({"edge": _opposite_edge(edge_of(l.direction)), "peer": local,
+					"lr": l.get("peer_range"), "pr": l.get("local_range")})
 		inv = _sort_edges(inv)
 		lines.append("\t" + String(p) + ":")
 		for e in inv:
-			lines.append("\t\t" + String(e.edge) + " = " + String(e.peer))
+			lines.append("\t\t" + _link_text(e.edge, e.peer, e.lr, e.pr))
 	lines.append("end")
 	return lines.join("\n")
 
@@ -258,7 +282,12 @@ static func build_server_conf(local_name, links, template_text = ""):
 			return ""
 		if p == local:
 			return ""
-		clean.append({"direction": d, "peer": p})
+		var item = {"direction": d, "peer": p}
+		if l.has("local_range"):
+			item["local_range"] = l.local_range
+		if l.has("peer_range"):
+			item["peer_range"] = l.peer_range
+		clean.append(item)
 	clean = sort_links(clean)
 
 	var peers = []
@@ -327,7 +356,14 @@ static func parse_server_conf(text):
 				var eq = s.find("=")
 				if eq > 0 and current_screen != "" and links.has(current_screen):
 					var edge = s.substr(0, eq).strip_edges()
+					# Los bordes pueden traer rango: "left(80,100)". Se guarda la arista.
+					var paren = edge.find("(")
+					if paren > 0:
+						edge = edge.substr(0, paren).strip_edges()
 					var peer = s.substr(eq + 1).strip_edges()
+					var pparen = peer.find("(")
+					if pparen > 0:
+						peer = peer.substr(0, pparen).strip_edges()
 					links[current_screen].append({"edge": edge, "peer": peer})
 	if screens.size() == 0:
 		return result

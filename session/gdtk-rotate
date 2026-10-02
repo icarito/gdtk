@@ -1,42 +1,79 @@
 #!/bin/sh
-# Rotación de pantalla para la sesión sway de gdtk.
+# Rotación de pantalla para gdtk: sway (swaymsg) o X11 (xrandr), según la sesión.
 #
-#   gdtk-rotate next            rota 90° en sentido horario (0 -> 90 -> 180 -> 270)
-#   gdtk-rotate right           igual que next (horario)
-#   gdtk-rotate left            rota 90° en sentido antihorario (0 -> 270 -> 180 -> 90)
-#   gdtk-rotate set <t>         fija el transform: normal | 90 | 180 | 270
-#   gdtk-rotate auto            daemon: sigue la orientación del equipo (por defecto)
-#                               (instancia única: si ya corre, no arranca otra)
+#   gdtk-rotate next|right     rota 90° en sentido horario (normal -> 90 -> 180 -> 270)
+#   gdtk-rotate left           rota 90° en sentido antihorario (normal -> 270 -> 180 -> 90)
+#   gdtk-rotate set <t>        fija el transform: normal | 90 | 180 | 270
+#   gdtk-rotate auto           daemon: sigue la orientación del equipo
 #   gdtk-rotate hold [on|off|toggle]
-#                               pausa/reactiva el modo auto (para leer acostado)
-#   gdtk-rotate status          transform actual, orientación y estado del hold
+#                              pausa/reactiva el modo auto (para leer acostado)
+#   gdtk-rotate status         backend, transform actual, orientación y hold
 #
-# El transform se aplica con `swaymsg output '*' transform <t>` (rota el output
-# completo, incluido el shell a pantalla completa). La orientación la publica
-# iio-sensor-proxy por D-Bus (net.hadess.SensorProxy.AccelerometerOrientation),
+# Backend por entorno: SWAYSOCK (sway) o DISPLAY con xrandr (X11). La orientación la
+# publica iio-sensor-proxy por D-Bus (net.hadess.SensorProxy.AccelerometerOrientation),
 # que ya resuelve la matriz de montaje del sensor.
 #
-# Emparejamiento orientación -> transform (convención wlroots, a 90°):
-#   normal    -> normal      right-up -> 90
-#   bottom-up -> 180         left-up  -> 270
-# Si la rotación sale invertida, se corrige acá o con la matriz de montaje
-# ACCEL_MOUNT_MATRIX en /etc/udev/hwdb.d/60-sensor.hwdb.
+# ponytail X11: la ventana del shell se dimensiona una vez al arrancar
+# (gdtk-session-x11) y sin window manager no se redimensiona sola al rotar, así que
+# en X11 la rotación se aplica al output pero el shell mantiene su tamaño.
 
 run_dir="${XDG_RUNTIME_DIR:-/tmp}/gdtk"
 mkdir -p "$run_dir" 2>/dev/null || true
 hold_file="$run_dir/rotate.hold"
 pid_file="$run_dir/rotate.pid"
+sock_file="$run_dir/rotate.sock"   # clave de sesión del daemon vivo (ver auto_loop)
 
-sway_ok() { command -v swaymsg >/dev/null 2>&1 && [ -n "${SWAYSOCK:-}" ]; }
-set_transform() { swaymsg output '*' transform "$1" >/dev/null 2>&1; }
+_backend() {
+	if command -v swaymsg >/dev/null 2>&1 && [ -n "${SWAYSOCK:-}" ] && [ -S "$SWAYSOCK" ]; then
+		printf 'sway'
+	elif command -v xrandr >/dev/null 2>&1 && [ -n "${DISPLAY:-}" ] && xrandr --query >/dev/null 2>&1; then
+		printf 'x11'
+	else
+		printf 'none'
+	fi
+}
+_ok() { [ "$(_backend)" != "none" ]; }
+_session_key() { printf '%s' "${SWAYSOCK:-}${DISPLAY:-}"; }
 
-current_transform() {
-	swaymsg -t get_outputs -r 2>/dev/null \
-		| jq -r 'map(select(.focused))[0].transform // .[0].transform // "normal"' 2>/dev/null
+_x11_output() { xrandr --query 2>/dev/null | awk '/ connected/{print $1; exit}'; }
+_x11_rot_name() { # transform -> token xrandr
+	case "$1" in normal) echo normal ;; 90) echo right ;; 180) echo inverted ;; 270) echo left ;; esac
+}
+_x11_transform_name() { # token xrandr -> transform
+	case "$1" in normal) echo normal ;; right) echo 90 ;; inverted) echo 180 ;; left) echo 270 ;; esac
 }
 
-# Sólo los cuatro transform "puros"; cualquier otro valor arranca desde 90.
-cycle() { # cycle <cw|ccw>
+set_transform() {
+	case "$(_backend)" in
+		sway) swaymsg output '*' transform "$1" >/dev/null 2>&1 ;;
+		x11)  xrandr --output "$(_x11_output)" --rotate "$(_x11_rot_name "$1")" >/dev/null 2>&1 ;;
+	esac
+}
+
+# Devuelve normal|90|180|270. En X11, xrandr imprime la rotación actual como palabra
+# entre la geometría y la lista "(normal left ...)"; sin rotar no la imprime.
+current_transform() {
+	case "$(_backend)" in
+		sway)
+			swaymsg -t get_outputs -r 2>/dev/null \
+				| jq -r 'map(select(.focused))[0].transform // .[0].transform // "normal"' 2>/dev/null ;;
+		x11)
+			_o="$(_x11_output)"
+			[ -n "$_o" ] || return
+			_tok="$(xrandr --query 2>/dev/null | awk -v o="$_o" '
+				$1 == o {
+					for (i = 1; i <= NF; i++) {
+						if ($i ~ /^[0-9]+x[0-9]+\+/) {
+							if ($(i+1) ~ /^(normal|left|right|inverted)$/) { print $(i+1); exit }
+						}
+					}
+					print "normal"; exit
+				}')"
+			_x11_transform_name "$_tok" ;;
+	esac
+}
+
+cycle() { # cw|ccw
 	case "$(current_transform):$1" in
 		normal:cw|0:cw)   set_transform 90 ;;
 		90:cw)            set_transform 180 ;;
@@ -58,42 +95,61 @@ orientation() {
 
 orientation_transform() {
 	case "$1" in
-		normal)          printf 'normal' ;;
-		right-up)        printf '90' ;;
-		bottom-up)       printf '180' ;;
-		left-up)         printf '270' ;;
-		*)               printf '' ;;
+		normal)    printf 'normal' ;;
+		right-up)  printf '90' ;;
+		bottom-up) printf '180' ;;
+		left-up)   printf '270' ;;
 	esac
 }
 
 held() { [ -f "$hold_file" ]; }
 
 auto_loop() {
-	# Instancia única: si ya hay un daemon vivo, no arranca otro.
-	if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file" 2>/dev/null)" 2>/dev/null; then
-		exit 0
+	# Instancia única POR SESIÓN: el pidfile sólo bloquea si el daemon vivo es de la
+	# misma sesión (misma clave SWAYSOCK/DISPLAY).
+	_key="$(_session_key)"
+	if [ -f "$pid_file" ]; then
+		_old="$(cat "$pid_file" 2>/dev/null)"
+		_oldsock="$(cat "$sock_file" 2>/dev/null)"
+		if [ -n "$_old" ] && kill -0 "$_old" 2>/dev/null; then
+			[ "$_oldsock" = "$_key" ] && exit 0
+			kill "$_old" 2>/dev/null
+			sleep 0.2
+		fi
 	fi
 	echo $$ >"$pid_file"
-	# swaymsg necesita el socket; si auto arranca antes que sway, espera.
+	printf '%s' "$_key" >"$sock_file"
+	# El backend puede tardar en estar listo (sway/X11 arrancando): esperar un poco.
 	_n=0
-	while ! sway_ok && [ "$_n" -lt 300 ]; do sleep 0.2; _n=$((_n + 1)); done
-	sway_ok || { rm -f "$pid_file"; echo "gdtk-rotate: sin SWAYSOCK, salgo" >&2; exit 0; }
+	while ! _ok && [ "$_n" -lt 300 ]; do sleep 0.2; _n=$((_n + 1)); done
+	_ok || { rm -f "$pid_file" "$sock_file"; echo "gdtk-rotate: sin backend (sway/x11), salgo" >&2; exit 0; }
 
 	busctl --system call net.hadess.SensorProxy /net/hadess/SensorProxy \
 		net.hadess.SensorProxy ClaimAccelerometer >/dev/null 2>&1 || true
 	trap 'busctl --system call net.hadess.SensorProxy /net/hadess/SensorProxy \
-		net.hadess.SensorProxy ReleaseAccelerometer >/dev/null 2>&1; rm -f "$pid_file"; exit 0' INT TERM
+		net.hadess.SensorProxy ReleaseAccelerometer >/dev/null 2>&1; rm -f "$pid_file" "$sock_file"; exit 0' INT TERM
 
+	_dead=0
 	_last=""
 	while :; do
-		_o="$(orientation)"
-		_t="$(orientation_transform "$_o")"
-		if [ -n "$_t" ] && [ "$_t" != "$_last" ] && ! held; then
-			case "$(current_transform)" in
-				"$_t") : ;;
-				*) set_transform "$_t" ;;
-			esac
-			_last="$_t"
+		# Backend perdido (compositor/X muertos): salir para no girar contra nada.
+		if ! _ok; then
+			_dead=$((_dead + 1))
+			if [ "$_dead" -ge 3 ]; then
+				busctl --system call net.hadess.SensorProxy /net/hadess/SensorProxy \
+					net.hadess.SensorProxy ReleaseAccelerometer >/dev/null 2>&1 || true
+				rm -f "$pid_file" "$sock_file"
+				echo "gdtk-rotate: backend perdido, salgo" >&2
+				exit 0
+			fi
+		else
+			_dead=0
+			_o="$(orientation)"
+			_t="$(orientation_transform "$_o")"
+			if [ -n "$_t" ] && [ "$_t" != "$_last" ] && ! held; then
+				[ "$(current_transform)" = "$_t" ] || set_transform "$_t"
+				_last="$_t"
+			fi
 		fi
 		sleep 1
 	done
@@ -116,8 +172,8 @@ case "${1:-status}" in
 			*) echo "uso: gdtk-rotate hold [on|off|toggle]" >&2; exit 2 ;;
 		esac ;;
 	status)
-		printf 'transform: %s\norientation: %s\nhold: %s\n' \
-			"$(current_transform)" "$(orientation)" \
+		printf 'backend: %s\ntransform: %s\norientation: %s\nhold: %s\n' \
+			"$(_backend)" "$(current_transform)" "$(orientation)" \
 			"$(held && echo on || echo off)" ;;
 	*) echo "uso: gdtk-rotate {next|right|left|set <t>|auto|hold [on|off|toggle]|status}" >&2; exit 2 ;;
 esac

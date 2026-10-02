@@ -1,17 +1,69 @@
 #!/bin/sh
 # Vigila el shell: lo relanza si se cae y, si se cae seguido, lo arranca a prueba de fallos
 # (GLES2, sin restaurar estado). Uso: gdtk-supervisor <godot> [args...]
-# Salida 0 = el usuario salió (termina la sesión); 75 = reinicio pedido (MCP gdtk_restart_shell).
+# Salida 0 = el usuario salio (termina la sesion); 75 = reinicio pedido (MCP gdtk_restart_shell).
 # Logs en ~/.local/state/gdtk: shell.log (corrida actual), shell.prev.log, crash-*.log.
+#
+# Versionado (Fase 1): si existe un store (gdtk-version) con current, el shell arranca
+# desde esa version y GDTK_HOME apunta ahi. Una version que corre PROMOTE_AFTER segundos
+# se marca buena; si el shell se cae, se vuelve a last_good antes de relanzar. Sin store
+# el comportamiento es identico al de siempre (aditivo).
 # ponytail: no detecta cuelgues (proceso vivo pero congelado): para eso gdtk_restart_shell force=true.
 LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/gdtk"
 RUN="${XDG_RUNTIME_DIR:-/tmp}"
 QUIT="$RUN/gdtk-quit"     # el shell la crea al pedir Salir: termina aunque el cierre se caiga
-FLAG="$RUN/gdtk-restart"  # el MCP lo crea antes de matar un shell colgado: no cuenta como caída
+FLAG="$RUN/gdtk-restart"  # el MCP lo crea antes de matar un shell colgado: no cuenta como caida
+LOCK="$RUN/gdtk-supervisor.lock"
+PROMOTE_AFTER="${GDTK_PROMOTE_AFTER:-20}"
+VER="$(dirname "$0")/gdtk-version"
+STORE="${GDTK_STORE:-${XDG_DATA_HOME:-$HOME/.local/share}/gdtk}"
+export GDTK_STORE
 mkdir -p "$LOGDIR"
 pid=""
-trap '[ -n "$pid" ] && kill "$pid" 2>/dev/null; exit 0' HUP INT TERM
 say() { echo "[supervisor] $*"; echo "$(date '+%F %T') $*" >>"$LOGDIR/supervisor.log"; }
+
+# Version activa: symlink atomico del store. Sin store => CONTENT vacio (modo clasico).
+CONTENT=""
+if [ -L "$STORE/current" ]; then
+	c="$(readlink -f "$STORE/current" 2>/dev/null || true)"
+	[ -n "$c" ] && [ -d "$c/shell" ] && CONTENT="$c"
+fi
+
+# Separa el binario del resto y guarda el --path original. El valor de --path se
+# reemplaza por la version activa cuando hay store; si no, se conserva el original.
+BIN="$1"; shift
+EXTRA=""
+ORIG_PATH=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--path) shift; [ $# -gt 0 ] && { ORIG_PATH="$1"; shift; }; continue;;
+		*) EXTRA="$EXTRA $1";;
+	esac
+	shift
+done
+
+take_lock() {
+	while ! mkdir "$LOCK" 2>/dev/null; do
+		old=""
+		[ -f "$LOCK/pid" ] && old="$(cat "$LOCK/pid" 2>/dev/null)"
+		if [ -n "$old" ] && kill -0 "$old" 2>/dev/null; then
+			say "ya hay un supervisor vivo (pid $old); no arranco otro"
+			exit 0
+		fi
+		rm -rf "$LOCK"
+	done
+	echo $$ >"$LOCK/pid"
+}
+
+stop_now() {
+	[ -n "$pid" ] && kill "$pid" 2>/dev/null
+	rm -rf "$LOCK"
+	exit 0
+}
+
+take_lock
+trap stop_now HUP INT TERM
+trap 'rm -rf "$LOCK"' EXIT
 
 fails=0
 while :; do
@@ -20,42 +72,80 @@ while :; do
 	safe=""
 	if [ "$fails" -ge 2 ]; then
 		safe="--video-driver GLES2"; export GDTK_SAFE="$fails"
-		say "modo a prueba de fallos tras $fails caídas"
+		say "modo a prueba de fallos tras $fails caidas"
 	else
 		unset GDTK_SAFE
 	fi
+	launch_path="$ORIG_PATH"
+	version=""
+	if [ -n "$CONTENT" ]; then
+		launch_path="$CONTENT/shell"
+		version="$(basename "$CONTENT")"
+		export GDTK_HOME="$CONTENT"
+	fi
 	start=$(date +%s)
-	# tee por un fifo: el log queda en disco y la salida sigue llegando a quien lanzó la sesión.
+	say "arrancando${version:+ version $version} ($launch_path)"
+	# tee por un fifo: el log queda en disco y la salida sigue llegando a quien lanzo la sesion.
 	fifo="$RUN/gdtk-shell.$$.fifo"; rm -f "$fifo"; mkfifo "$fifo"
 	tee "$LOGDIR/shell.log" <"$fifo" &
 	tee_pid=$!
 	# shellcheck disable=SC2086
-	"$@" $safe >"$fifo" 2>&1 &
+	"$BIN" $safe $EXTRA --path "$launch_path" >"$fifo" 2>&1 &
 	pid=$!
 	echo "$pid" >"$RUN/gdtk-shell.pid"
+	# Promocion a buena: si sigue vivo tras PROMOTE_AFTER, sella last_good. Si se cae
+	# antes, kill -0 falla y no promueve (el pid del archivo evita reciclar un pid ajeno).
+	promoter=""
+	if [ -n "$version" ] && [ -x "$VER" ]; then
+		( sleep "$PROMOTE_AFTER"
+		  if kill -0 "$pid" 2>/dev/null && [ "$(cat "$RUN/gdtk-shell.pid" 2>/dev/null)" = "$pid" ]; then
+			"$VER" good "$version" >/dev/null 2>&1 && say "version $version marcada buena"
+		  fi ) &
+		promoter=$!
+	fi
 	wait "$pid"; rc=$?
 	pid=""
+	[ -n "$promoter" ] && kill "$promoter" 2>/dev/null
 	# No usar `wait` sin argumentos: un hijo del shell (gvd, terminal, deskflow) puede
 	# heredar el FIFO y mantener vivo al tee, dejando al supervisor colgado sin
-	# relanzar el shell. Se cierra el tee explícitamente y se sigue.
+	# relanzar el shell. Se cierra el tee explicitamente y se sigue.
 	kill "$tee_pid" 2>/dev/null
 	wait "$tee_pid" 2>/dev/null
 	rm -f "$fifo" "$RUN/gdtk-shell.pid"
 
-	if [ "$rc" -eq 0 ] || [ -f "$QUIT" ]; then
-		[ "$rc" -eq 0 ] || say "salida pedida; el cierre terminó con rc=$rc"
+	# El cierre pedido por el usuario (QUIT) manda. En cambio un reinicio pedido
+	# (rc=75 de recovery.restart, o el flag gdtk-restart que crea el MCP) DEBE
+	# relanzar aunque el shell haya salido con rc=0: p. ej. si lo terminan con
+	# SIGTERM en vez de SIGKILL. Antes rc=0 ganaba sobre el flag y el supervisor
+	# cerraba la sesion en vez de relanzar.
+	if [ -f "$QUIT" ]; then
+		[ "$rc" -eq 0 ] || say "salida pedida; el cierre termino con rc=$rc"
 		rm -f "$QUIT"; exit 0
 	elif [ "$rc" -eq 75 ] || [ -f "$FLAG" ]; then
 		say "reinicio pedido (rc=$rc)"; fails=0; unset GDTK_LAST_CRASH
 		continue
+	elif [ "$rc" -eq 0 ]; then
+		exit 0
 	fi
 	crash="$LOGDIR/crash-$(date +%Y%m%d-%H%M%S).log"
 	cp "$LOGDIR/shell.log" "$crash"
 	ls -t "$LOGDIR"/crash-*.log | tail -n +11 | xargs -r rm -f
-	# Caídas seguidas = cada una a menos de 60 s de arrancar; si no, se empieza a contar de nuevo.
+	# Versionado: la version que acaba de caer no es la ultima buena -> volver a last_good.
+	if [ -n "$CONTENT" ] && [ -x "$VER" ]; then
+		cur="$(basename "$CONTENT")"
+		lg="$(basename "$(readlink "$STORE/last_good" 2>/dev/null)" 2>/dev/null || true)"
+		if [ -n "$lg" ] && [ "$lg" != "$cur" ]; then
+			say "rollback $cur -> $lg (la version cayo)"
+			"$VER" use "$lg" >/dev/null 2>&1 || true
+			CONTENT="$(readlink -f "$STORE/current" 2>/dev/null || true)"
+		else
+			say "sin rollback (current=$cur last_good=${lg:-none})"
+		fi
+	fi
+	# Caidas seguidas = cada una a menos de 60 s de arrancar; si no, se empieza a contar de nuevo.
 	if [ $(($(date +%s) - start)) -lt 60 ]; then fails=$((fails + 1)); else fails=1; fi
-	say "el shell se cayó (rc=$rc, seguidas=$fails): $crash"
+	say "el shell se cayo (rc=$rc, seguidas=$fails): $crash"
 	export GDTK_LAST_CRASH="$crash"
-	[ "$fails" -ge 5 ] && { say "demasiadas caídas, me rindo"; exit "$rc"; }
+	[ "$fails" -ge 5 ] && { say "demasiadas caidas, me rindo"; exit "$rc"; }
 	sleep 1
 done

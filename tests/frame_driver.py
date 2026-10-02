@@ -137,11 +137,11 @@ def main():
         key(client, "F6") if not frame(client).get("visible") else None
         shot(client, "frame-closed.png")
 
-        client.call_tool("gdtk_open", {"name": "Chat"})
-        time.sleep(0.5)
+        client.call_tool("gdtk_open", {"name": "Terminal"})
+        time.sleep(2.5)
         client.call_tool("gdtk_home")
         time.sleep(0.5)
-        check("la actividad interna sigue en el Frame tras ir al Home", item(client, "Chat") is not None)
+        check("la actividad interna sigue en el Frame tras ir al Home", item(client, "Terminal") is not None)
     finally:
         client.close()
 

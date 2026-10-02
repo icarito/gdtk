@@ -45,6 +45,10 @@ static uint32_t now_ms(void) {
 }
 
 remote_pointer *remote_pointer_create(void) {
+	const char *wayland = getenv("WAYLAND_DISPLAY");
+	if (wayland == NULL || *wayland == '\0') {
+		return NULL;
+	}
 	struct remote_pointer *p = calloc(1, sizeof(*p));
 	p->display = wl_display_connect(NULL);
 	if (p->display == NULL) {

@@ -36,6 +36,9 @@
 #include <wlr/types/wlr_input_method_v2.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/types/wlr_xdg_decoration_v1.h>
+#include <wlr/types/wlr_xdg_foreign_registry.h>
+#include <wlr/types/wlr_xdg_foreign_v1.h>
+#include <wlr/types/wlr_xdg_foreign_v2.h>
 #include <wlr/types/wlr_server_decoration.h>
 #include <wlr/util/log.h>
 #include <wlr/xwayland/xwayland.h>
@@ -121,6 +124,14 @@ struct wl_server {
 	struct wlr_xdg_shell *xdg_shell;
 	struct wlr_seat *seat;
 	struct wlr_keyboard keyboard;
+
+	// xdg-foreign (v1/v2): deja que un cliente (el portal GTK del selector de
+	// archivos) declare su ventana hija de la ventana de otra app. El parent que
+	// marca wlroots hace que el shell lo trate como diálogo y lo flote sobre su
+	// host en vez de como una ventana suelta (actividad/workspace nuevo).
+	struct wlr_xdg_foreign_registry *foreign_registry;
+	struct wlr_xdg_foreign_v1 *foreign_v1;
+	struct wlr_xdg_foreign_v2 *foreign_v2;
 
 	// IME (K14): text-input-v3 del cliente y el motor IME (fcitx5/ibus) por
 	// input-method-v2. Relay minimo: activa el motor con el foco de text-input,
@@ -1484,6 +1495,17 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 	s->subcompositor = wlr_subcompositor_create(s->display);
 	s->data_device_manager = wlr_data_device_manager_create(s->display);
 	s->xdg_shell = wlr_xdg_shell_create(s->display, 3);
+
+	// xdg-foreign v1 (GTK3: Firefox, xdg-desktop-portal-gtk) y v2 (GTK4): el
+	// selector de archivos del portal es otro cliente y sin esto no puede
+	// hacerse transient de la ventana que lo pidió; quedaría huérfano.
+	s->foreign_registry = wlr_xdg_foreign_registry_create(s->display);
+	if (s->foreign_registry != NULL) {
+		s->foreign_v1 = wlr_xdg_foreign_v1_create(s->display, s->foreign_registry);
+		s->foreign_v2 = wlr_xdg_foreign_v2_create(s->display, s->foreign_registry);
+	} else {
+		wlr_log(WLR_ERROR, "wl_server: fallo wlr_xdg_foreign_registry_create");
+	}
 
 	// Un wl_output del tamaño de la vista: GTK3 (Firefox) limita los popups al área del
 	// monitor, y sin ningún output los configuraba a 1x1 y los descartaba.

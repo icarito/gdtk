@@ -1,9 +1,10 @@
 extends Reference
 
-# Reinicio del shell sin perder el estado (ver session/gdtk-supervisor): antes de salir con
-# código 75 se guarda qué estaba abierto; al arrancar se reabre de a una actividad.
-# Las apps Wayland mueren con el shell (su compositor vive en este proceso): se relanzan.
-# ponytail: no se guardan las actividades dinámicas (ventanas que no lanzó el shell).
+# Reinicio del proceso supervisado (ver session/gdtk-supervisor). Las ventanas Wayland
+# pertenecen al compositor embebido y no sobreviven si el proceso muere; relanzarlas
+# automáticamente no preserva su estado y en navegadores puede disparar crash recovery.
+# Por eso aquí sólo se restaura estado seguro del shell y servicios. Para tomar cambios
+# GDScript sin perder ventanas usar Host.reload_shell() / MCP reload_shell.
 
 const EXIT_RESTART = 75
 const LAUNCH_TIMEOUT_MS = 10000
@@ -23,10 +24,12 @@ func save(shell):
 	for a in shell.ACTIVITIES:
 		if a.get("dynamic", false):
 			continue
-		var alive = shell.wayland_ids.has(a.name) and shell._id_alive(shell.wayland_ids[a.name])
-		if alive or shell.script_instances.has(a.name):
+		if a.has("script") and shell.script_instances.has(a.name):
 			open.append(a.name)
-	var state = {"open": open, "current": shell.current_activity.name if shell.current_activity != null else ""}
+	var current = ""
+	if shell.current_activity != null and open.has(shell.current_activity.name):
+		current = shell.current_activity.name
+	var state = {"open": open, "current": current}
 	# Los servicios (Deskflow) sobreviven al reinicio: sin su pid el anillo no los marca
 	# y el portal de input remoto no los reconoce.
 	state["services"] = shell.service_pids

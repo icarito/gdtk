@@ -228,6 +228,11 @@ void RemoteInput::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("respond", "id", "allow"), &RemoteInput::respond);
 	ClassDB::bind_method(D_METHOD("is_pending", "id"), &RemoteInput::is_pending);
 	ClassDB::bind_method(D_METHOD("get_client_count"), &RemoteInput::get_client_count);
+	ClassDB::bind_method(D_METHOD("has_input_capture"), &RemoteInput::has_input_capture);
+	ClassDB::bind_method(D_METHOD("capture_motion", "position", "relative", "time"), &RemoteInput::capture_motion);
+	ClassDB::bind_method(D_METHOD("capture_button", "button", "pressed", "time"), &RemoteInput::capture_button);
+	ClassDB::bind_method(D_METHOD("capture_scroll", "x", "y", "time"), &RemoteInput::capture_scroll);
+	ClassDB::bind_method(D_METHOD("capture_key", "scancode", "pressed", "time"), &RemoteInput::capture_key);
 	ClassDB::bind_integer_constant(get_class_static(), StringName(), "DEVICE_ID", DEVICE_ID);
 	// Un cliente pide controlar el input (Start del portal): responder con respond(id, allow).
 	ADD_SIGNAL(MethodInfo("access_requested", PropertyInfo(Variant::INT, "id"), PropertyInfo(Variant::INT, "pid"), PropertyInfo(Variant::STRING, "app_id")));
@@ -307,6 +312,36 @@ bool RemoteInput::is_pending(int p_id) const {
 
 int RemoteInput::get_client_count() const {
 	return server != NULL ? eis_server_clients(server) : 0;
+}
+
+bool RemoteInput::has_input_capture() const {
+	return server != NULL && eis_server_has_input_capture(server);
+}
+
+bool RemoteInput::capture_motion(const Vector2 &p_pos, const Vector2 &p_relative, uint64_t p_time) {
+	return server != NULL && eis_server_capture_motion(server, p_pos.x, p_pos.y, p_relative.x, p_relative.y, p_time);
+}
+
+bool RemoteInput::capture_button(int p_button, bool p_pressed, uint64_t p_time) {
+	uint32_t evdev = 0;
+	switch (p_button) {
+		case BUTTON_LEFT: evdev = EVDEV_BTN_LEFT; break;
+		case BUTTON_RIGHT: evdev = EVDEV_BTN_RIGHT; break;
+		case BUTTON_MIDDLE: evdev = EVDEV_BTN_MIDDLE; break;
+		case BUTTON_XBUTTON1: evdev = EVDEV_BTN_SIDE; break;
+		case BUTTON_XBUTTON2: evdev = EVDEV_BTN_EXTRA; break;
+		default: return false;
+	}
+	return server != NULL && eis_server_capture_button(server, evdev, p_pressed, p_time);
+}
+
+bool RemoteInput::capture_scroll(double p_x, double p_y, uint64_t p_time) {
+	return server != NULL && eis_server_capture_scroll(server, p_x, p_y, p_time);
+}
+
+bool RemoteInput::capture_key(uint32_t p_scancode, bool p_pressed, uint64_t p_time) {
+	uint32_t evdev = _scancode_to_evdev(p_scancode);
+	return evdev != 0 && server != NULL && eis_server_capture_key(server, evdev, p_pressed, p_time);
 }
 
 RemoteInput::RemoteInput() {

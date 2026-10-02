@@ -5,7 +5,7 @@ extends Control
 # son nodos nativos hijos del Control del Vecindario (en Godot los hijos se dibujan
 # después del _draw del padre, por eso el menú quedaba oculto detrás de los íconos).
 
-const MENU = preload("./menu_style.gd")
+const MENU = preload("res://menu_style.gd")
 
 const MENU_TITLE_H = 20.0
 const MENU_PAD_X = 8.0

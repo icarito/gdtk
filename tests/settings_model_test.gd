@@ -29,11 +29,22 @@ func _init():
 	check("default acento en paleta", d.accent in S.ACCENT_PALETTE)
 	check("default fondo sin imagen", d.wallpaper.path == "")
 	check("default scroll natural activo", d.natural_scroll == true and S.NATURAL_SCROLL_DEFAULT)
+	check("default control compartido apagado", d.deskflow.mode == "off"
+		and d.deskflow.port == 24800 and not d.deskflow.auto)
 	check("scroll natural tolera false de texto", S.nat_scroll("false") == false and S.nat_scroll("on") == true)
 	check("scroll natural cae al default con basura", S.nat_scroll("cosa") == S.NATURAL_SCROLL_DEFAULT)
 	check("argumentos de scroll natural",
 		S.natural_scroll_cmd(false) == ["input", "type:touchpad", "natural_scroll", "disabled"]
 		and S.natural_scroll_cmd(true) == ["input", "type:touchpad", "natural_scroll", "enabled"])
+	var df = S.deskflow({"mode": "use_remote", "host": "bastion.local", "port": "24801",
+		"auto": "yes", "name": "tengu"})
+	check("control compartido cliente normalizado", df.mode == "use_remote"
+		and df.host == "bastion.local" and df.port == 24801 and df.auto and df.name == "tengu")
+	check("control compartido sin host se apaga",
+		S.deskflow({"mode": "use_remote", "host": ""}).mode == "off")
+	check("control compartido valida host/nombre",
+		S.host_name("bad host") == "" and S.screen_name("bad name") == ""
+		and S.screen_name("bastion") == "bastion")
 
 	# Hex: válidos, normalización y rechazos.
 	check("hex sin # aceptado", S.valid_hex("AABBCC") == "#aabbcc")
@@ -89,6 +100,8 @@ func _init():
 		labels.append(o.label.to_lower())
 	for k in S.WALLPAPER_MODE_LABELS.keys():
 		labels.append(String(S.WALLPAPER_MODE_LABELS[k]).to_lower())
+	for k in S.CONTROL_MODE_LABELS.keys():
+		labels.append(String(S.CONTROL_MODE_LABELS[k]).to_lower())
 	for t in forbidden:
 		var hit = false
 		for l in labels:

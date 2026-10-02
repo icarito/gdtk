@@ -193,6 +193,36 @@ static func _contact_desc(direction, offset, span, edge_len):
 	}
 
 
+static func _pct(v, length):
+	if length <= 0.0:
+		return 0.0
+	return clamp(100.0 * float(v) / float(length), 0.0, 100.0)
+
+
+# Tramo COMPARTIDO entre a y b en porcentajes (0..100) de cada borde, en el formato
+# de los `links` de Deskflow: left(80,100) = cupid(0,20). `local` es el rango sobre el
+# borde de a y `peer` sobre el borde opuesto de b. {} si no hay contacto.
+static func link_ranges(a, b):
+	var c = contact(a, b)
+	if c.empty():
+		return {}
+	var ra = rect(a)
+	var rb = rect(b)
+	var vertical = String(c.direction) == "east" or String(c.direction) == "west"
+	var a_len = ra.size.y if vertical else ra.size.x
+	var b_len = rb.size.y if vertical else rb.size.x
+	var span = float(c.span)
+	var a0 = float(c.offset)
+	var b0 = (max(ra.position.y, rb.position.y) - rb.position.y) if vertical \
+		else (max(ra.position.x, rb.position.x) - rb.position.x)
+	return {
+		"direction": String(c.direction),
+		"local_range": [_pct(a0, a_len), _pct(a0 + span, a_len)],
+		"peer_range": [_pct(b0, b_len), _pct(b0 + span, b_len)],
+		"overlap_pct": _pct(span, a_len),
+	}
+
+
 static func direction_of(a, b):
 	var c = contact(a, b)
 	return String(c.get("direction", "")) if not c.empty() else ""

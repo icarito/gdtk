@@ -28,5 +28,22 @@ func _init():
 	check("applet_menu teclado", F.applet_menu("teclado") == "teclado")
 	check("applet_menu otros", F.applet_menu("recursos") == "picker" and F.applet_menu("reloj") == "picker")
 
+	# Sombra del Frame: ahora son filas dibujadas dentro de las ventanas reales, no
+	# ventanas ImGui separadas que puedan capturar mouse sobre las apps.
+	var down = F.shadow_rows(Vector2(0, 10), 100.0, 1.0, 3.0, 0.18)
+	check("shadow_rows abajo: tres filas", down.size() == 3)
+	check("shadow_rows abajo: y crece", down[0].rect.position.y == 10 and down[2].rect.position.y == 12)
+	check("shadow_rows abajo: alpha decrece", down[0].alpha > down[1].alpha and down[1].alpha > down[2].alpha)
+	var up = F.shadow_rows(Vector2(0, 10), 100.0, -1.0, 3.0, 0.18)
+	check("shadow_rows arriba: y decrece", up[0].rect.position.y == 10 and up[2].rect.position.y == 8)
+
+	# Applets vivos (sysmon/teclado) mientras una franja esté a la vista, no sólo con
+	# Home o el Frame enfocados: una barra fijada (pin) también los mantiene al día.
+	check("applets_live: Inicio", F.applets_live(true, false, false, false))
+	check("applets_live: Frame abierto", F.applets_live(false, true, false, false))
+	check("applets_live: barra inferior fija", F.applets_live(false, false, false, true))
+	check("applets_live: barra superior fija", F.applets_live(false, false, true, false))
+	check("applets_live: todo oculto, otra app enfocada", not F.applets_live(false, false, false, false))
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

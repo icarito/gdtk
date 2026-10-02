@@ -2,18 +2,16 @@ extends Control
 
 # K10a — Vecindario: un solo mapa 2D (rediseño).
 #
-# Centro "Este equipo" con ícono de monitor; vecinos como nodos circulares
-# grandes ubicados por su dirección (N arriba, S abajo, E derecha, O izquierda,
-# pegados al anillo medio; sin dirección: anillo exterior, atenuados). El Wi-Fi
-# es infraestructura: puntos chicos en los anillos + "Red: <SSID>".
+# Centro "Este equipo" con ícono de monitor; vecinos como nodos circulares.
+# Si Settings ya guardó una posición relativa, el mapa la refleja; si no, los
+# vecinos quedan en el anillo exterior. El Wi-Fi es infraestructura: puntos chicos
+# en los anillos + "Red: <SSID>".
 #
 # Interacción:
-#   - arrastrar un vecino hacia un lado lo imanta a esa dirección y la guarda
-#     en host_directions como confirmada (misma fuente que Pantalla y Teclado y
-#     mouse), vía el shell;
-#   - clic izquierdo = seleccionar (resalta + rótulo de estado en español);
+#   - clic izquierdo = seleccionar;
 #   - clic derecho = menú popup estilo WindowMaker (paleta de menu_style.gd)
 #     con acciones en lenguaje humano; las deshabilitadas muestran su razón.
+#   - la edición fina de posición vive en Configuración > Pantallas.
 #
 # La geometría y el vocabulario viven en el helper puro neighborhood_map.gd;
 # acá sólo se dibuja el snapshot y se delega la ejecución al shell. Nada de I/O
@@ -37,6 +35,10 @@ const NODE_DIM_ALPHA = 0.45
 const CENTER_PLATE = Color(0.14, 0.18, 0.27, 1.0)
 const WIFI_DOT = Color(0.55, 0.64, 0.80, 0.65)
 const WIFI_DOT_ACTIVE = Color(1.0, 0.84, 0.43, 0.95)
+# Bluetooth: conectado (verde), vinculado (claro) y sólo conocido (tenue).
+const BT_DOT_CONNECTED = Color(0.52, 0.90, 0.58, 1.0)
+const BT_DOT_PAIRED = Color(0.78, 0.84, 0.96, 0.95)
+const BT_DOT_KNOWN = Color(0.55, 0.64, 0.80, 0.60)
 # Íconos nuevos (The Noun Project, ver icons/np/CREDITS.txt): PNG claros. Los hosts
 # llevan el ícono de su `kind` y el punto del Wi-Fi pasa a ser un ícono de AP.
 const NP_DIR = "res://icons/np/"
@@ -69,6 +71,7 @@ var drawn_size = Vector2.ZERO
 var center = Vector2.ZERO
 var radius = 0.0
 var wifi_points = []
+var bt_points = []           # dispositivos Bluetooth (proveedor del Vecindario)
 var host_nodes = []
 var directions = {}          # hid -> entry {"direction","confirm",...} (lo puebla el shell)
 var direction_conflicts = [] # lista de {"direction","hids":[..]} (la puebla el shell)
@@ -93,6 +96,8 @@ var _menu_hover = -1
 var _menu_layer = null       # nodo hijo propio, por encima de íconos (ver _sync_menu)
 var _menu_is_wifi = false    # true = el menú es de una red Wi-Fi, no de un host
 var _menu_wifi = null        # red Wi-Fi del menú (ver _open_wifi_menu)
+var _menu_is_bt = false      # true = el menú es de un dispositivo Bluetooth
+var _menu_bt = null          # dispositivo Bluetooth del menú
 var _since_ms = -1
 
 
@@ -119,6 +124,7 @@ func refresh(force = false):
 	center = vp * 0.5
 	radius = radii.outer
 	wifi_points = MAP.wifi_dots(networks, vp, bar)
+	bt_points = MAP.bt_dots(model.bt_devices if model.get("bt_devices") != null else [], vp, bar)
 	host_nodes = MAP.map_layout(hosts, directions, vp, bar)
 
 	_label("Vecindario", Vector2(16, bar + 10), 220)
@@ -130,6 +136,10 @@ func refresh(force = false):
 	var wifi_text = MAP.wifi_label(networks)
 	if wifi_text != "":
 		_label(wifi_text, Vector2(16, bar + 34), 360, Label.ALIGN_LEFT, TEXT_DIM)
+	for d in bt_points:
+		var bc = Vector2(d.pos)
+		_label(_bt_label(d), Vector2(bc.x - 70, bc.y + MAP.BT_ICON_SIZE * 0.5 + 3), 140,
+			Label.ALIGN_CENTER, _bt_color(d))
 
 	for node in host_nodes:
 		var host = node.host
@@ -139,11 +149,10 @@ func refresh(force = false):
 		_label(host_label(host), Vector2(c.x - 80, c.y + size * 0.5 + 4), 160, Label.ALIGN_CENTER)
 		_make_icon(self, _host_icon(host), node.pos + Vector2(4, 4), size - 8.0)
 		if id == selected_host:
-			var status = MAP.direction_status_text(compass_state(id), compass_direction(id))
 			var session = _session_badge(id)
 			if session != "":
-				status += " · " + session
-			_label(status, Vector2(c.x - 110, c.y + size * 0.5 + 22), 220, Label.ALIGN_CENTER, HIGHLIGHT)
+				_label(session, Vector2(c.x - 110, c.y + size * 0.5 + 22), 220,
+					Label.ALIGN_CENTER, HIGHLIGHT)
 
 	if host_nodes.empty():
 		var msg = MAP.empty_message(host_nodes.size(), _elapsed_ms())
@@ -154,12 +163,11 @@ func refresh(force = false):
 		_build_menu_rows()
 	# El menú vive en un nodo propio agregado al final: los íconos/etiquetas son
 	# hijos nativos y se dibujan por encima del _draw del padre, así que el menú
-	# debe ser el último hijo con z_index alto para no quedar oculto.
+	# debe ser el último hijo (raise()) para no quedar oculto.
 	if _menu_layer == null or not is_instance_valid(_menu_layer):
 		_menu_layer = preload("res://neighborhood_menu.gd").new()
 		_menu_layer.name = "MenuLayer"
 		_menu_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		_menu_layer.z_index = 10
 		add_child(_menu_layer)
 	_menu_layer.rect_size = vp
 	_menu_layer.raise()
@@ -172,6 +180,7 @@ func _sync_menu():
 	if _menu_layer == null or not is_instance_valid(_menu_layer):
 		return
 	_menu_layer.visible = _menu_host != null
+	_menu_layer.title = "Wi-Fi" if _menu_is_wifi else ("Bluetooth" if _menu_is_bt else "Vecino")
 	_menu_layer.rows = _menu_rows
 	_menu_layer.rect = _menu_rect
 	_menu_layer.hover = _menu_hover
@@ -225,6 +234,11 @@ func _on_mouse_button(event):
 			_open_wifi_menu(wifi, pos)
 			accept_event()
 			return
+		var bt = MAP.hit_bt(pos, bt_points)
+		if bt != null:
+			_open_bt_menu(bt, pos)
+			accept_event()
+			return
 		var node = MAP.hit_node(pos, host_nodes)
 		if node != null:
 			_open_menu(node.host, pos)
@@ -253,27 +267,25 @@ func _on_mouse_button(event):
 			accept_event()
 			update()
 			return
+		var bt_hit = MAP.hit_bt(pos, bt_points)
+		if bt_hit != null:
+			_open_bt_menu(bt_hit, pos)
+			accept_event()
+			update()
+			return
 		var hit = MAP.hit_node(pos, host_nodes)
 		if hit != null:
 			selected_host = String(hit.id)
-			_drag_id = String(hit.id)
-			_drag_from = Vector2(hit.center)
-			_drag_now = pos
-			_dragging = false
+			_drag_id = ""
 		else:
 			selected_host = ""
 			_drag_id = ""
 		update()
 		call_deferred("refresh", true)
 	else:
-		if _drag_id != "":
-			if _dragging:
-				var dir = MAP.drag_direction(_drag_from, pos)
-				if dir != "":
-					_apply_direction(_drag_id, dir)
-			_drag_id = ""
-			_dragging = false
-			update()
+		_drag_id = ""
+		_dragging = false
+		update()
 
 
 func _on_mouse_motion(event):
@@ -370,6 +382,8 @@ func _open_menu(host, at):
 	_menu_host = host
 	_menu_is_wifi = false
 	_menu_wifi = null
+	_menu_is_bt = false
+	_menu_bt = null
 	_menu_items = MAP.neighbor_menu(host, _host_actions(host), compass_direction(selected_host),
 		MAP.debug_enabled(OS.get_environment("GDTK_DEBUG")))
 	_menu_open_pos = Vector2(at)
@@ -385,6 +399,8 @@ func _open_wifi_menu(w, at):
 		return
 	_menu_is_wifi = true
 	_menu_wifi = w
+	_menu_is_bt = false
+	_menu_bt = null
 	_menu_host = {}  # no-null: hay menú abierto (los huéspedes del menú son de host)
 	_menu_items = _wifi_menu_items(w)
 	_menu_open_pos = Vector2(at)
@@ -412,10 +428,55 @@ func _wifi_menu_items(w):
 	return out
 
 
+# Menú de un dispositivo Bluetooth: conectar/desconectar, vincular/olvidar y buscar.
+# La ejecución la hace el shell con bluetoothctl (nunca acá).
+func _open_bt_menu(d, at):
+	if typeof(d) != TYPE_DICTIONARY:
+		return
+	_menu_is_bt = true
+	_menu_bt = d
+	_menu_is_wifi = false
+	_menu_wifi = null
+	_menu_host = {}
+	_menu_items = _bt_menu_items(d)
+	_menu_open_pos = Vector2(at)
+	_menu_hover = -1
+	_build_menu_rows()
+	update()
+
+
+func _bt_menu_items(d):
+	var addr = String(d.get("address", "")).strip_edges()
+	var name = String(d.get("name", addr)).strip_edges()
+	if name == "":
+		name = addr
+	var out = []
+	if addr == "":
+		return out
+	if bool(d.get("connected", false)):
+		out.append({"kind": "bt_disconnect", "id": "bt_disconnect", "label": "Desconectar " + name,
+			"enabled": true, "reason": "", "address": addr})
+	else:
+		out.append({"kind": "bt_connect", "id": "bt_connect", "label": "Conectar " + name,
+			"enabled": true, "reason": "", "address": addr})
+	if bool(d.get("paired", false)):
+		out.append({"kind": "bt_forget", "id": "bt_forget", "label": "Olvidar " + name,
+			"enabled": true, "reason": "", "address": addr})
+	else:
+		out.append({"kind": "bt_pair", "id": "bt_pair", "label": "Vincular " + name,
+			"enabled": true, "reason": "", "address": addr})
+	out.append({"kind": "separator"})
+	out.append({"kind": "bt_scan", "id": "bt_scan", "label": "Buscar dispositivos",
+		"enabled": true, "reason": "", "address": ""})
+	return out
+
+
 func _close_menu():
 	_menu_host = null
 	_menu_is_wifi = false
 	_menu_wifi = null
+	_menu_is_bt = false
+	_menu_bt = null
 	_menu_items = []
 	_menu_rows = []
 	_menu_rect = Rect2()
@@ -470,6 +531,21 @@ func _activate_row(row):
 	if item == null or not bool(item.get("enabled", false)):
 		return
 	var kind = String(item.get("kind", ""))
+	if _menu_is_bt:
+		var addr = String(item.get("address", ""))
+		if kind == "bt_connect" and shell != null and shell.has_method("_bt_connect"):
+			shell._bt_connect(addr)
+		elif kind == "bt_disconnect" and shell != null and shell.has_method("_bt_disconnect"):
+			shell._bt_disconnect(addr)
+		elif kind == "bt_pair" and shell != null and shell.has_method("_bt_pair"):
+			shell._bt_pair(addr)
+		elif kind == "bt_forget" and shell != null and shell.has_method("_bt_forget"):
+			shell._bt_forget(addr)
+		elif kind == "bt_scan" and shell != null and shell.has_method("_bt_scan"):
+			shell._bt_scan()
+		_close_menu()
+		update()
+		return
 	if _menu_is_wifi:
 		if kind == "wifi_connect":
 			if shell != null and shell.has_method("_wifi_connect"):
@@ -787,20 +863,17 @@ func _draw():
 		draw_arc(center, float(r), 0.0, TAU, 96, RING_MID if r == radii.mid else RING, 1.0)
 	for dot in wifi_points:
 		var active = bool(dot.in_use)
-		var ap = _icon_texture("np/" + AP_ICON)
-		if ap != null:
-			# El AP deja de ser un punto: ícono legible, tenue salvo la red en uso.
-			var s = MAP.WIFI_ICON_SIZE + (4.0 if active else 0.0)
-			draw_texture_rect(ap, Rect2(Vector2(dot.pos) - Vector2(s, s) * 0.5, Vector2(s, s)),
-				false, WIFI_DOT_ACTIVE if active else WIFI_DOT)
-		else:
-			draw_circle(Vector2(dot.pos), MAP.WIFI_DOT_RADIUS + (1.0 if active else 0.0),
-				WIFI_DOT_ACTIVE if active else WIFI_DOT)
+		# AP con la antena clásica de Sugar (no el router genérico): mástil, bola y
+		# ondas. Sigue siendo infraestructura, no presencia social.
+		_draw_ap(Vector2(dot.pos), MAP.WIFI_ICON_SIZE * 0.5 + (2.0 if active else 0.0), active)
 	_draw_center_plate()
 	for node in host_nodes:
 		if _dragging and String(node.id) == _drag_id:
 			continue
 		_draw_node(node, Vector2(node.center), float(node.size))
+	# Bluetooth: se dibuja al final para quedar por encima del equipo central.
+	for d in bt_points:
+		_draw_bt_icon(Vector2(d.pos), MAP.BT_ICON_SIZE * 0.5, d)
 	if _dragging:
 		var drag_node = _node_by_id(_drag_id)
 		if drag_node != null:
@@ -811,6 +884,59 @@ func _draw():
 			_draw_node(drag_node, _drag_now, float(drag_node.size))
 	# El menú lo dibuja _menu_layer (nodo propio, por encima); acá sólo se sincroniza.
 	_sync_menu()
+
+
+# Antena clásica de Sugar para el AP de Wi-Fi: base, mástil, bola y ondas. Se
+# dibuja vectorial (sin PNG) para que escale y siga el color de estado.
+func _draw_ap(c, r, active):
+	var col = WIFI_DOT_ACTIVE if active else WIFI_DOT
+	var thick = max(1.5, r * 0.16)
+	var top = Vector2(c.x, c.y)
+	var base_y = c.y + r * 0.80
+	draw_line(Vector2(c.x - r * 0.55, base_y), Vector2(c.x + r * 0.55, base_y), col, thick, true)
+	draw_line(Vector2(c.x, base_y), top, col, thick, true)
+	draw_circle(top, thick * 1.35, col)
+	for i in range(3):
+		var ar = r * (0.42 + 0.30 * float(i))
+		draw_arc(top, ar, -PI * 0.78, -PI * 0.22, 18, col, thick, true)
+
+
+# Color por estado del dispositivo Bluetooth.
+func _bt_color(d):
+	if bool(d.get("connected", false)):
+		return BT_DOT_CONNECTED
+	if bool(d.get("paired", false)):
+		return BT_DOT_PAIRED
+	return BT_DOT_KNOWN
+
+
+func _bt_label(d):
+	var n = String(d.get("name", "")).strip_edges()
+	return n if n != "" else String(d.get("address", ""))
+
+
+# Dispositivo Bluetooth: placa chica con el runa de Bluetooth; verde si está
+# conectado (con halo), claro si está vinculado, tenue si sólo es conocido.
+func _draw_bt_icon(c, r, d):
+	var col = _bt_color(d)
+	if bool(d.get("connected", false)):
+		draw_circle(c, r * 1.28, Color(col.r, col.g, col.b, 0.18))
+	draw_circle(c, r, NODE_BG)
+	draw_arc(c, r, 0.0, TAU, 32, col, 1.5)
+	_draw_bt_glyph(c, r * 0.62, col, max(1.4, r * 0.16))
+
+
+# Runa de Bluetooth: mástil vertical y dos diagonales (triángulos espejados).
+func _draw_bt_glyph(c, r, col, w):
+	var top = c + Vector2(0.0, -r)
+	var bot = c + Vector2(0.0, r)
+	draw_line(top, bot, col, w, true)
+	var a = PoolVector2Array([top, c + Vector2(0.62 * r, -0.36 * r),
+		c + Vector2(-0.62 * r, 0.36 * r), bot])
+	var b = PoolVector2Array([bot, c + Vector2(0.62 * r, 0.36 * r),
+		c + Vector2(-0.62 * r, -0.36 * r), top])
+	draw_polyline(a, col, w, true)
+	draw_polyline(b, col, w, true)
 
 
 func _draw_center_plate():

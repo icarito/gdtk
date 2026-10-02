@@ -250,8 +250,42 @@ func _draw_canvas():
 			canvas.draw_rect(cr, STYLE.WARN, false, 2.0)
 		if font != null and cr.size.x > 40.0:
 			canvas.draw_string(font, cr.position + Vector2(8, 20), _label_of(sc), STYLE.TEXT)
+			if cr.size.y > 34.0:
+				canvas.draw_string(font, cr.position + Vector2(8, 20 + font.get_height()), _size_of(sc), STYLE.DIM)
+	# Porcentaje del tramo compartido en cada contacto (como los rangos de Deskflow):
+	# con pantallas de distinta resolución deja ver cuánto borde se usa realmente.
+	if font != null:
+		for e in SL.edges(layout):
+			var a = SL.screen_by_id(layout, String(e.get("from", "")))
+			var b = SL.screen_by_id(layout, String(e.get("to", "")))
+			if a == null or b == null:
+				continue
+			var r = SL.link_ranges(a, b)
+			if r.empty():
+				continue
+			var ra = SL.rect(a)
+			var rb = SL.rect(b)
+			var dir = String(r.get("direction", ""))
+			var mid = Vector2.ZERO
+			if dir == "east" or dir == "west":
+				var x = (ra.position.x + ra.size.x) if dir == "east" else ra.position.x
+				var y0 = max(ra.position.y, rb.position.y)
+				var y1 = min(ra.position.y + ra.size.y, rb.position.y + rb.size.y)
+				mid = Vector2(x, (y0 + y1) * 0.5)
+			else:
+				var y = (ra.position.y + ra.size.y) if dir == "south" else ra.position.y
+				var x0 = max(ra.position.x, rb.position.x)
+				var x1 = min(ra.position.x + ra.size.x, rb.position.x + rb.size.x)
+				mid = Vector2((x0 + x1) * 0.5, y)
+			var t = str(int(round(float(r.get("overlap_pct", 0.0))))) + "%"
+			var cp = _canvas_of(mid)
+			canvas.draw_string(font, cp + Vector2(-font.get_string_size(t).x * 0.5, -4), t, STYLE.WARN)
 	if layout.screens.empty() and font != null:
 		canvas.draw_string(font, Vector2(PAD, PAD), "No hay otros equipos", STYLE.DIM)
+
+
+func _size_of(sc):
+	return "%d×%d" % [int(round(float(sc.w))), int(round(float(sc.h)))]
 
 
 func _label_of(sc):

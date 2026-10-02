@@ -80,10 +80,18 @@ func _cleanup():
 
 
 func _remove_token():
-	if token_path != "" and token != "":
-		var dir = Directory.new()
-		dir.remove(token_path)
-		token = ""
+	# Sólo borra si el archivo sigue siendo el nuestro: en una recarga se crea un
+	# Remote nuevo y el viejo, al salir, borraba el token del nuevo (mismo path).
+	if token_path == "" or token == "":
+		return
+	var f = File.new()
+	var ours = true
+	if f.file_exists(token_path) and f.open(token_path, File.READ) == OK:
+		ours = f.get_as_text().strip_edges() == token
+		f.close()
+	if ours:
+		Directory.new().remove(token_path)
+	token = ""
 
 
 # Si el motor muere sin pasar por _exit_tree (p.ej. al matar cage, que deja caer el display
@@ -417,10 +425,11 @@ func _hud_command(params):
 	return {"output": hud.command_output(str(params.get("line", "")))}
 
 
-func _event_mouse_motion(x, y):
+func _event_mouse_motion(x, y, rx = 0.0, ry = 0.0):
 	var event = InputEventMouseMotion.new()
 	event.position = Vector2(x, y)
 	event.global_position = Vector2(x, y)
+	event.relative = Vector2(rx, ry)
 	return event
 
 
@@ -445,7 +454,8 @@ func _click(params):
 
 
 func _move(params):
-	event_queue.push_back(_event_mouse_motion(float(params.get("x", 0.0)), float(params.get("y", 0.0))))
+	event_queue.push_back(_event_mouse_motion(float(params.get("x", 0.0)), float(params.get("y", 0.0)),
+		float(params.get("rx", 0.0)), float(params.get("ry", 0.0))))
 
 
 # Press/release por separado (el click siempre manda los dos juntos): lo necesita

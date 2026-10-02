@@ -12,12 +12,15 @@ extends Reference
 const REFRESH_MS = 20000      # refresco normal del listado
 const RESCAN_MS = 60000       # rescan best-effort una vez por minuto
 const SLEEP_STEP_MS = 100     # granularidad para que stop() no espere de más
+const BT_TIMEOUT = "2"        # timeout de cada bluetoothctl (worker)
+const BT_MAX = 16             # tope de dispositivos para no inflar el mapa
 
 # Hosts DNS-SD de gdtk: el modelo puro vive en neighborhood_hosts.gd, acá sólo se
 # invoca avahi-browse de forma acotada. Si no está o falla, no hay hosts y el
 # Wi-Fi sigue igual.
 const HOSTS_SCRIPT = preload("res://neighborhood_hosts.gd")
 const PUBLISH_PLAN = preload("res://neighborhood_publish_plan.gd")
+const BT_APPLET = preload("res://applet_bluetooth.gd")  # reutiliza su parser puro
 const GDTK_SERVICES = ["_gdtk-gvd._udp", "_gdtk-deskflow._tcp", "_gdtk-clip._tcp"]
 
 # Cápsula de un nodo en la vista: el disco del AP más el alto de su etiqueta
@@ -29,15 +32,18 @@ const LABEL_TAIL = 18.0       # alto extra bajo el disco ocupado por el texto
 
 var networks = []             # lista de nodos "red" (ESS), copiada por poll()
 var hosts = []                # hosts DNS-SD de gdtk, copiada por poll()
+var bt_devices = []           # dispositivos Bluetooth conocidos, copiada por poll()
 var status = ""               # "", "ok", "empty", "off", "no_nmcli", "error"
 var version = 0               # sube cuando el hilo escribió un resultado nuevo
 
 var _mutex = Mutex.new()
 var _thread = null
 var _want_stop = false
+var _want_refresh = false      # pide un refresco inmediato (tras una acción)
 var _hosts_model = null        # instancia diferida de HOSTS_SCRIPT (sólo hilo)
 var _nets = []
 var _hosts = []
+var _bt = []
 var _status = ""
 var _version = 0
 var _rescan_at = -RESCAN_MS
@@ -76,9 +82,25 @@ func poll():
 	_mutex.lock()
 	networks = _nets
 	hosts = _hosts
+	bt_devices = _bt
 	status = _status
 	version = _version
 	_mutex.unlock()
+
+
+# Pide un refresco inmediato (p. ej. tras conectar/desconectar un dispositivo).
+# El worker lo atiende sin esperar el periodo; nunca bloquea al llamador.
+func request_refresh():
+	_mutex.lock()
+	_want_refresh = true
+	_mutex.unlock()
+
+
+func _refresh_requested():
+	_mutex.lock()
+	var r = _want_refresh
+	_mutex.unlock()
+	return r
 
 
 func status_line():
@@ -109,10 +131,14 @@ func _work(_userdata):
 	while true:
 		if _stopped():
 			return
+		_mutex.lock()
+		_want_refresh = false
+		_mutex.unlock()
 		var res = _scan()
 		_mutex.lock()
 		_nets = res.get("nets", [])
 		_hosts = res.get("hosts", [])
+		_bt = res.get("bt", [])
 		_status = res.get("status", "")
 		_version += 1
 		_mutex.unlock()
@@ -122,17 +148,21 @@ func _work(_userdata):
 			waited += SLEEP_STEP_MS
 			if _stopped():
 				return
+			if _refresh_requested():
+				break
 
 
 func _scan():
 	var out = []
+	var hosts = _read_hosts()
+	var bt = _read_bt()
 	if OS.execute("sh", ["-c", "command -v nmcli >/dev/null 2>&1"]) != 0:
-		return {"status": "no_nmcli", "nets": [], "hosts": _read_hosts()}
+		return {"status": "no_nmcli", "nets": [], "hosts": hosts, "bt": bt}
 	# Radio: si está apagada no se lista (y no se enciende en silencio).
 	var code = OS.execute("nmcli", ["radio", "wifi"], true, out)
 	var radio = str(out[0]).strip_edges() if out.size() > 0 else ""
 	if code != 0 or radio != "enabled":
-		return {"status": ("off" if code == 0 else "error"), "nets": [], "hosts": _read_hosts()}
+		return {"status": ("off" if code == 0 else "error"), "nets": [], "hosts": hosts, "bt": bt}
 	# Rescan best-effort una vez por minuto: el error de permisos se ignora.
 	var now = OS.get_ticks_msec()
 	if now - _rescan_at >= RESCAN_MS:
@@ -143,13 +173,13 @@ func _scan():
 		["-t", "-f", "IN-USE,SSID,BSSID,CHAN,FREQ,SIGNAL,SECURITY", "device", "wifi", "list"],
 		true, out)
 	if code != 0:
-		return {"status": "error", "nets": [], "hosts": _read_hosts()}
+		return {"status": "error", "nets": [], "hosts": hosts, "bt": bt}
 	var text = ""
 	for line in out:
 		text += str(line) + "\n"
 	var nets = parse_nmcli(text)
 	return {"status": ("ok" if not nets.empty() else "empty"),
-		"nets": nets, "hosts": _read_hosts()}
+		"nets": nets, "hosts": hosts, "bt": bt}
 
 
 # Hosts del Vecindario: servicios DNS-SD de gdtk resueltos con avahi-browse
@@ -194,6 +224,65 @@ func _ensure_local_identity():
 	var identity = PUBLISH_PLAN.local_identity(host)
 	_local_hid = String(identity.hid)
 	_local_name = String(identity.name)
+
+
+# --- Bluetooth ---------------------------------------------------------------
+# Dispositivos conocidos por bluetoothctl: nombre, estado (conectado/vinculado) y
+# RSSI de los conectados (para ubicarlos simbólicamente). Todo desde el worker, con
+# timeout corto; sin adaptador o radio apagada devuelve [] y el Wi-Fi no se afecta.
+func _read_bt():
+	var out = []
+	if OS.execute("sh", ["-c", "command -v bluetoothctl >/dev/null 2>&1"]) != 0:
+		return []
+	if OS.execute("timeout", [BT_TIMEOUT, "bluetoothctl", "show"], true, out) != 0:
+		return []
+	var p = BT_APPLET.parse_bluetooth_show(_join(out))
+	if p.no_controller or p.powered != "yes":
+		return []
+	var devs = parse_bt_devices(_join(_bt_run(["devices"])))
+	var connected = parse_bt_devices(_join(_bt_run(["devices", "Connected"])))
+	var paired = parse_bt_devices(_join(_bt_run(["devices", "Paired"])))
+	var conn_set = _bt_addr_set(connected)
+	var pair_set = _bt_addr_set(paired)
+	var result = []
+	for d in devs:
+		if result.size() >= BT_MAX:
+			break
+		var addr = d.address
+		var rssi = 0
+		var icon = ""
+		if conn_set.has(addr):
+			var parsed = parse_bt_info(_join(_bt_run(["info", addr])))
+			rssi = parsed.rssi
+			icon = parsed.icon
+		result.append({
+			"address": addr, "name": d.name,
+			"connected": conn_set.has(addr), "paired": pair_set.has(addr),
+			"rssi": rssi, "icon": icon,
+		})
+	_place_bt(result)
+	return result
+
+
+func _bt_run(args):
+	var out = []
+	if OS.execute("timeout", [BT_TIMEOUT, "bluetoothctl"] + args, true, out) != 0:
+		return []
+	return out
+
+
+func _bt_addr_set(list):
+	var s = {}
+	for d in list:
+		s[d.address] = true
+	return s
+
+
+func _join(lines):
+	var t = ""
+	for l in lines:
+		t += str(l) + "\n"
+	return t
 
 
 # --- parseo puro -------------------------------------------------------------
@@ -351,6 +440,54 @@ static func _place_all(nets):
 		n.angle = _angle_for(n.band, t) + (float((h / 100) % 1000) / 1000.0 - 0.5) * 0.22
 
 
+# Dispositivos de `bluetoothctl devices`: líneas "Device AA:BB:.. Nombre".
+static func parse_bt_devices(text):
+	var out = []
+	for raw in String(text).split("\n", false):
+		var l = raw.strip_edges()
+		if not l.begins_with("Device "):
+			continue
+		var rest = l.substr("Device ".length())
+		var sp = rest.find(" ")
+		var addr = (rest.substr(0, sp) if sp >= 0 else rest).strip_edges()
+		var name = (rest.substr(sp + 1) if sp >= 0 else "").strip_edges()
+		if addr == "":
+			continue
+		out.append({"address": addr, "name": (name if name != "" else addr)})
+	return out
+
+
+# Campos de `bluetoothctl info <addr>` que importan: RSSI (dBm) e Icon.
+static func parse_bt_info(text):
+	var res = {"rssi": 0, "icon": ""}
+	for raw in String(text).split("\n", false):
+		var l = raw.strip_edges()
+		if l.begins_with("RSSI:"):
+			var v = l.substr("RSSI:".length()).strip_edges()
+			if v.is_valid_integer():
+				res.rssi = int(v)
+		elif l.begins_with("Icon:"):
+			res.icon = l.substr("Icon:".length()).strip_edges()
+	return res
+
+
+# Ubicación simbólica de un dispositivo: ángulo determinista por dirección y radio
+# por estado/RSSI (conectado más cerca del centro; si hay RSSI, como el Wi-Fi). No
+# es un radar real, sólo una metáfora estable y reproducible.
+static func _place_bt(devices):
+	for d in devices:
+		var h = abs(String(d.address).hash())
+		d["angle"] = -PI * 0.5 + TAU * (float(h % 1000) / 1000.0)
+		var frac = 0.85
+		if bool(d.connected):
+			frac = 0.26
+			if int(d.rssi) != 0:
+				frac = clamp(_radius_frac(int(d.rssi)) * 0.6, 0.14, 0.5)
+		elif bool(d.paired):
+			frac = 0.55
+		d["r_frac"] = clamp(frac + (float(int(h / 1000) % 100) / 100.0 - 0.5) * 0.04, 0.12, 0.98)
+
+
 # Media altura de la cápsula de un nodo de radio `rad`: el disco más la etiqueta.
 static func capsule_half_h(rad):
 	return float(rad) + LABEL_TAIL
@@ -490,6 +627,15 @@ static func selftest():
 		"sin FAILED")
 	var rel = relax_positions([Vector2(10.0, 10.0), Vector2(10.0, 10.0)], [32.0, 32.0], 2.0, 16, 0.0)
 	assert((rel[0] - rel[1]).length() >= 64.0, "repulsión separa nodos de 64 px")
+	var bt = parse_bt_devices("Device AA:BB:CC:DD:EE:01 Parlante\nDevice 11:22:33:44:55:66 Auriculares")
+	assert(bt.size() == 2 and bt[0].address == "AA:BB:CC:DD:EE:01" and bt[0].name == "Parlante",
+		"parseo de bluetoothctl devices")
+	var info = parse_bt_info("RSSI: -57\nIcon: audio-card")
+	assert(info.rssi == -57 and info.icon == "audio-card", "parseo de info")
+	var placed = [{"address": "AA:BB:CC:DD:EE:01", "connected": true, "paired": true, "rssi": -50},
+		{"address": "11:22:33:44:55:66", "connected": false, "paired": false, "rssi": 0}]
+	_place_bt(placed)
+	assert(placed[0].r_frac < placed[1].r_frac, "conectado más cerca que el lejano")
 	return true
 
 

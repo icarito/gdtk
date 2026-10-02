@@ -30,10 +30,22 @@ typedef struct {
 eis_server *eis_server_create(eis_server_callbacks cb, const char *keymap, int w, int h, const char *test_socket);
 // "" si todo bien; si no, por qué no hay portal (el EIS de prueba puede andar igual).
 const char *eis_server_error(eis_server *s);
+// 1 si la interfaz org.freedesktop.impl.portal.InputCapture quedó registrada en el
+// bus de la sesión (RemoteDesktop puede andar y InputCapture no, y viceversa).
+int eis_server_has_input_capture(eis_server *s);
 // No bloquea: procesa lo que haya en el bus y en los sockets EIS.
 void eis_server_dispatch(eis_server *s);
 void eis_server_set_size(eis_server *s, int w, int h);
 void eis_server_respond(eis_server *s, int id, int allow);
+// InputCapture: el shell llama estas funciones con eventos FISICOS locales (los que
+// llevan RemoteInput::DEVICE_ID no deben llegar acá). Al cruzar una barrera armada se
+// activa la sesión y, mientras esté activa, el evento se reenvía a los clientes
+// receiver por EIS (frame con `time`). `time` en ms monotónicos (OS.get_ticks_msec),
+// 0 = usar el reloj actual. Devuelven 1 si la captura consumió el evento.
+int eis_server_capture_motion(eis_server *s, double x, double y, double dx, double dy, uint64_t time);
+int eis_server_capture_button(eis_server *s, uint32_t button, int pressed, uint64_t time);
+int eis_server_capture_scroll(eis_server *s, double dx, double dy, uint64_t time);
+int eis_server_capture_key(eis_server *s, uint32_t key, int pressed, uint64_t time);
 // 1 si la petición `id` sigue esperando respuesta.
 int eis_server_pending(eis_server *s, int id);
 // Clientes EIS conectados ahora.

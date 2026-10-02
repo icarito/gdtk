@@ -10,7 +10,7 @@ extends Node
 # Con `remote_source` definido, la vista dibuja los snapshots que llegan de
 # otra instancia (visor remoto).
 
-const DebugMetrics = preload("debug_metrics.gd")
+const DebugMetrics = preload("res://addons/debug_hud/debug_metrics.gd")
 
 var enabled = true
 # HUD completo abierto (F1 / ` si hotkeys). El widget mini se muestra si show_mini.

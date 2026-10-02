@@ -44,6 +44,13 @@ const WIFI_HIT_EXTRA = 6.0
 const WIFI_FRACTION_MIN = 0.32
 const WIFI_FRACTION_MAX = 0.95
 
+# Dispositivos Bluetooth: ícono algo menor que el AP; se ubican en anillos
+# simbólicos (conectado cerca, vinculado al medio, conocido lejos).
+const BT_ICON_SIZE = 26.0
+const BT_HIT_EXTRA = 6.0
+const BT_FRACTION_MIN = 0.26
+const BT_FRACTION_MAX = 0.98
+
 const NODE_SIZE = 56.0
 const NODE_MARGIN = 12.0
 # Separación angular entre vecinos que comparten la misma dirección.
@@ -204,6 +211,35 @@ static func hit_wifi(point, points, radius = WIFI_ICON_SIZE * 0.5 + WIFI_HIT_EXT
 	return null
 
 
+# Dispositivos Bluetooth sobre anillos simbólicos (mismo esquema que el Wi-Fi).
+static func bt_dots(devices, vp, bar):
+	var out = []
+	if typeof(devices) != TYPE_ARRAY:
+		return out
+	var center = Vector2(vp.x * 0.5, vp.y * 0.5)
+	var radii = map_radii(vp, bar)
+	for d in devices:
+		if typeof(d) != TYPE_DICTIONARY:
+			continue
+		var frac = clamp(float(d.get("r_frac", 0.0)), 0.0, 1.0)
+		var r = lerp(radii.mid * BT_FRACTION_MIN, radii.outer * BT_FRACTION_MAX, frac)
+		var a = float(d.get("angle", 0.0))
+		out.append({
+			"pos": Vector2(center.x + cos(a) * r, center.y + sin(a) * r),
+			"address": String(d.get("address", "")),
+			"name": String(d.get("name", "")),
+			"connected": bool(d.get("connected", false)),
+			"paired": bool(d.get("paired", false)),
+			"rssi": int(d.get("rssi", 0)),
+		})
+	return out
+
+
+# Dispositivo Bluetooth bajo `point`, o null.
+static func hit_bt(point, points, radius = BT_ICON_SIZE * 0.5 + BT_HIT_EXTRA):
+	return hit_wifi(point, points, radius)
+
+
 # "Red: <SSID>" de la red en uso, o "" si no hay. Texto humano para la UI.
 static func wifi_label(networks):
 	if typeof(networks) != TYPE_ARRAY:
@@ -325,7 +361,7 @@ static func direction_status_text(state, direction):
 			return "posición propuesta: " + direction_label(direction)
 
 
-# Fila del menú contextual. `kind`: "action" | "direction" | "separator" | "debug".
+# Fila del menú contextual. `kind`: "action" | "separator" | "debug".
 # Los ítems deshabilitados llevan `reason` para mostrar en una línea aparte.
 static func neighbor_menu(host, actions, direction, debug = false):
 	var items = []
@@ -341,27 +377,9 @@ static func neighbor_menu(host, actions, direction, debug = false):
 				"reason": human_reason(a),
 				"action": a,
 			})
-	items.append({"kind": "separator"})
-	var cur = direction if valid_direction(direction) else "none"
-	for d in DIRECTIONS:
-		var already = (d == cur)
-		items.append({
-			"kind": "direction",
-			"id": "direction:" + d,
-			"label": "Colocar al " + direction_label(d),
-			"enabled": not already,
-			"reason": ("ya está al " + direction_label(d)) if already else "",
-			"direction": d,
-		})
-	items.append({
-		"kind": "direction",
-		"id": "direction:none",
-		"label": "Quitar de la disposición",
-		"enabled": cur != "none",
-		"reason": "" if cur != "none" else "sin posición asignada",
-		"direction": "none",
-	})
 	if bool(debug):
+		if not items.empty():
+			items.append({"kind": "separator"})
 		var h = host if typeof(host) == TYPE_DICTIONARY else {}
 		items.append({"kind": "separator"})
 		items.append({"kind": "debug", "id": "debug:id", "label": "id: " + String(h.get("id", "")),

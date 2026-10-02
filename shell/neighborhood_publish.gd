@@ -74,9 +74,9 @@ func build_gvd_txt(identity, opts = {}):
 
 func build_deskflow_txt(identity, opts = {}):
 	var txt = build_common_txt(identity)
-	# Por defecto un host gdtk se anuncia como CLIENTE: en sesiones gdtk el servidor
-	# no puede capturar entrada (falta el portal InputCapture), así que aceptar ser
-	# controlado es lo honesto. role=server sólo si el caller lo pide explícitamente.
+	# Por defecto un host gdtk se anuncia como CLIENTE: compartir este teclado/mouse
+	# requiere que Settings pida share_here y que el backend InputCapture esté disponible.
+	# role=server sólo si el caller lo pide explícitamente.
 	txt.append("role=" + _one_of(String(opts.get("role", "client")), ["server", "client"], "client"))
 	txt.append("clip=" + _one_of(String(opts.get("clip", "1")), ["0", "1"], "1"))
 	txt.append("tls=" + _one_of(String(opts.get("tls", "required")), ["required"], "required"))

@@ -1,0 +1,25 @@
+#!/bin/sh
+# Habilita el sensor hub (MSHW0030) del Surface Pro 3 SIN reactivar el táctil N-Trig.
+#
+# Se instala en /usr/local/lib/gdtk/ y lo corre gdtk-sensor-hub.service como root al
+# arrancar el sistema, para que el acelerómetro esté disponible siempre (aunque la
+# sesión gdtk se lance de forma manual y no por gdtk-session-sway).
+#
+# Por qué desbindear INT33C3: en el SP3 el táctil (NTRG0001) y el sensor hub
+# (MSHW0030) son I2C-HID y los auto-enlaza i2c_hid_acpi. Cuelgan de controladores
+# I2C distintos: MSHW0030 del INT33C2 (i2c-0) y NTRG0001 del INT33C3 (i2c-1). Al
+# desbindear el controlador del táctil, NTRG0001 nunca aparece, y al cargar
+# i2c_hid_acpi a mano sólo se activa el sensor hub.
+set -u
+
+[ "$(cat /sys/class/dmi/id/product_name 2>/dev/null)" = "Surface Pro 3" ] || exit 0
+
+ctrl=/sys/devices/pci0000:00/INT33C3:00
+if [ -L "$ctrl/driver" ]; then
+	drv="$(basename "$(readlink -f "$ctrl/driver" 2>/dev/null)")"
+	if [ -n "$drv" ]; then
+		echo INT33C3:00 > "/sys/bus/platform/drivers/$drv/unbind" 2>/dev/null || true
+	fi
+fi
+
+modprobe i2c_hid_acpi || true

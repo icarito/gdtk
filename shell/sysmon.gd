@@ -11,6 +11,9 @@ const CPU_W = 96.0      # ancho de la gráfica de CPU
 const R = 12.0          # radio de los diales
 const GAUGE_W = 74.0    # dial + etiqueta
 const W = CPU_W + GAUGE_W * 2.0 + 10.0
+# Governor de CPU: se lee siempre; se escribe sólo por acción explícita del usuario.
+const GOV_PATH = "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"
+const GOV_AVAIL = "/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors"
 
 var cpu = []          # % de CPU por muestra, la más nueva al final
 var ram = 0.0         # % de RAM en uso (MemTotal - MemAvailable)
@@ -18,6 +21,15 @@ var swap = 0.0        # % de swap en uso (SwapTotal - SwapFree)
 var has_cpu = false   # hubo al menos una muestra de /proc/stat
 var has_ram = false   # /proc/meminfo trajo MemTotal
 var has_swap = false  # hay swap configurada (SwapTotal > 0)
+var temp_c = -1.0     # temperatura de CPU en °C (-1 = sin dato)
+var has_temp = false  # se leyó alguna zona térmica
+var temp_label = ""   # zona elegida (informativa; no se muestra como jerga)
+var governor = ""     # governor de cpu0 (schedutil, performance, …)
+var has_governor = false
+var governor_initial = ""  # governor al arrancar la sesión ("predeterminado")
+var battery_pct = -1.0     # carga de la batería principal (-1 = sin batería)
+var battery_status = ""    # Charging / Discharging / Full / Not charging
+var has_battery = false
 var last_ms = -PERIOD_MS
 var prev_total = 0
 var prev_idle = 0
@@ -60,7 +72,139 @@ func tick():
 		else:
 			swap = 0.0
 			has_swap = false
+	_sample_thermal()
+	_sample_battery()
 	return true
+
+
+# Temperatura de CPU y governor. Prefiere las zonas térmicas de paquete/CPU; si no
+# hay, usa la más caliente de cualquier zona. Lee archivos chicos de sysfs a 1 Hz
+# (mismo periodo que el resto del muestreo); nunca desde _draw.
+func _sample_thermal():
+	governor = ""
+	has_governor = false
+	var f = File.new()
+	if f.open(GOV_PATH, File.READ) == OK:
+		governor = f.get_line().strip_edges()
+		f.close()
+		has_governor = governor != ""
+		if governor_initial == "":
+			governor_initial = governor  # "predeterminado" de la sesión
+	var cpu_t = -1.0
+	var any_t = -1.0
+	var cpu_label = ""
+	var d = Directory.new()
+	if d.open("/sys/class/thermal") == OK:
+		d.list_dir_begin(true, true)
+		var n = d.get_next()
+		while n != "":
+			if n.begins_with("thermal_zone"):
+				var base = "/sys/class/thermal/" + n
+				var t = _read_float(base + "/temp")
+				if t > 0.0:
+					if t > 1000.0:
+						t = t / 1000.0  # mili-grados a °C
+					var typ = _read_text(base + "/type").to_lower()
+					if typ.find("pkg") >= 0 or typ.find("cpu") >= 0 or typ.find("x86") >= 0:
+						if t > cpu_t:
+							cpu_t = t
+							cpu_label = typ
+					if t > any_t:
+						any_t = t
+			n = d.get_next()
+		d.list_dir_end()
+	temp_c = cpu_t if cpu_t >= 0.0 else any_t
+	temp_label = cpu_label
+	has_temp = temp_c >= 0.0
+
+
+# Lee una línea de sysfs. sysfs reporta tamaño 0, así que get_as_text() devuelve "";
+# get_line() sí trae el valor (temp/type/governor).
+func _read_text(path):
+	var f = File.new()
+	if f.open(path, File.READ) != OK:
+		return ""
+	var s = f.get_line().strip_edges()
+	f.close()
+	return s
+
+
+func _read_float(path):
+	var s = _read_text(path)
+	return float(s) if s != "" else -1.0
+
+
+# Batería principal: capacidad (%) y estado (Charging/Discharging/Full/…). Sin
+# batería, todo queda en -1/"" y los widgets no la muestran.
+func _sample_battery():
+	has_battery = false
+	battery_pct = -1.0
+	battery_status = ""
+	var d = Directory.new()
+	if d.open("/sys/class/power_supply") != OK:
+		return
+	d.list_dir_begin(true, true)
+	var n = d.get_next()
+	while n != "":
+		var base = "/sys/class/power_supply/" + n
+		if _read_text(base + "/type").to_lower() == "battery":
+			var cap = _read_float(base + "/capacity")
+			if cap >= 0.0:
+				battery_pct = cap
+				battery_status = _read_text(base + "/status")
+				has_battery = true
+				break
+		n = d.get_next()
+	d.list_dir_end()
+
+
+func battery_charging():
+	var s = battery_status.to_lower()
+	return s == "charging" or s == "full"
+
+
+# Governor "predeterminado": el que estaba activo al arrancar la sesión; si no se
+# pudo capturar, el primero que ofrezca el kernel.
+func governor_default():
+	if governor_initial != "":
+		return governor_initial
+	var g = governors()
+	return g[0] if not g.empty() else ""
+
+
+# Governors que ofrece el equipo (lista del kernel, en orden). Sin caché: se lee
+# sólo cuando el usuario interactúa, no en cada tick.
+func governors():
+	var s = _read_text(GOV_AVAIL)
+	if s == "":
+		return []
+	var out = []
+	for g in s.split(" ", false):
+		if String(g) != "":
+			out.append(String(g))
+	return out
+
+
+# Aplica un governor. Primero intenta escribir directo (sysfs suele ser root);
+# si falla, delega en pkexec sin bloquear el frame. Devuelve true si pudo escribir.
+func set_governor(gov):
+	var name = String(gov).strip_edges()
+	if name == "":
+		return false
+	var f = File.new()
+	if f.open(GOV_PATH, File.WRITE) == OK:
+		f.store_line(name)
+		f.close()
+		governor = name
+		has_governor = true
+		return true
+	# Sin permiso: pkexec (agente polkit de la sesión). No bloqueante.
+	if File.new().file_exists("/usr/bin/pkexec"):
+		OS.execute("/usr/bin/pkexec", ["sh", "-c", "echo '" + name + "' > " + GOV_PATH], false)
+		governor = name
+		has_governor = true
+		return true
+	return false
 
 
 func _cpu_now():

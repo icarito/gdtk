@@ -11,13 +11,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 
 #define BUS_NAME "org.freedesktop.impl.portal.desktop.gdtk"
 #define FRONTEND_NAME "org.freedesktop.portal.Desktop"
 #define OBJ_PATH "/org/freedesktop/portal/desktop"
 #define DEVICE_TYPES 3 // KEYBOARD | POINTER
+#define SESSION_RD 1
+#define SESSION_IC 2
 
 static const enum eis_device_capability CAPS[] = {
 	EIS_DEVICE_CAP_POINTER,
@@ -33,8 +37,14 @@ struct client {
 	struct eis_client *client;
 	struct eis_seat *seat;
 	struct eis_device *device;
+	struct session *session;
 	uint32_t caps; // lo que el cliente pidió en el bind
 	struct client *next;
+};
+
+struct capture_barrier {
+	uint32_t id;
+	int x1, y1, x2, y2;
 };
 
 // Sesión del portal: su propio contexto EIS, así cerrarla corta a su cliente.
@@ -47,13 +57,40 @@ struct session {
 	sd_bus_message *pending; // Start esperando la respuesta del usuario
 	int req_id;
 	struct eis *eis;
+	int kind, enabled, active;
+	uint32_t capabilities, activation_id;
+	struct capture_barrier *barriers;
+	size_t nbarriers;
+	uint32_t active_barrier;
+	double cursor_x, cursor_y;
+	// Tras Release/Disable el puntero queda pegado al borde: ignorar ese borde
+	// hasta que el usuario vuelva a mover hacia dentro. 0=nada, 1=izq, 2=der,
+	// 3=arriba, 4=abajo.
+	uint32_t released_edge;
+	// µs monotónicos de la última activación. Deskflow, en su primer motion tras
+	// Activated, llama Release() SIN cursor_position (EiScreen::onMotionEvent con
+	// m_isOnScreen todavía true) justo cuando el mismo motion dispara el switch al
+	// equipo vecino. Obedecerlo desactivaba la captura y obligaba a re-activar en
+	// bucle; se ignora si llega pegadísimo a la activación (ver m_ic_release).
+	uint64_t activated_at;
+	// Tras activar, Deskflow entra a la pantalla vecina justo EN el borde y un jitter
+	// contrario (p. ej. y=-2) la abandona al instante. Durante esta ventana se anula el
+	// delta contrario a la dirección de cruce para que el puntero remoto se adentre.
+	uint32_t kick_edge;
+	uint64_t kick_until;
+	// Nudge de arranque: al conectar el cliente IC, Deskflow a veces arma sus barreras
+	// antes de tener listo su layout. Se difiere un ZonesChanged (ver dispatch) y sólo
+	// se emite si el cliente NO llegó a armar barreras: emitirlo después de que ya las
+	// armó lo hacía rearmar sin volver a Enable y dejaba la sesión suspendida.
+	// µs monotónicos; 0 = sin nudge pendiente.
+	uint64_t zones_nudge_at;
 	struct session *next;
 };
 
 struct eis_server {
 	eis_server_callbacks cb;
 	sd_bus *bus;
-	sd_bus_slot *slot, *sc_slot;
+	sd_bus_slot *slot, *sc_slot, *ic_slot;
 	struct eis *test;
 	struct session *sessions;
 	struct client *clients;
@@ -63,8 +100,12 @@ struct eis_server {
 	// Propiedades del backend (las lee sd-bus por offset).
 	uint32_t device_types, version;
 	uint32_t sc_sources, sc_cursors, sc_version;
+	uint32_t ic_caps, ic_version, zone_set;
 	char error[160];
 };
+
+static const sd_bus_vtable session_vtable[];
+static int ic_emit_capture(struct session *se, const char *name, int include_activation);
 
 // --- EIS ---
 
@@ -104,6 +145,9 @@ static void device_update(struct eis_server *s, struct client *c) {
 	eis_device_add(d);
 	eis_device_resume(d);
 	c->device = d;
+	if (c->session && c->session->kind == SESSION_IC && c->session->active && !eis_client_is_sender(c->client)) {
+		eis_device_start_emulating(d, c->session->activation_id);
+	}
 }
 
 static void client_free(struct eis_server *s, struct client *c) {
@@ -122,7 +166,145 @@ static void client_free(struct eis_server *s, struct client *c) {
 	free(c);
 }
 
-static void handle_eis(struct eis_server *s, struct eis *ctx) {
+static void session_emulating(struct eis_server *s, struct session *se, int active) {
+	for (struct client *c = s->clients; c; c = c->next) {
+		if (c->session != se || eis_client_is_sender(c->client) || !c->device) {
+			continue;
+		}
+		if (active) {
+			eis_device_start_emulating(c->device, se->activation_id);
+		} else {
+			eis_device_stop_emulating(c->device);
+		}
+	}
+}
+
+// --- InputCapture: el compositor local reenvía el hardware físico al cliente EIS ---
+
+// Borde de una barrera válida (mismo convenio que barrier_valid).
+static int barrier_edge(struct eis_server *s, const struct capture_barrier *b) {
+	if (b->x1 == b->x2) {
+		return b->x1 <= 0 ? 1 : (b->x1 >= s->w ? 2 : 0);
+	}
+	return b->y1 <= 0 ? 3 : (b->y1 >= s->h ? 4 : 0);
+}
+
+// ¿Hay dónde reenviar? Un cliente receptor (no sender) con dispositivo agregado.
+static int capture_ready(struct eis_server *s, struct session *se) {
+	for (struct client *c = s->clients; c; c = c->next) {
+		if (c->session == se && c->device && !eis_client_is_sender(c->client)) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static struct session *capture_active(struct eis_server *s) {
+	for (struct session *se = s->sessions; se; se = se->next) {
+		if (!se->closed && se->kind == SESSION_IC && se->enabled && se->active && capture_ready(s, se)) {
+			return se;
+		}
+	}
+	return NULL;
+}
+
+// El shell manda milisegundos (OS.get_ticks_msec): libei espera CLOCK_MONOTONIC en µs.
+static uint64_t capture_time(uint64_t time) {
+	if (time > 0) {
+		return time * 1000ULL;
+	}
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
+
+// Desactiva la captura recordando por qué borde salió (histéresis anti-rebote).
+static void capture_deactivate(struct eis_server *s, struct session *se) {
+	if (!se->active) {
+		return;
+	}
+	for (size_t i = 0; i < se->nbarriers; i++) {
+		if (se->barriers[i].id == se->active_barrier) {
+			se->released_edge = (uint32_t)barrier_edge(s, &se->barriers[i]);
+			break;
+		}
+	}
+	session_emulating(s, se, 0);
+	ic_emit_capture(se, "Deactivated", 1);
+	se->active = 0;
+	se->active_barrier = 0;
+	se->kick_until = 0;
+}
+
+// Release del cliente InputCapture. Deskflow suelta la captura en su primer motion
+// (EiScreen::onMotionEvent con isOnScreen) y espera que la misma orilla re-dispare
+// con el puntero aún pegado: Release sin cursor_position no fija histéresis. El
+// Release con posición es el regreso a la pantalla local: fija la orilla de esa
+// posición para no re-disparar apenas queda el puntero pegado al volver.
+static void capture_release(struct eis_server *s, struct session *se, double rx, double ry) {
+	if (!se->active) {
+		return;
+	}
+	int has_pos = rx >= 0.0 && ry >= 0.0;
+	se->released_edge = 0;
+	if (has_pos) {
+		if (rx <= 0.0) {
+			se->released_edge = 1; // izquierda
+		} else if (rx >= (double)(s->w - 1)) {
+			se->released_edge = 2; // derecha
+		} else if (ry <= 0.0) {
+			se->released_edge = 3; // arriba
+		} else if (ry >= (double)(s->h - 1)) {
+			se->released_edge = 4; // abajo
+		}
+	} else if (se->active_barrier != 0) {
+		// Release sin posición (el "baile" de Deskflow): no dejar la orilla re-armada
+		// al toque; el usuario tiene que mover hacia dentro para volver a dispararla.
+		for (size_t i = 0; i < se->nbarriers; i++) {
+			if (se->barriers[i].id == se->active_barrier) {
+				se->released_edge = (uint32_t)barrier_edge(s, &se->barriers[i]);
+				break;
+			}
+		}
+	}
+	session_emulating(s, se, 0);
+	ic_emit_capture(se, "Deactivated", 1);
+	se->active = 0;
+	se->active_barrier = 0;
+	se->kick_until = 0;
+}
+
+// Al volver hacia dentro, ese borde vuelve a habilitarse.
+static void capture_update_released(struct session *se, double dx, double dy) {
+	switch (se->released_edge) {
+		case 1: if (dx > 0.0) se->released_edge = 0; break;
+		case 2: if (dx < 0.0) se->released_edge = 0; break;
+		case 3: if (dy > 0.0) se->released_edge = 0; break;
+		case 4: if (dy < 0.0) se->released_edge = 0; break;
+		default: break;
+	}
+}
+
+static uint32_t barrier_crossed(struct eis_server *s, struct session *se, double x, double y, double dx, double dy) {
+	for (size_t i = 0; i < se->nbarriers; i++) {
+		const struct capture_barrier *b = &se->barriers[i];
+		if (se->released_edge != 0 && (uint32_t)barrier_edge(s, b) == se->released_edge) {
+			continue;
+		}
+		if (b->x1 == b->x2) {
+			if (b->x1 <= 0 && dx < 0.0 && x <= 0.0 && y >= b->y1 && y <= b->y2) return b->id;
+			// Los píxeles de la ventana llegan 0..w-1 / 0..h-1: el borde lógico se
+			// dispara en el último píxel con delta saliente.
+			if (b->x1 >= s->w && dx > 0.0 && x >= (double)(s->w - 1) && y >= b->y1 && y <= b->y2) return b->id;
+		} else {
+			if (b->y1 <= 0 && dy < 0.0 && y <= 0.0 && x >= b->x1 && x <= b->x2) return b->id;
+			if (b->y1 >= s->h && dy > 0.0 && y >= (double)(s->h - 1) && x >= b->x1 && x <= b->x2) return b->id;
+		}
+	}
+	return 0;
+}
+
+static void handle_eis(struct eis_server *s, struct session *se, struct eis *ctx) {
 	eis_dispatch(ctx);
 	struct eis_event *e;
 	while ((e = eis_get_event(ctx)) != NULL) {
@@ -131,14 +313,10 @@ static void handle_eis(struct eis_server *s, struct eis *ctx) {
 		void *ud = s->cb.ud;
 		switch (eis_event_get_type(e)) {
 			case EIS_EVENT_CLIENT_CONNECT:
-				// Sólo clientes que mandan input (sender); un receiver no tiene nada que hacer acá.
-				if (!eis_client_is_sender(ec)) {
-					eis_client_disconnect(ec);
-					break;
-				}
 				c = calloc(1, sizeof(*c));
 				c->ctx = ctx;
 				c->client = eis_client_ref(ec);
+				c->session = se;
 				c->next = s->clients;
 				s->clients = c;
 				eis_client_set_user_data(ec, c);
@@ -149,6 +327,14 @@ static void handle_eis(struct eis_server *s, struct eis *ctx) {
 				}
 				eis_seat_add(c->seat);
 				fprintf(stderr, "eis: cliente '%s' conectado\n", eis_client_get_name(ec));
+				if (se && se->kind == SESSION_IC) {
+					// Deskflow a veces arma sus barreras antes de que su config fije
+					// activeSides (quedaba "no input capture pointer barriers found").
+					// No emitir ZonesChanged ahora: si llega tarde, cuando el cliente ya
+					// armó y habilitó, lo hace rearmar sin Enable y la sesión queda
+					// suspendida. Se difiere y sólo se emite si no armó barreras.
+					se->zones_nudge_at = capture_time(0) + 400000ULL;
+				}
 				break;
 			case EIS_EVENT_CLIENT_DISCONNECT:
 				if (c) {
@@ -256,6 +442,37 @@ static struct session *session_find(struct eis_server *s, const char *path) {
 	return NULL;
 }
 
+static struct session *session_find_kind(struct eis_server *s, const char *path, int kind) {
+	struct session *se = session_find(s, path);
+	return se && se->kind == kind ? se : NULL;
+}
+
+static int session_add(struct eis_server *s, const char *path, int kind, struct session **out) {
+	struct session *se = calloc(1, sizeof(*se));
+	if (!se) {
+		return -ENOMEM;
+	}
+	se->s = s;
+	se->path = strdup(path);
+	se->version = 1;
+	se->kind = kind;
+	se->capabilities = DEVICE_TYPES;
+	se->activation_id = 1;
+	se->pid = session_pid(s->bus, path);
+	int r = sd_bus_add_object_vtable(s->bus, &se->slot, path, "org.freedesktop.impl.portal.Session", session_vtable, se);
+	if (r < 0) {
+		free(se->path);
+		free(se);
+		return r;
+	}
+	se->next = s->sessions;
+	s->sessions = se;
+	if (out) {
+		*out = se;
+	}
+	return 0;
+}
+
 static void reply_start(struct session *se, int allow) {
 	if (allow) {
 		sd_bus_reply_method_return(se->pending, "ua{sv}", 0, 2, "devices", "u", DEVICE_TYPES, "clipboard_enabled", "b", 0);
@@ -274,6 +491,10 @@ static int m_session_close(sd_bus_message *m, void *ud, sd_bus_error *err) {
 	se->closed = 1; // se libera en dispatch, fuera de este callback
 	if (se->pending) {
 		reply_start(se, 0);
+	}
+	if (se->kind == SESSION_IC) {
+		capture_deactivate(se->s, se);
+		ic_emit_capture(se, "Disabled", 0);
 	}
 	return sd_bus_reply_method_return(m, "");
 }
@@ -296,19 +517,11 @@ static int m_create_session(sd_bus_message *m, void *ud, sd_bus_error *err) {
 	if (!from_frontend(m, err)) {
 		return -EACCES;
 	}
-	struct session *se = calloc(1, sizeof(*se));
-	se->s = s;
-	se->path = strdup(path);
-	se->version = 1;
-	se->pid = session_pid(s->bus, path);
-	r = sd_bus_add_object_vtable(s->bus, &se->slot, path, "org.freedesktop.impl.portal.Session", session_vtable, se);
+	struct session *se = NULL;
+	r = session_add(s, path, SESSION_RD, &se);
 	if (r < 0) {
-		free(se->path);
-		free(se);
 		return r;
 	}
-	se->next = s->sessions;
-	s->sessions = se;
 	return sd_bus_reply_method_return(m, "ua{sv}", 0, 0);
 }
 
@@ -330,7 +543,7 @@ static int m_start(sd_bus_message *m, void *ud, sd_bus_error *err) {
 	if (!from_frontend(m, err)) {
 		return -EACCES;
 	}
-	struct session *se = session_find(s, path);
+	struct session *se = session_find_kind(s, path, SESSION_RD);
 	if (!se || se->pending || se->started) {
 		return sd_bus_error_set(err, SD_BUS_ERROR_INVALID_ARGS, "sesión inválida");
 	}
@@ -371,6 +584,351 @@ static int m_connect_to_eis(sd_bus_message *m, void *ud, sd_bus_error *err) {
 	return r;
 }
 
+static int m_ic_create_session(sd_bus_message *m, void *ud, sd_bus_error *err) {
+	struct eis_server *s = ud;
+	const char *handle, *path, *app_id, *parent;
+	int r = sd_bus_message_read(m, "ooss", &handle, &path, &app_id, &parent);
+	if (r < 0) {
+		return r;
+	}
+	if (!from_frontend(m, err)) {
+		return -EACCES;
+	}
+	struct session *se = NULL;
+	r = session_add(s, path, SESSION_IC, &se);
+	if (r < 0) {
+		return r;
+	}
+	se->started = 1;
+	return sd_bus_reply_method_return(m, "ua{sv}", 0, 2,
+			"session_id", "s", "gdtk",
+			"capabilities", "u", s->ic_caps);
+}
+
+static int m_ic_create_session2(sd_bus_message *m, void *ud, sd_bus_error *err) {
+	struct eis_server *s = ud;
+	const char *path, *app_id;
+	int r = sd_bus_message_read(m, "os", &path, &app_id);
+	if (r < 0) {
+		return r;
+	}
+	if (!from_frontend(m, err)) {
+		return -EACCES;
+	}
+	r = session_add(s, path, SESSION_IC, NULL);
+	if (r < 0) {
+		return r;
+	}
+	return sd_bus_reply_method_return(m, "a{sv}", 0);
+}
+
+static int m_ic_start(sd_bus_message *m, void *ud, sd_bus_error *err) {
+	struct eis_server *s = ud;
+	const char *handle, *path, *app_id, *parent;
+	int r = sd_bus_message_read(m, "ooss", &handle, &path, &app_id, &parent);
+	if (r < 0) {
+		return r;
+	}
+	if (!from_frontend(m, err)) {
+		return -EACCES;
+	}
+	struct session *se = session_find_kind(s, path, SESSION_IC);
+	if (!se || se->started) {
+		return sd_bus_error_set(err, SD_BUS_ERROR_INVALID_ARGS, "sesión inválida");
+	}
+	se->started = 1;
+	se->capabilities = s->ic_caps;
+	return sd_bus_reply_method_return(m, "ua{sv}", 0, 2,
+			"capabilities", "u", se->capabilities,
+			"clipboard_enabled", "b", 0);
+}
+
+static int reply_zones(sd_bus_message *m, struct eis_server *s) {
+	sd_bus_message *reply = NULL;
+	int r = sd_bus_message_new_method_return(m, &reply);
+	if (r < 0) {
+		return r;
+	}
+	r = sd_bus_message_append(reply, "u", 0);
+	if (r >= 0) r = sd_bus_message_open_container(reply, 'a', "{sv}");
+	if (r >= 0) r = sd_bus_message_open_container(reply, 'e', "sv");
+	if (r >= 0) r = sd_bus_message_append(reply, "s", "zones");
+	if (r >= 0) r = sd_bus_message_open_container(reply, 'v', "a(uuii)");
+	if (r >= 0) r = sd_bus_message_open_container(reply, 'a', "(uuii)");
+	if (r >= 0) r = sd_bus_message_append(reply, "(uuii)", (uint32_t)s->w, (uint32_t)s->h, 0, 0);
+	if (r >= 0) r = sd_bus_message_close_container(reply);
+	if (r >= 0) r = sd_bus_message_close_container(reply);
+	if (r >= 0) r = sd_bus_message_close_container(reply);
+	if (r >= 0) r = sd_bus_message_open_container(reply, 'e', "sv");
+	if (r >= 0) r = sd_bus_message_append(reply, "s", "zone_set");
+	if (r >= 0) r = sd_bus_message_open_container(reply, 'v', "u");
+	if (r >= 0) r = sd_bus_message_append(reply, "u", s->zone_set);
+	if (r >= 0) r = sd_bus_message_close_container(reply);
+	if (r >= 0) r = sd_bus_message_close_container(reply);
+	if (r >= 0) r = sd_bus_message_close_container(reply);
+	if (r >= 0) r = sd_bus_send(sd_bus_message_get_bus(m), reply, NULL);
+	sd_bus_message_unref(reply);
+	return r;
+}
+
+static int m_ic_get_zones(sd_bus_message *m, void *ud, sd_bus_error *err) {
+	struct eis_server *s = ud;
+	const char *handle, *path, *app_id;
+	int r = sd_bus_message_read(m, "oos", &handle, &path, &app_id);
+	if (r < 0) {
+		return r;
+	}
+	if (!from_frontend(m, err)) {
+		return -EACCES;
+	}
+	if (!session_find_kind(s, path, SESSION_IC)) {
+		return sd_bus_error_set(err, SD_BUS_ERROR_INVALID_ARGS, "sesión inválida");
+	}
+	return reply_zones(m, s);
+}
+
+static int reply_failed_barriers(sd_bus_message *m, const uint32_t *failed, size_t nfailed) {
+	sd_bus_message *reply = NULL;
+	int r = sd_bus_message_new_method_return(m, &reply);
+	if (r < 0) {
+		return r;
+	}
+	r = sd_bus_message_append(reply, "u", 0);
+	if (r >= 0) r = sd_bus_message_open_container(reply, 'a', "{sv}");
+	if (r >= 0) r = sd_bus_message_open_container(reply, 'e', "sv");
+	if (r >= 0) r = sd_bus_message_append(reply, "s", "failed_barriers");
+	if (r >= 0) r = sd_bus_message_open_container(reply, 'v', "au");
+	if (r >= 0) r = sd_bus_message_open_container(reply, 'a', "u");
+	for (size_t i = 0; r >= 0 && i < nfailed; i++) r = sd_bus_message_append(reply, "u", failed[i]);
+	if (r >= 0) r = sd_bus_message_close_container(reply);
+	if (r >= 0) r = sd_bus_message_close_container(reply);
+	if (r >= 0) r = sd_bus_message_close_container(reply);
+	if (r >= 0) r = sd_bus_message_close_container(reply);
+	if (r >= 0) r = sd_bus_send(sd_bus_message_get_bus(m), reply, NULL);
+	sd_bus_message_unref(reply);
+	return r;
+}
+
+static int barrier_valid(const struct eis_server *s, const struct capture_barrier *b) {
+	if (b->id == 0 || (b->x1 != b->x2 && b->y1 != b->y2)) return 0;
+	if (b->x1 == b->x2) {
+		return (b->x1 == 0 || b->x1 == s->w) && b->y1 >= 0 && b->y2 >= b->y1 && b->y2 < s->h;
+	}
+	return (b->y1 == 0 || b->y1 == s->h) && b->x1 >= 0 && b->x2 >= b->x1 && b->x2 < s->w;
+}
+
+static int parse_barrier(sd_bus_message *m, struct capture_barrier *out) {
+	int r = sd_bus_message_enter_container(m, 'a', "{sv}");
+	if (r <= 0) return r < 0 ? r : -EINVAL;
+	memset(out, 0, sizeof(*out));
+	while ((r = sd_bus_message_enter_container(m, 'e', "sv")) > 0) {
+		const char *key = NULL, *sig = NULL;
+		r = sd_bus_message_read(m, "s", &key);
+		if (r >= 0) r = sd_bus_message_peek_type(m, NULL, &sig);
+		if (r >= 0) r = sd_bus_message_enter_container(m, 'v', sig);
+		if (r >= 0 && strcmp(key, "barrier_id") == 0 && strcmp(sig, "u") == 0) {
+			r = sd_bus_message_read(m, "u", &out->id);
+		} else if (r >= 0 && strcmp(key, "position") == 0 && strcmp(sig, "(iiii)") == 0) {
+			r = sd_bus_message_read(m, "(iiii)", &out->x1, &out->y1, &out->x2, &out->y2);
+		} else if (r >= 0) {
+			r = sd_bus_message_skip(m, sig);
+		}
+		if (r >= 0) r = sd_bus_message_exit_container(m);
+		if (r >= 0) r = sd_bus_message_exit_container(m);
+		if (r < 0) return r;
+	}
+	if (r < 0) return r;
+	return sd_bus_message_exit_container(m);
+}
+
+static int ic_emit_capture(struct session *se, const char *name, int include_activation) {
+	sd_bus_message *sig = NULL;
+	int r = sd_bus_message_new_signal(se->s->bus, &sig, OBJ_PATH,
+			"org.freedesktop.impl.portal.InputCapture", name);
+	if (r < 0) {
+		return r;
+	}
+	r = sd_bus_message_append(sig, "o", se->path);
+	if (r >= 0) r = sd_bus_message_open_container(sig, 'a', "{sv}");
+	if (include_activation) {
+		if (r >= 0) r = sd_bus_message_open_container(sig, 'e', "sv");
+		if (r >= 0) r = sd_bus_message_append(sig, "s", "activation_id");
+		if (r >= 0) r = sd_bus_message_open_container(sig, 'v', "u");
+		if (r >= 0) r = sd_bus_message_append(sig, "u", se->activation_id);
+		if (r >= 0) r = sd_bus_message_close_container(sig);
+		if (r >= 0) r = sd_bus_message_close_container(sig);
+		if (r >= 0) r = sd_bus_message_open_container(sig, 'e', "sv");
+		if (r >= 0) r = sd_bus_message_append(sig, "s", "cursor_position");
+		if (r >= 0) r = sd_bus_message_open_container(sig, 'v', "(dd)");
+		if (r >= 0) r = sd_bus_message_append(sig, "(dd)", se->cursor_x, se->cursor_y);
+		if (r >= 0) r = sd_bus_message_close_container(sig);
+		if (r >= 0) r = sd_bus_message_close_container(sig);
+		if (r >= 0 && strcmp(name, "Activated") == 0) {
+			r = sd_bus_message_open_container(sig, 'e', "sv");
+			if (r >= 0) r = sd_bus_message_append(sig, "s", "barrier_id");
+			if (r >= 0) r = sd_bus_message_open_container(sig, 'v', "u");
+			if (r >= 0) r = sd_bus_message_append(sig, "u", se->active_barrier);
+			if (r >= 0) r = sd_bus_message_close_container(sig);
+			if (r >= 0) r = sd_bus_message_close_container(sig);
+		}
+	}
+	if (r >= 0) r = sd_bus_message_close_container(sig);
+	if (r >= 0) r = sd_bus_send(se->s->bus, sig, NULL);
+	sd_bus_message_unref(sig);
+	return r;
+}
+
+static int m_ic_set_pointer_barriers(sd_bus_message *m, void *ud, sd_bus_error *err) {
+	struct eis_server *s = ud;
+	const char *handle, *path, *app_id;
+	int r = sd_bus_message_read(m, "oos", &handle, &path, &app_id);
+	if (r < 0) {
+		return r;
+	}
+	if (!from_frontend(m, err)) {
+		return -EACCES;
+	}
+	struct session *se = session_find_kind(s, path, SESSION_IC);
+	if (!se) {
+		return sd_bus_error_set(err, SD_BUS_ERROR_INVALID_ARGS, "sesión inválida");
+	}
+	if (sd_bus_message_skip(m, "a{sv}") < 0) return -EINVAL;
+	if (sd_bus_message_enter_container(m, 'a', "a{sv}") < 0) return -EINVAL;
+	struct capture_barrier *accepted = NULL;
+	uint32_t *failed = NULL;
+	size_t naccepted = 0, nfailed = 0;
+	while ((r = sd_bus_message_at_end(m, 0)) == 0) {
+		struct capture_barrier b;
+		r = parse_barrier(m, &b);
+		if (r < 0) break;
+		if (barrier_valid(s, &b)) {
+			struct capture_barrier *next = realloc(accepted, (naccepted + 1) * sizeof(*accepted));
+			if (!next) { r = -ENOMEM; break; }
+			accepted = next;
+			accepted[naccepted++] = b;
+		} else {
+			uint32_t *next = realloc(failed, (nfailed + 1) * sizeof(*failed));
+			if (!next) { r = -ENOMEM; break; }
+			failed = next;
+			failed[nfailed++] = b.id;
+		}
+	}
+	if (r >= 0) r = sd_bus_message_exit_container(m);
+	uint32_t zone_set = 0;
+	if (r >= 0) r = sd_bus_message_read(m, "u", &zone_set);
+	if (r < 0 || zone_set != s->zone_set) {
+		free(accepted);
+		free(failed);
+		return r < 0 ? r : sd_bus_error_set(err, SD_BUS_ERROR_INVALID_ARGS, "zone_set inválido");
+	}
+	// Spec: SetPointerBarriers suspende la sesión; hay que volver a llamar Enable().
+	se->enabled = 0;
+	capture_deactivate(s, se);
+	free(se->barriers);
+	se->barriers = accepted;
+	se->nbarriers = naccepted;
+	r = reply_failed_barriers(m, failed, nfailed);
+	free(failed);
+	return r;
+}
+
+static int m_ic_enable(sd_bus_message *m, void *ud, sd_bus_error *err) {
+	struct eis_server *s = ud;
+	const char *path, *app_id;
+	int r = sd_bus_message_read(m, "os", &path, &app_id);
+	if (r < 0) {
+		return r;
+	}
+	if (!from_frontend(m, err)) {
+		return -EACCES;
+	}
+	struct session *se = session_find_kind(s, path, SESSION_IC);
+	if (!se || !se->started) {
+		return sd_bus_error_set(err, SD_BUS_ERROR_INVALID_ARGS, "sesión inválida");
+	}
+	se->enabled = 1;
+	se->released_edge = 0;
+	return sd_bus_reply_method_return(m, "ua{sv}", 0, 0);
+}
+
+static int m_ic_disable(sd_bus_message *m, void *ud, sd_bus_error *err) {
+	struct eis_server *s = ud;
+	const char *path, *app_id;
+	int r = sd_bus_message_read(m, "os", &path, &app_id);
+	if (r < 0) {
+		return r;
+	}
+	if (!from_frontend(m, err)) {
+		return -EACCES;
+	}
+	struct session *se = session_find_kind(s, path, SESSION_IC);
+	if (!se) {
+		return sd_bus_error_set(err, SD_BUS_ERROR_INVALID_ARGS, "sesión inválida");
+	}
+	se->enabled = 0;
+	capture_deactivate(s, se);
+	ic_emit_capture(se, "Disabled", 0);
+	return sd_bus_reply_method_return(m, "ua{sv}", 0, 0);
+}
+
+static int m_ic_release(sd_bus_message *m, void *ud, sd_bus_error *err) {
+	struct eis_server *s = ud;
+	const char *path, *app_id;
+	int r = sd_bus_message_read(m, "os", &path, &app_id);
+	if (r < 0) {
+		return r;
+	}
+	if (!from_frontend(m, err)) {
+		return -EACCES;
+	}
+	struct session *se = session_find_kind(s, path, SESSION_IC);
+	if (!se) {
+		return sd_bus_error_set(err, SD_BUS_ERROR_INVALID_ARGS, "sesión inválida");
+	}
+	// options: sólo cursor_position "(dd)" interesa; -1,-1 = no vino (dance interno
+	// de Deskflow: permitir que la misma orilla re-dispare, ver capture_release).
+	double rx = -1.0, ry = -1.0;
+	r = sd_bus_message_enter_container(m, SD_BUS_TYPE_ARRAY, "{sv}");
+	if (r >= 0) {
+		while (sd_bus_message_at_end(m, 0) == 0) {
+			const char *key = NULL;
+			r = sd_bus_message_enter_container(m, SD_BUS_TYPE_DICT_ENTRY, "sv");
+			if (r < 0) {
+				break;
+			}
+			if (sd_bus_message_read(m, "s", &key) < 0) {
+				break;
+			}
+			if (key != NULL && strcmp(key, "cursor_position") == 0) {
+				// El valor es siempre una variante; su cuerpo debería ser "(dd)".
+				if (sd_bus_message_enter_container(m, SD_BUS_TYPE_VARIANT, NULL) >= 0) {
+					if (sd_bus_message_read(m, "(dd)", &rx, &ry) < 0) {
+						rx = ry = -1.0;
+						sd_bus_message_skip(m, "*");
+					}
+					sd_bus_message_exit_container(m);
+				}
+			} else if (sd_bus_message_skip(m, "v") < 0) {
+				break;
+			}
+			sd_bus_message_exit_container(m);
+		}
+		sd_bus_message_exit_container(m);
+	}
+	if (se->active) {
+		int has_pos = rx >= 0.0 && ry >= 0.0;
+		// Deskflow llama Release() sin posición en el primer motion tras Activated
+		// (aún cree que el puntero está en la pantalla local) y en ese mismo motion
+		// dispara el switch: si lo obedecemos, apagamos la captura y re-activamos en
+		// bucle. Sólo en esa ventana pegada a la activación se ignora.
+		if (!has_pos && (capture_time(0) - se->activated_at) < 250000ULL) {
+			return sd_bus_reply_method_return(m, "ua{sv}", 0, 0);
+		}
+		capture_release(s, se, rx, ry);
+	}
+	return sd_bus_reply_method_return(m, "ua{sv}", 0, 0);
+}
+
 static const sd_bus_vtable rd_vtable[] = {
 	SD_BUS_VTABLE_START(0),
 	SD_BUS_METHOD("CreateSession", "oosa{sv}", "ua{sv}", m_create_session, SD_BUS_VTABLE_UNPRIVILEGED),
@@ -382,6 +940,26 @@ static const sd_bus_vtable rd_vtable[] = {
 	SD_BUS_VTABLE_END,
 };
 // ponytail: sin Notify* (input por D-Bus en vez de EIS); Deskflow y lan-mouse usan EIS.
+
+static const sd_bus_vtable ic_vtable[] = {
+	SD_BUS_VTABLE_START(0),
+	SD_BUS_METHOD("CreateSession", "oossa{sv}", "ua{sv}", m_ic_create_session, SD_BUS_VTABLE_UNPRIVILEGED),
+	SD_BUS_METHOD("CreateSession2", "osa{sv}", "a{sv}", m_ic_create_session2, SD_BUS_VTABLE_UNPRIVILEGED),
+	SD_BUS_METHOD("Start", "oossa{sv}", "ua{sv}", m_ic_start, SD_BUS_VTABLE_UNPRIVILEGED),
+	SD_BUS_METHOD("GetZones", "oosa{sv}", "ua{sv}", m_ic_get_zones, SD_BUS_VTABLE_UNPRIVILEGED),
+	SD_BUS_METHOD("SetPointerBarriers", "oosa{sv}aa{sv}u", "ua{sv}", m_ic_set_pointer_barriers, SD_BUS_VTABLE_UNPRIVILEGED),
+	SD_BUS_METHOD("Enable", "osa{sv}", "ua{sv}", m_ic_enable, SD_BUS_VTABLE_UNPRIVILEGED),
+	SD_BUS_METHOD("Disable", "osa{sv}", "ua{sv}", m_ic_disable, SD_BUS_VTABLE_UNPRIVILEGED),
+	SD_BUS_METHOD("Release", "osa{sv}", "ua{sv}", m_ic_release, SD_BUS_VTABLE_UNPRIVILEGED),
+	SD_BUS_METHOD("ConnectToEIS", "osa{sv}", "h", m_connect_to_eis, SD_BUS_VTABLE_UNPRIVILEGED),
+	SD_BUS_SIGNAL("Disabled", "oa{sv}", 0),
+	SD_BUS_SIGNAL("Activated", "oa{sv}", 0),
+	SD_BUS_SIGNAL("Deactivated", "oa{sv}", 0),
+	SD_BUS_SIGNAL("ZonesChanged", "oa{sv}", 0),
+	SD_BUS_PROPERTY("SupportedCapabilities", "u", NULL, offsetof(struct eis_server, ic_caps), SD_BUS_VTABLE_PROPERTY_CONST),
+	SD_BUS_PROPERTY("version", "u", NULL, offsetof(struct eis_server, ic_version), SD_BUS_VTABLE_PROPERTY_CONST),
+	SD_BUS_VTABLE_END,
+};
 
 // ScreenCast vacío (sin fuentes; todo pedido se rechaza): libportal (Deskflow) lee la versión
 // de org.freedesktop.portal.ScreenCast antes de crear una sesión RemoteDesktop, y el frontend
@@ -411,9 +989,152 @@ static void session_free(struct eis_server *s, struct session *se) {
 	if (se->eis) {
 		eis_close(s, se->eis);
 	}
+	free(se->barriers);
 	sd_bus_slot_unref(se->slot);
 	free(se->path);
 	free(se);
+}
+
+// --- InputCapture: eventos físicos locales ---
+//
+// El shell avisa por acá de cada evento FÍSICO local. Con una sesión armada y el
+// puntero cruzando una barrera válida se activa la captura: Activated + emulación EIS.
+// Mientras la sesión esté activa el evento se reenvía a sus clientes receiver (libei).
+// Devuelven 1 si la captura consumió el evento y el shell no debe procesarlo localmente.
+
+// Reenvía a los receiver de la sesión (cada uno cierra su frame timestamp).
+static int capture_send_motion(struct session *se, double x, double y, double dx, double dy, uint64_t t) {
+	int sent = 0;
+	// Ventana anti-retorno: ver kick_edge/kick_until en struct session.
+	if (se->kick_until != 0) {
+		if (capture_time(0) < se->kick_until) {
+			switch (se->kick_edge) {
+				case 1: if (dx > 0.0) dx = 0.0; break; // salió por izquierda: no volver a la derecha
+				case 2: if (dx < 0.0) dx = 0.0; break;
+				case 3: if (dy > 0.0) dy = 0.0; break;
+				case 4: if (dy < 0.0) dy = 0.0; break;
+			}
+		} else {
+			se->kick_until = 0;
+		}
+	}
+	for (struct client *c = se->s->clients; c; c = c->next) {
+		if (c->session != se || eis_client_is_sender(c->client) || !c->device) {
+			continue;
+		}
+		// Relativo PRIMERO: Deskflow (EiScreen::onMotionEvent) sólo procesa
+		// EI_EVENT_POINTER_MOTION; su onAbsMotionEvent es un no-op. Como el
+		// dispositivo también expone POINTER_ABSOLUTE (necesario para que Deskflow
+		// calcule el tamaño de pantalla por la region), mandar absoluto dejaba el
+		// cursor clavado: nunca cruzaba ni liberaba la captura.
+		if (eis_device_has_capability(c->device, EIS_DEVICE_CAP_POINTER)) {
+			eis_device_pointer_motion(c->device, dx, dy);
+			eis_device_frame(c->device, t);
+			sent = 1;
+		} else if (eis_device_has_capability(c->device, EIS_DEVICE_CAP_POINTER_ABSOLUTE)) {
+			eis_device_pointer_motion_absolute(c->device, x, y);
+			eis_device_frame(c->device, t);
+			sent = 1;
+		}
+	}
+	return sent;
+}
+
+static void capture_send_button(struct session *se, uint32_t button, int pressed, uint64_t t) {
+	for (struct client *c = se->s->clients; c; c = c->next) {
+		if (c->session != se || eis_client_is_sender(c->client) || !c->device) continue;
+		if (!eis_device_has_capability(c->device, EIS_DEVICE_CAP_BUTTON)) continue;
+		eis_device_button_button(c->device, button, pressed != 0);
+		eis_device_frame(c->device, t);
+	}
+}
+
+static void capture_send_scroll(struct session *se, int32_t sx, int32_t sy, uint64_t t) {
+	for (struct client *c = se->s->clients; c; c = c->next) {
+		if (c->session != se || eis_client_is_sender(c->client) || !c->device) continue;
+		if (!eis_device_has_capability(c->device, EIS_DEVICE_CAP_SCROLL)) continue;
+		eis_device_scroll_discrete(c->device, sx, sy);
+		eis_device_frame(c->device, t);
+	}
+}
+
+static void capture_send_key(struct session *se, uint32_t key, int pressed, uint64_t t) {
+	for (struct client *c = se->s->clients; c; c = c->next) {
+		if (c->session != se || eis_client_is_sender(c->client) || !c->device) continue;
+		if (!eis_device_has_capability(c->device, EIS_DEVICE_CAP_KEYBOARD)) continue;
+		eis_device_keyboard_key(c->device, key, pressed != 0);
+		eis_device_frame(c->device, t);
+	}
+}
+
+int eis_server_capture_motion(eis_server *s, double x, double y, double dx, double dy, uint64_t time) {
+	uint64_t t = capture_time(time);
+	struct session *act = capture_active(s);
+	if (act != NULL) {
+		act->cursor_x = x;
+		act->cursor_y = y;
+		capture_send_motion(act, x, y, dx, dy, t);
+		return 1;
+	}
+	int captured = 0;
+	for (struct session *se = s->sessions; se; se = se->next) {
+		if (se->closed || se->kind != SESSION_IC || !se->enabled || se->active || !capture_ready(s, se)) {
+			continue;
+		}
+		// Sólo habilita el borde de salida cuando el usuario vuelve hacia adentro.
+		capture_update_released(se, dx, dy);
+		uint32_t id = barrier_crossed(s, se, x, y, dx, dy);
+		if (id == 0) {
+			continue;
+		}
+		se->cursor_x = x;
+		se->cursor_y = y;
+		se->active = 1;
+		se->active_barrier = id;
+		se->activated_at = capture_time(0);
+		se->kick_edge = 0;
+		for (size_t i = 0; i < se->nbarriers; i++) {
+			if (se->barriers[i].id == id) {
+				se->kick_edge = (uint32_t)barrier_edge(s, &se->barriers[i]);
+				break;
+			}
+		}
+		se->kick_until = se->kick_edge != 0 ? capture_time(0) + 300000ULL : 0;
+		se->activation_id += 16; // salto amplio: detecta wrap del contador
+		ic_emit_capture(se, "Activated", 1);
+		session_emulating(s, se, 1);
+		capture_send_motion(se, x, y, dx, dy, t);
+		captured = 1;
+	}
+	return captured;
+}
+
+int eis_server_capture_button(eis_server *s, uint32_t button, int pressed, uint64_t time) {
+	struct session *act = capture_active(s);
+	if (act == NULL) {
+		return 0;
+	}
+	capture_send_button(act, button, pressed, capture_time(time));
+	return 1;
+}
+
+int eis_server_capture_scroll(eis_server *s, double dx, double dy, uint64_t time) {
+	struct session *act = capture_active(s);
+	if (act == NULL) {
+		return 0;
+	}
+	// El shell manda muescas (±1); EIS discrete usa 1/120 de muesca por unidad.
+	capture_send_scroll(act, (int32_t)(dx * 120.0), (int32_t)(dy * 120.0), capture_time(time));
+	return 1;
+}
+
+int eis_server_capture_key(eis_server *s, uint32_t key, int pressed, uint64_t time) {
+	struct session *act = capture_active(s);
+	if (act == NULL) {
+		return 0;
+	}
+	capture_send_key(act, key, pressed, capture_time(time));
+	return 1;
 }
 
 // --- API ---
@@ -426,6 +1147,9 @@ eis_server *eis_server_create(eis_server_callbacks cb, const char *keymap, int w
 	s->device_types = DEVICE_TYPES;
 	s->version = 2;
 	s->sc_version = 5;
+	s->ic_caps = DEVICE_TYPES;
+	s->ic_version = 2;
+	s->zone_set = 1;
 	s->keymap_fd = -1;
 	if (keymap && *keymap) {
 		// Con el '\0' final: los clientes lo mapean y lo leen como string.
@@ -451,12 +1175,16 @@ eis_server *eis_server_create(eis_server_callbacks cb, const char *keymap, int w
 		r = sd_bus_add_object_vtable(s->bus, &s->sc_slot, OBJ_PATH, "org.freedesktop.impl.portal.ScreenCast", sc_vtable, s);
 	}
 	if (r >= 0) {
+		r = sd_bus_add_object_vtable(s->bus, &s->ic_slot, OBJ_PATH, "org.freedesktop.impl.portal.InputCapture", ic_vtable, s);
+	}
+	if (r >= 0) {
 		r = sd_bus_request_name(s->bus, BUS_NAME, 0);
 	}
 	if (r < 0) {
 		snprintf(s->error, sizeof(s->error), "sin portal RemoteDesktop (%s: %s)", BUS_NAME, strerror(-r));
 		s->slot = sd_bus_slot_unref(s->slot);
 		s->sc_slot = sd_bus_slot_unref(s->sc_slot);
+		s->ic_slot = sd_bus_slot_unref(s->ic_slot);
 		s->bus = sd_bus_flush_close_unref(s->bus);
 	}
 	return s;
@@ -464,6 +1192,12 @@ eis_server *eis_server_create(eis_server_callbacks cb, const char *keymap, int w
 
 const char *eis_server_error(eis_server *s) {
 	return s->error;
+}
+
+// 1 si el backend InputCapture quedó registrado en el bus (el gate del shell pregunta
+// esto en vez de adivinar por el .portal: la interfaz es lo que atiende a Deskflow).
+int eis_server_has_input_capture(eis_server *s) {
+	return s && s->ic_slot != NULL;
 }
 
 void eis_server_dispatch(eis_server *s) {
@@ -479,12 +1213,25 @@ void eis_server_dispatch(eis_server *s) {
 			continue;
 		}
 		if (se->eis) {
-			handle_eis(s, se->eis);
+			handle_eis(s, se, se->eis);
 		}
 		p = &se->next;
 	}
+	// Nudge diferido de arranque (ver struct session): emitir ZonesChanged sólo si el
+	// cliente IC todavía no armó barreras. Si ya armó/habilitó, emitirlo lo hace
+	// rearmar sin Enable y la captura queda muerta.
+	uint64_t now = capture_time(0);
+	for (struct session *se = s->sessions; se; se = se->next) {
+		if (se->kind != SESSION_IC || se->zones_nudge_at == 0 || now < se->zones_nudge_at) {
+			continue;
+		}
+		se->zones_nudge_at = 0;
+		if (se->nbarriers == 0) {
+			ic_emit_capture(se, "ZonesChanged", 0);
+		}
+	}
 	if (s->test) {
-		handle_eis(s, s->test);
+		handle_eis(s, NULL, s->test);
 	}
 }
 
@@ -494,6 +1241,22 @@ void eis_server_set_size(eis_server *s, int w, int h) {
 	}
 	s->w = w;
 	s->h = h;
+	// Las barreras apuntan a los bordes viejos: se invalidan (zone_set cambia) y
+	// la captura se corta; el cliente debe pedir GetZones y SetPointerBarriers otra vez.
+	s->zone_set++;
+	for (struct session *se = s->sessions; se; se = se->next) {
+		if (se->kind != SESSION_IC) {
+			continue;
+		}
+		se->enabled = 0;
+		capture_deactivate(s, se);
+		free(se->barriers);
+		se->barriers = NULL;
+		se->nbarriers = 0;
+		// Sin esto el cliente queda armado con el zone_set viejo y nunca rearme:
+		// ZonesChanged lo manda a GetZones + SetPointerBarriers + Enable otra vez.
+		ic_emit_capture(se, "ZonesChanged", 0);
+	}
 	// La región no se puede cambiar: dispositivo nuevo con la región nueva.
 	for (struct client *c = s->clients; c; c = c->next) {
 		if (c->device) {
@@ -539,6 +1302,7 @@ void eis_server_destroy(eis_server *s) {
 	}
 	sd_bus_slot_unref(s->slot);
 	sd_bus_slot_unref(s->sc_slot);
+	sd_bus_slot_unref(s->ic_slot);
 	sd_bus_flush_close_unref(s->bus);
 	if (s->keymap_fd >= 0) {
 		close(s->keymap_fd);

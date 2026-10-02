@@ -141,7 +141,10 @@ func _mutex_set(mutex, state, key, value):
 
 
 func _apply_text(text):
-	var next = model.parse(text)
+	var t = String(text)
+	if t.strip_edges() == "":
+		return  # lectura vacía/fallida: conservar la configuración vigente
+	var next = model.parse(t)
 	if str(next) == str(settings):
 		return
 	settings = next
@@ -179,6 +182,20 @@ func wallpaper_kind():
 	if model == null:
 		return "solid"
 	return model.wallpaper_kind(settings.get("wallpaper", {}))
+
+
+# Apariencia normalizada del Frame/Hogar (bisel, plano, relieve) para el shell.
+func appearance():
+	if model == null:
+		return {"bevel": 1.0, "flat": false, "emboss": true}
+	return model.appearance(settings.get("appearance", {}))
+
+
+# Escala de UI normalizada (factor sobre la automática por resolución).
+func ui_scale():
+	if model == null:
+		return 1.0
+	return model.ui_scale_value(settings.get("ui_scale", 1.0))
 
 
 func has_wallpaper_image():

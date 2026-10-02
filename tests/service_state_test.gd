@@ -1,7 +1,7 @@
 extends SceneTree
 
-# Autoprueba del estado de servicios de shell.gd: parser puro de pgrep y merge del
-# snapshot. No hace I/O ni arranca Threads. Correr:
+# Autoprueba del estado de servicios: parser puro de pgrep y merge del snapshot.
+# No hace I/O ni arranca Threads. Correr:
 #   godot --no-window --path shell -s $PWD/tests/service_state_test.gd
 
 var failed = 0
@@ -14,7 +14,7 @@ func check(name, ok):
 
 
 func _init():
-	var S = load("res://shell.gd")
+	var S = load("res://service_state.gd")
 
 	# parse_pgrep_pids: vacío, válido con varias líneas y basura.
 	check("parse_pgrep_pids vacío", S.parse_pgrep_pids("").empty())
@@ -23,6 +23,12 @@ func _init():
 	check("parse_pgrep_pids varias líneas", pids == [1234, 5678, 9])
 	var junk = S.parse_pgrep_pids("abc\n12x\n0\n-5\n42\n")
 	check("parse_pgrep_pids ignora basura/0/negativos", junk == [42])
+
+	# stray_deskflow_pids: ajenos a matar al arrancar; nunca los propios de gdtk.
+	check("stray_deskflow_pids sin propios", S.stray_deskflow_pids([10, 20], []) == [10, 20])
+	check("stray_deskflow_pids excluye propios", S.stray_deskflow_pids([10, 20, 30], [20]) == [10, 30])
+	check("stray_deskflow_pids ignora inválidos", S.stray_deskflow_pids([0, -3, 7], []) == [7])
+	check("stray_deskflow_pids vacío", S.stray_deskflow_pids([], [1]).empty())
 
 	# merge: sin proceso y sin gracia -> parado.
 	var m = S.merge_service_snapshot({"Deskflow": []}, {}, 1000, {}, {})

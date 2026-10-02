@@ -138,29 +138,8 @@ def run_full():
         check("gdtk_state view=home", isinstance(state, dict) and state.get("view") == "home",
               json.dumps(state)[:200] if state else str(result))
 
-        result = client.call_tool("gdtk_open", {"name": "Chat"})
-        check("gdtk_open Chat sin error", not result.get("isError"))
-        time.sleep(0.3)
-        state = content_text(client.call_tool("gdtk_state"))
-        view = state.get("view") if isinstance(state, dict) else None
-        check("gdtk_state view=Chat tras abrir", view == "Chat", str(view))
-
-        # El input del chat está abajo del historial, pegado al borde inferior.
-        viewport = state.get("viewport", [1280, 683]) if isinstance(state, dict) else [1280, 683]
-        click_x = float(os.environ.get("GDTK_TEST_CLICK_X", viewport[0] * 0.3))
-        click_y = float(os.environ.get("GDTK_TEST_CLICK_Y", viewport[1] - 56))
-        result = client.call_tool("gdtk_click", {"x": click_x, "y": click_y})
-        check("gdtk_click en el input del chat", not result.get("isError"),
-              "x=%.0f y=%.0f" % (click_x, click_y))
-
-        result = client.call_tool("gdtk_type", {"text": "hola mcp\n"})
-        check("gdtk_type 'hola mcp'", not result.get("isError"))
-
-        time.sleep(1.5)
-        result = client.call_tool("gdtk_screenshot", {"max_width": 1280})
-        ok = write_png(result, os.path.join(ROOT, "mcp-chat.png"))
-        check("gdtk_screenshot -> mcp-chat.png", ok and not result.get("isError"))
-
+        # Ya no hay actividades internas de demo (Chat/Panel): se abre una ventana
+        # real (es2gears) y se ejercita el puente de input por RPC sobre ella.
         result = client.call_tool("gdtk_home")
         check("gdtk_home sin error", not result.get("isError"))
 
@@ -174,6 +153,14 @@ def run_full():
         state = content_text(client.call_tool("gdtk_state"))
         windows = state.get("windows", []) if isinstance(state, dict) else []
         check("gdtk_state una ventana tras launch", len(windows) == 1, str(windows))
+
+        # Clic y tecleo: sólo se ejercita la vía (es2gears no consume el texto).
+        viewport = state.get("viewport", [1280, 683]) if isinstance(state, dict) else [1280, 683]
+        click_x = float(os.environ.get("GDTK_TEST_CLICK_X", viewport[0] * 0.5))
+        click_y = float(os.environ.get("GDTK_TEST_CLICK_Y", viewport[1] * 0.5))
+        result = client.call_tool("gdtk_click", {"x": click_x, "y": click_y})
+        check("gdtk_click", not result.get("isError"), "x=%.0f y=%.0f" % (click_x, click_y))
+        check("gdtk_type", not client.call_tool("gdtk_type", {"text": "hola mcp\n"}).get("isError"))
 
         result = client.call_tool("gdtk_screenshot", {"max_width": 1280})
         ok = write_png(result, os.path.join(ROOT, "mcp-gears.png"))

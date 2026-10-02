@@ -21,6 +21,13 @@ func reload_shell():
 		shell.free()
 	Host.live_reload = true
 	shell = Host.sc("res://shell.gd").new()
+	# Si el shell no compila en una recarga en vivo, reiniciar el proceso (75) en vez
+	# de quedar con una UI nula: el supervisor relanza y puede aplicar rollback.
+	if shell == null:
+		Host.live_reload = false
+		push_error("gdtk: shell.gd no compiló en la recarga; reiniciando")
+		get_tree().quit(75)
+		return
 	shell.name = "Shell"
 	shell.service_pids = services
 	add_child(shell)

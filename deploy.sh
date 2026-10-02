@@ -37,7 +37,7 @@ rsync -a "$TMP/godot-gdtk" "$HOST:gdtk/bin/"
 rsync -a --exclude '*crash*' --exclude '.import' "$GDTK/shell" "$GDTK/addons" "$GDTK/settings" "$HOST:gdtk/"  # shell/addons/settings -> ../addons
 rsync -a "$GDTK/mcp" "$HOST:gdtk/"
 rsync -a "$GDTK/tools" "$HOST:gdtk/"  # gvd vendoreado (tools/gvd/DEPS.md)
-rsync -a "$GDTK/session/gdtk-session" "$GDTK/session/gdtk-session-x11" "$GDTK/session/keyboard.sh" "$GDTK/session/gdtk-supervisor" "$GDTK/session/gdtk-session-sway" "$GDTK/session/sway.conf" "$GDTK/session/portal.sh" "$GDTK/session/autostart.sh" "$GDTK/session/sensor-hub.sh" "$GDTK/session/gdtk-rotate" "$HOST:gdtk/session/"
+rsync -a "$GDTK/session/gdtk-session" "$GDTK/session/gdtk-session-x11" "$GDTK/session/keyboard.sh" "$GDTK/session/gdtk-supervisor" "$GDTK/session/gdtk-version" "$GDTK/session/gdtk-preflight" "$GDTK/session/gdtk-preflight.gd" "$GDTK/session/gdtk-session-sway" "$GDTK/session/sway.conf" "$GDTK/session/portal.sh" "$GDTK/session/autostart.sh" "$GDTK/session/sensor-hub.sh" "$GDTK/session/gdtk-rotate" "$GDTK/session/gdtk-sensor-hub" "$GDTK/session/gdtk-sensor-hub.service" "$GDTK/session/input-settings.sh" "$HOST:gdtk/session/"
 # Portal RemoteDesktop propio (input remoto libei): el backend lo implementa el shell
 # (modules/wayland/eis_server.c). El frontend xdg-desktop-portal lo enruta sólo en la
 # sesión gdtk (UseIn/DesktopNames), así no toca xfce ni las demás sesiones del host.
@@ -52,6 +52,16 @@ desktop gdtk-sway.desktop "gdtk (sway)" gdtk-session-sway   # alias de compatibi
 ssh "$HOST" '~/gdtk/bin/godot-gdtk --version || true'
 ssh "$HOST" 'sudo -n cp ~/gdtk/session/gdtk.desktop ~/gdtk/session/gdtk-sway.desktop /usr/share/wayland-sessions/ && sudo -n cp ~/gdtk/session/gdtk-x11.desktop /usr/share/xsessions/' \
 	|| echo "Instalar con sudo: ~/gdtk/session/gdtk.desktop en /usr/share/wayland-sessions/ y gdtk-x11.desktop en /usr/share/xsessions/"
+# Servicio de arranque: habilita el sensor hub del Surface Pro 3 (rotación automática)
+# sin depender de cómo se lance la sesión. En otros equipos es un no-op.
+ssh "$HOST" 'sudo -n install -Dm755 ~/gdtk/session/gdtk-sensor-hub /usr/local/lib/gdtk/gdtk-sensor-hub && sudo -n cp ~/gdtk/session/gdtk-sensor-hub.service /etc/systemd/system/ && sudo -n systemctl daemon-reload && sudo -n systemctl enable --now gdtk-sensor-hub.service' \
+	|| echo "Instalar con sudo: gdtk-sensor-hub.service (ver session/)"
 # Portal del usuario (sin sudo): xdg-desktop-portal busca *.portal en XDG_DATA_HOME y
 # <desktop>-portals.conf en XDG_CONFIG_HOME; aplica sólo con XDG_CURRENT_DESKTOP=gdtk.
 ssh "$HOST" 'mkdir -p ~/.config/xdg-desktop-portal ~/.local/share/xdg-desktop-portal/portals && cp ~/gdtk/session/gdtk-portals.conf ~/.config/xdg-desktop-portal/ && cp ~/gdtk/session/gdtk.portal ~/.local/share/xdg-desktop-portal/portals/'
+# Store de versiones (Fase 1): snapshot del árbol desplegado y activarlo, así el
+# supervisor puede promover/volver ante un arranque roto. GDTK_NO_STORE=1 lo omite.
+if [ -z "${GDTK_NO_STORE:-}" ]; then
+	ssh "$HOST" 'chmod +x ~/gdtk/session/gdtk-version ~/gdtk/session/gdtk-preflight 2>/dev/null; GDTK_GODOT="$HOME/gdtk/bin/godot-gdtk" ~/gdtk/session/gdtk-version snapshot --from "$HOME/gdtk" --note "deploy $(date +%F_%T)" --use' \
+		|| echo "aviso: no se creó el snapshot inicial (¿falta jq en $HOST?)"
+fi

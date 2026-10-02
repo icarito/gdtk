@@ -110,7 +110,8 @@ def tool(name, description, properties, required=None):
 
 
 TOOLS = [
-    tool("gdtk_restart_shell", "Restart the shell process without ending the session (the supervisor relaunches it). Open activities are saved and reopened; wayland apps are relaunched (they die with the shell). force=true kills a hung shell instead of asking it.", {"force": {"type": "boolean"}}),
+    tool("gdtk_reload_shell", "Reload GDScript shell/UI code in-process. The embedded Wayland compositor stays alive, so open Wayland windows keep running. Use this for UI/script changes.", {}),
+    tool("gdtk_restart_shell", "Restart the whole shell process without ending the session (the supervisor relaunches it). This closes embedded Wayland windows; they are not relaunched automatically. force=true kills a hung shell instead of asking it.", {"force": {"type": "boolean"}}),
     tool("gdtk_logs", "Read shell logs from disk (works even if the shell is down): which=shell (current run), prev (previous run), crash (latest crash log), supervisor (restart history).", {"which": {"type": "string", "enum": ["shell", "prev", "crash", "supervisor"]}, "lines": {"type": "integer"}}),
     tool("gdtk_state", "Get the shell state: current view, viewport, wayland socket, windows and activities.", {}),
     tool("gdtk_open", "Open an activity from the home ring by name (e.g. Chat).", {"name": {"type": "string"}}, ["name"]),
@@ -129,6 +130,7 @@ TOOLS = [
 ]
 
 TOOL_METHOD = {
+    "gdtk_reload_shell": "reload_shell",
     "gdtk_state": "state",
     "gdtk_open": "open",
     "gdtk_home": "home",
@@ -204,7 +206,7 @@ def restart_shell(arguments):
     if not arguments.get("force"):
         try:
             call_shell("restart_shell", {})
-            return "reinicio pedido: el shell guarda su estado y el supervisor lo relanza"
+            return "reinicio pedido: el supervisor lo relanza; las ventanas Wayland abiertas se cierran"
         except ShellError as exc:
             log("restart suave falló (%s), forzando" % exc)
     pid_path = os.path.join(runtime_dir(), "gdtk-shell.pid")
@@ -220,9 +222,9 @@ def restart_shell(arguments):
         try:
             os.kill(pid, 0)
         except OSError:
-            return "shell %d terminado; el supervisor lo relanza (sin estado guardado)" % pid
+            return "shell %d terminado; el supervisor lo relanza; las ventanas Wayland abiertas se cierran" % pid
     os.kill(pid, 9)
-    return "shell %d matado con SIGKILL; el supervisor lo relanza" % pid
+    return "shell %d matado con SIGKILL; el supervisor lo relanza; las ventanas Wayland abiertas se cierran" % pid
 
 
 LOCAL_TOOLS = {"gdtk_logs": read_logs, "gdtk_restart_shell": restart_shell}
