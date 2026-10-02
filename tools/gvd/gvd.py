@@ -70,6 +70,11 @@ CAPTURE_PROTO_DIR = "protocols"
 CAPTURE_PROTO_C = "wlr-screencopy-unstable-v1-protocol.c"
 CAPTURE_PROTO_H = "wlr-screencopy-unstable-v1-client-protocol.h"
 CAPTURE_FORMATS = {"XR24": "BGRx", "AR24": "BGRA"}
+
+# Colorimetría forzada del stream. Sin esto el encoder etiqueta bt601 (default) y
+# los sinks que asumen bt709/HD muestran colores desviados. Override con
+# GVD_COLORIMETRY (p. ej. bt601) o "" para no forzar.
+COLORIMETRY = os.environ.get("GVD_COLORIMETRY", "bt709")
 POSITIONS = ("right", "left", "above", "below")
 
 # cursor-mode de Mutter ScreenCast
@@ -512,7 +517,8 @@ class Sender:
         key_interval = max(1, round(a.refresh if a.refresh is not None else fps))
         va_usage = 4 if a.quality == "balanced" else 7
         x264_preset = "veryfast" if a.quality == "balanced" else "ultrafast"
-        raw_caps = f"video/x-raw,framerate={fps}/1,interlace-mode=progressive"
+        cim = f",colorimetry={COLORIMETRY}" if COLORIMETRY else ""
+        raw_caps = f"video/x-raw,framerate={fps}/1,interlace-mode=progressive{cim}"
         if enc != "va":
             raw_caps += ",format=I420"
         if source is None:
@@ -526,9 +532,14 @@ class Sender:
             e += ["videorate", "drop-only=false", "!",
                   raw_caps, "!"]
         elif enc != "va":
-            e += ["video/x-raw,interlace-mode=progressive,format=I420", "!"]
+            e += [f"video/x-raw,interlace-mode=progressive,format=I420{cim}", "!"]
         if enc == "va":
             e += ["vapostproc", "!"]
+            if cim:
+                # Re-etiquetar DESPUÉS de vapostproc: mantiene la conversión VA y deja
+                # la colorimetría correcta en el SPS (vapostproc solo pone un valor raro).
+                e += [f"video/x-raw{cim}", "!"]
+        if enc == "va":
             e += ["vah264enc", f"bitrate={a.bitrate}", "rate-control=cbr",
                   f"key-int-max={key_interval}", f"target-usage={va_usage}",
                   "b-frames=0", "!",
