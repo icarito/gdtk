@@ -51,6 +51,58 @@ func _build():
 
 	layout = _ensure_layout()
 	_refresh_status()
+	_build_sizes()
+
+
+# Filas para editar la resolución REAL de cada equipo (px). La disposición y los %
+# de solape se calculan con estos tamaños.
+func _build_sizes():
+	h_gap(6)
+	h_note("Tamaños (px): ajustá la resolución real de cada equipo.")
+	var row = h_row()
+	h_label("Este equipo", row)
+	_size_spin(layout.local.w, row, layout.local.id, true)
+	_size_spin(layout.local.h, row, layout.local.id, false)
+	for sc in layout.screens:
+		row = h_row()
+		h_label(_label_of(sc), row)
+		_size_spin(sc.w, row, sc.id, true)
+		_size_spin(sc.h, row, sc.id, false)
+
+
+func _size_spin(value, row, sc_id, is_w):
+	var sp = SpinBox.new()
+	sp.min_value = 100
+	sp.max_value = 8000
+	sp.step = 1
+	sp.value = float(value)
+	sp.rect_min_size.x = 96
+	sp.connect("value_changed", self, "_on_size_changed", [String(sc_id), bool(is_w)])
+	row.add_child(sp)
+	return sp
+
+
+func _on_size_changed(value, sc_id, is_w):
+	_apply_size(sc_id, value if is_w else null, null if is_w else value)
+	if canvas != null:
+		canvas.update()
+	_commit()
+
+
+func _apply_size(id, w, h):
+	if String(id) == String(layout.local.id):
+		if w != null:
+			layout.local.w = float(w)
+		if h != null:
+			layout.local.h = float(h)
+		return
+	for i in range(layout.screens.size()):
+		if String(layout.screens[i].id) == String(id):
+			if w != null:
+				layout.screens[i].w = float(w)
+			if h != null:
+				layout.screens[i].h = float(h)
+			return
 
 
 func _on_resized():
