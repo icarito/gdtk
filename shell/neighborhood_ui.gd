@@ -611,7 +611,11 @@ func _host_actions(host):
 	# Canal autorizado (ssh/buzón) hacia este host: habilita las acciones de
 	# pantalla cuando el peer anuncia state=capable (abre su receptor on-demand).
 	# Se resuelve del propio host (misma dirección que usará el emisor por ssh).
-	ctx.provision_channel = bool(INBOX.ssh_target(host).get("ok", false))
+	# Canal autorizado hacia este host: ssh/buzón O el canal peer gdtk (LAN) que el
+	# host anuncia por mDNS (`ctl=`). Con cualquiera, el receptor on-demand se puede
+	# abrir sin ssh.
+	ctx.provision_channel = bool(INBOX.ssh_target(host).get("ok", false)) \
+		or int(host.get("ctl", 0)) > 0
 	# Servidor local disponible resuelto una vez por el shell (cached, sin escanear
 	# PATH por frame). Sin shell (headless) no se toca el contexto.
 	if shell != null and shell.has_method("deskflow_server_available"):

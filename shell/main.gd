@@ -31,7 +31,9 @@ func reload_shell():
 	shell.name = "Shell"
 	shell.service_pids = services
 	add_child(shell)
-	Host.reload_remote()  # también toma cambios de remote.gd
+	Host.reload_remote()  # también toma cambios de remote.gd/peer_control.gd
 	if Host.remote != null:
 		Host.remote.shell = shell
+	if Host.peer_control != null:
+		Host.peer_control.shell = shell
 	Host.live_reload = false

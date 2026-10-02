@@ -65,32 +65,31 @@ func _draw():
 
 
 # Exposé como "zoom out": un marco por workspace con su número (índice/total), el
-# borde de cada ventana (resaltando la seleccionada) y el botón de cerrar sobre la
-# ventana bajo el puntero. Todos los workspaces están en pantalla a la vez.
+# borde tenue de cada ventana no seleccionada y el botón de cerrar sobre la ventana
+# bajo el puntero. La selección no usa borde azul: la marca el propio shell escalando
+# y aclarando un poco la ventana (ver _update_tile). Todos los workspaces están en
+# pantalla a la vez.
 func _draw_expose(font):
 	var units = shell._units()
 	var n = units.size()
 	var sel_id = -1
 	if shell.expose_sel >= 0 and shell.expose_sel < shell.tiles.size():
 		sel_id = shell.tiles[shell.expose_sel]
-	var blue = Color(0.26, 0.59, 0.98, 1.0)
 	for i in range(n):
 		if i >= shell.expose_unit_cards.size():
 			break
 		var frame = shell.expose_unit_cards[i]
 		var on = units[i].has(sel_id)
-		draw_rect(frame, blue if on else Color(1, 1, 1, 0.16), false, 2.0 if on else 1.0)
+		draw_rect(frame, Color(1, 1, 1, 0.22 if on else 0.12), false, 1.5 if on else 1.0)
 		for id in units[i]:
 			var r = shell.expose_cards.get(id)
 			if r == null:
 				continue
-			if id == sel_id:
-				draw_rect(r, blue, false, 3.0)
-			else:
+			if id != sel_id:
 				draw_rect(r, Color(0, 0, 0, 0.45), false, 1.0)
 		if font != null:
 			var label = "%d/%d" % [i + 1, n]
-			var col = blue if on else Color(1, 1, 1, 0.30)
+			var col = Color(1, 1, 1, 0.55) if on else Color(1, 1, 1, 0.30)
 			var lw = font.get_string_size(label).x
 			draw_string(font, Vector2(frame.position.x + frame.size.x * 0.5 - lw * 0.5,
 				frame.position.y + frame.size.y + 16.0), label, col)

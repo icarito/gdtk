@@ -34,6 +34,10 @@ typedef struct {
 	void (*activate)(void *ud, int id);
 	// El cliente pide minimizarse (xdg_toplevel.set_minimized o iconify X11).
 	void (*minimize)(void *ud, int id);
+	// El cliente pide maximizar/desmaximizar (xdg_toplevel.set_maximized). `maximized`
+	// es el estado pedido (1/0); el borde ya lo confirmo en el configure y el shell
+	// decide como acomodar la ventana en su workspace.
+	void (*maximize)(void *ud, int id, int maximized);
 	// Algo del árbol de `id` desapareció sin commit (menú X o popup cerrado): redibujar.
 	void (*damage)(void *ud, int id);
 } wl_server_callbacks;

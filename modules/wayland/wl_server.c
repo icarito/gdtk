@@ -65,6 +65,8 @@ typedef struct toplevel {
 	struct wl_listener set_title;
 	// se registra en ambas rutas (xdg y Xwayland)
 	struct wl_listener request_minimize;
+	// sólo xdg: CSD pide maximizar/desmaximizar (GTK4 headerbar, etc.)
+	struct wl_listener request_maximize;
 	// sólo X
 	struct wl_listener associate;
 	struct wl_listener dissociate;
@@ -857,9 +859,26 @@ static void handle_toplevel_request_minimize(struct wl_listener *listener, void 
 	}
 }
 
+// El cliente pide maximizar/desmaximizar desde su decoracion (xdg_toplevel.set_maximized).
+// Se confirma el estado en el configure (aunque no cambie) y se avisa al shell, que es
+// quien decide el layout: en modo tiled alterna entre ocupar la pantalla entera o su
+// franja partida. Para X11 el pedido llega como request_configure y no se maneja aca.
+static void handle_toplevel_request_maximize(struct wl_listener *listener, void *data) {
+	toplevel *t = wl_container_of(listener, t, request_maximize);
+	if (t->tl == NULL) {
+		return;
+	}
+	bool maximized = t->tl->requested.maximized;
+	wlr_xdg_toplevel_set_maximized(t->tl, maximized);
+	wlr_xdg_surface_schedule_configure(t->tl->base);
+	if (t->server->cb.maximize != NULL) {
+		t->server->cb.maximize(t->server->cb.ud, t->id, maximized ? 1 : 0);
+	}
+}
+
 static void toplevel_unlink(toplevel *t) {
 	struct wl_listener *all[] = { &t->commit, &t->map, &t->unmap, &t->destroy, &t->set_title,
-		&t->request_minimize, &t->associate, &t->dissociate, &t->request_configure };
+		&t->request_minimize, &t->request_maximize, &t->associate, &t->dissociate, &t->request_configure };
 	for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
 		wl_list_remove(&all[i]->link);
 		wl_list_init(&all[i]->link);
@@ -1014,6 +1033,8 @@ static void handle_new_toplevel(struct wl_listener *listener, void *data) {
 	wl_signal_add(&tl->events.set_title, &t->set_title);
 	t->request_minimize.notify = handle_toplevel_request_minimize;
 	wl_signal_add(&tl->events.request_minimize, &t->request_minimize);
+	t->request_maximize.notify = handle_toplevel_request_maximize;
+	wl_signal_add(&tl->events.request_maximize, &t->request_maximize);
 
 	wl_list_insert(s->toplevels.prev, &t->link);
 
@@ -1438,6 +1459,8 @@ static void handle_new_xsurface(struct wl_listener *listener, void *data) {
 	wl_signal_add(&xs->events.set_title, &t->set_title);
 	t->request_minimize.notify = handle_toplevel_request_minimize;
 	wl_signal_add(&xs->events.request_minimize, &t->request_minimize);
+	// xdg-only: no se registra en X11, pero toplevel_unlink lo remueve igual.
+	wl_list_init(&t->request_maximize.link);
 	t->associate.notify = handle_xtoplevel_associate;
 	wl_signal_add(&xs->events.associate, &t->associate);
 	t->dissociate.notify = handle_xtoplevel_dissociate;

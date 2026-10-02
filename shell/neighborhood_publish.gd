@@ -55,7 +55,8 @@ func build_common_txt(identity):
 		"name=" + _txt_value(String(identity.get("name", "gdtk"))),
 		"kind=" + kind,
 		"icon=" + icon,
-		"auth=" + _one_of(String(identity.get("auth", "ask")), _AUTH, "ask")
+		"auth=" + _one_of(String(identity.get("auth", "ask")), _AUTH, "ask"),
+		"ctl=" + _txt_atom(String(identity.get("ctl", "")), "")
 	]
 
 

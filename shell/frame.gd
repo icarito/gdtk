@@ -1449,8 +1449,8 @@ func _input(event):
 		# Alt+F11: pantalla completa de la ventana enfocada.
 		shell._toggle_fullscreen()
 	elif event.alt and not event.control and code == KEY_F10:
-		# Alt+F10: maximizar (ocupar todo el workspace).
-		shell._maximize_window(shell.focused_tile)
+		# Alt+F10: maximizar/desmaximizar (workspace entero <-> franja partida).
+		shell._toggle_maximize_window(shell.focused_tile)
 	else:
 		return
 	_gulp(code)

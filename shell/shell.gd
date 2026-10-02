@@ -40,6 +40,7 @@ const GVD_SESSION = preload("res://gvd_session.gd")
 # K17: planes puros de automatización de gvd (emisor local/receptor remoto por
 # ssh, `--position` del mapa, `--cursor sway`, suspensión del vínculo Deskflow).
 const GVD_LAUNCH = preload("res://gvd_launch.gd")
+const PEER_CALL = preload("res://peer_call.gd")
 const MENU_STYLE = preload("res://menu_style.gd")
 const HOST_DISPATCH = preload("res://host_dispatch.gd")
 # Publisher mDNS del Vecindario: modelo puro + plan puro de anuncios; el shell
@@ -287,6 +288,10 @@ var view_anim = {}
 var fullscreen_id = -1
 # Proporción de reparto de una franja partida: id -> peso (default 1). Asa de borde.
 var split_weight = {}
+# Ventana maximizada en su workspace: id -> {"members": [ids], "weights": {id: w}}.
+# Recuerda la franja partida previa para poder restaurarla (boton max/desmax de la app,
+# Alt+F10 o comando remoto). Ver _maximize_window / _restore_maximized_window.
+var maximize_state = {}
 var handles = []         # asas de la franja enfocada: {"x", "y", "h", "i", "left", "right"}
 var hover_handle = null
 var resize_handle = null
@@ -317,6 +322,12 @@ const EXPOSE_GAP = 18.0
 const EXPOSE_MAX_SCALE = 0.62
 # Lado del botón de cerrar de cada ventana en exposé (se ajusta al tamaño de la tarjeta).
 const EXPOSE_CLOSE_MAX = 22.0
+# Aire entre ventanas en exposé: se encoge cada tarjeta unos px para que las ventanas
+# de un workspace partido no queden pegadas (antes las separaba el borde azul de foco).
+const EXPOSE_CARD_INSET = 3.0
+# Selección en exposé (sin borde): la ventana elegida se agranda y se aclara un poco.
+const EXPOSE_SEL_SCALE = 1.05
+const EXPOSE_SEL_BRIGHT = 1.13
 const MOD_KEYS = [KEY_CONTROL, KEY_SHIFT, KEY_ALT, KEY_META, KEY_SUPER_L, KEY_SUPER_R]
 
 # Hogar: fila(s) de favoritos centradas (SPEC-sugar-home-visual). Pareja XO para la
@@ -557,6 +568,7 @@ func _ready():
 	compositor.connect("toplevel_removed", self, "_on_toplevel_removed")
 	compositor.connect("toplevel_activate", self, "_on_toplevel_activate")
 	compositor.connect("toplevel_minimize", self, "_on_toplevel_minimize")
+	compositor.connect("toplevel_maximize", self, "_on_toplevel_maximize")
 	# Cambios de ventanas: rearmar la UI (el Frame las lista, recovery espera la suya).
 	compositor.connect("toplevel_added", self, "_redraw_on_signal")
 	compositor.connect("toplevel_removed", self, "_redraw_on_signal")
@@ -706,7 +718,8 @@ func _save_layout():
 	for g in groups:
 		gs.append(g.duplicate())
 	Host.layout = {"tiles": tiles.duplicate(), "groups": gs, "weights": split_weight.duplicate(),
-		"minimized": minimized.keys(), "focused": focused_tile, "fullscreen": fullscreen_id}
+		"minimized": minimized.keys(), "focused": focused_tile, "fullscreen": fullscreen_id,
+		"maximize": maximize_state.duplicate(true)}
 
 
 # Al recargar el shell, las apps siguen vivas en el compositor del Host: se rearma el
@@ -753,6 +766,9 @@ func _adopt_windows():
 		split_weight = {}
 		for k in lay.get("weights", {}):
 			split_weight[int(k)] = lay["weights"][k]
+		maximize_state = {}
+		for k in lay.get("maximize", {}):
+			maximize_state[int(k)] = lay["maximize"][k]
 		var f = int(lay.get("focused", -1))
 		_focus_tile(f if tiles.has(f) else (tiles[tiles.size() - 1] if not tiles.empty() else -1))
 		fullscreen_id = int(lay.get("fullscreen", -1))
@@ -1215,6 +1231,10 @@ func _compute_expose_layout():
 	var plan = EXPOSE_LAYOUT.plan(vp, local, EXPOSE_PAD, EXPOSE_GAP, EXPOSE_MAX_SCALE)
 	expose_unit_cards = plan["units"]
 	expose_cards = plan["cards"]
+	# Un poco de aire entre ventanas: se encoge cada tarjeta (el shell centra la
+	# miniatura en su tarjeta, así que el hueco queda simétrico).
+	for id in expose_cards.keys():
+		expose_cards[id] = expose_cards[id].grow(-EXPOSE_CARD_INSET)
 	# tile_rects queda con la geometría REAL local de cada ventana: la necesita
 	# _update_tile para reescalar la miniatura sin distorsionar el contenido.
 	for u in range(units.size()):
@@ -1353,6 +1373,11 @@ func _update_tile(id, now):
 		var card = expose_cards.get(id, Rect2(Vector2.ZERO, view.rect_size))
 		node.rect_size = rect.size
 		var s = min(min(card.size.x / max(rect.size.x, 1.0), card.size.y / max(rect.size.y, 1.0)), 1.0)
+		# Selección sin borde: la elegida se agranda un poco y se aclara (ver _draw_expose).
+		var sel = expose_sel >= 0 and expose_sel < tiles.size() and tiles[expose_sel] == id
+		var bright = EXPOSE_SEL_BRIGHT if sel else 1.0
+		if sel:
+			s *= EXPOSE_SEL_SCALE
 		var tpos = card.position + (card.size - rect.size * s) * 0.5
 		var a = view_anim.get(id)
 		if a != null:
@@ -1367,7 +1392,7 @@ func _update_tile(id, now):
 		else:
 			node.rect_scale = Vector2(s, s)
 			node.rect_position = tpos
-		node.modulate = Color(1, 1, 1, 1)
+		node.modulate = Color(bright, bright, bright, 1.0)
 		node.visible = true
 		return
 
@@ -1892,6 +1917,7 @@ func _minimize_window(id):
 	if fullscreen_id == id:
 		fullscreen_id = -1
 	_remove_from_group(id)
+	maximize_state.erase(id)
 	minimized[id] = true
 	tiles.erase(id)
 	tile_fade.erase(id)
@@ -1963,17 +1989,63 @@ func _toggle_fullscreen():
 	request_redraw()
 
 
-# Alt+F10: maximizar = sacar la ventana de su franja partida para que ocupe todo el
-# hueco central del Frame (K12). Ya no se esconde el Frame: la ventana no queda por
-# debajo de las barras, así que ocultarlo sólo dejaría franjas vacías. Pantalla
-# completa (todo el viewport, sin Frame) sigue siendo Alt+F11.
+# Alt+F10 / botón max de la app: maximizar = sacar la ventana de su franja partida
+# para que ocupe todo el workspace (el hueco central del Frame, K12). Se recuerda la
+# franja previa (miembros y pesos) para poder deshacerlo con _restore_maximized_window.
+# Pantalla completa (todo el viewport, sin Frame) sigue siendo Alt+F11.
 func _maximize_window(id):
 	if id < 0 or not tiles.has(id):
 		return
 	fullscreen_id = -1
-	_remove_from_group(id)
+	var g = _group_of(id)
+	if g != null:
+		var weights = {}
+		for m in g:
+			weights[m] = _weight(m)
+		maximize_state[id] = {"members": g.duplicate(), "weights": weights}
+		_remove_from_group(id)
 	_focus_tile(id)
 	request_redraw()
+
+
+# Desmaximizar: rearma la franja partida que la ventana ocupaba antes de maximizar.
+# Los miembros que se cerraron entretanto simplemente no vuelven.
+func _restore_maximized_window(id):
+	if id < 0:
+		return
+	var st = maximize_state.get(id)
+	maximize_state.erase(id)
+	if st == null or not tiles.has(id):
+		return
+	var weights = st.get("weights", {})
+	var members = []
+	for m in st.get("members", []):
+		if tiles.has(m):
+			members.append(m)
+	if members.size() < 2:
+		_focus_tile(id)
+		request_redraw()
+		return
+	# Por si el usuario retileó a mano mientras estaba maximizada: se saca a cada
+	# miembro de su grupo actual antes de rearmar la franja guardada.
+	for m in members:
+		_remove_from_group(m)
+	for m in members:
+		split_weight[m] = float(weights.get(m, 1.0))
+	groups.append(members)
+	_focus_tile(id)
+	request_redraw()
+
+
+# Alt+F10 / botón de la app: alterna maximizar y desmaximizar en modo tiled (workspace
+# entero <-> solo una parte).
+func _toggle_maximize_window(id):
+	if id < 0 or not tiles.has(id):
+		return
+	if maximize_state.has(id):
+		_restore_maximized_window(id)
+	else:
+		_maximize_window(id)
 
 
 # K18: la ventana de pantalla compartida se reconoce por su título fijo
@@ -3486,6 +3558,10 @@ func _start_publishers():
 	if not avahi.available:
 		return   # degradado, sin error
 	var identity = PUBLISH_PLAN.local_identity(_local_hostname(), local_device_kind())
+	# Endpoint del canal peer (LAN, sin ssh) para que un vecino nos pida abrir el
+	# receptor de pantalla. Vacío si el canal no está escuchando.
+	if Host.peer_control != null and Host.peer_control.listening():
+		identity["ctl"] = str(Host.peer_control.port)
 	var caps = {"gvd": true, "gvd_port": 5600, "deskflow": true, "deskflow_port": 24800,
 		"deskflow_role": _deskflow_role}
 	var plan = PUBLISH_PLAN.new().build(identity, caps, avahi.path)
@@ -4833,6 +4909,113 @@ func _open_pantalla_window(gvd_path, has_sway, port):
 	activity_error = "pantalla: actividad no disponible"
 
 
+# --- Canal peer (LAN, sin ssh): tokens por-par y acciones de pantalla -----------
+
+func _peer_port():
+	var p = int(OS.get_environment("GDTK_PEER_PORT"))
+	return p if p > 0 else 7788
+
+
+func _gvd_path_local():
+	var cands = GVD_LAUNCH.ACTIONS.gvd_path_candidates(OS.get_environment("HOME"),
+		OS.get_environment("GDTK_HOME"))
+	var exists = {}
+	var f = File.new()
+	for c in cands:
+		var p = String(c)
+		if p.begins_with("/") and f.file_exists(p):
+			exists[p] = true
+	return GVD_LAUNCH.ACTIONS.resolve_gvd_path(cands, exists)
+
+
+func _peer_tokens_path():
+	var base = OS.get_environment("XDG_CONFIG_HOME")
+	if base == "":
+		base = OS.get_environment("HOME").plus_file(".config")
+	return base.plus_file("gdtk").plus_file("peer-tokens.json")
+
+
+func _peer_tokens_load():
+	var f = File.new()
+	if f.open(_peer_tokens_path(), File.READ) != OK:
+		return {}
+	var d = JSON.parse(f.get_as_text()).result
+	f.close()
+	return d if typeof(d) == TYPE_DICTIONARY else {}
+
+
+func _peer_token_get(peer_id):
+	return String(_peer_tokens_load().get("cli:" + String(peer_id), ""))
+
+
+func _peer_token_set(peer_id, tok):
+	var d = _peer_tokens_load()
+	d["cli:" + String(peer_id)] = String(tok)
+	var f = File.new()
+	if f.open(_peer_tokens_path(), File.WRITE) == OK:
+		f.store_string(JSON.print(d))
+		f.close()
+
+
+# ¿El hid es un vecino confirmado? (gate del TOFU del canal peer)
+func _peer_is_confirmed(hid):
+	var h = String(hid)
+	if h == "":
+		return false
+	var entry = host_directions.get(h, null)
+	if typeof(entry) == TYPE_DICTIONARY and String(entry.get("confirm", "")) == "confirmed":
+		return true
+	return host_directions.has(h)
+
+
+# Llama al canal peer del vecino. Devuelve true si ejecutó. Si es la primera vez,
+# el vecino provisiona y devuelve su token (TOFU) y lo guardamos para la próxima.
+func _peer_call(peer_host, peer_id, method, params = {}):
+	var host = String(peer_host).strip_edges()
+	if host == "":
+		return false
+	if host.find(".") < 0:
+		host = host + ".local"
+	var resp = PEER_CALL.request(host, _peer_port(), _local_hid(),
+		_peer_token_get(peer_id), method, params)
+	if resp.empty():
+		return false
+	if not bool(resp.get("ok", false)):
+		return false
+	if resp.has("token"):
+		_peer_token_set(peer_id, String(resp.token))
+	return true
+
+
+# --- Acciones que ejecuta el canal peer en ESTE host ----------------------------
+
+func _peer_gvd_open(port, _from):
+	var path = _gvd_path_local()
+	if path == "":
+		return false
+	_open_pantalla_window(path, _has_sway_socket(), int(port))
+	return true
+
+
+func _peer_gvd_stop():
+	for i in range(ACTIVITIES.size()):
+		if String(ACTIVITIES[i].get("name", "")) == "Pantalla":
+			ACTIVITIES[i]["wayland"] = null
+			return true
+	return true
+
+
+func _peer_gvd_active():
+	for i in range(ACTIVITIES.size()):
+		if String(ACTIVITIES[i].get("name", "")) == "Pantalla":
+			return ACTIVITIES[i].get("wayland", null) != null
+	return false
+
+
+func _peer_gvd_send(_port, _target):
+	return false
+
+
 func _direction_for(host_id):
 	var entry = host_directions.get(String(host_id), {})
 	if typeof(entry) != TYPE_DICTIONARY:
@@ -4892,19 +5075,31 @@ func _start_gvd_screen(host_id, action):
 		_launch_tracked(id, String(sp.get("cmd", "")), sp.get("args", []))
 		_suspend_deskflow_link(id, direction)
 		if bool(target.get("ok", false)):
-			var rp = GVD_LAUNCH.remote_recv_argv(String(target.get("peer", "")), _has_sway_socket())
-			if bool(rp.get("ok", false)):
-				_launch_tracked(GVD_LAUNCH.remote_recv_key(id),
-					String(rp.get("cmd", "")), rp.get("args", []))
+			var peer_host = String(target.get("peer", ""))
+			var port = GVD_LAUNCH.port_of_plan(plan)
+			# Canal peer (LAN, sin ssh): pedirle al vecino que abra su receptor.
+			var done = _peer_call(peer_host, id, "gvd_recv",
+				{"port": port, "from": _local_hostname()})
+			if not done:
+				# Fallback: canal autorizado clásico (ssh/buzón).
+				var rp = GVD_LAUNCH.remote_recv_argv(peer_host, _has_sway_socket())
+				if bool(rp.get("ok", false)):
+					_launch_tracked(GVD_LAUNCH.remote_recv_key(id),
+						String(rp.get("cmd", "")), rp.get("args", []))
 	else:
 		_open_pantalla_window(gvd_path, _has_sway_socket(), GVD_LAUNCH.port_of_plan(plan))
 		if bool(target.get("ok", false)):
-			var rp2 = GVD_LAUNCH.remote_send_argv(String(target.get("peer", "")),
-				_local_hostname(), GVD_LAUNCH.port_of_plan(plan),
-				GVD_LAUNCH.position_for(direction, true))
-			if bool(rp2.get("ok", false)):
-				_launch_tracked(GVD_LAUNCH.remote_send_key(id),
-					String(rp2.get("cmd", "")), rp2.get("args", []))
+			var peer_host2 = String(target.get("peer", ""))
+			var port2 = GVD_LAUNCH.port_of_plan(plan)
+			var done2 = _peer_call(peer_host2, id, "gvd_send",
+				{"port": port2, "target": _local_hostname()})
+			if not done2:
+				var rp2 = GVD_LAUNCH.remote_send_argv(peer_host2,
+					_local_hostname(), port2,
+					GVD_LAUNCH.position_for(direction, true))
+				if bool(rp2.get("ok", false)):
+					_launch_tracked(GVD_LAUNCH.remote_send_key(id),
+						String(rp2.get("cmd", "")), rp2.get("args", []))
 	request_redraw()
 
 
@@ -5214,6 +5409,19 @@ func _on_toplevel_minimize(id):
 	request_redraw()
 
 
+# La app pide maximizar/desmaximizar desde su decoración (CSD): se alterna el workspace
+# entero con su franja partida. Sólo aplica a ventanas gestionadas (raíz en `tiles`).
+func _on_toplevel_maximize(id, maximized):
+	var root = _root_of(id)
+	if not tiles.has(root):
+		return
+	if maximized == 0:
+		_restore_maximized_window(root)
+	else:
+		_maximize_window(root)
+	request_redraw()
+
+
 func _add_dialog(id):
 	if not dialogs.has(id):
 		dialogs.append(id)
@@ -5371,6 +5579,7 @@ func _on_toplevel_removed(id):
 	if fullscreen_id == id:
 		fullscreen_id = -1
 	_remove_from_group(id)
+	maximize_state.erase(id)
 	minimized.erase(id)
 	unit_focus.erase(id)
 	tiles.erase(id)

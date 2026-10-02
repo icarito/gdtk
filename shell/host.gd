@@ -8,6 +8,7 @@ extends Node
 var compositor = null
 var remote_input = null
 var remote = null        # control remoto JSON-RPC (remote.gd)
+var peer_control = null  # canal peer LAN sin ssh (peer_control.gd)
 var main = null          # main.gd, para pedirle la recarga
 var live_reload = false  # true mientras se instancia el shell por recarga
 var layout = {}          # layout del shell (orden/grupos/foco) para restaurar tras recargar
@@ -43,8 +44,18 @@ func _ready():
 	remote.name = "Remote"
 	add_child(remote)
 
+	# Canal peer (LAN, sin ssh) para pedirle a un vecino que abra su receptor gvd.
+	peer_control = load("res://peer_control.gd").new()
+	peer_control.name = "PeerControl"
+	add_child(peer_control)
+	var peer_port = int(OS.get_environment("GDTK_PEER_PORT"))
+	if peer_port <= 0:
+		peer_port = 7788
+	peer_control.start(null, peer_port)
 
-# Recrea el control remoto (remote.gd) para que un reload también tome sus cambios.
+
+# Recrea el control remoto (remote.gd) y el canal peer (peer_control.gd) para que un
+# reload también tome sus cambios.
 func reload_remote():
 	if remote != null and is_instance_valid(remote):
 		remove_child(remote)
@@ -52,6 +63,16 @@ func reload_remote():
 	remote = sc("res://remote.gd").new()
 	remote.name = "Remote"
 	add_child(remote)
+	if peer_control != null and is_instance_valid(peer_control):
+		remove_child(peer_control)
+		peer_control.free()
+	peer_control = sc("res://peer_control.gd").new()
+	peer_control.name = "PeerControl"
+	add_child(peer_control)
+	var peer_port = int(OS.get_environment("GDTK_PEER_PORT"))
+	if peer_port <= 0:
+		peer_port = 7788
+	peer_control.start(null, peer_port)
 
 
 # Script sin caché: una recarga toma los .gd nuevos del disco. ResourceLoader con

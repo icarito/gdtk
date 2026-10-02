@@ -136,6 +136,14 @@ static func _host_before(a, b):
 	return String(a.get("id", "")) < String(b.get("id", ""))
 
 
+static func _ctl_port(v):
+	var s = str(v).strip_edges()
+	if not s.is_valid_integer():
+		return 0
+	var p = int(s)
+	return p if p > 0 and p < 65536 else 0
+
+
 static func _new_host(id, hid, svc):
 	var txt = svc.txt
 	var label = str(txt.get("name", svc.name)).strip_edges()
@@ -150,6 +158,7 @@ static func _new_host(id, hid, svc):
 		"kind": kind,
 		"icon": icon,
 		"auth": str(txt.get("auth", "")),
+		"ctl": _ctl_port(txt.get("ctl", "")),
 		"state": "visto",
 		"connected": false,
 		"degraded": hid == "",
@@ -169,6 +178,7 @@ static func _new_saved_host(hid):
 		"kind": "unknown",
 		"icon": "unknown",
 		"auth": "",
+		"ctl": 0,
 		"state": "guardado",
 		"connected": false,
 		"degraded": false,
