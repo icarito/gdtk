@@ -213,6 +213,14 @@ func _handle_line(conn, line):
 			Host.call_deferred("reload_shell")
 		"state":
 			_reply(conn, id, _state())
+		"media":
+			# Gancho de prueba/automatización del OSD de volumen/brillo: mismas
+			# acciones que las teclas multimedia ({"action":"up"|"down"|"mute"|
+			# "brightness_up"|"brightness_down"}).
+			if shell.system_osd != null:
+				_reply(conn, id, shell.system_osd.rpc_action(params))
+			else:
+				_fail(conn, id, -32003, "sin system_osd")
 		"open":
 			shell._open_by_name(str(params.get("name", "")))
 			_reply(conn, id, true)

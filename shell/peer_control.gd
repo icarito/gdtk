@@ -36,6 +36,20 @@ func start(p_shell, p_port):
 		print("PeerControl: escuchando en 0.0.0.0:", port)
 
 
+func _exit_tree():
+	stop()
+
+
+func stop():
+	if server != null:
+		server.stop()
+		server = null
+	for conn in conns:
+		if conn.peer.get_status() == StreamPeerTCP.STATUS_CONNECTED:
+			conn.peer.disconnect_from_host()
+	conns = []
+
+
 func listening():
 	return server != null and port > 0
 

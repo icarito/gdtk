@@ -15,7 +15,7 @@ var ACTIVITIES = [
 	# hardcodear una sola ubicación.
 	# K18: el receptor usa un título fijo ("Pantalla compartida") y se trata como
 	# una ventana normal; `match` lo asocia por ese título aunque el comando sea `python3`.
-	{"name": "Pantalla", "match": ["Pantalla compartida"], "wayland": ["sh", "-c", "for c in \"$HOME/gdtk/tools/gvd/gvd.py\" \"$HOME/Proyectos/gvd/gvd.py\" \"$HOME/gvd/gvd.py\" \"$(command -v gvd 2>/dev/null)\"; do [ -n \"$c\" ] && [ -f \"$c\" ] && exec python3 \"$c\" recv --sink auto; done; echo 'vecindario: gvd no encontrado (recv)' >&2"]},
+	{"name": "Pantalla", "match": ["Pantalla compartida"], "wayland": ["sh", "-c", "for c in \"$HOME/gdtk/tools/gvd/gvd.py\" \"$HOME/Proyectos/gvd/gvd.py\" \"$HOME/gvd/gvd.py\" \"$(command -v gvd 2>/dev/null)\"; do [ -n \"$c\" ] && [ -f \"$c\" ] && exec python3 \"$c\" recv --sink auto --cursor none; done; echo 'vecindario: gvd no encontrado (recv)' >&2"]},
 	# 'Salir' ya no es una actividad del anillo: es una acción de sesión del ícono central
 	# del Hogar (ver _draw_home / popup ##home_session).
 ]
@@ -38,7 +38,7 @@ const SERVICE_STATE = preload("res://service_state.gd")
 # usa el despacho de acciones del Vecindario (no ejecuta nada por sí mismo).
 const GVD_SESSION = preload("res://gvd_session.gd")
 # K17: planes puros de automatización de gvd (emisor local/receptor remoto por
-# ssh, `--position` del mapa, `--cursor sway`, suspensión del vínculo Deskflow).
+# ssh, `--position` del mapa, suspensión del vínculo Deskflow).
 const GVD_LAUNCH = preload("res://gvd_launch.gd")
 const PEER_CALL = preload("res://peer_call.gd")
 const MENU_STYLE = preload("res://menu_style.gd")
@@ -63,6 +63,13 @@ const FOCUS_FOLLOW = preload("res://focus_follow.gd")
 # Exposé como "zoom out" del escritorio: layout puro (proporciones reales) por
 # workspace, ordenado como la fila de pantallas.
 const EXPOSE_LAYOUT = preload("res://expose_layout.gd")
+# Volumen/mute/brillo + OSD (teclas multimedia del motor; ver system_osd.gd).
+const SYSTEM_OSD = preload("res://system_osd.gd")
+# K13 — Modo ventanas: flotante (default, WindowMaker) vs mosaico. Modelos puros.
+const WM_MODE = preload("res://wm_mode.gd")
+const WINDOW_CHROME = preload("res://window_chrome.gd")
+const FLOAT_LAYOUT = preload("res://float_layout.gd")
+const WM_DRAG = preload("res://wm_drag.gd")
 
 onready var compositor = Host.compositor
 var view = null          # Control que dibuja las ventanas (se crea en _ready)
@@ -182,6 +189,8 @@ var _inbox_mutex = Mutex.new()  # protege el snapshot, los flags y el want_stop
 var gvd_session_pids = {}     # key -> pid de la sesión viva
 var _gvd_launch_threads = []  # Threads de lanzamiento rastreado, reapeados en _process
 var _gvd_launch_states = []   # {"done": bool, "key": String, "pid": int, "error": String}
+var _gvd_peer_threads = []    # Threads de llamadas peer gvd_* antes de lanzar procesos
+var _gvd_peer_states = []     # {"done": bool, "key": String, "ok": bool, ...}
 var _gvd_mutex = Mutex.new()  # protege gvd_session_pids y los flags "done"
 # K17: vínculo Deskflow suspendido temporalmente mientras gvd extiende el monitor
 # virtual hacia ese vecino/dirección. Se guarda para restaurarlo al cortar la
@@ -226,6 +235,9 @@ var ui_scale_factor = 1.0
 var remote_input = null
 var input_requests = []  # pedidos de otros procesos esperando el diálogo
 var eis_cursor = null  # sin cursor propio el host (cage/sway) no lo mueve: se dibuja uno
+
+# Volumen/mute/brillo: worker + OSD (ver system_osd.gd).
+var system_osd = null
 
 # Diagnóstico de entrada (ver remote.gd state.input): cuentan eventos que llegan al shell.
 var input_motion_count = 0
@@ -295,6 +307,14 @@ var maximize_state = {}
 var handles = []         # asas de la franja enfocada: {"x", "y", "h", "i", "left", "right"}
 var hover_handle = null
 var resize_handle = null
+# K13 — Modo ventanas: flotante por defecto (ventanas libres con chrome) o mosaico.
+var wm_mode = WM_MODE.default_mode()
+var float_layout = FLOAT_LAYOUT.new()
+var window_rects = {}        # id -> Rect2 exterior (marco+barra) en modo flotante
+var wm_maximized = {}        # id -> true: maximizada dentro del modo flotante
+var chrome_drag = null       # {id, kind, edge, grab, start, from} del arrastre de chrome
+var wm_box = Rect2()         # caja de contenido del último layout flotante (para encajar)
+var _wm_last_title_click = {"id": -1, "at": 0}
 var expose_scroll = 0.0  # exposé: reservado (todo entra en pantalla; la rueda navega)
 var pan = 0.0            # scroll suave entre workspaces (Super+rueda): offset continuo
 var pan_active = false   # true mientras se panea; cae al más cercano al soltar Super
@@ -324,9 +344,9 @@ const EXPOSE_MAX_SCALE = 0.62
 const EXPOSE_CLOSE_MAX = 22.0
 # Aire entre ventanas en exposé: se encoge cada tarjeta unos px para que las ventanas
 # de un workspace partido no queden pegadas (antes las separaba el borde azul de foco).
-const EXPOSE_CARD_INSET = 3.0
+const EXPOSE_CARD_INSET = 4.0
 # Selección en exposé (sin borde): la ventana elegida se agranda y se aclara un poco.
-const EXPOSE_SEL_SCALE = 1.05
+const EXPOSE_SEL_SCALE = 1.03
 const EXPOSE_SEL_BRIGHT = 1.13
 const MOD_KEYS = [KEY_CONTROL, KEY_SHIFT, KEY_ALT, KEY_META, KEY_SUPER_L, KEY_SUPER_R]
 
@@ -495,6 +515,129 @@ func _content_rect(vp):
 	return CONTENT_LAYOUT.dialog_area(vp, frame_bar_h(vp))
 
 
+# --- K13: modo ventanas (flotante por defecto / mosaico) ---------------------
+
+func is_floating():
+	return wm_mode == WM_MODE.FLOATING
+
+
+func wm_mode_label():
+	return WM_MODE.label(wm_mode)
+
+
+# Cambia el modo global. Conserva identidad, foco y minimizadas: al pasar a flotante
+# materializa las unidades en cascada; al volver a mosaico, la fila se rearma sola.
+func set_wm_mode(mode):
+	var m = WM_MODE.normalize(mode)
+	wm_mode = m
+	pan = 0.0
+	pan_active = false
+	home_slide_since = -1
+	if is_floating():
+		float_layout.from_units(_units(), _tile_rect(get_viewport_rect().size), focused_tile)
+	else:
+		float_layout.reset()
+		wm_maximized.clear()
+	request_redraw()
+
+
+func cycle_wm_mode():
+	set_wm_mode(WM_MODE.toggled(wm_mode))
+
+
+# "Acomodar ventanas" (menú del bloque): re-cascada en flotante, re-fila en mosaico.
+func arrange_windows():
+	if is_floating():
+		float_layout.from_units(_units(), _tile_rect(get_viewport_rect().size), focused_tile)
+		wm_maximized.clear()
+	request_redraw()
+
+
+# Alto del chrome y bisel, escalados por la UI (mismos números base del modelo).
+func _chrome_title_h():
+	return WINDOW_CHROME.TITLE_H * get_imgui_scale()
+
+
+func _chrome_border():
+	return WINDOW_CHROME.BORDER * get_imgui_scale()
+
+
+# Materializa la colocación flotante del frame actual: sincroniza float_layout con
+# `tiles`, deriva el rect de contenido (tile_rects, lo que ve el cliente) y ordena
+# los nodos del view según el z-order para que el solape siga al foco.
+func _compute_float_layout(cr):
+	wm_box = cr
+	for id in float_layout.ids_z():
+		if not tiles.has(id):
+			float_layout.remove(id)
+	for id in tiles:
+		if minimized.has(id):
+			continue
+		if not float_layout.has(id):
+			float_layout.place_new(id, cr)
+		else:
+			float_layout.move_to(id, float_layout.rect(id).position, cr)
+	if float_layout.has(focused_tile):
+		float_layout.raise(focused_tile)
+	var th = _chrome_title_h()
+	var bd = _chrome_border()
+	window_rects = {}
+	for id in tiles:
+		if minimized.has(id):
+			continue
+		var fr = cr if (maximize_state.has(id) or wm_maximized.has(id)) else float_layout.rect(id)
+		if fr == null:
+			fr = cr
+		window_rects[id] = fr
+		tile_rects[id] = WINDOW_CHROME.content_rect(fr, th, bd)
+	var i = 0
+	for id in float_layout.ids_z():
+		var n = tile_nodes.get(id)
+		if n != null and is_instance_valid(n):
+			view.move_child(n, i)
+			i += 1
+
+
+# Orden de hit-test de las ventanas: de arriba hacia abajo (z-order) en flotante;
+# el orden de `tiles` en mosaico. Las que aún no están en el layout van al final.
+func _hit_order_ids():
+	if not is_floating():
+		return tiles
+	var out = float_layout.ids_z()
+	out.invert()
+	for id in tiles:
+		if not out.has(id):
+			out.append(id)
+	return out
+
+
+# Zona de chrome bajo el punto: la ventana flotante más arriba cuyo marco la
+# contenga (excepto si el punto cae en el contenido, que va al cliente).
+func _chrome_pick(pos):
+	if not is_floating():
+		return null
+	var th = _chrome_title_h()
+	var bd = _chrome_border()
+	var scale = get_imgui_scale()
+	var btn = WINDOW_CHROME.BTN * scale
+	var bhit = WINDOW_CHROME.BORDER_HIT * scale
+	for id in _hit_order_ids():
+		if id == fullscreen_id or minimized.has(id) or not tiles.has(id):
+			continue
+		var fr = window_rects.get(id, null)
+		if fr == null:
+			continue
+		var part = WINDOW_CHROME.hit(pos, fr, th, bd, btn, bhit)
+		if part == "":
+			continue
+		# La ventana de arriba que contiene el punto manda: su contenido va al cliente
+		# y no se busca chrome de ventanas de abajo.
+		if part == "content":
+			return null
+		return {"id": id, "part": part}
+	return null
+
+
 # Ícono del equipo local: el mismo `kind` que publica el Vecindario (o "unknown",
 # que cae al ícono de escritorio). Es el que va en el bloque Inicio del Frame y en
 # la placa central del mapa, en lugar de una casita genérica.
@@ -569,6 +712,7 @@ func _ready():
 	compositor.connect("toplevel_activate", self, "_on_toplevel_activate")
 	compositor.connect("toplevel_minimize", self, "_on_toplevel_minimize")
 	compositor.connect("toplevel_maximize", self, "_on_toplevel_maximize")
+	compositor.connect("toplevel_fullscreen", self, "_on_toplevel_fullscreen")
 	# Cambios de ventanas: rearmar la UI (el Frame las lista, recovery espera la suya).
 	compositor.connect("toplevel_added", self, "_redraw_on_signal")
 	compositor.connect("toplevel_removed", self, "_redraw_on_signal")
@@ -682,6 +826,10 @@ func _ready():
 	remote_input = Host.remote_input
 	remote_input.connect("access_requested", self, "_on_input_access")
 	eis_cursor = _make_eis_cursor()
+	# Volumen/brillo: el worker resuelve backends y lee el estado inicial; el OSD se
+	# dibuja al final de _imgui_frame.
+	system_osd = SYSTEM_OSD.new()
+	system_osd.setup(self)
 
 	# Sin redibujo continuo: ImGui se arma sólo con input (a input_hz), con
 	# request_redraw() (commits Wayland, señales, control remoto) o al cambiar el minuto (reloj).
@@ -881,6 +1029,10 @@ func _process(_delta):
 	_plan_poll()
 	# Configuración: reapa el Thread de lectura y aplica acento/fondo del snapshot.
 	settings_poll()
+	# Volumen/brillo: copia el estado del worker y mantiene vivo el OSD mientras se
+	# desvanece (mismo patrón que el resto de los workers).
+	if system_osd != null and system_osd.poll():
+		request_redraw()
 	if screenshot_path == "":
 		var sleep = SLEEP_IDLE if now - last_activity > IDLE_MS else SLEEP_ACTIVE
 		if OS.low_processor_usage_mode_sleep_usec != sleep:
@@ -985,6 +1137,9 @@ func _imgui_frame():
 	_draw_input_requests()
 	# HUD de debug global (autoload DebugHud): Super+F6 lo abre en cualquier actividad (frame.gd).
 	DebugHud.draw(self)
+	# OSD de volumen/brillo, por encima de todo y efímero.
+	if system_osd != null:
+		system_osd.draw(self)
 
 	frame_count += 1
 	_run_test_logic()
@@ -1078,12 +1233,19 @@ func _compute_slide_layout():
 	if fullscreen_id >= 0 and tiles.has(fullscreen_id):
 		for id in tiles:
 			tile_rects[id] = Rect2(0.0, 0.0, vp.x, vp.y) if id == fullscreen_id else Rect2(vp.x * 2.0, 0.0, vp.x, vp.y)
+		window_rects.clear()
 		return
+	var cr = _tile_rect(vp)
+	# K13: en flotante no hay fila; las ventanas se colocan libres dentro del hueco
+	# central (cascada, arrastre y z-order los lleva float_layout).
+	if is_floating():
+		_compute_float_layout(cr)
+		return
+	window_rects.clear()
 	var s = _row_s(units)
 	# Cada pantalla (top-level) vive bajo la barra superior con alto completo; la
 	# fila desliza con el ancho del viewport (consistente con pan/_home_x), así los
 	# vecinos quedan a ±ancho. Sólo los diálogos se limitan al hueco de dos barras.
-	var cr = _tile_rect(vp)
 	for u in range(units.size()):
 		var area = Rect2(cr.position.x + (float(u) - s) * vp.x, cr.position.y, cr.size.x, cr.size.y)
 		var members = units[u]
@@ -1120,7 +1282,7 @@ func _split_rects(members, area):
 # entre cada par, para dibujar/arrastrar la redimensión.
 func _compute_handles():
 	handles = []
-	if expose or fullscreen_id >= 0 or _at_home() or _home_anim_active():
+	if expose or fullscreen_id >= 0 or _at_home() or _home_anim_active() or is_floating():
 		hover_handle = null
 		resize_handle = null
 		return
@@ -1682,6 +1844,8 @@ func _tick_home_slide():
 func _pan_by(amount):
 	if _home_anim_active():
 		return
+	if is_floating():
+		return
 	var units = _units()
 	var n = units.size()
 	if n == 0:
@@ -1722,6 +1886,8 @@ func _snap_pan():
 # (junto a otra). Maximizar (Alt+F10) es lo mismo pero ocupando todo el workspace.
 func _snap_tile(dir):
 	if not tile_mode or focused_tile < 0:
+		return
+	if is_floating():
 		return
 	var units = _units()
 	var ui = _focused_unit_index(units)
@@ -1918,6 +2084,7 @@ func _minimize_window(id):
 		fullscreen_id = -1
 	_remove_from_group(id)
 	maximize_state.erase(id)
+	wm_maximized.erase(id)
 	minimized[id] = true
 	tiles.erase(id)
 	tile_fade.erase(id)
@@ -1997,6 +2164,13 @@ func _maximize_window(id):
 	if id < 0 or not tiles.has(id):
 		return
 	fullscreen_id = -1
+	# K13: en flotante maximizar es ocupar todo el hueco central conservando la
+	# geometría flotante recordada (se restaura con _restore_maximized_window).
+	if is_floating():
+		wm_maximized[id] = true
+		_focus_tile(id)
+		request_redraw()
+		return
 	var g = _group_of(id)
 	if g != null:
 		var weights = {}
@@ -2012,6 +2186,12 @@ func _maximize_window(id):
 # Los miembros que se cerraron entretanto simplemente no vuelven.
 func _restore_maximized_window(id):
 	if id < 0:
+		return
+	# K13: en flotante basta con soltar la marca; float_layout conserva el rect previo.
+	if is_floating():
+		wm_maximized.erase(id)
+		_focus_tile(id)
+		request_redraw()
 		return
 	var st = maximize_state.get(id)
 	maximize_state.erase(id)
@@ -2041,6 +2221,12 @@ func _restore_maximized_window(id):
 # entero <-> solo una parte).
 func _toggle_maximize_window(id):
 	if id < 0 or not tiles.has(id):
+		return
+	if is_floating():
+		if wm_maximized.has(id):
+			_restore_maximized_window(id)
+		else:
+			_maximize_window(id)
 		return
 	if maximize_state.has(id):
 		_restore_maximized_window(id)
@@ -3557,6 +3743,7 @@ func _start_publishers():
 	var avahi = _publisher.detect_avahi()
 	if not avahi.available:
 		return   # degradado, sin error
+	_reap_stray_publishers()
 	var identity = PUBLISH_PLAN.local_identity(_local_hostname(), local_device_kind())
 	# Endpoint del canal peer (LAN, sin ssh) para que un vecino nos pida abrir el
 	# receptor de pantalla. Vacío si el canal no está escuchando.
@@ -3567,6 +3754,14 @@ func _start_publishers():
 	var plan = PUBLISH_PLAN.new().build(identity, caps, avahi.path)
 	for entry in plan.services:
 		_publish_launch(entry)
+
+
+func _reap_stray_publishers():
+	var user = OS.get_environment("USER")
+	if user == "":
+		return
+	OS.execute("pkill", ["-TERM", "-u", user, "-f",
+		"avahi-publish-service gdtk (gvd|deskflow|clip)"], true)
 
 
 # Lanza un anuncio sin bloquear; el pid queda en `service_pids` bajo _svc_mutex y
@@ -4083,6 +4278,10 @@ func _exit_tree():
 	if neighborhood != null:
 		neighborhood.stop()
 		neighborhood = null
+	# Volumen/brillo: detiene el worker y espera a que termine.
+	if system_osd != null:
+		system_osd.shutdown()
+		system_osd = null
 	_stop_service_worker()
 	# Anuncios mDNS: sus Threads ya terminaron con el worker; matar los pids vivos.
 	_stop_publishers()
@@ -4106,6 +4305,10 @@ func _exit_tree():
 		th.wait_to_finish()
 	_gvd_launch_threads = []
 	_gvd_launch_states = []
+	for th in _gvd_peer_threads:
+		th.wait_to_finish()
+	_gvd_peer_threads = []
+	_gvd_peer_states = []
 	# Escrituras de config de plan pendientes: no dejarlas a medias.
 	for th in _plan_write_threads:
 		th.wait_to_finish()
@@ -4861,9 +5064,9 @@ func _stop_gvd_session(host_id):
 
 
 # --- K17: automatización del monitor virtual (gvd) ---------------------------
-# El shell lanza/corta gvd solo: emisor local si es GNOME, receptor remoto por
-# ssh (buzón), receptor local en un tile (actividad "Pantalla"), `--position` del
-# mapa y `--cursor sway` si hay SWAYSOCK; además suspende y restaura el vínculo
+# El shell lanza/corta gvd solo: emisor local si puede capturar, receptor remoto
+# por ssh (buzón), receptor local en un tile (actividad "Pantalla") y
+# `--position` del mapa; además suspende y restaura el vínculo
 # Deskflow de esa dirección. Nada bloquea el render: los procesos van por
 # _launch_tracked (Threads) y el estado se lee de caches.
 
@@ -4872,6 +5075,14 @@ func _screen_keys(host_id):
 
 
 func _screen_session_active(host_id):
+	var id = String(host_id)
+	_gvd_mutex.lock()
+	for st in _gvd_peer_states:
+		if String(st.get("key", "")) == id and not bool(st.get("done", false)) \
+				and not bool(st.get("cancelled", false)):
+			_gvd_mutex.unlock()
+			return true
+	_gvd_mutex.unlock()
 	for k in _screen_keys(host_id):
 		if _has_tracked(k):
 			return true
@@ -4880,6 +5091,11 @@ func _screen_session_active(host_id):
 
 func _stop_gvd_screen(host_id):
 	var id = String(host_id)
+	_gvd_mutex.lock()
+	for st in _gvd_peer_states:
+		if String(st.get("key", "")) == id:
+			st.cancelled = true
+	_gvd_mutex.unlock()
 	for k in _screen_keys(id):
 		_stop_tracked(k)
 	_close_pantalla_window()
@@ -4887,12 +5103,43 @@ func _stop_gvd_screen(host_id):
 
 
 func _close_pantalla_window():
-	if wayland_ids.has("Pantalla") and _id_alive(wayland_ids["Pantalla"]):
-		compositor.close(wayland_ids["Pantalla"])
+	for id in _pantalla_window_ids():
+		compositor.close(id)
+	_pending_remove("Pantalla")
+	starting.erase("Pantalla")
+	_kill_pantalla_receivers()
+
+
+func _pantalla_window_ids():
+	var out = []
+	for name in wayland_ids.keys():
+		var id = int(wayland_ids[name])
+		if not _id_alive(id):
+			continue
+		if String(name) == "Pantalla" or _is_pantalla_window(id):
+			out.append(id)
+	for id in compositor.get_ids():
+		if compositor.get_parent_id(id) > 0 or out.has(id):
+			continue
+		if _is_pantalla_window(id):
+			out.append(id)
+	return out
+
+
+func _is_pantalla_window(id):
+	return String(compositor.get_title(id)) == "Pantalla compartida" \
+		or String(compositor.get_app_id(id)) == "gvd.SharedScreen"
+
+
+func _kill_pantalla_receivers():
+	var user = OS.get_environment("USER")
+	if user == "":
+		return
+	OS.execute("pkill", ["-TERM", "-u", user, "-f", "gvd.py recv"], true)
 
 
 # Abre el receptor local en un tile: reutiliza la actividad wayland "Pantalla"
-# con el argv calculado (`--cursor sway` sólo si la sesión expone SWAYSOCK).
+# con el argv calculado.
 func _open_pantalla_window(gvd_path, has_sway, port):
 	var plan = GVD_LAUNCH.local_recv_argv(gvd_path, has_sway, port)
 	if not bool(plan.get("ok", false)):
@@ -4970,21 +5217,48 @@ func _peer_is_confirmed(hid):
 
 # Llama al canal peer del vecino. Devuelve true si ejecutó. Si es la primera vez,
 # el vecino provisiona y devuelve su token (TOFU) y lo guardamos para la próxima.
-func _peer_call(peer_host, peer_id, method, params = {}):
+func _peer_endpoint_for(host_id):
+	var host = _neighborhood_host(host_id)
+	if host == null:
+		return {"ok": false, "peer": "", "port": 0, "error": "host no está en el Vecindario"}
+	var port = int(host.get("ctl", 0))
+	if port <= 0:
+		return {"ok": false, "peer": "", "port": 0, "error": "sin canal peer"}
+	var target = INBOX_MODEL.ssh_target(host)
+	if not bool(target.get("ok", false)):
+		return {"ok": false, "peer": "", "port": 0, "error": "host sin dirección"}
+	return {"ok": true, "peer": String(target.get("peer", "")), "port": port, "error": ""}
+
+
+func _peer_call_result(peer_host, peer_id, method, params = {}, ctl_port = 0):
+	var out = {"ok": false, "error": "", "response": {}}
 	var host = String(peer_host).strip_edges()
 	if host == "":
-		return false
+		out.error = "vecino sin dirección"
+		return out
 	if host.find(".") < 0:
 		host = host + ".local"
-	var resp = PEER_CALL.request(host, _peer_port(), _local_hid(),
+	var port = int(ctl_port)
+	if port <= 0:
+		port = _peer_port()
+	var r = PEER_CALL.request_status(host, port, _local_hid(),
 		_peer_token_get(peer_id), method, params)
+	var resp = r.get("response", {})
 	if resp.empty():
-		return false
+		out.error = String(r.get("error", "sin respuesta"))
+		return out
 	if not bool(resp.get("ok", false)):
-		return false
+		out.error = String(resp.get("error", "rechazado"))
+		return out
 	if resp.has("token"):
 		_peer_token_set(peer_id, String(resp.token))
-	return true
+	out.ok = true
+	out.response = resp
+	return out
+
+
+func _peer_call(peer_host, peer_id, method, params = {}):
+	return bool(_peer_call_result(peer_host, peer_id, method, params).ok)
 
 
 # --- Acciones que ejecuta el canal peer en ESTE host ----------------------------
@@ -4993,23 +5267,20 @@ func _peer_gvd_open(port, _from):
 	var path = _gvd_path_local()
 	if path == "":
 		return false
+	if _pantalla_window_ids().empty():
+		_pending_remove("Pantalla")
+		starting.erase("Pantalla")
 	_open_pantalla_window(path, _has_sway_socket(), int(port))
 	return true
 
 
 func _peer_gvd_stop():
-	for i in range(ACTIVITIES.size()):
-		if String(ACTIVITIES[i].get("name", "")) == "Pantalla":
-			ACTIVITIES[i]["wayland"] = null
-			return true
+	_close_pantalla_window()
 	return true
 
 
 func _peer_gvd_active():
-	for i in range(ACTIVITIES.size()):
-		if String(ACTIVITIES[i].get("name", "")) == "Pantalla":
-			return ACTIVITIES[i].get("wayland", null) != null
-	return false
+	return not _pantalla_window_ids().empty()
 
 
 func _peer_gvd_send(_port, _target):
@@ -5028,17 +5299,15 @@ func _has_sway_socket():
 	return OS.get_environment("SWAYSOCK").strip_edges() != ""
 
 
-# ¿Hay canal autorizado hacia este host para abrir su receptor (ssh/buzón)? Es el
-# mismo canal que usa `_start_gvd_screen` para el receptor remoto; el Vecindario lo
-# consulta para habilitar las acciones de pantalla cuando el peer anuncia
-# state=capable (no mantiene receptor escuchando). Barato: lookup + modelo puro.
+# ¿Hay canal peer autorizado hacia este host para abrir su receptor? Es el mismo
+# canal que usa `_start_gvd_screen`; pantalla on-demand no cae a ssh.
 func provision_channel_for(host_id):
-	return bool(_inbox_peer_for(String(host_id)).get("ok", false))
+	return bool(_peer_endpoint_for(String(host_id)).get("ok", false))
 
 
-# Arranca una sesión de pantalla hacia `host_id`. `share_my_screen` emite local
-# (si GNOME) y abre el receptor del peer por ssh; `use_as_screen` abre el receptor
-# local en un tile y pide al peer (GNOME) que emita. Nunca bloquea.
+# Arranca una sesión de pantalla hacia `host_id`. `share_my_screen` emite local y
+# abre el receptor del peer por el canal peer LAN; `use_as_screen` abre el receptor
+# local en un tile y pide al peer que emita. Nunca bloquea.
 func _start_gvd_screen(host_id, action):
 	var id = String(host_id)
 	var plan = action.get("plan", null) if typeof(action) == TYPE_DICTIONARY else null
@@ -5047,7 +5316,7 @@ func _start_gvd_screen(host_id, action):
 		activity_error = "pantalla: no se encontró el programa de pantalla"
 		return
 	var direction = _direction_for(id)
-	var target = _inbox_peer_for(id)
+	var target = _peer_endpoint_for(id)
 	var aid = String(action.get("id", "")) if typeof(action) == TYPE_DICTIONARY else ""
 	if aid == "share_my_screen":
 		if not GVD_LAUNCH.local_can_emit(OS.get_environment("XDG_CURRENT_DESKTOP"),
@@ -5072,34 +5341,30 @@ func _start_gvd_screen(host_id, action):
 		if not bool(sp.get("ok", false)):
 			activity_error = "pantalla: " + String(sp.get("error", ""))
 			return
-		_launch_tracked(id, String(sp.get("cmd", "")), sp.get("args", []))
-		_suspend_deskflow_link(id, direction)
-		if bool(target.get("ok", false)):
-			var peer_host = String(target.get("peer", ""))
-			var port = GVD_LAUNCH.port_of_plan(plan)
-			# Canal peer (LAN, sin ssh): pedirle al vecino que abra su receptor.
-			var done = _peer_call(peer_host, id, "gvd_recv",
-				{"port": port, "from": _local_hostname()})
-			if not done:
-				# Fallback: canal autorizado clásico (ssh/buzón).
-				var rp = GVD_LAUNCH.remote_recv_argv(peer_host, _has_sway_socket())
-				if bool(rp.get("ok", false)):
-					_launch_tracked(GVD_LAUNCH.remote_recv_key(id),
-						String(rp.get("cmd", "")), rp.get("args", []))
+		if not bool(target.get("ok", false)):
+			activity_error = "pantalla: " + String(target.get("error", "sin canal peer"))
+			return
+		var peer_host = String(target.get("peer", ""))
+		var port = GVD_LAUNCH.port_of_plan(plan)
+		# Canal peer (LAN, sin ssh): pedirle al vecino que abra su receptor antes
+		# de crear el monitor virtual local. Así no se anuncia "activo" sin ventana
+		# del otro lado.
+		_queue_gvd_peer_launch(id, peer_host, int(target.get("port", 0)),
+			"gvd_recv", {"port": port, "from": _local_hostname()},
+			String(sp.get("cmd", "")), sp.get("args", []), direction)
 	else:
 		_open_pantalla_window(gvd_path, _has_sway_socket(), GVD_LAUNCH.port_of_plan(plan))
 		if bool(target.get("ok", false)):
 			var peer_host2 = String(target.get("peer", ""))
 			var port2 = GVD_LAUNCH.port_of_plan(plan)
-			var done2 = _peer_call(peer_host2, id, "gvd_send",
-				{"port": port2, "target": _local_hostname()})
-			if not done2:
-				var rp2 = GVD_LAUNCH.remote_send_argv(peer_host2,
-					_local_hostname(), port2,
-					GVD_LAUNCH.position_for(direction, true))
-				if bool(rp2.get("ok", false)):
-					_launch_tracked(GVD_LAUNCH.remote_send_key(id),
-						String(rp2.get("cmd", "")), rp2.get("args", []))
+			var sent = _peer_call_result(peer_host2, id, "gvd_send",
+				{"port": port2, "target": _local_hostname()}, int(target.get("port", 0)))
+			if not bool(sent.ok):
+				_close_pantalla_window()
+				activity_error = "pantalla: el vecino no pudo emitir (" + String(sent.error) + ")"
+		else:
+			_close_pantalla_window()
+			activity_error = "pantalla: " + String(target.get("error", "sin canal peer"))
 	request_redraw()
 
 
@@ -5130,6 +5395,68 @@ func _restore_deskflow_link(host_id):
 	if cmd == "":
 		return
 	_launch_tracked(HOST_DISPATCH.deskflow_session_key(id), cmd, saved.get("args", []))
+
+
+func _queue_gvd_peer_launch(host_id, peer_host, ctl_port, method, params, cmd, args, direction):
+	var id = String(host_id)
+	var state = {
+		"done": false,
+		"cancelled": false,
+		"key": id,
+		"peer_id": id,
+		"peer_host": String(peer_host),
+		"ctl_port": int(ctl_port),
+		"local_hid": _local_hid(),
+		"token": _peer_token_get(id),
+		"method": String(method),
+		"params": params if typeof(params) == TYPE_DICTIONARY else {},
+		"cmd": String(cmd),
+		"args": args if typeof(args) == TYPE_ARRAY else [],
+		"direction": String(direction),
+		"ok": false,
+		"error": "",
+		"response": {},
+	}
+	var th = Thread.new()
+	_gvd_mutex.lock()
+	_gvd_peer_threads.append(th)
+	_gvd_peer_states.append(state)
+	_gvd_mutex.unlock()
+	th.start(self, "_gvd_peer_work", {"state": state})
+	request_redraw()
+
+
+func _gvd_peer_work(userdata):
+	var state = userdata.state
+	var r = PEER_CALL.request_status(String(state.peer_host), int(state.ctl_port),
+		String(state.local_hid), String(state.token), String(state.method),
+		state.params, 4500)
+	var resp = r.get("response", {})
+	_gvd_mutex.lock()
+	state.response = resp
+	if resp.empty():
+		state.error = String(r.get("error", "sin respuesta"))
+	elif not bool(resp.get("ok", false)):
+		state.error = String(resp.get("error", "rechazado"))
+	else:
+		state.ok = true
+	state.done = true
+	_gvd_mutex.unlock()
+
+
+func _finish_gvd_peer_state(state):
+	if bool(state.get("cancelled", false)):
+		return
+	var resp = state.get("response", {})
+	if typeof(resp) == TYPE_DICTIONARY and resp.has("token"):
+		_peer_token_set(String(state.get("peer_id", "")), String(resp.token))
+	if not bool(state.get("ok", false)):
+		activity_error = "pantalla: el vecino no abrió el receptor (" \
+			+ String(state.get("error", "sin respuesta")) + ")"
+		return
+	_launch_tracked(String(state.get("key", "")), String(state.get("cmd", "")),
+		state.get("args", []))
+	_suspend_deskflow_link(String(state.get("key", "")), String(state.get("direction", "")))
 
 
 # Lanza un plan (gvd send, servidor Deskflow) en un Thread de un solo uso; captura
@@ -5173,6 +5500,17 @@ func _tracked_launch_work(userdata):
 # Reapea los Threads de lanzamiento terminados (no bloquea).
 func _gvd_poll():
 	var reaped = false
+	for i in range(_gvd_peer_threads.size() - 1, -1, -1):
+		var pstate = _gvd_peer_states[i]
+		_gvd_mutex.lock()
+		var pdone = bool(pstate.get("done", false))
+		_gvd_mutex.unlock()
+		if pdone:
+			_gvd_peer_threads[i].wait_to_finish()
+			_gvd_peer_threads.remove(i)
+			_gvd_peer_states.remove(i)
+			_finish_gvd_peer_state(pstate)
+			reaped = true
 	for i in range(_gvd_launch_threads.size() - 1, -1, -1):
 		var state = _gvd_launch_states[i]
 		_gvd_mutex.lock()
@@ -5203,6 +5541,12 @@ func _host_session_state(host_id):
 				active = true
 				break
 	var starting = false
+	for st in _gvd_peer_states:
+		if bool(st.get("done", false)) or bool(st.get("cancelled", false)):
+			continue
+		if String(st.get("key", "")) == id:
+			starting = true
+			break
 	for st in _gvd_launch_states:
 		if bool(st.get("done", false)):
 			continue
@@ -5422,6 +5766,26 @@ func _on_toplevel_maximize(id, maximized):
 	request_redraw()
 
 
+# La app pide pantalla completa (video de YouTube, etc.): la ventana ocupa todo el
+# viewport y se esconde el Frame (mismo estado que Alt+F11). Al salir vuelve a su
+# pantalla. Sólo aplica a ventanas gestionadas (raíz en `tiles`).
+func _on_toplevel_fullscreen(id, fullscreen):
+	var root = _root_of(id)
+	if not tiles.has(root):
+		return
+	if fullscreen == 0:
+		if fullscreen_id == root:
+			fullscreen_id = -1
+		request_redraw()
+		return
+	if focused_tile != root:
+		_focus_tile(root)
+	fullscreen_id = root
+	if frame != null:
+		frame.set_visible(false)
+	request_redraw()
+
+
 func _add_dialog(id):
 	if not dialogs.has(id):
 		dialogs.append(id)
@@ -5580,6 +5944,7 @@ func _on_toplevel_removed(id):
 		fullscreen_id = -1
 	_remove_from_group(id)
 	maximize_state.erase(id)
+	wm_maximized.erase(id)
 	minimized.erase(id)
 	unit_focus.erase(id)
 	tiles.erase(id)
@@ -5615,6 +5980,12 @@ func _refocus_dialog():
 
 
 func _on_view_input(event):
+	if _capture_remote_input_event(event):
+		return
+	# K13: en modo flotante, la barra de título y los botones de la ventana se
+	# resuelven antes que el contenido del cliente (y antes del arrastre al Frame).
+	if not expose and is_floating() and _on_chrome_input(event):
+		return
 	if window_dragging:
 		return
 	if expose:
@@ -5683,6 +6054,93 @@ func _on_view_input(event):
 				_focus_tile(hit.id)
 
 
+# --- K13: input del chrome flotante ------------------------------------------
+
+# Resuelve la barra de título/botones/bordes de las ventanas flotantes. Devuelve
+# true si el evento se consumió (no debe llegar al cliente).
+func _on_chrome_input(event):
+	if event is InputEventMouseMotion:
+		if chrome_drag != null:
+			_chrome_drag_motion(event.position)
+			return true
+		return _chrome_pick(event.position) != null
+	if not (event is InputEventMouseButton) or event.button_index != BUTTON_LEFT:
+		return false
+	if not event.pressed:
+		var was_dragging = chrome_drag != null
+		chrome_drag = null
+		if was_dragging:
+			window_dragging = false
+			request_redraw()
+		return was_dragging
+	var pick = _chrome_pick(event.position)
+	if pick == null:
+		return false
+	var id = int(pick.id)
+	var part = String(pick.part)
+	if part == "min":
+		chrome_drag = {"id": id, "kind": "press"}
+		_minimize_window(id)
+		return true
+	if part == "close":
+		chrome_drag = {"id": id, "kind": "press"}
+		_close_window_id(id)
+		return true
+	var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(get_viewport_rect().size)
+	if part == "title":
+		# Doble clic en la barra: maximizar/restaurar. Un clic simple levanta y arrastra.
+		var now = OS.get_ticks_msec()
+		var dbl = int(_wm_last_title_click.id) == id and now - int(_wm_last_title_click.at) < 350
+		_wm_last_title_click = {"id": id, "at": now}
+		if dbl:
+			_toggle_maximize_window(id)
+			return true
+		if wm_maximized.has(id):
+			wm_maximized.erase(id)
+			float_layout.set_rect(id, window_rects.get(id, box))
+		if not float_layout.has(id):
+			float_layout.place_new(id, box)
+		_focus_tile(id)
+		var fr = window_rects.get(id, box)
+		chrome_drag = {"id": id, "kind": "move", "grab": event.position - fr.position}
+		window_dragging = true
+		request_redraw()
+		return true
+	if WINDOW_CHROME.is_edge(part):
+		if not float_layout.has(id):
+			float_layout.place_new(id, box)
+		_focus_tile(id)
+		chrome_drag = {"id": id, "kind": "resize", "edge": part,
+			"start": window_rects.get(id, box), "from": event.position}
+		window_dragging = true
+		request_redraw()
+		return true
+	return false
+
+
+func _chrome_drag_motion(pos):
+	if chrome_drag == null:
+		return
+	var id = int(chrome_drag.id)
+	if not tiles.has(id):
+		chrome_drag = null
+		window_dragging = false
+		return
+	var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(get_viewport_rect().size)
+	var kind = String(chrome_drag.kind)
+	if kind != "move" and kind != "resize":
+		return
+	if kind == "move":
+		float_layout.move_to(id, pos - chrome_drag.grab, box)
+	else:
+		var nr = WINDOW_CHROME.resized(chrome_drag.start, String(chrome_drag.edge), pos - chrome_drag.from)
+		float_layout.resize_to(id, nr, box)
+	# Durante el arrastre la ventana debe seguir al puntero 1:1, sin la animación
+	# de reacomodo (que haría un efecto elástico).
+	instant_switch = true
+	request_redraw()
+
+
 # Lazy focus follows mouse: al mover el puntero sobre otra ventana (o su diálogo)
 # se le da el foco; no reenfoca la misma ni restaura una minimizada. Sólo se llama
 # con movimiento real del puntero (ver _on_view_input), nunca al abrir una ventana
@@ -5717,7 +6175,7 @@ func _view_hit_test(pos):
 			# El compositor espera coords del buffer: la caja alinea la geometry en
 			# rect.position, así que se suma geo.position.
 			return {"id": d, "pos": pos - rect.position + _dialog_geo(d).position, "dialog": d}
-	for id in tiles:
+	for id in _hit_order_ids():
 		var r = tile_rects.get(id)
 		if r == null:
 			continue
@@ -5738,41 +6196,55 @@ func _view_hit_test(pos):
 # Teclear en el Home lleva a la búsqueda de apps.
 # En _input (Godot 3 lo llama también en ImGuiCanvas): con el puntero sobre el
 # home ImGui marca todo como manejado y a _unhandled_input no llega nada.
-func _input(event):
-	last_activity = OS.get_ticks_msec()
+func _capture_remote_input_event(event):
 	# InputCapture toma exclusivamente el hardware local. Los eventos EIS que entran
 	# desde otro equipo tienen DEVICE_ID y nunca deben volver a Deskflow.
-	if remote_input != null and event.device != RemoteInput.DEVICE_ID:
-		var captured = false
-		var now = OS.get_ticks_msec()
-		if event is InputEventMouseMotion:
-			captured = remote_input.capture_motion(event.position, event.relative, now)
-		elif event is InputEventMouseButton:
-			if event.button_index == BUTTON_WHEEL_UP and event.pressed:
-				captured = remote_input.capture_scroll(0.0, -1.0, now)
-			elif event.button_index == BUTTON_WHEEL_DOWN and event.pressed:
-				captured = remote_input.capture_scroll(0.0, 1.0, now)
-			elif event.button_index == BUTTON_WHEEL_LEFT and event.pressed:
-				captured = remote_input.capture_scroll(-1.0, 0.0, now)
-			elif event.button_index == BUTTON_WHEEL_RIGHT and event.pressed:
-				captured = remote_input.capture_scroll(1.0, 0.0, now)
-			else:
-				captured = remote_input.capture_button(event.button_index, event.pressed, now)
-		elif event is InputEventKey:
-			var physical = event.physical_scancode if event.physical_scancode != 0 else event.scancode
-			captured = remote_input.capture_key(physical, event.pressed, now)
-		if captured:
-			# Captura activa: pointer lock para recibir deltas crudos del compositor
-			# (sway clava el puntero en el borde y sin esto `relative` es ~0).
-			if not mouse_locked:
-				Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
-				mouse_locked = true
-			get_tree().set_input_as_handled()
-			return
-		if mouse_locked:
-			# Deskflow soltó el control: devolver puntero y cursor al escritorio local.
-			Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
-			mouse_locked = false
+	if remote_input == null or event.device == RemoteInput.DEVICE_ID:
+		return false
+	var captured = false
+	var now = OS.get_ticks_msec()
+	if event is InputEventMouseMotion:
+		captured = remote_input.capture_motion(event.position, event.relative, now)
+	elif event is InputEventMouseButton:
+		if event.button_index == BUTTON_WHEEL_UP and event.pressed:
+			captured = remote_input.capture_scroll(0.0, -1.0, now)
+		elif event.button_index == BUTTON_WHEEL_DOWN and event.pressed:
+			captured = remote_input.capture_scroll(0.0, 1.0, now)
+		elif event.button_index == BUTTON_WHEEL_LEFT and event.pressed:
+			captured = remote_input.capture_scroll(-1.0, 0.0, now)
+		elif event.button_index == BUTTON_WHEEL_RIGHT and event.pressed:
+			captured = remote_input.capture_scroll(1.0, 0.0, now)
+		else:
+			captured = remote_input.capture_button(event.button_index, event.pressed, now)
+	elif event is InputEventKey:
+		var physical = event.physical_scancode if event.physical_scancode != 0 else event.scancode
+		captured = remote_input.capture_key(physical, event.pressed, now)
+	if captured:
+		# Captura activa: pointer lock para recibir deltas crudos del compositor
+		# (sway clava el puntero en el borde y sin esto `relative` es ~0).
+		if not mouse_locked:
+			Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+			mouse_locked = true
+		get_tree().set_input_as_handled()
+		return true
+	if mouse_locked:
+		# Deskflow soltó el control: devolver puntero y cursor al escritorio local.
+		Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
+		mouse_locked = false
+	return false
+
+
+func _input(event):
+	last_activity = OS.get_ticks_msec()
+	if _capture_remote_input_event(event):
+		return
+	# Teclas multimedia (volumen/brillo): el shell las consume y muestra el OSD; no
+	# van a la app. En _input (no en _unhandled_input) para que también las vea con
+	# el puntero sobre el Home, donde ImGui marca todo como manejado.
+	if system_osd != null and system_osd.handle_input(event):
+		request_redraw()
+		get_tree().set_input_as_handled()
+		return
 	if event is InputEventMouseMotion:
 		input_motion_count += 1
 		# Drag del anillo (Hogar): el clic normal lo resuelve ImGui; acá sólo se

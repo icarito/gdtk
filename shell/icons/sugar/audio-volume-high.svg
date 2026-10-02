@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd" [
+  <!ENTITY fill_color "#FFFFFF">
+  <!ENTITY stroke_color "#010101">
+]>
+<svg xmlns="http://www.w3.org/2000/svg" width="55" height="55" viewBox="0 0 55 55">
+  <g id="audio-volume-high">
+    <path d="M 10 22 L 20 22 L 30 14 L 30 41 L 20 33 L 10 33 Z" fill="&fill_color;" stroke="&stroke_color;" stroke-linejoin="round" stroke-width="3"/>
+    <path d="M 34 21 Q 40 27.5 34 34" fill="none" stroke="&stroke_color;" stroke-linecap="round" stroke-width="3"/>
+    <path d="M 39 16 Q 49 27.5 39 39" fill="none" stroke="&stroke_color;" stroke-linecap="round" stroke-width="3"/>
+  </g>
+</svg>

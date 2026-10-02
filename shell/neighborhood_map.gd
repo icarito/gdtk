@@ -331,8 +331,11 @@ static func human_reason(action):
 	if raw == "":
 		raw = String(action.get("state", "")).strip_edges()
 	var low = raw.to_lower()
+	if low.find("canal de pantalla") >= 0 or low.find("canal peer") >= 0 \
+			or low.find("capable") >= 0:
+		return "no se puede contactar al otro equipo"
 	if low.find("receptor de pantalla") >= 0 or low.find("gvd") >= 0:
-		return "no tiene el receptor de pantalla"
+		return "pantalla no disponible en este equipo"
 	if low.find("deskflow") >= 0:
 		return "el control compartido no está disponible en este equipo"
 	if low.find("hid") >= 0 or low.find("degradado") >= 0 or low.find("confiable") >= 0:
@@ -341,8 +344,8 @@ static func human_reason(action):
 		return "dos equipos en el mismo lado"
 	if low.find("confirmar") >= 0:
 		return "falta confirmar la posición"
-	if low.find("canal") >= 0 or low.find("capable") >= 0:
-		return "hay que habilitar el receptor en el otro equipo"
+	if low.find("canal") >= 0:
+		return "no se puede contactar al otro equipo"
 	if has_internal_terms(raw):
 		return "no disponible"
 	return raw

@@ -66,10 +66,13 @@ const APPLETS = [
 	{"id": "termico", "name": "Temperatura · Governor", "short": "TEMP", "span": 1},
 	{"id": "reloj", "name": "Reloj", "short": "REL"},
 	{"id": "teclado", "name": "Teclado", "short": "TEC"},
+	{"id": "ventanas", "name": "Ventanas · flotantes o mosaico", "short": "VENT"},
 ]
-const APPLET_DEFAULT = ["recursos", "termico", "reloj", "teclado"]
+const APPLET_DEFAULT = ["recursos", "termico", "reloj", "teclado", "ventanas"]
 # Look WindowMaker de los menús verticales (popups ImGui). Sólo estilo.
 const MENU_STYLE = preload("res://menu_style.gd")
+# K13a: modo de ventanas (flotante por defecto / mosaico); modelo puro.
+const WM_MODE = preload("res://wm_mode.gd")
 # K10b: modelo PURO de los bloques "Compartido" (sesiones activas con vecinos).
 const SHARED_BLOCK = preload("res://shared_block.gd")
 # Grosor de la barra de estado del bloque "Compartido".
@@ -136,6 +139,10 @@ var drawn = false
 var applets_visible = []
 var applets_future = []
 var applets_raw = {}
+# K13a: modo de ventanas del shell (flotante por defecto). Persiste en el mismo
+# frame-applets.json y se aplica al shell al cargar y al alternar.
+var window_mode = "floating"
+var window_mode_saved = "floating"
 var applets_saved_bottom = []
 var pinned_top = []
 var pinned_dock = []
@@ -179,6 +186,10 @@ var trash_layout = null
 
 func _ready():
 	_load_applets()
+	# K13: aplicar el modo persistido apenas el shell está disponible (frame se crea
+	# dentro de shell._ready). Default flotante si no hay archivo.
+	if shell != null and shell.has_method("set_wm_mode"):
+		shell.set_wm_mode(window_mode)
 
 
 # Los applets consultan en workers; al salir del árbol no deben quedar hilos vivos.
@@ -272,6 +283,9 @@ func _load_applets():
 					applets_future.append(v)
 				saved.append(v)
 			applets_saved_bottom = saved
+	# K13a: modo de ventanas persistido; sin dato -> flotante (default del producto).
+	window_mode = WM_MODE.parse(applets_raw)
+	window_mode_saved = window_mode
 	applets_dirty = false
 
 
@@ -291,7 +305,8 @@ func _save_applets():
 	for id in applets_future:
 		bottom.append(id)
 	if _same_list(bottom, applets_saved_bottom) and _same_list(pinned_top, pinned_saved_top) and _same_list(pinned_dock, pinned_saved_dock) \
-			and pin_top_bar == pin_saved_top and pin_bottom_bar == pin_saved_bottom:
+			and pin_top_bar == pin_saved_top and pin_bottom_bar == pin_saved_bottom \
+			and WM_MODE.normalize(window_mode) == WM_MODE.normalize(window_mode_saved):
 		applets_dirty = false
 		return
 	var path = _applets_path()
@@ -301,6 +316,7 @@ func _save_applets():
 	applets_raw["top"] = pinned_top
 	applets_raw["dock"] = pinned_dock
 	applets_raw["pin"] = {"top": pin_top_bar, "bottom": pin_bottom_bar}
+	applets_raw["window_mode"] = WM_MODE.serialize(window_mode)
 	var tmp = path + ".tmp"
 	var w = File.new()
 	if w.open(tmp, File.WRITE) != OK:
@@ -316,6 +332,7 @@ func _save_applets():
 	pinned_saved_dock = pinned_dock.duplicate()
 	pin_saved_top = pin_top_bar
 	pin_saved_bottom = pin_bottom_bar
+	window_mode_saved = window_mode
 	applets_dirty = false
 
 
@@ -518,7 +535,11 @@ static func menu_trigger(button_index, pressed):
 # Menú que abre el clic derecho sobre un applet: "teclado" para el applet de
 # teclado; "picker" (selector de controles del Frame) para el resto. Puro para test.
 static func applet_menu(id):
-	return "teclado" if id == "teclado" else "picker"
+	if id == "teclado":
+		return "teclado"
+	if id == "ventanas":
+		return "ventanas"
+	return "picker"
 
 
 # ¿Hay que muestrear los applets? Sí mientras alguna franja que los contiene esté a
@@ -534,16 +555,36 @@ func _applet_primary(id):
 	if id == "termico":
 		applet_action_want = "gov"
 		shell.request_redraw()
+	elif id == "ventanas":
+		toggle_window_mode()
 
 
 # Menú contextual del applet (clic derecho). Mismo destino que el equivalente de
 # teclado en _frame_key (Enter/Espacio).
 func _applet_context(id):
-	if applet_menu(id) == "teclado":
+	if id == "ventanas":
+		applet_action_want = "ventanas"
+	elif applet_menu(id) == "teclado":
 		applet_action_want = "teclado"
 	else:
 		applet_picker_want = true
 	shell.request_redraw()
+
+
+# K13a — estado del modo de ventanas. Cambia el modo global del shell y lo persiste
+# (mismo frame-applets.json, escritura atómica). El bloque "Ventanas" del Frame lo usa
+# con clic izquierdo (alternar) y clic derecho (menú con las dos opciones).
+func set_window_mode(mode):
+	window_mode = WM_MODE.normalize(mode)
+	if shell != null and shell.has_method("set_wm_mode"):
+		shell.set_wm_mode(window_mode)
+	applets_dirty = true
+	_save_applets()
+	shell.request_redraw()
+
+
+func toggle_window_mode():
+	set_window_mode(WM_MODE.toggled(window_mode))
 
 
 
@@ -558,11 +599,15 @@ func _applet_state(id):
 			return "activo"
 		"teclado":
 			return keyboard.state
+		"ventanas":
+			return "activo"
 	return "sin_dato"
 
 
 func _applet_value(id):
 	match id:
+		"ventanas":
+			return WM_MODE.label(window_mode)
 		"recursos":
 			return "CPU %s · MEM %s · SWP %s" % [
 				("%d%%" % int(round(sysmon.cpu_now()))) if sysmon.has_cpu else "sin dato",
@@ -751,14 +796,14 @@ func _draw_shared_face(ui, pos, rect, b, side):
 		ui.set_cursor_pos(pos + Vector2((side - s) * 0.5, bw + 3.0))
 		ui.image(icon, Vector2(s, s))
 	var badge = Vector2(max(14.0, side * 0.24), max(14.0, side * 0.24))
-	var badge_pos = pos + Vector2(bw + 3.0, side - badge.size.y - 6.0)
+	var badge_pos = pos + Vector2(bw + 3.0, side - badge.y - 6.0)
 	ui.imgui_draw_rect_filled(Rect2(badge_pos, badge), Color(0.10, 0.11, 0.14, 1.0), 0.0)
 	_draw_shared_glyph(ui, Rect2(badge_pos + Vector2(2.0, 2.0), badge - Vector2(4.0, 4.0)), type, line)
 	# Texto de estado corto (el completo va en el tooltip): nunca pisa al vecino.
 	var tag = String(b.state_text)
 	if tag.length() > 6:
 		tag = tag.substr(0, 6)
-	ui.set_cursor_pos(pos + Vector2(badge_pos.x + badge.size.x + 4.0, side - badge.size.y - 3.0))
+	ui.set_cursor_pos(pos + Vector2(badge_pos.x + badge.x + 4.0, side - badge.y - 3.0))
 	ui.text_colored(line, tag)
 	ui.imgui_draw_rect_filled(Rect2(rect.position + Vector2(4.0, side - SHARED_W - 1.0),
 		Vector2(side - 8.0, SHARED_W)), line, 0.0)
@@ -1786,6 +1831,20 @@ func _draw_applets(ui, vp, off, mouse):
 				if MENU_STYLE.item(ui, String(g), "", String(g) == cur):
 					sysmon.set_governor(String(g))
 					shell.request_redraw()
+		ui.end_popup()
+	MENU_STYLE.end(ui)
+	# K13a: menú del bloque "Ventanas" (clic derecho). Clic izquierdo alterna.
+	MENU_STYLE.begin(ui)
+	if ui.begin_popup("##applet_ventanas"):
+		MENU_STYLE.chrome(ui, "Ventanas")
+		if MENU_STYLE.item(ui, "Ventanas flotantes", "", WM_MODE.is_floating(window_mode)):
+			set_window_mode("floating")
+		if MENU_STYLE.item(ui, "Ventanas en mosaico", "", WM_MODE.is_tiled(window_mode)):
+			set_window_mode("tiled")
+		ui.separator()
+		if MENU_STYLE.item(ui, "Acomodar ventanas"):
+			if shell != null and shell.has_method("arrange_windows"):
+				shell.arrange_windows()
 		ui.end_popup()
 	MENU_STYLE.end(ui)
 	# Hueco del applet arrastrado, resaltado (Esc cancela; el fantasma va al cursor).

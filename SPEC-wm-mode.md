@@ -1,7 +1,10 @@
 # SPEC — Modo ventanas tradicional (WindowMaker) — K13 (DISEÑO)
 
-Estado: **sólo diseño**. No hay implementación en esta entrega. Este documento es el
-entregable de K13 de `SPEC-ui-rework-2026-10.md`.
+Estado: **diseño + implementación parcial**. Modelos puros y BlockApp ya
+implementados (K13a `wm_mode.gd`, K13b `window_chrome.gd`, K13c `float_layout.gd`,
+K13d `wm_drag.gd` + tests); integración del modo flotante por defecto en
+`shell.gd`/`frame.gd`/`tiles_ui.gd`. K13e (bloques del Frame sin espacios) ya estaba
+resuelto con `PAD=0` en `frame.gd`. K13f/K13g pendientes (ver §10).
 
 Origen: en la prueba real el shell se ve como un escritorio tiled sin chrome; las
 ventanas no tienen barra de título, el Frame tiene huecos entre bloques y no existe

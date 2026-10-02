@@ -241,12 +241,12 @@ static func _screen_action(gvd, local, id, label):
 			enabled = false
 			reason = plan.error
 			plan = null
-	# state=capable: el peer tiene que abrir su receptor por un canal ya autorizado
-	# (ssh o control remoto gdtk); sin canal, la acción se muestra deshabilitada.
+	# state=capable: el peer abre su receptor on-demand por el canal peer gdtk
+	# anunciado como `ctl=`; sin ese canal, la acción se muestra deshabilitada.
 	if enabled and _txt(gvd, "state", "ready") == "capable" \
 			and not bool(local.get("provision_channel", false)):
 		enabled = false
-		reason = "state=capable: hay que abrir el receptor del peer por un canal autorizado"
+		reason = "sin canal de pantalla del otro equipo"
 	# Conflicto de borde: dos hosts en la misma arista. No se ofrece la accion ni
 	# su plan hasta resolver; la direccion sin confirmar NO bloquea la pantalla.
 	if conflict:

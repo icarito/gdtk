@@ -30,6 +30,7 @@ Tests pequeños de modelos/parsers:
 /home/icarito/Proyectos/godot3-box3d/godot-dev/bin/godot.frt.opt.tools.x86_64.gdtk --no-window --path shell -s $PWD/tests/neighborhood_actions_test.gd
 /home/icarito/Proyectos/godot3-box3d/godot-dev/bin/godot.frt.opt.tools.x86_64.gdtk --no-window --path shell -s $PWD/tests/expose_layout_test.gd
 /home/icarito/Proyectos/godot3-box3d/godot-dev/bin/godot.frt.opt.tools.x86_64.gdtk --no-window --path shell -s $PWD/tests/frame_menu_test.gd
+/home/icarito/Proyectos/godot3-box3d/godot-dev/bin/godot.frt.opt.tools.x86_64.gdtk --no-window --path shell -s $PWD/tests/system_osd_test.gd
 ```
 
 Shell visual/anidado:
@@ -53,6 +54,19 @@ con falla si el proceso termina en `exit 0` y las líneas `ok` del test aparecen
 
 No cambies de rama ni limpies esos árboles sin pedirlo. El script verifica que el
 binario tenga `ImGuiCanvas` y `SlugVector2D`.
+
+### Volumen / brillo / OSD
+
+Las teclas multimedia las maneja el shell (`shell/system_osd.gd`, enganchado en
+`shell.gd` `_input`/`_process`/`_imgui_frame`) y **requieren el motor recompilado**:
+`KEY_BRIGHTNESSUP/DOWN` se agregaron a `core/os/keyboard.*` + `global_constants.cpp`,
+y el mapeo de `XF86Audio*`/`XF86MonBrightness*` a `platform/frt/sdl2_godot_map.h` y
+`platform/x11/key_mapping_x11.cpp`. Audio por `wpctl` (fallback `pactl`/`amixer`);
+brillo por logind `Session.SetBrightness` (sin root), fallback `brightnessctl`/sysfs.
+El OSD usa íconos Sugar/Slug (`shell/icons/sugar/audio-volume-{high,muted}.svg`,
+`display-brightness.svg`); sin GLES3 cae al raster SVG del motor. Para probar el OSD
+sin teclas físicas: RPC `media` del control remoto con
+`{"action":"up"|"down"|"mute"|"brightness_up"|"brightness_down"|"show"}`.
 
 ## Setup de pruebas y updates (repo vs instalación)
 

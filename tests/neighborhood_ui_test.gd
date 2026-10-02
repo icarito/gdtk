@@ -49,7 +49,9 @@ func _init():
 
 	var screen_action = {"id": "use_as_screen", "enabled": false,
 		"reason": "gvd no disponible en este equipo"}
-	check("razón sin nombre interno", MAP.human_reason(screen_action) == "no tiene el receptor de pantalla")
+	check("razón sin nombre interno", MAP.human_reason(screen_action) == "pantalla no disponible en este equipo")
+	check("razón sin canal peer", MAP.human_reason({"id": "x", "enabled": false,
+		"reason": "sin canal de pantalla del otro equipo"}) == "no se puede contactar al otro equipo")
 	check("razón de conflicto", MAP.human_reason({"id": "x", "enabled": false,
 		"reason": "conflicto de borde: dos hosts reclaman la misma dirección"}) == "dos equipos en el mismo lado")
 	check("razón de confirmación", MAP.human_reason({"id": "x", "enabled": false,
@@ -177,7 +179,7 @@ func _init():
 		if String(it.get("id", "")) == "share_my_screen":
 			disabled_item = it
 	check("acción no disponible con razón humana",
-		not bool(disabled_item.enabled) and String(disabled_item.reason) == "no tiene el receptor de pantalla")
+		not bool(disabled_item.enabled) and String(disabled_item.reason) == "pantalla no disponible en este equipo")
 	var debug_menu = MAP.neighbor_menu({"id": "h1", "capabilities": {"gvd": {}}}, [], "none", true)
 	var has_debug = false
 	for it in debug_menu:
