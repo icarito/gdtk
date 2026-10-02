@@ -3,8 +3,8 @@ extends Reference
 # K17 (SPEC-ui-rework-2026-10) — planes PUROS de automatización de gvd.
 #
 # El shell lanza y corta el monitor virtual solo: emisor local si este equipo es
-# GNOME, receptor remoto por ssh (buzón), receptor local en un tile, `--position`
-# según el mapa y `--cursor sway` si hay SWAYSOCK. Este módulo NO ejecuta nada:
+# GNOME/wlroots, receptor remoto por ssh (buzón), receptor local en un tile y
+# `--position` según el mapa. Este módulo NO ejecuta nada:
 # no toca red, procesos, filesystem ni estado global; sólo decide y describe los
 # argv, igual que host_dispatch.gd / neighborhood_actions.gd. El caller (shell.gd)
 # hace el I/O real en Threads (`_launch_tracked`, `_toggle_service`) sin bloquear
@@ -120,15 +120,14 @@ static func local_send_argv(gvd_path, peer, port = 0, position = "", wlr_virtual
 
 
 # Plan del receptor LOCAL ("Ver su escritorio aquí"): `gvd recv --sink auto`
-# (prefiere gl/xv; waylandsink aborta en el compositor embebido) con `--cursor
-# sway` si la sesión tiene SWAYSOCK y `--port` si el emisor remoto usa otro
-# puerto. El shell lo abre en un tile.
+# (prefiere gl/xv; waylandsink aborta en el compositor embebido) y `--port` si el
+# emisor remoto usa otro puerto. El emisor wlroots ya no transmite el puntero en
+# el video (--overlay-cursor 0); se usa el puntero propio de este equipo, así que
+# se desactiva el cursor separado (no hay que mover el cursor de sway por red).
 static func local_recv_argv(gvd_path, has_sway = false, port = 0):
 	var plan = ACTIONS.gvd_recv_plan(gvd_path, {"sink": "auto", "port": int(port)})
-	if not bool(plan.get("ok", false)):
-		return plan
-	if bool(has_sway):
-		plan["args"].append_array(["--cursor", "sway"])
+	if bool(plan.get("ok", false)) and typeof(plan.get("args", [])) == TYPE_ARRAY:
+		plan["args"].append_array(["--cursor", "none"])
 	return plan
 
 
@@ -297,12 +296,13 @@ static func selftest():
 	ok = ok and gvd_path_of(null) == "" and target_host_of(real) != ""
 	ok = ok and gvd_path_of({"ok": false, "cmd": "", "args": []}) == ""
 
-	# Receptor local: sink auto (gl/xv) y cursor sway sólo si hay SWAYSOCK.
+	# Receptor local: sink auto (gl/xv), cursor separado desactivado explícitamente.
 	var rp = local_recv_argv("/home/u/gvd/gvd.py", false)
 	ok = ok and rp.ok and rp.cmd == "python3" and rp.args[1] == "recv"
-	ok = ok and rp.args.find("--sink") >= 0 and rp.args.find("--cursor") < 0
+	ok = ok and rp.args.find("--sink") >= 0 and rp.args.find("--cursor") >= 0 \
+		and rp.args.find("none") >= 0
 	var rps = local_recv_argv("/home/u/gvd/gvd.py", true)
-	ok = ok and rps.args.find("--cursor") >= 0 and rps.args.find("sway") >= 0
+	ok = ok and rps.args.find("--cursor") >= 0 and rps.args.find("none") >= 0
 	ok = ok and not local_recv_argv("~/gvd/gvd.py", true).ok
 	var rpp = local_recv_argv("/home/u/gvd/gvd.py", false, 5601)
 	ok = ok and rpp.args.find("--port") >= 0 and rpp.args.find("5601") >= 0

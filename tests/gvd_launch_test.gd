@@ -50,14 +50,15 @@ func _init():
 	check("gvd_path_of plan inválido", mod.gvd_path_of(null) == ""
 		and mod.gvd_path_of({"ok": false}) == "")
 
-	# Receptor local en un tile: --cursor sway sólo con SWAYSOCK.
+	# Receptor local en un tile: cursor embebido en el video, sin cursor sway.
 	var rp = mod.local_recv_argv("/home/u/gvd/gvd.py", false)
 	check("receptor local auto (gl/xv)", rp.ok and rp.cmd == "python3"
 		and rp.args[1] == "recv" and rp.args[3] == "auto")
-	check("receptor sin sway no fuerza cursor", rp.args.find("--cursor") < 0)
+	check("receptor local desactiva cursor falso",
+		rp.args.find("--cursor") >= 0 and rp.args.find("none") >= 0)
 	var rps = mod.local_recv_argv("/home/u/gvd/gvd.py", true)
-	check("receptor con SWAYSOCK usa --cursor sway",
-		rps.args.find("--cursor") >= 0 and rps.args.find("sway") >= 0)
+	check("receptor con SWAYSOCK tampoco usa cursor falso",
+		rps.args.find("--cursor") >= 0 and rps.args.find("none") >= 0)
 	check("receptor escucha el puerto del emisor",
 		mod.local_recv_argv("/home/u/gvd/gvd.py", false, 5601).args.find("5601") >= 0
 		and mod.local_recv_argv("/home/u/gvd/gvd.py", false, 5600).args.find("--port") < 0)

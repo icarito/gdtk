@@ -666,14 +666,24 @@ class Sender:
                 self.virtual = None
                 return False
         output = self.virtual.name if self.virtual else getattr(self.a, "output", "")
-        # overlay-cursor=1 mete el cursor en el frame (gvd-capture lo pide al
-        # compositor): el video ya sale con puntero, sin canal separado.
-        argv = [helper, "--fps", str(self.a.fps), "--overlay-cursor", "1"]
+        # overlay-cursor=1 mete el puntero del emisor en el frame (gvd-capture lo
+        # pide al compositor); por defecto NO se transmite: el receptor usa su
+        # propio puntero local (sway/Deskflow). Con --cursor-mode embedded se
+        # conserva el comportamiento viejo (puntero dentro del video, sin canal
+        # separado).
+        overlay = "1" if getattr(self.a, "cursor_mode", "separate") == "embedded" else "0"
+        argv = [helper, "--fps", str(self.a.fps), "--overlay-cursor", overlay]
         if output:
             argv += ["--output", output]
         log("[*] captura: " + " ".join(argv))
+        env = None
+        display = _find_wlr_wayland_display()
+        if display and display != os.environ.get("WAYLAND_DISPLAY"):
+            env = dict(os.environ)
+            env["WAYLAND_DISPLAY"] = display
+            log(f"[*] captura wlroots via WAYLAND_DISPLAY={display}")
         self.capture = subprocess.Popen(argv, stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE)
+                                        stderr=subprocess.PIPE, env=env)
         line = self._read_capture_header()
         if line is None:
             log("[!] sin cabecera de captura wlroots")
@@ -940,13 +950,72 @@ def _sway_cmd(sock, *words):
 
 
 def _sway_outputs(sock):
-    ok, out = _sway_cmd(sock, "-t", "get_outputs")
-    if not ok:
-        return None
-    try:
-        return json.loads(out)
-    except ValueError:
-        return None
+	ok, out = _sway_cmd(sock, "-t", "get_outputs")
+	if not ok:
+		return None
+	try:
+		return json.loads(out)
+	except ValueError:
+		return None
+
+
+def _wlr_probe_display(display, timeout=1.5):
+	"""Devuelve true si ese WAYLAND_DISPLAY entrega cabecera de gvd-capture."""
+	helper = ensure_capture_helper()
+	if not helper or not display:
+		return False
+	env = dict(os.environ)
+	env["WAYLAND_DISPLAY"] = display
+	proc = None
+	try:
+		proc = subprocess.Popen([helper, "--fps", "1", "--overlay-cursor", "0",
+			"--once"], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env)
+		end = time.monotonic() + timeout
+		buf = b""
+		while time.monotonic() < end:
+			if proc.stderr is not None:
+				r, _, _ = select.select([proc.stderr.fileno()], [], [], 0.05)
+				if r:
+					chunk = os.read(proc.stderr.fileno(), 4096)
+					if not chunk:
+						return b"GVDCAP1" in buf
+					buf += chunk
+					if b"GVDCAP1" in buf:
+						return True
+					if b"no expone wlr-screencopy" in buf or b"no pude conectar" in buf:
+						return False
+			if proc.poll() is not None:
+				return b"GVDCAP1" in buf
+	except OSError:
+		return False
+	finally:
+		if proc is not None:
+			try:
+				if proc.poll() is None:
+					proc.terminate()
+					proc.wait(timeout=0.5)
+			except Exception:
+				try:
+					proc.kill()
+				except Exception:
+					pass
+	return False
+
+
+def _find_wlr_wayland_display():
+	current = os.environ.get("WAYLAND_DISPLAY", "")
+	if current and _wlr_probe_display(current):
+		return current
+	rt = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+	for path in sorted(glob.glob(os.path.join(rt, "wayland-*"))):
+		if path.endswith(".lock"):
+			continue
+		name = os.path.basename(path)
+		if name == current:
+			continue
+		if _wlr_probe_display(name):
+			return name
+	return current
 
 
 class SwayVirtualOutput:

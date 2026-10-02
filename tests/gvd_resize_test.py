@@ -151,7 +151,7 @@ class ReceiverPipelineTest(unittest.TestCase):
             ["recv", "--sink", "wayland", "--video-size", "1280x800"])
         cmd = self.gvd.recv_pipeline(args, "waylandsink", False)
         self.assertIn("waylandsink", cmd)
-        self.assertIn("force-aspect-ratio=true", cmd)
+        self.assertNotIn("force-aspect-ratio=true", cmd)
         self.assertNotIn("fullscreen=true", cmd)
         self.assertEqual(self.gvd.WINDOW_TITLE, U.WINDOW_TITLE)
         self.assertEqual(self.gvd.APP_ID, U.APP_ID)
