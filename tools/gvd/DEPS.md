@@ -50,10 +50,13 @@ Sólo path wlroots:
 - Video e2e verificado bastion→tengu y bastion→cupid: `gvd send --capture wlr` (VA) →
   UDP/RTP H.264 → receptor decodifica (probado con `avdec_h264 ! filesink`, ~390 MB en
   8 s, ~15 fps).
-- Fidelidad de color del pipeline (capture/encode/decode) verificada con patrón SMPTE:
-  el PNG por `vapostproc ! vah264enc ! avdec_h264` coincide con la referencia directa.
-  Si el render se ve con colores desviados, el sospechoso es la **colorimetría** en el
-  sink del receptor (`glimagesink`/`ffplay`), no la captura/encode.
+- COLOR (arreglado): el encoder etiquetaba **bt601** por defecto y `vapostproc` ponía
+  un valor raro (`2:4:5:1`), lo que hacía que sinks que asumen bt709/HD pintaran
+  desviado. `gvd.py` ahora inserta `video/x-raw,colorimetry=bt709` DESPUÉS de
+  `vapostproc` (mantiene VA) y el SPS queda bt709; verificable con `gst-launch -v ...
+  ! avdec_h264 ! fakesink` (`colorimetry=(string)bt709`). Override: `GVD_COLORIMETRY`.
+  Fidelidad verificada también e2e por red (referencia local vs frame decodificado en
+  tengu: medias RGB coinciden).
 - Sinks: el compositor embebido de gdtk NO expone `wp_viewporter`, así que
   `waylandsink` avisa "missing the ability to scale" y puede abortar. Usar `--sink
   auto` (prefiere gl/xv), `--sink gl` o `--sink ffplay` (ffplay exige `--transport tcp`).
