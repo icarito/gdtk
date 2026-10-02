@@ -50,6 +50,7 @@ class WaylandCompositor : public Node {
 	static void _cb_activate(void *p_ud, int p_id);
 	static void _cb_minimize(void *p_ud, int p_id);
 	static void _cb_maximize(void *p_ud, int p_id, int p_maximized);
+	static void _cb_fullscreen(void *p_ud, int p_id, int p_fullscreen);
 	static void _cb_damage(void *p_ud, int p_id);
 
 	void _on_added(int p_id);

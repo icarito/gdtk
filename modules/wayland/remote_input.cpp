@@ -229,6 +229,7 @@ void RemoteInput::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_pending", "id"), &RemoteInput::is_pending);
 	ClassDB::bind_method(D_METHOD("get_client_count"), &RemoteInput::get_client_count);
 	ClassDB::bind_method(D_METHOD("has_input_capture"), &RemoteInput::has_input_capture);
+	ClassDB::bind_method(D_METHOD("set_capture_ranges", "ranges"), &RemoteInput::set_capture_ranges);
 	ClassDB::bind_method(D_METHOD("capture_motion", "position", "relative", "time"), &RemoteInput::capture_motion);
 	ClassDB::bind_method(D_METHOD("capture_button", "button", "pressed", "time"), &RemoteInput::capture_button);
 	ClassDB::bind_method(D_METHOD("capture_scroll", "x", "y", "time"), &RemoteInput::capture_scroll);
@@ -316,6 +317,23 @@ int RemoteInput::get_client_count() const {
 
 bool RemoteInput::has_input_capture() const {
 	return server != NULL && eis_server_has_input_capture(server);
+}
+
+bool RemoteInput::set_capture_ranges(const PoolRealArray &p_ranges) {
+	if (server == NULL) {
+		return false;
+	}
+	if (p_ranges.size() < 8) {
+		eis_server_set_capture_ranges(server, NULL);
+		return false;
+	}
+	PoolRealArray::Read r = p_ranges.read();
+	double ranges[8];
+	for (int i = 0; i < 8; i++) {
+		ranges[i] = (double)r[i];
+	}
+	eis_server_set_capture_ranges(server, ranges);
+	return true;
 }
 
 bool RemoteInput::capture_motion(const Vector2 &p_pos, const Vector2 &p_relative, uint64_t p_time) {

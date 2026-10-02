@@ -38,6 +38,9 @@ typedef struct {
 	// es el estado pedido (1/0); el borde ya lo confirmo en el configure y el shell
 	// decide como acomodar la ventana en su workspace.
 	void (*maximize)(void *ud, int id, int maximized);
+	// El cliente pide pantalla completa (xdg_toplevel.set_fullscreen o X11
+	// _NET_WM_STATE_FULLSCREEN). `fullscreen` es el estado pedido (1/0).
+	void (*fullscreen)(void *ud, int id, int fullscreen);
 	// Algo del árbol de `id` desapareció sin commit (menú X o popup cerrado): redibujar.
 	void (*damage)(void *ud, int id);
 } wl_server_callbacks;

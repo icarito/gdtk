@@ -3,6 +3,7 @@
 
 #include "core/map.h"
 #include "core/os/input_event.h"
+#include "core/pool_vector.h"
 #include "scene/main/node.h"
 
 struct eis_server;
@@ -59,6 +60,10 @@ public:
 	int get_client_count() const;
 	// 1 si el backend del portal InputCapture quedó registrado en el bus de la sesión.
 	bool has_input_capture() const;
+	// Tramos porcentuales por borde donde InputCapture puede activarse, en el orden
+	// [left_lo,left_hi, right_lo,right_hi, top_lo,top_hi, bottom_lo,bottom_hi].
+	// Debe venir del layout de Deskflow (down(0,67) etc.); si no, NULL/[] = 0..100.
+	bool set_capture_ranges(const PoolRealArray &p_ranges);
 	// Eventos locales para el portal InputCapture. DEVICE_ID se filtra en GDScript.
 	bool capture_motion(const Vector2 &p_pos, const Vector2 &p_relative, uint64_t p_time);
 	bool capture_button(int p_button, bool p_pressed, uint64_t p_time);

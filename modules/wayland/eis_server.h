@@ -36,6 +36,12 @@ int eis_server_has_input_capture(eis_server *s);
 // No bloquea: procesa lo que haya en el bus y en los sockets EIS.
 void eis_server_dispatch(eis_server *s);
 void eis_server_set_size(eis_server *s, int w, int h);
+// Rangos porcentuales (0..100) por borde donde InputCapture puede ACTIVARSE, en el
+// orden [left_lo,left_hi, right_lo,right_hi, top_lo,top_hi, bottom_lo,bottom_hi].
+// El layout de Deskflow usa tramos parciales (p.ej. down(0,67)), pero Deskflow arma
+// barreras de borde COMPLETO: sin este filtro gdtk captura también en el tramo sin
+// vecino, Deskflow no cambia de pantalla y el puntero queda clavado. NULL = 0..100.
+void eis_server_set_capture_ranges(eis_server *s, const double *ranges);
 void eis_server_respond(eis_server *s, int id, int allow);
 // InputCapture: el shell llama estas funciones con eventos FISICOS locales (los que
 // llevan RemoteInput::DEVICE_ID no deben llegar acá). Al cruzar una barrera armada se

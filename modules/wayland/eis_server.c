@@ -97,6 +97,9 @@ struct eis_server {
 	int keymap_fd;
 	size_t keymap_size;
 	int w, h, next_id;
+	// Rangos % por borde (índice 1..4 = izq/der/arriba/abajo) donde InputCapture
+	// puede activarse. Ver eis_server_set_capture_ranges.
+	double capture_lo[5], capture_hi[5];
 	// Propiedades del backend (las lee sd-bus por offset).
 	uint32_t device_types, version;
 	uint32_t sc_sources, sc_cursors, sc_version;
@@ -106,6 +109,8 @@ struct eis_server {
 
 static const sd_bus_vtable session_vtable[];
 static int ic_emit_capture(struct session *se, const char *name, int include_activation);
+static int capture_ready(struct eis_server *s, struct session *se);
+static void capture_deactivate(struct eis_server *s, struct session *se);
 
 // --- EIS ---
 
@@ -151,6 +156,7 @@ static void device_update(struct eis_server *s, struct client *c) {
 }
 
 static void client_free(struct eis_server *s, struct client *c) {
+	struct session *se = c->session;
 	for (struct client **p = &s->clients; *p; p = &(*p)->next) {
 		if (*p == c) {
 			*p = c->next;
@@ -164,6 +170,13 @@ static void client_free(struct eis_server *s, struct client *c) {
 	eis_seat_unref(c->seat);
 	eis_client_unref(c->client);
 	free(c);
+	// Si se va el último receptor de una sesión InputCapture activa (libei corta
+	// por violación de protocolo o desconexión), hay que soltar la captura. Si no,
+	// se->active queda 1, el shell sigue con pointer lock y el puntero queda
+	// clavado/duplicado al reconectar (Deskflow #8503).
+	if (se && se->kind == SESSION_IC && se->active && !capture_ready(s, se)) {
+		capture_deactivate(s, se);
+	}
 }
 
 static void session_emulating(struct eis_server *s, struct session *se, int active) {
@@ -267,6 +280,13 @@ static void capture_release(struct eis_server *s, struct session *se, double rx,
 			}
 		}
 	}
+	if (has_pos) {
+		// Deactivated.cursor_position debe ser la posición actual (la que sugirió
+		// el cliente en Release). Antes quedaba el cursor_x/y del último físico
+		// capturado y el puntero volvía a la zona equivocada.
+		se->cursor_x = rx;
+		se->cursor_y = ry;
+	}
 	session_emulating(s, se, 0);
 	ic_emit_capture(se, "Deactivated", 1);
 	se->active = 0;
@@ -288,7 +308,19 @@ static void capture_update_released(struct session *se, double dx, double dy) {
 static uint32_t barrier_crossed(struct eis_server *s, struct session *se, double x, double y, double dx, double dy) {
 	for (size_t i = 0; i < se->nbarriers; i++) {
 		const struct capture_barrier *b = &se->barriers[i];
-		if (se->released_edge != 0 && (uint32_t)barrier_edge(s, b) == se->released_edge) {
+		int edge = barrier_edge(s, b);
+		if (edge == 0) {
+			continue; // no está exactamente en un borde
+		}
+		if (se->released_edge != 0 && (uint32_t)edge == se->released_edge) {
+			continue;
+		}
+		// El tramo debe caer dentro del rango del link (deskflow.conf down(0,67)):
+		// Deskflow manda barreras de borde COMPLETO y filtra recién en su core; si
+		// gdtk captura fuera del rango, Deskflow no cruza y el puntero queda clavado.
+		// Eje del rango: izq/der -> y; arriba/abajo -> x.
+		double pct = edge <= 2 ? 100.0 * y / (double)s->h : 100.0 * x / (double)s->w;
+		if (pct < s->capture_lo[edge] || pct > s->capture_hi[edge]) {
 			continue;
 		}
 		if (b->x1 == b->x2) {
@@ -1087,8 +1119,14 @@ int eis_server_capture_motion(eis_server *s, double x, double y, double dx, doub
 		if (id == 0) {
 			continue;
 		}
-		se->cursor_x = x;
-		se->cursor_y = y;
+		// cursor_position puede quedar fuera de la zona: es justo lo que el spec
+		// InputCapture::Activated espera para señalar "el puntero rebasó el borde"
+		// (p.ej. y=h-1+dy). Si publicamos la posición recortada al último píxel,
+		// Deskflow cree que el puntero sigue dentro de la pantalla local, no hace
+		// el switch y su cursor queda clavado en la orilla (fantasma en la pantalla
+		// equivocada) mientras la captura local sigue activa.
+		se->cursor_x = x + dx;
+		se->cursor_y = y + dy;
 		se->active = 1;
 		se->active_barrier = id;
 		se->activated_at = capture_time(0);
@@ -1150,6 +1188,10 @@ eis_server *eis_server_create(eis_server_callbacks cb, const char *keymap, int w
 	s->ic_caps = DEVICE_TYPES;
 	s->ic_version = 2;
 	s->zone_set = 1;
+	for (int i = 1; i <= 4; i++) {
+		s->capture_lo[i] = 0.0;
+		s->capture_hi[i] = 100.0;
+	}
 	s->keymap_fd = -1;
 	if (keymap && *keymap) {
 		// Con el '\0' final: los clientes lo mapean y lo leen como string.
@@ -1262,6 +1304,31 @@ void eis_server_set_size(eis_server *s, int w, int h) {
 		if (c->device) {
 			device_update(s, c);
 		}
+	}
+}
+
+void eis_server_set_capture_ranges(eis_server *s, const double *ranges) {
+	if (!s) {
+		return;
+	}
+	for (int e = 1; e <= 4; e++) {
+		s->capture_lo[e] = 0.0;
+		s->capture_hi[e] = 100.0;
+	}
+	if (!ranges) {
+		return;
+	}
+	for (int e = 1; e <= 4; e++) {
+		double lo = ranges[(e - 1) * 2 + 0];
+		double hi = ranges[(e - 1) * 2 + 1];
+		if (lo < 0.0) lo = 0.0;
+		if (hi > 100.0) hi = 100.0;
+		if (hi < lo) {
+			lo = 0.0;
+			hi = 100.0;
+		}
+		s->capture_lo[e] = lo;
+		s->capture_hi[e] = hi;
 	}
 }
 

@@ -67,6 +67,8 @@ typedef struct toplevel {
 	struct wl_listener request_minimize;
 	// sólo xdg: CSD pide maximizar/desmaximizar (GTK4 headerbar, etc.)
 	struct wl_listener request_maximize;
+	// xdg y Xwayland: pantalla completa (video de YouTube, etc.)
+	struct wl_listener request_fullscreen;
 	// sólo X
 	struct wl_listener associate;
 	struct wl_listener dissociate;
@@ -845,7 +847,11 @@ static void handle_toplevel_unmap(struct wl_listener *listener, void *data) {
 static void handle_toplevel_request_minimize(struct wl_listener *listener, void *data) {
 	toplevel *t = wl_container_of(listener, t, request_minimize);
 	if (t->tl != NULL) {
-		wlr_xdg_surface_schedule_configure(t->tl->base);
+		// schedule_configure exige la superficie inicializada (wlroots aborta si no).
+		// Antes del primer configure el estado pedido ya viaja en el configure inicial.
+		if (t->tl->base->initialized) {
+			wlr_xdg_surface_schedule_configure(t->tl->base);
+		}
 	} else {
 		// Xwayland emite el evento también al des-iconificar (minimize=false): no es
 		// un pedido de minimizar.
@@ -859,26 +865,54 @@ static void handle_toplevel_request_minimize(struct wl_listener *listener, void 
 	}
 }
 
-// El cliente pide maximizar/desmaximizar desde su decoracion (xdg_toplevel.set_maximized).
+// El cliente pide maximizar/desmaximizar (xdg_toplevel.set_maximized o el pedido X11).
 // Se confirma el estado en el configure (aunque no cambie) y se avisa al shell, que es
 // quien decide el layout: en modo tiled alterna entre ocupar la pantalla entera o su
-// franja partida. Para X11 el pedido llega como request_configure y no se maneja aca.
+// franja partida.
 static void handle_toplevel_request_maximize(struct wl_listener *listener, void *data) {
 	toplevel *t = wl_container_of(listener, t, request_maximize);
-	if (t->tl == NULL) {
-		return;
+	bool maximized;
+	if (t->tl != NULL) {
+		maximized = t->tl->requested.maximized;
+		// set_* agenda un configure internamente: aborta si la superficie no está inicializada
+		if (t->tl->base->initialized) {
+			wlr_xdg_toplevel_set_maximized(t->tl, maximized);
+			wlr_xdg_surface_schedule_configure(t->tl->base);
+		}
+	} else {
+		maximized = t->xs->maximized_horz || t->xs->maximized_vert;
+		wlr_xwayland_surface_set_maximized(t->xs, maximized, maximized);
 	}
-	bool maximized = t->tl->requested.maximized;
-	wlr_xdg_toplevel_set_maximized(t->tl, maximized);
-	wlr_xdg_surface_schedule_configure(t->tl->base);
 	if (t->server->cb.maximize != NULL) {
 		t->server->cb.maximize(t->server->cb.ud, t->id, maximized ? 1 : 0);
 	}
 }
 
+// El cliente pide pantalla completa (video de YouTube, etc.). Se confirma el estado y
+// se avisa al shell, que ocupa todo el viewport con esa ventana (fullscreen_id).
+static void handle_toplevel_request_fullscreen(struct wl_listener *listener, void *data) {
+	toplevel *t = wl_container_of(listener, t, request_fullscreen);
+	bool fullscreen;
+	if (t->tl != NULL) {
+		fullscreen = t->tl->requested.fullscreen;
+		// set_* agenda un configure internamente: aborta si la superficie no está inicializada
+		if (t->tl->base->initialized) {
+			wlr_xdg_toplevel_set_fullscreen(t->tl, fullscreen);
+			wlr_xdg_surface_schedule_configure(t->tl->base);
+		}
+	} else {
+		fullscreen = t->xs->fullscreen;
+		wlr_xwayland_surface_set_fullscreen(t->xs, fullscreen);
+	}
+	if (t->server->cb.fullscreen != NULL) {
+		t->server->cb.fullscreen(t->server->cb.ud, t->id, fullscreen ? 1 : 0);
+	}
+}
+
 static void toplevel_unlink(toplevel *t) {
 	struct wl_listener *all[] = { &t->commit, &t->map, &t->unmap, &t->destroy, &t->set_title,
-		&t->request_minimize, &t->request_maximize, &t->associate, &t->dissociate, &t->request_configure };
+		&t->request_minimize, &t->request_maximize, &t->request_fullscreen,
+		&t->associate, &t->dissociate, &t->request_configure };
 	for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
 		wl_list_remove(&all[i]->link);
 		wl_list_init(&all[i]->link);
@@ -1035,6 +1069,8 @@ static void handle_new_toplevel(struct wl_listener *listener, void *data) {
 	wl_signal_add(&tl->events.request_minimize, &t->request_minimize);
 	t->request_maximize.notify = handle_toplevel_request_maximize;
 	wl_signal_add(&tl->events.request_maximize, &t->request_maximize);
+	t->request_fullscreen.notify = handle_toplevel_request_fullscreen;
+	wl_signal_add(&tl->events.request_fullscreen, &t->request_fullscreen);
 
 	wl_list_insert(s->toplevels.prev, &t->link);
 
@@ -1459,8 +1495,10 @@ static void handle_new_xsurface(struct wl_listener *listener, void *data) {
 	wl_signal_add(&xs->events.set_title, &t->set_title);
 	t->request_minimize.notify = handle_toplevel_request_minimize;
 	wl_signal_add(&xs->events.request_minimize, &t->request_minimize);
-	// xdg-only: no se registra en X11, pero toplevel_unlink lo remueve igual.
-	wl_list_init(&t->request_maximize.link);
+	t->request_maximize.notify = handle_toplevel_request_maximize;
+	wl_signal_add(&xs->events.request_maximize, &t->request_maximize);
+	t->request_fullscreen.notify = handle_toplevel_request_fullscreen;
+	wl_signal_add(&xs->events.request_fullscreen, &t->request_fullscreen);
 	t->associate.notify = handle_xtoplevel_associate;
 	wl_signal_add(&xs->events.associate, &t->associate);
 	t->dissociate.notify = handle_xtoplevel_dissociate;
