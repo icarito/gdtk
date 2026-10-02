@@ -41,3 +41,19 @@ Sólo path wlroots:
 ## Detección
 `python3 gvd.py caps --json` lista lo disponible sin abrir streams (incluye
 `send.backends`, `send.wlr_ready` y `send.wlr_capture_bin`).
+
+## Verificación e2e (2026-10-02) y color
+- Emisor wlroots: debe conectar al compositor que expone `wlr-screencopy`. En bastion
+  (gdtk bajo sway) el shell tiene `WAYLAND_DISPLAY=wayland-1` (sway); si se corre desde
+  una terminal del compositor embebido (`wayland-0`) falla con "el compositor no expone
+  wlr-screencopy/wl_shm".
+- Video e2e verificado bastion→tengu y bastion→cupid: `gvd send --capture wlr` (VA) →
+  UDP/RTP H.264 → receptor decodifica (probado con `avdec_h264 ! filesink`, ~390 MB en
+  8 s, ~15 fps).
+- Fidelidad de color del pipeline (capture/encode/decode) verificada con patrón SMPTE:
+  el PNG por `vapostproc ! vah264enc ! avdec_h264` coincide con la referencia directa.
+  Si el render se ve con colores desviados, el sospechoso es la **colorimetría** en el
+  sink del receptor (`glimagesink`/`ffplay`), no la captura/encode.
+- Sinks: el compositor embebido de gdtk NO expone `wp_viewporter`, así que
+  `waylandsink` avisa "missing the ability to scale" y puede abortar. Usar `--sink
+  auto` (prefiere gl/xv), `--sink gl` o `--sink ffplay` (ffplay exige `--transport tcp`).
