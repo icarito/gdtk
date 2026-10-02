@@ -463,6 +463,48 @@ static func edges(layout):
 	return out
 
 
+# Topología COMPLETA de adyacencias para el server de Deskflow: una entrada por
+# cada par de pantallas que se tocan (no sólo desde la local), con el borde y los
+# rangos porcentuales de cada lado. Los ids se traducen a nombres Deskflow: la
+# pantalla local usa `local_name`; las demás su campo `peer`. Formato listo para
+# deskflow_conf.build_topology_conf:
+# [{screen, edge, peer, range, peer_range, direction}].
+static func topology(layout, local_name = ""):
+	var lay = normalize_layout(layout)
+	var local_id = String(lay.local.id)
+	if String(local_name).strip_edges() == "":
+		local_name = String(lay.local.label) if String(lay.local.label) != "" else local_id
+	var name_of = {}
+	for s in all_screens(lay):
+		if String(s.id) == local_id:
+			name_of[String(s.id)] = String(local_name)
+		else:
+			var pn = String(s.peer)
+			name_of[String(s.id)] = pn if pn != "" else String(s.id)
+	var out = []
+	for e in edges(lay):
+		var a = screen_by_id(lay, String(e.get("from", "")))
+		var b = screen_by_id(lay, String(e.get("to", "")))
+		if a == null or b == null:
+			continue
+		var r = link_ranges(a, b)
+		if r.empty():
+			continue
+		var an = String(name_of.get(String(e.get("from", "")), String(e.get("from", ""))))
+		var bn = String(name_of.get(String(e.get("to", "")), String(e.get("to", ""))))
+		if an == "" or bn == "" or an == bn:
+			continue
+		out.append({
+			"screen": an,
+			"edge": edge_of(String(r.get("direction", ""))),
+			"peer": bn,
+			"range": r.local_range,
+			"peer_range": r.peer_range,
+			"direction": String(r.get("direction", "")),
+		})
+	return out
+
+
 # Direcciones de todos los vecinos en el formato de host_directions (fuente unica
 # de Pantalla y Teclado y mouse). Sólo las pantallas con contacto confirmado.
 static func to_host_directions(layout):

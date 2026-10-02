@@ -3872,7 +3872,7 @@ func _deskflow_config_writes(mode, cfg, home, local):
 				writes.append({"path": home.plus_file("gdtk").plus_file("deskflow-client.conf"), "text": text})
 		"share_here":
 			var layout_path = _deskflow_layout_path()
-			var layout_text = CONF_MODEL.build_server_conf(local, _settings_deskflow_links())
+			var layout_text = _settings_deskflow_topology_text(local)
 			var settings_text = DESKFLOW_SETTINGS.build_server_settings(local, layout_path, port)
 			if layout_text != "" and settings_text != "":
 				writes.append({"path": layout_path, "text": layout_text})
@@ -3920,6 +3920,23 @@ func _settings_deskflow_links():
 				item["peer_range"] = r.peer_range
 		out.append(item)
 	return out
+
+
+# Conf del server con la topología COMPLETA del layout de Pantallas: todas las
+# adyacencias entre pantallas (no sólo desde la local), con rangos %. La local usa
+# `local_name`; los vecinos su campo `peer`.
+func _settings_deskflow_topology_text(local_name):
+	if settings_bridge == null:
+		return ""
+	var layout = settings_bridge.settings.get("screens", {})
+	var lay = SCREEN_LAYOUT.normalize_layout(layout)
+	var topo = SCREEN_LAYOUT.topology(lay, String(local_name))
+	var names = []
+	for s in SCREEN_LAYOUT.all_screens(lay):
+		var nm = String(local_name) if s.local else (String(s.peer) if String(s.peer) != "" else String(s.id))
+		if nm != "" and not names.has(nm):
+			names.append(nm)
+	return CONF_MODEL.build_topology_conf(names, topo)
 
 
 func _settings_layout_key():

@@ -318,6 +318,62 @@ static func build_server_conf(local_name, links, template_text = ""):
 	return blocks.join("\n") + "\n"
 
 
+# Config de servidor con la topología COMPLETA (varias pantallas y aristas entre
+# cualquier par, no sólo desde la local). `names` = nombres de todas las pantallas
+# (la primera es el server/local). `links` = [{screen, edge, peer, range, peer_range}]
+# con edge en {up,down,left,right} y los rangos opcionales en % (0..100).
+static func build_topology_conf(names, links, template_text = ""):
+	if typeof(names) != TYPE_ARRAY or names.empty():
+		return ""
+	var clean_names = []
+	for n in names:
+		var s = String(n).strip_edges()
+		if not LAYOUT.valid_peer(s) or clean_names.has(s):
+			return ""
+		clean_names.append(s)
+	if typeof(links) != TYPE_ARRAY:
+		return ""
+	var per = {}
+	for n in clean_names:
+		per[n] = []
+	for l in links:
+		if typeof(l) != TYPE_DICTIONARY:
+			return ""
+		var sc = String(l.get("screen", ""))
+		var ed = String(l.get("edge", ""))
+		var pe = String(l.get("peer", ""))
+		if not clean_names.has(sc) or not clean_names.has(pe) or sc == pe:
+			return ""
+		if EDGE_ORDER.find(ed) < 0:
+			return ""
+		per[sc].append({"edge": ed, "peer": pe, "lr": l.get("range"), "pr": l.get("peer_range")})
+		# Arista inversa (la topología lista cada contacto una vez): bajo el peer,
+		# borde opuesto, con los rangos intercambiados.
+		per[pe].append({"edge": _opposite_edge(ed), "peer": sc, "lr": l.get("peer_range"), "pr": l.get("range")})
+
+	var blocks = PoolStringArray()
+	blocks.append(_screens_block(clean_names))
+	blocks.append("")
+	blocks.append("section: aliases")
+	blocks.append("end")
+	blocks.append("")
+	var lines = PoolStringArray()
+	lines.append("section: links")
+	for n in clean_names:
+		lines.append("\t" + String(n) + ":")
+		for e in _sort_edges(per[n]):
+			lines.append("\t\t" + _link_text(e.edge, e.peer, e.lr, e.pr))
+	lines.append("end")
+	blocks.append(lines.join("\n"))
+	blocks.append("")
+	var opts = _options_from_template(template_text)
+	if opts == "":
+		opts = _default_options_block()
+	opts = _force_clipboard_sharing(opts)
+	blocks.append(opts)
+	return blocks.join("\n") + "\n"
+
+
 # Lee la config real. local = primera pantalla de section: screens (convencion
 # de build). Devuelve {local_links, screens}; texto invalido -> listas vacias.
 static func parse_server_conf(text):
