@@ -405,6 +405,22 @@ void WaylandCompositor::_cb_drag_state(void *p_ud, int p_active) {
 	self->emit_signal("drag_state_changed", self->drag_active);
 }
 
+void WaylandCompositor::_cb_output_added(void *p_ud, int p_id) {
+	static_cast<WaylandCompositor *>(p_ud)->emit_signal("output_added", p_id);
+}
+
+void WaylandCompositor::_cb_output_changed(void *p_ud, int p_id) {
+	static_cast<WaylandCompositor *>(p_ud)->emit_signal("output_changed", p_id);
+}
+
+void WaylandCompositor::_cb_output_removed(void *p_ud, int p_id) {
+	static_cast<WaylandCompositor *>(p_ud)->emit_signal("output_removed", p_id);
+}
+
+void WaylandCompositor::_cb_toplevel_output_changed(void *p_ud, int p_toplevel_id, int p_output_id) {
+	static_cast<WaylandCompositor *>(p_ud)->emit_signal("toplevel_output_changed", p_toplevel_id, p_output_id);
+}
+
 void WaylandCompositor::_cb_activate(void *p_ud, int p_id) {
 	static_cast<WaylandCompositor *>(p_ud)->emit_signal("toplevel_activate", p_id);
 }
@@ -707,6 +723,15 @@ void WaylandCompositor::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_dmabuf_state"), &WaylandCompositor::get_dmabuf_state);
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "dmabuf_state"), "", "get_dmabuf_state");
 
+	ClassDB::bind_method(D_METHOD("add_output", "name", "rect", "scale", "primary"), &WaylandCompositor::add_output, DEFVAL(1.0), DEFVAL(false));
+	ClassDB::bind_method(D_METHOD("configure_output", "id", "rect", "scale"), &WaylandCompositor::configure_output, DEFVAL(1.0));
+	ClassDB::bind_method(D_METHOD("remove_output", "id"), &WaylandCompositor::remove_output);
+	ClassDB::bind_method(D_METHOD("set_toplevel_output", "toplevel_id", "output_id"), &WaylandCompositor::set_toplevel_output);
+	ClassDB::bind_method(D_METHOD("get_toplevel_output", "toplevel_id"), &WaylandCompositor::get_toplevel_output);
+	ClassDB::bind_method(D_METHOD("get_outputs"), &WaylandCompositor::get_outputs);
+	ClassDB::bind_method(D_METHOD("get_output", "id"), &WaylandCompositor::get_output);
+	ClassDB::bind_method(D_METHOD("get_primary_output_id"), &WaylandCompositor::get_primary_output_id);
+
 	ADD_SIGNAL(MethodInfo("toplevel_added", PropertyInfo(Variant::INT, "id")));
 	ADD_SIGNAL(MethodInfo("toplevel_removed", PropertyInfo(Variant::INT, "id")));
 	ADD_SIGNAL(MethodInfo("toplevel_activate", PropertyInfo(Variant::INT, "id")));
@@ -723,6 +748,10 @@ void WaylandCompositor::_bind_methods() {
 	ADD_SIGNAL(MethodInfo("drag_icon_changed"));
 	ADD_SIGNAL(MethodInfo("drag_state_changed", PropertyInfo(Variant::BOOL, "active")));
 	ADD_SIGNAL(MethodInfo("process_exited", PropertyInfo(Variant::INT, "pid"), PropertyInfo(Variant::INT, "code")));
+	ADD_SIGNAL(MethodInfo("output_added", PropertyInfo(Variant::INT, "id")));
+	ADD_SIGNAL(MethodInfo("output_changed", PropertyInfo(Variant::INT, "id")));
+	ADD_SIGNAL(MethodInfo("output_removed", PropertyInfo(Variant::INT, "id")));
+	ADD_SIGNAL(MethodInfo("toplevel_output_changed", PropertyInfo(Variant::INT, "toplevel_id"), PropertyInfo(Variant::INT, "output_id")));
 }
 
 void WaylandCompositor::_notification(int p_what) {
@@ -800,6 +829,10 @@ String WaylandCompositor::start() {
 	cb.cursor_image = &WaylandCompositor::_cb_cursor_image;
 	cb.drag_icon = &WaylandCompositor::_cb_drag_icon;
 	cb.drag_state = &WaylandCompositor::_cb_drag_state;
+	cb.output_added = &WaylandCompositor::_cb_output_added;
+	cb.output_changed = &WaylandCompositor::_cb_output_changed;
+	cb.output_removed = &WaylandCompositor::_cb_output_removed;
+	cb.toplevel_output_changed = &WaylandCompositor::_cb_toplevel_output_changed;
 
 	server = wl_server_create(cb, (int)default_size.x, (int)default_size.y);
 	if (server == NULL) {
@@ -1212,4 +1245,90 @@ String WaylandCompositor::get_dmabuf_state() const {
 		return String("on");
 	}
 	return String("off (") + String(wl_server_dmabuf_reason(server)) + String(")");
+}
+
+Dictionary WaylandCompositor::_output_dict(int p_output_id) const {
+	Dictionary d;
+	if (server == NULL) {
+		return d;
+	}
+	wl_server_output_info info;
+	if (!wl_server_output_get(server, p_output_id, &info)) {
+		return d;
+	}
+	d["id"] = info.id;
+	d["name"] = String(info.name != NULL ? info.name : "");
+	d["rect"] = Rect2(info.x, info.y, info.width, info.height);
+	d["scale"] = info.scale;
+	d["primary"] = info.primary != 0;
+	d["enabled"] = info.enabled != 0;
+	return d;
+}
+
+int WaylandCompositor::add_output(const String &p_name, const Rect2 &p_rect, float p_scale, bool p_primary) {
+	if (server == NULL) {
+		return 0;
+	}
+	int scale = (int)(p_scale + 0.5f);
+	if (scale < 1) {
+		scale = 1;
+	}
+	return wl_server_output_add(server, p_name.utf8().get_data(),
+			(int)p_rect.position.x, (int)p_rect.position.y,
+			(int)p_rect.size.x, (int)p_rect.size.y, scale, p_primary ? 1 : 0);
+}
+
+bool WaylandCompositor::configure_output(int p_output_id, const Rect2 &p_rect, float p_scale) {
+	if (server == NULL) {
+		return false;
+	}
+	int scale = (int)(p_scale + 0.5f);
+	if (scale < 1) {
+		scale = 1;
+	}
+	return wl_server_output_configure(server, p_output_id,
+			(int)p_rect.position.x, (int)p_rect.position.y,
+			(int)p_rect.size.x, (int)p_rect.size.y, scale) != 0;
+}
+
+void WaylandCompositor::remove_output(int p_output_id) {
+	if (server != NULL) {
+		wl_server_output_remove(server, p_output_id);
+	}
+}
+
+void WaylandCompositor::set_toplevel_output(int p_toplevel_id, int p_output_id) {
+	if (server != NULL) {
+		wl_server_toplevel_set_output(server, p_toplevel_id, p_output_id);
+	}
+}
+
+int WaylandCompositor::get_toplevel_output(int p_toplevel_id) const {
+	return server != NULL ? wl_server_toplevel_output(server, p_toplevel_id) : 0;
+}
+
+Array WaylandCompositor::get_outputs() const {
+	Array out;
+	if (server == NULL) {
+		return out;
+	}
+	int count = wl_server_outputs(server, NULL, 0);
+	if (count <= 0) {
+		return out;
+	}
+	Vector<int> ids;
+	ids.resize(count);
+	int n = wl_server_outputs(server, ids.ptrw(), count);
+	for (int i = 0; i < n; i++) {
+		out.push_back(_output_dict(ids[i]));
+	}
+	return out;
+}
+
+Dictionary WaylandCompositor::get_output(int p_output_id) const {
+	return _output_dict(p_output_id);
+}
+
+int WaylandCompositor::get_primary_output_id() const {
+	return server != NULL ? wl_server_output_primary(server) : 0;
 }

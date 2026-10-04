@@ -1,0 +1,97 @@
+#!/bin/sh
+# gdtk-set-governor — helper privilegiado mínimo para cambiar el governor de CPU.
+# Instalado root:root 0755 en /usr/libexec/ por session/gdtk-governor-provision.
+# Es invocado por pkexec desde el shell (SPEC-power-governor).
+#
+# Contrato:
+#   gdtk-set-governor <governor>
+#   1. Exactamente un argumento, token ASCII [A-Za-z0-9_-]+.
+#   2. El valor debe figurar como palabra completa en un scaling_available_governors.
+#   3. Escribe TODAS las /sys/.../cpufreq/policy*/scaling_governor (fallback cpu0).
+#   4. Sin eval, sin sh -c, sin globs ni rutas derivadas del argumento.
+#   5. Verifica cada escritura; un fallo parcial devuelve rc != 0.
+#   6. Diagnóstico corto por stderr, sin secretos ni contenido arbitrario.
+#
+# Sólo para tests no privilegiados: GDTK_GOVERNOR_TEST=1 + GDTK_GOVERNOR_SYSFS=<raíz>
+# permiten usar un árbol sysfs falso. Como root siempre se usa /sys real.
+set -u
+
+PROG="gdtk-set-governor"
+
+die() { # die <mensaje> [rc]
+	printf '%s: %s\n' "$PROG" "$1" >&2
+	exit "${2:-1}"
+}
+
+read_line() { # read_line <ruta> -> primera línea sin salto; vacío si no se puede leer
+	r=""
+	IFS= read -r r < "$1" 2>/dev/null || true
+	printf '%s' "$r"
+}
+
+[ "$#" -eq 1 ] || die "uso: $PROG <governor>" 2
+gov="$1"
+
+# Token estricto: cualquier metacarácter, espacio, ruta o inyección queda fuera.
+case "$gov" in
+	''|*[!A-Za-z0-9_-]*) die "governor inválido" 2 ;;
+esac
+
+sysfs="/sys"
+if [ "${GDTK_GOVERNOR_TEST:-0}" = "1" ]; then
+	[ "$(id -u)" -eq 0 ] && die "modo de prueba no permitido como root" 2
+	[ -n "${GDTK_GOVERNOR_SYSFS:-}" ] || die "GDTK_GOVERNOR_SYSFS sin definir" 2
+	sysfs="$GDTK_GOVERNOR_SYSFS"
+fi
+
+# Políticas presentes: policy*/ o, si no hay, el cpufreq de cpu0.
+policies=""
+npol=0
+for d in "$sysfs"/devices/system/cpu/cpufreq/policy*/; do
+	if [ -d "$d" ]; then
+		policies="$policies $d"
+		npol=$((npol + 1))
+	fi
+done
+if [ "$npol" -eq 0 ] && [ -d "$sysfs/devices/system/cpu/cpu0/cpufreq" ]; then
+	policies="$sysfs/devices/system/cpu/cpu0/cpufreq/"
+	npol=1
+fi
+[ "$npol" -gt 0 ] || die "sin cpufreq en sysfs" 3
+
+# El governor debe estar publicado como palabra completa por el kernel.
+avail_found=0
+gov_ok=0
+for d in $policies; do
+	a="$(read_line "${d}scaling_available_governors")"
+	if [ -n "$a" ]; then
+		avail_found=1
+		for w in $a; do
+			[ "$w" = "$gov" ] && gov_ok=1
+		done
+	fi
+done
+[ "$avail_found" -eq 1 ] || die "kernel sin lista de governors" 3
+[ "$gov_ok" -eq 1 ] || die "governor no disponible" 4
+
+# Escritura + verificación por política. Sin éxito parcial silencioso.
+applied=0
+failed=0
+for d in $policies; do
+	t="${d}scaling_governor"
+	if ! printf '%s\n' "$gov" > "$t" 2>/dev/null; then
+		printf '%s: no se pudo escribir scaling_governor\n' "$PROG" >&2
+		failed=1
+		continue
+	fi
+	if [ "$(read_line "$t")" != "$gov" ]; then
+		printf '%s: verificación fallida en scaling_governor\n' "$PROG" >&2
+		failed=1
+		continue
+	fi
+	applied=$((applied + 1))
+done
+
+[ "$failed" -eq 0 ] || die "fallo parcial ($applied/$npol)" 5
+[ "$applied" -gt 0 ] || die "nada escrito" 5
+exit 0

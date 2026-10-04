@@ -6,10 +6,13 @@
 #
 # Versionado: lo que corre es SIEMPRE el arbol vivo (--path original, ~/gdtk/shell):
 # sincronizar basta, no hay snapshot que activar. El store (gdtk-version) es solo una red
-# de seguridad automatica: un shell vivo que lleva PROMOTE_AFTER s sano se guarda solo
-# como last_good; si el shell vivo se cae 2 veces seguidas al arrancar, se usa last_good
-# hasta el proximo reinicio pedido (que vuelve al arbol vivo). Ver `gdtk-version status`.
-# ponytail: no detecta cuelgues (proceso vivo pero congelado): para eso gdtk_restart_shell force=true.
+# de seguridad automatica: solo se guarda last_good_content cuando el heartbeat
+# semantico del shell acredita progreso (C2, SPEC-session-continuity): PID vivo, heartbeat
+# del PID correcto, `sequence` avanzando y `reload=ready`. Si el shell vivo se cae 2 veces
+# seguidas al arrancar, se usa last_good hasta el proximo reinicio pedido (que vuelve al
+# arbol vivo). Ver `gdtk-version status`.
+# Cuelgue: un PID vivo sin avance de heartbeat se reporta como `hung`; terminarlo queda
+# detras de GDTK_HEALTH_KILL_HUNG=1. Sin heartbeat no se promueve ni se mata (compatibilidad).
 LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/gdtk"
 RUN="${XDG_RUNTIME_DIR:-/tmp}"
 QUIT="$RUN/gdtk-quit"     # el shell la crea al pedir Salir: termina aunque el cierre se caiga
@@ -19,6 +22,11 @@ PROMOTE_AFTER="${GDTK_PROMOTE_AFTER:-20}"
 VER="$(dirname "$0")/gdtk-version"
 STORE="${GDTK_STORE:-${XDG_DATA_HOME:-$HOME/.local/share}/gdtk}"
 export GDTK_STORE
+# C2: heartbeat semantico. El helper valida pid + frescura del health.json atomico.
+HEALTH_BIN="$(dirname "$0")/gdtk-health"
+HEALTH_INTERVAL="${GDTK_HEALTH_INTERVAL:-1}"
+HEALTH_TIMEOUT="${GDTK_HEALTH_TIMEOUT:-8}"
+KILL_HUNG="${GDTK_HEALTH_KILL_HUNG:-0}"
 mkdir -p "$LOGDIR"
 pid=""
 say() { echo "[supervisor] $*"; echo "$(date '+%F %T') $*" >>"$LOGDIR/supervisor.log"; }
@@ -130,18 +138,72 @@ while :; do
 	"$BIN" $safe $EXTRA --path "$launch_path" >"$fifo" 2>&1 &
 	pid=$!
 	echo "$pid" >"$RUN/gdtk-shell.pid"
-	# Promocion a buena: si sigue vivo tras PROMOTE_AFTER, sella last_good. Si se cae
-	# antes, kill -0 falla y no promueve (el pid del archivo evita reciclar un pid ajeno).
+	# Promocion a last_good_content: SOLO con progreso semantico observado del PID
+	# correcto (C2). Un PID vivo o un heartbeat estancado no promueve. Sin heartbeat no
+	# se promueve ni se mata (compatibilidad de arranque). El cuelgue se reporta; matarlo
+	# requiere GDTK_HEALTH_KILL_HUNG=1.
 	promoter=""
 	if [ -x "$VER" ]; then
-		( sleep "$PROMOTE_AFTER"
-		  if kill -0 "$pid" 2>/dev/null && [ "$(cat "$RUN/gdtk-shell.pid" 2>/dev/null)" = "$pid" ]; then
-			if [ -n "$version" ]; then
-				"$VER" good "$version" >/dev/null 2>&1 && say "version $version marcada buena"
-			else
-				"$VER" autogood >/dev/null 2>&1 && say "arbol vivo guardado como last_good"
-			fi
-		  fi ) &
+		(
+			hb_seen=0; hb_last_seq=""; hb_adv=0; hb_hung=0; hb_promoted=0
+			hb_last_adv="$(date +%s)"; hb_start="$(date +%s)"
+			while kill -0 "$pid" 2>/dev/null; do
+				[ "$(cat "$RUN/gdtk-shell.pid" 2>/dev/null)" = "$pid" ] || break
+				line=""
+				[ -x "$HEALTH_BIN" ] && line="$("$HEALTH_BIN" probe "$pid" 2>/dev/null || true)"
+				state="$(printf '%s' "$line" | cut -f1)"
+				seq="$(printf '%s' "$line" | cut -f2)"
+				reload="$(printf '%s' "$line" | cut -f3)"
+				now="$(date +%s)"
+				case "$state" in
+					ok)
+						if [ "$reload" = ready ]; then
+							if [ "$hb_seen" -eq 0 ]; then
+								hb_seen=1; hb_last_adv="$now"
+							elif [ -n "$seq" ] && [ -n "$hb_last_seq" ] \
+							     && [ "$seq" -gt "$hb_last_seq" ] 2>/dev/null; then
+								hb_adv=$((hb_adv + 1)); hb_last_adv="$now"
+							fi
+						fi
+						hb_last_seq="$seq"
+						;;
+					absent|nounjq)
+						# Sin heartbeat: compatibilidad, ni promocion ni muerte.
+						hb_seen=0; hb_last_seq=""; hb_adv=0
+						;;
+					*) : ;;  # invalid/wrongpid/stale: no cuentan progreso
+				esac
+				# Cuelgue: hubo heartbeat valido y dejo de avanzar.
+				if [ "$hb_seen" -eq 1 ] && [ $((now - hb_last_adv)) -ge "$HEALTH_TIMEOUT" ]; then
+					if [ "$hb_hung" -eq 0 ]; then
+						say "shell sin progreso semantico (hung): pid $pid"
+						hb_hung=1
+					fi
+					if [ "$KILL_HUNG" = 1 ]; then
+						say "GDTK_HEALTH_KILL_HUNG=1: termino el shell colgado (pid $pid)"
+						kill "$pid" 2>/dev/null
+						break
+					fi
+				fi
+				# Promover: PID vivo + heartbeat del PID + >=2 avances + reload ready.
+				if [ "$hb_promoted" -eq 0 ] && [ "$state" = ok ] && [ "$hb_seen" -eq 1 ] \
+				   && [ "$reload" = ready ] && [ "$hb_adv" -ge 2 ] \
+				   && [ $((now - hb_start)) -ge "$PROMOTE_AFTER" ]; then
+					if [ -n "$version" ]; then
+						if "$VER" good "$version" >/dev/null 2>&1; then
+							say "version $version marcada buena (progreso semantico)"; hb_promoted=1
+						fi
+					else
+						if "$VER" autogood >/dev/null 2>&1; then
+							say "arbol vivo guardado como last_good (progreso semantico)"; hb_promoted=1
+						else
+							say "autogood fallo (preflight); no se promueve"
+						fi
+					fi
+				fi
+				sleep "$HEALTH_INTERVAL"
+			done
+		) &
 		promoter=$!
 	fi
 	wait "$pid"; rc=$?

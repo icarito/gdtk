@@ -1,0 +1,68 @@
+#!/bin/sh
+# gdtk-governor-provision — instala o remueve el helper root-owned y su action polkit
+# (SPEC-power-governor). Lo ejecuta el OPERADOR, a mano y con sudo. Ni deploy.sh ni el
+# shell lo llaman: cada host decide provisionar.
+#
+#   sudo <repo>/session/gdtk-governor-provision install
+#        <repo>/session/gdtk-governor-provision status   (sin root)
+#   sudo <repo>/session/gdtk-governor-provision remove
+set -u
+
+HELPER_DST="/usr/libexec/gdtk-set-governor"
+POLICY_DST="/usr/share/polkit-1/actions/org.gdtk.governor.policy"
+ACTION_ID="org.gdtk.governor.set"
+SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
+HELPER_SRC="$SRC_DIR/gdtk-governor-helper"
+POLICY_SRC="$SRC_DIR/org.gdtk.governor.policy"
+
+usage() { printf 'uso: %s {status|install|remove}\n' "$0" >&2; exit 2; }
+need_root() { [ "$(id -u)" -eq 0 ] || { echo "$PROG: requiere sudo/root" >&2; exit 1; }; }
+PROG="$(basename "$0")"
+
+status() {
+	for p in "$HELPER_DST" "$POLICY_DST"; do
+		if [ -e "$p" ]; then
+			printf '%s: presente (%s)\n' "$p" "$(stat -c '%a %U:%G' "$p" 2>/dev/null || echo '?')"
+		else
+			printf '%s: ausente\n' "$p"
+		fi
+	done
+	if command -v pkaction >/dev/null 2>&1; then
+		if pkaction --action-id "$ACTION_ID" >/dev/null 2>&1; then
+			printf 'action %s: registrada\n' "$ACTION_ID"
+		else
+			printf 'action %s: no registrada\n' "$ACTION_ID"
+		fi
+	fi
+}
+
+install_all() {
+	need_root
+	[ -f "$HELPER_SRC" ] || { echo "$PROG: falta $HELPER_SRC" >&2; exit 1; }
+	[ -f "$POLICY_SRC" ] || { echo "$PROG: falta $POLICY_SRC" >&2; exit 1; }
+	install -D -o root -g root -m 0755 "$HELPER_SRC" "$HELPER_DST"
+	install -D -o root -g root -m 0644 "$POLICY_SRC" "$POLICY_DST"
+	printf 'instalado: %s (0755 root:root)\n' "$HELPER_DST"
+	printf 'instalado: %s (0644 root:root)\n' "$POLICY_DST"
+	if command -v pkaction >/dev/null 2>&1; then
+		if pkaction --action-id "$ACTION_ID" >/dev/null 2>&1; then
+			printf 'action verificada: %s\n' "$ACTION_ID"
+		else
+			printf 'aviso: pkaction no reconoce %s (¿polkitd activo?)\n' "$ACTION_ID" >&2
+		fi
+	fi
+}
+
+remove_all() {
+	need_root
+	rm -f "$HELPER_DST" "$POLICY_DST"
+	printf 'removido: %s\n' "$HELPER_DST"
+	printf 'removido: %s\n' "$POLICY_DST"
+}
+
+case "${1:-}" in
+	status) status ;;
+	install) install_all ;;
+	remove) remove_all ;;
+	*) usage ;;
+esac

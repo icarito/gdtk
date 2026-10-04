@@ -1,0 +1,51 @@
+#!/bin/sh
+# Historial del portapapeles de las apps embebidas (applet Portapapeles del Frame,
+# shell/applet_clipboard.gd). POSIX sh.
+#
+#   gdtk-clipboard watch <wayland-display>   vigía único (flock); despierta con cada copia
+#   gdtk-clipboard store                     guarda stdin como entrada (lo llama wl-paste)
+#   gdtk-clipboard set <wayland-display> <f> pone el texto de <f> como selección y borra <f>
+#                                            (lo que llega de otro equipo del Grupo)
+#
+# Requiere que el compositor ofrezca ext-data-control-v1 (modules/wayland/wl_server.c):
+# sin eso `wl-paste --watch` sale con error y el applet muestra «no disponible".
+# El historial vive en XDG_RUNTIME_DIR (tmpfs, 0700): se borra al cerrar sesión.
+# Una entrada = un archivo con nombre de reloj en ns (orden lexicográfico = orden real).
+# Lo que el gestor de contraseñas marca como sensible (CLIPBOARD_STATE=sensitive) no
+# se guarda.
+
+dir="${XDG_RUNTIME_DIR:-/tmp}/gdtk/clipboard"
+max=50
+
+case "$1" in
+watch)
+	[ -n "$2" ] || exit 2
+	command -v wl-paste >/dev/null 2>&1 || { echo "gdtk-clipboard: falta wl-paste" >&2; exit 3; }
+	mkdir -p "$dir" && chmod 700 "$dir" || exit 1
+	# El lock lo tiene el vigía vivo: relanzar es idempotente.
+	WAYLAND_DISPLAY="$2" exec flock -n "$dir/.lock" wl-paste --type text --watch "$0" store
+	;;
+store)
+	[ "${CLIPBOARD_STATE:-data}" = data ] || exit 0
+	umask 077
+	tmp="$dir/.in.$$"
+	head -c 65536 >"$tmp"
+	last="$(ls "$dir" | tail -n 1)"
+	if [ ! -s "$tmp" ] || { [ -n "$last" ] && cmp -s "$tmp" "$dir/$last"; }; then
+		rm -f "$tmp"
+		exit 0
+	fi
+	mv "$tmp" "$dir/$(date +%s%N)"
+	ls "$dir" | head -n -"$max" | (cd "$dir" && xargs -r rm -f --)
+	;;
+set)
+	[ -n "$2" ] && [ -f "$3" ] || exit 2
+	# wl-copy queda sirviendo la selección en segundo plano; el archivo ya no hace falta.
+	WAYLAND_DISPLAY="$2" wl-copy --type 'text/plain;charset=utf-8' <"$3"
+	rm -f "$3"
+	;;
+*)
+	echo "uso: $0 watch <wayland-display> | store | set <wayland-display> <archivo>" >&2
+	exit 2
+	;;
+esac

@@ -130,16 +130,20 @@ static func hit(pos, frame_rect, title_h = TITLE_H, border = BORDER, btn = BTN, 
 # `inset` px del borde izquierdo (≈ 1 bloque de la rejilla) para no quedar centrada.
 # `reveal` 0..1 la esconde detrás de la ventana (y = borde superior) y la sube hasta
 # su lugar; el dibujo recorta con reveal_clip, así parece salir de detrás de la ventana.
-static func move_grip_rect(rect, scale = 1.0, reveal = 1.0, inset = 0.0):
+# Con `inside = true` (ventana maximizada: no hay hueco arriba del marco, el Frame
+# está pegado) la pastilla queda DENTRO del borde superior y no usa reveal.
+static func move_grip_rect(rect, scale = 1.0, reveal = 1.0, inset = 0.0, inside = false):
 	var r = Rect2(rect)
 	if r.size.x <= 0.0 or r.size.y <= 0.0:
 		return Rect2()
 	var w = min(MOVE_GRIP_W * scale, r.size.x)
 	var h = MOVE_GRIP_H * scale
-	var p = clamp(float(reveal), 0.0, 1.0)
 	var x = r.position.x + (r.size.x - w) * 0.5
 	if inset > 0.0:
 		x = r.position.x + min(float(inset), max(r.size.x - w, 0.0))
+	if inside:
+		return Rect2(Vector2(x, r.position.y), Vector2(w, h))
+	var p = clamp(float(reveal), 0.0, 1.0)
 	return Rect2(Vector2(x, r.position.y - h * p), Vector2(w, h))
 
 
@@ -155,27 +159,36 @@ static func reveal_clip(g, top_y):
 	return Rect2(r.position, Vector2(r.size.x, y - r.position.y))
 
 
-static func move_grip_hit(pos, rect, scale = 1.0, inset = 0.0):
-	var g = move_grip_rect(rect, scale, 1.0, inset)
+static func move_grip_hit(pos, rect, scale = 1.0, inset = 0.0, inside = false):
+	var g = move_grip_rect(rect, scale, 1.0, inset, inside)
 	return g.size.x > 0.0 and g.grow(MOVE_GRIP_PAD * scale).has_point(Vector2(pos))
 
 
-# ¿El puntero está sobre la ventana CSD o cerca de su borde superior? (muestra el pill)
-static func move_grip_hover(pos, rect, scale = 1.0, inset = 0.0):
+# ¿El puntero está cerca del asa (franja junto al borde superior o la propia pastilla)?
+# Discreta, como el asa de split (aparece al acercarse a la línea, no sobre toda la
+# ventana): con `inside = true` la franja va dentro del borde (maximizada).
+static func move_grip_hover(pos, rect, scale = 1.0, inset = 0.0, inside = false):
 	var r = Rect2(rect)
 	if r.size.x <= 0.0 or r.size.y <= 0.0:
 		return false
+	var pt = Vector2(pos)
 	var pad = HOVER_TOP * scale
-	return Rect2(r.position - Vector2(0, pad), r.size + Vector2(0, pad)).has_point(Vector2(pos)) \
-		or move_grip_hit(pos, r, scale, inset)
+	var top = r.position.y if inside else r.position.y - pad
+	var band = Rect2(Vector2(r.position.x, top),
+		Vector2(r.size.x, max((r.position.y + pad) - top, 0.0)))
+	return band.has_point(pt) or move_grip_hit(pt, r, scale, inset, inside)
 
 
 # Zonas propias del shell sobre una ventana CSD: "grip" | "bottom" | "bl" | "br" | "".
-static func csd_hit(pos, rect, scale = 1.0, inset = 0.0):
+# Con `inside = true` (maximizada) sólo el asa: el resto del rect es del cliente (no
+# se redimensiona una maximizada hasta restaurarla).
+static func csd_hit(pos, rect, scale = 1.0, inset = 0.0, inside = false):
 	var r = Rect2(rect)
 	var pt = Vector2(pos)
-	if move_grip_hit(pt, r, scale, inset):
+	if move_grip_hit(pt, r, scale, inset, inside):
 		return "grip"
+	if inside:
+		return ""
 	if r.size.x <= 0.0 or r.size.y <= 0.0 or not r.has_point(pt):
 		return ""
 	if pt.y < r.end.y - CSD_EDGE * scale:
@@ -297,14 +310,21 @@ static func selftest():
 	assert(csd_hit(Vector2(102, 497), fr, 1.0) == "bl" and csd_hit(Vector2(498, 497), fr, 1.0) == "br", "csd esquinas")
 	assert(csd_hit(Vector2(300, 400), fr, 1.0) == "", "csd contenido")
 	assert(csd_hit(Vector2(300, 520), fr, 1.0) == "", "csd fuera abajo")
-	assert(move_grip_hover(Vector2(150, 300), fr, 1.0) and move_grip_hover(Vector2(150, 190), fr, 1.0), "hover dentro/arriba")
-	assert(not move_grip_hover(Vector2(150, 150), fr, 1.0) and not move_grip_hover(Vector2(150, 520), fr, 1.0), "sin hover lejos")
+	assert(move_grip_hover(Vector2(150, 210), fr, 1.0) and move_grip_hover(Vector2(150, 190), fr, 1.0), "hover cerca del borde superior")
+	assert(not move_grip_hover(Vector2(150, 300), fr, 1.0) and not move_grip_hover(Vector2(150, 150), fr, 1.0), "sin hover lejos")
 	assert(move_grip_rect(Rect2(), 1.0).size == Vector2.ZERO, "pill de rect vacío")
 	# Asa con desfase: ~1 bloque desde el lado izquierdo (no centrada).
 	assert(move_grip_rect(fr, 1.0, 1.0, 40.0) == Rect2(140, 190, 40, 10), "asa desfasada a la izquierda")
 	assert(csd_hit(Vector2(145, 205), fr, 1.0, 40.0) == "grip", "grip desfasado")
 	assert(csd_hit(Vector2(145, 205), fr, 1.0, 0.0) == "", "sin desfase ese punto es del cliente")
 	assert(move_grip_rect(fr, 1.0, 1.0, 5000.0).position.x == 460.0, "desfase no sale del rect")
+	# Maximizada: asa dentro del borde superior y sólo el asa es del shell.
+	assert(move_grip_rect(fr, 1.0, 1.0, 0.0, true) == Rect2(280, 200, 40, 10), "asa dentro del borde")
+	assert(csd_hit(Vector2(300, 203), fr, 1.0, 0.0, true) == "grip", "hit asa dentro")
+	assert(csd_hit(Vector2(150, 230), fr, 1.0, 0.0, true) == "", "maximizada: cuerpo del cliente")
+	assert(csd_hit(Vector2(300, 497), fr, 1.0, 0.0, true) == "", "maximizada: sin franja inferior")
+	assert(move_grip_hover(Vector2(150, 205), fr, 1.0, 0.0, true), "hover maximizada cerca del borde")
+	assert(not move_grip_hover(Vector2(150, 300), fr, 1.0, 0.0, true), "maximizada: sin hover en el cuerpo")
 	# Marco degenerado.
 	var empty = parts(Rect2(0, 0, 0, 0), 22.0, 1.0, 22.0, 0.0, 8.0)
 	assert(empty.content.size == Vector2.ZERO and empty.resize.size == Vector2.ZERO, "marco vacío")

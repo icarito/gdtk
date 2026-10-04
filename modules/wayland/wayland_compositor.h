@@ -75,6 +75,10 @@ class WaylandCompositor : public Node {
 	static void _cb_cursor_image(void *p_ud, const unsigned char *p_data, int p_w, int p_h, uint32_t p_format, int p_stride, int p_hx, int p_hy);
 	static void _cb_drag_icon(void *p_ud, const unsigned char *p_data, int p_w, int p_h, uint32_t p_format, int p_stride, int p_dx, int p_dy);
 	static void _cb_drag_state(void *p_ud, int p_active);
+	static void _cb_output_added(void *p_ud, int p_id);
+	static void _cb_output_changed(void *p_ud, int p_id);
+	static void _cb_output_removed(void *p_ud, int p_id);
+	static void _cb_toplevel_output_changed(void *p_ud, int p_toplevel_id, int p_output_id);
 
 	void _on_added(int p_id);
 	void _on_removed(int p_id);
@@ -87,6 +91,7 @@ class WaylandCompositor : public Node {
 	void _reap_children();
 
 	Map<int, Toplevel>::Element *_toplevel_entry(int p_id);
+	Dictionary _output_dict(int p_output_id) const;
 
 protected:
 	static void _bind_methods();
@@ -139,6 +144,17 @@ void pointer_axis_stop();
 	int get_dmabuf_commits() const;
 	int get_shm_commits() const;
 	String get_dmabuf_state() const;
+
+	// Salidas logicas (multi-output). `p_rect` es la geometria logica global;
+	// `p_scale` se redondea a un entero >=1. add_output devuelve el id (>0) o 0.
+	int add_output(const String &p_name, const Rect2 &p_rect, float p_scale = 1.0, bool p_primary = false);
+	bool configure_output(int p_output_id, const Rect2 &p_rect, float p_scale = 1.0);
+	void remove_output(int p_output_id);
+	void set_toplevel_output(int p_toplevel_id, int p_output_id);
+	int get_toplevel_output(int p_toplevel_id) const;
+	Array get_outputs() const;
+	Dictionary get_output(int p_output_id) const;
+	int get_primary_output_id() const;
 };
 
 #endif // WAYLAND_COMPOSITOR_H

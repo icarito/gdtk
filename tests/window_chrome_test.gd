@@ -85,6 +85,13 @@ func _init():
 	check("csd esquinas", C.csd_hit(Vector2(102, 497), fr, 1.0) == "bl" and C.csd_hit(Vector2(498, 497), fr, 1.0) == "br")
 	check("csd hover cerca del borde superior", C.move_grip_hover(Vector2(150, 190), fr, 1.0)
 		and not C.move_grip_hover(Vector2(150, 150), fr, 1.0))
+	# Maximizada: asa DENTRO del borde superior (no hay hueco arriba) y sin franja inferior.
+	check("asa dentro del borde superior", _eq(C.move_grip_rect(fr, 1.0, 1.0, 0.0, true), Rect2(280, 200, 40, 10)))
+	check("csd grip maximizada", C.csd_hit(Vector2(300, 203), fr, 1.0, 0.0, true) == "grip")
+	check("csd cuerpo maximizada es del cliente", C.csd_hit(Vector2(150, 230), fr, 1.0, 0.0, true) == "")
+	check("csd sin franja inferior maximizada", C.csd_hit(Vector2(300, 497), fr, 1.0, 0.0, true) == "")
+	check("hover maximizada cerca del borde", C.move_grip_hover(Vector2(300, 205), fr, 1.0, 0.0, true)
+		and not C.move_grip_hover(Vector2(300, 300), fr, 1.0, 0.0, true))
 
 	# Marco degenerado: no rompe.
 	var empty = C.parts(Rect2(0, 0, 0, 0))

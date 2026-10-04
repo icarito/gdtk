@@ -194,15 +194,19 @@ live_differs() {
 	return 1
 }
 
-# Lo llama el supervisor cuando el arbol vivo lleva PROMOTE_AFTER s sano: lo guarda como
-# last_good si cambio desde el ultimo guardado. Mantiene pocas copias (gc 3).
+# Lo llama el supervisor cuando el arbol vivo acredita progreso semantico (C2): lo
+# guarda como last_good_content si cambio desde el ultimo guardado. Pasa por
+# gdtk-preflight (SIN --no-check): un contenido que no compila no se promueve.
+# Mantiene pocas copias (gc 3).
 cmd_autogood() {
 	lg="$(readlink -f "$LAST_GOOD" 2>/dev/null || true)"
 	if [ -n "$lg" ] && [ -d "$lg/shell" ] && ! live_differs "$lg"; then
 		say "last_good ya coincide con el arbol vivo"; return 0
 	fi
-	cmd_snapshot --from "$BASE" --no-check --note "auto: arbol vivo sano"
-	cmd_good "$(ls -t "$CONTENT" | head -1)"
+	out="$(cmd_snapshot --from "$BASE" --note "auto: arbol vivo sano")"
+	id="${out#snapshot }"; id="${id%% *}"
+	[ -n "$id" ] && [ -d "$CONTENT/$id" ] || die "autogood: el snapshot no produjo un id"
+	cmd_good "$id"
 	cmd_gc 3 >/dev/null
 }
 

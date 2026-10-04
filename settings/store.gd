@@ -44,6 +44,8 @@ func load_settings():
 
 # Guarda settings.json y los archivos de sesión. Devuelve "" si todo fue bien.
 func save(settings):
+	# "deskflow" lo escribe el shell (interruptor del Grupo): se conserva lo del disco.
+	settings["deskflow"] = load_settings().get("deskflow", settings.get("deskflow", {}))
 	var normalized = model.normalize(settings)
 	var err = write_atomic(settings_path(), model.to_json(normalized))
 	if err != "":

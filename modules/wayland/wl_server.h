@@ -74,6 +74,16 @@ typedef struct {
 	// Cursor por surface (wl_pointer.set_cursor con surface): buffer shm del cliente
 	// (mismo formato que `frame`, valido SOLO durante la llamada) y hotspot en px.
 	void (*cursor_image)(void *ud, const unsigned char *data, int w, int h, uint32_t format, int stride, int hx, int hy);
+	// Salidas logicas (multi-output): se avisa al agregar, reconfigurar y quitar
+	// una salida. La principal creada en wl_server_create NO emite output_added
+	// (el nodo Godot todavia no tiene el puntero al server en ese momento); el
+	// shell la consulta con wl_server_output_primary/get.
+	void (*output_added)(void *ud, int id);
+	void (*output_changed)(void *ud, int id);
+	void (*output_removed)(void *ud, int id);
+	// Una ventana cambio de salida (asignacion explicita o reasignacion al
+	// retirar una salida). `output_id` es la nueva salida.
+	void (*toplevel_output_changed)(void *ud, int toplevel_id, int output_id);
 } wl_server_callbacks;
 
 // Superficie layer-shell mapeada: rect en coords del output (la vista), capa 0..3
@@ -82,6 +92,19 @@ typedef struct {
 	int id, layer;
 	int x, y, w, h;
 } wl_server_layer_surface;
+
+// Descriptor de una salida logica (wrl_output headless + ubicacion en el layout
+// global del compositor embebido). x,y,width,height son geometria LOGICA en
+// coords globales; scale es el factor entero de escala. `name` apunta al alias
+// estable guardado por el server (valido mientras la salida exista; no liberar).
+typedef struct {
+	int id;
+	const char *name;
+	int x, y, width, height;
+	int scale;
+	int primary;
+	int enabled;
+} wl_server_output_info;
 
 wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h);
 const char *wl_server_socket(wl_server *s);
@@ -97,6 +120,32 @@ void wl_server_set_maximized(wl_server *s, int id, int maximized);
 void wl_server_set_popup_bounds(wl_server *s, int id, int x, int y, int w, int h);
 void wl_server_set_fullscreen(wl_server *s, int id, int fullscreen);
 void wl_server_set_default_size(wl_server *s, int w, int h);
+// --- Salidas logicas (multi-output) -----------------------------------------
+// Crea una salida headless con nombre estable y geometria logica global.
+// `scale` se normaliza a >=1. `primary` marca la principal del layout (solo la
+// creacion desde wl_server_create la usa). Devuelve el id de la salida (>0) o 0
+// si falla. No emite output_added si el server todavia se esta construyendo.
+// `name` debe ser unico entre salidas (wl_output.name); vacio/NULL usa "GDTK-<id>".
+int wl_server_output_add(wl_server *s, const char *name,
+		int x, int y, int width, int height, int scale, int primary);
+// Mueve/redimensiona/escala una salida existente. Devuelve 1 si existia.
+int wl_server_output_configure(wl_server *s, int output_id,
+		int x, int y, int width, int height, int scale);
+// Retira una salida y reasigna sus toplevels a la principal antes de destruirla.
+// La principal no se puede retirar (no-op con log). No queda ninguna ventana
+// huerfana ni invisible.
+void wl_server_output_remove(wl_server *s, int output_id);
+// Asigna el toplevel a una salida (0 = principal) y emite los wl_surface.enter/
+// leave correspondientes. No-op si el toplevel o la salida no existen.
+void wl_server_toplevel_set_output(wl_server *s, int toplevel_id, int output_id);
+// Salida actual del toplevel (0 si el toplevel no existe).
+int wl_server_toplevel_output(wl_server *s, int toplevel_id);
+// Id de la salida principal (0 si no hay ninguna).
+int wl_server_output_primary(wl_server *s);
+// Escribe hasta `max` ids de salidas y devuelve cuantas hay (puede exceder max).
+int wl_server_outputs(wl_server *s, int *ids, int max);
+// Devuelve 1 y llena `out` si `output_id` existe; 0 si no.
+int wl_server_output_get(wl_server *s, int output_id, wl_server_output_info *out);
 void wl_server_close(wl_server *s, int id);
 // Enfoca el teclado. `raise` controla por separado si una ventana XWayland se
 // reordena arriba; el foco lazy del shell usa 0 para conservar el z-order.

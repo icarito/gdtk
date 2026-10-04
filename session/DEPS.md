@@ -57,6 +57,29 @@ no el sway donde corre el shell fullscreen.
 PrintScreen lo atiende el shell (no depende del portal): guarda el viewport compuesto
 (todo el escritorio, apps anidadas incluidas) en `<Imágenes>/Pantallazos/`.
 
+## Governor de CPU (helper polkit)
+
+Cambiar `scaling_governor` desde el DockApp de energía no usa shell privilegiada ni
+`sh -c`. El shell invoca `pkexec --disable-internal-agent /usr/libexec/gdtk-set-governor
+<governor>`; una action polkit dedicada (`org.gdtk.governor.set`, archivo
+`session/org.gdtk.governor.policy`) autoriza implícitamente sólo a la sesión local
+activa (`allow_active=yes`, `allow_any=no`, `allow_inactive=no`, sin `allow_gui`). El
+helper revalida token y pertenencia a `scaling_available_governors` porque `pkexec` no
+valida argumentos.
+
+La provisión es **manual y por host** (no la hace `deploy.sh` ni el shell). El deploy
+sólo copia `gdtk-governor-helper`, `gdtk-governor-provision` y `org.gdtk.governor.policy`
+a `~/gdtk/session/`. Para activarla, con sudo:
+
+```sh
+sudo ~/gdtk/session/gdtk-governor-provision install   # helper 0755 root:root + policy 0644 root:root
+~/gdtk/session/gdtk-governor-provision status         # sin root
+sudo ~/gdtk/session/gdtk-governor-provision remove
+```
+
+Requiere `polkit` (y `pkexec`). Si el helper o la action no están instalados, el shell
+no abre diálogo: informa que falta provisionar.
+
 ## Notas
 
 - **Autologin y llavero**: con autologin el keyring **no** se desbloquea por PAM; la

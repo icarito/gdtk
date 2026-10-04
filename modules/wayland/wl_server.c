@@ -7,6 +7,7 @@
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
 #include <drm_fourcc.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -22,6 +23,7 @@
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_cursor_shape_v1.h>
 #include <wlr/types/wlr_data_device.h>
+#include <wlr/types/wlr_ext_data_control_v1.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_layer_shell_v1.h>
 #include <wlr/types/wlr_output_layout.h>
@@ -62,6 +64,7 @@ typedef struct toplevel {
 	bool mapped;
 	bool want_focus;
 	bool visible; // dibujado en el último frame del shell (ver wl_server_set_visible)
+	int output_id; // salida logica asignada (0 = sin asignar; por defecto la principal)
 
 	struct wl_listener commit;
 	struct wl_listener map;
@@ -133,6 +136,25 @@ typedef struct text_input_relay {
 	struct wl_listener disable;
 	struct wl_listener destroy;
 } text_input_relay;
+
+// Una salida logica: un wlr_output headless del backend + su ubicacion en el
+// layout global del compositor embebido. La geometria (width/height) es LOGICA;
+// el modo fisico del wlr_output se fija en width*scale/height*scale. La principal
+// (primary) existe siempre tras wl_server_create; el resto son secundarias. Las
+// surfaces de los toplevels reciben wl_surface.enter/leave al mapear y al
+// reasignarse. No renderiza por si sola: la presentacion por output es fase
+// posterior (OutputContext), aca solo se mantiene el modelo y el protocolo.
+typedef struct logical_output {
+	struct wl_list link;
+	struct wl_server *server;
+	int id;
+	char *name; // alias estable (heap); NULL si la salida no tiene nombre
+	struct wlr_output *output;
+	int x, y, width, height; // geometria logica global
+	int scale;
+	bool primary;
+	bool enabled;
+} logical_output;
 
 struct wl_server {
 	struct wl_display *display;
@@ -211,6 +233,17 @@ struct wl_server {
 	bool throttle; // true tras el primer wl_server_set_visible: frame callbacks sólo a lo visible
 	int next_id;
 	int default_w, default_h;
+
+	// Salidas logicas: coleccion explicita de wlr_output headless. `output_layout`
+	// (xdg-output usa este) y `outputs` (logical_output.link) viven toda la corrida.
+	// `s->output` (arriba) es un alias directo al wlr_output de la principal para
+	// el codigo previo (layer-shell, etc.). `creating` suprime output_added
+	// durante wl_server_create (el nodo Godot aun no tiene el puntero al server).
+	struct wlr_output_layout *output_layout;
+	struct wl_list outputs;
+	int next_output_id;
+	int primary_output_id;
+	bool creating;
 
 	// Estado por surface de todos los toplevels. Se recorre entero en cada
 	// dispatch para reimportar buffers nuevos; se limpia en events.destroy.
@@ -857,6 +890,102 @@ static void handle_toplevel_set_title(struct wl_listener *listener, void *data) 
 	}
 }
 
+// --- Salidas logicas (multi-output) -----------------------------------------
+
+static logical_output *output_find(struct wl_server *s, int id) {
+	if (s == NULL || id <= 0) {
+		return NULL;
+	}
+	logical_output *o;
+	wl_list_for_each(o, &s->outputs, link) {
+		if (o->id == id) {
+			return o;
+		}
+	}
+	return NULL;
+}
+
+static struct wlr_surface *toplevel_root_surface(toplevel *t) {
+	if (t->tl != NULL && t->tl->base != NULL) {
+		return t->tl->base->surface;
+	}
+	if (t->xs != NULL) {
+		return t->xs->surface;
+	}
+	return NULL;
+}
+
+// Fija modo (width*scale) y escala del wlr_output. El layout usa el tamano
+// efectivo del output = ancho/scale, o sea la geometria logica pedida.
+static void output_commit(logical_output *o) {
+	struct wlr_output_state state;
+	wlr_output_state_init(&state);
+	int scale = o->scale > 0 ? o->scale : 1;
+	wlr_output_state_set_enabled(&state, o->enabled);
+	wlr_output_state_set_custom_mode(&state, o->width * scale, o->height * scale, 60000);
+	wlr_output_state_set_scale(&state, (float)scale);
+	if (!wlr_output_commit_state(o->output, &state)) {
+		wlr_log(WLR_ERROR, "wl_server: no se pudo configurar la salida %d (%dx%d @%d)",
+				o->id, o->width, o->height, o->scale);
+	}
+	wlr_output_state_finish(&state);
+}
+
+// Avisa al cliente el cambio de salida: leave de la vieja y enter de la nueva,
+// recorriendo todo el arbol (subsurfaces y popups, como frame_done). Las
+// wlr_surface_send_* son no-op si la surface ya estaba (o no estaba).
+struct output_emit_ctx {
+	struct wlr_output *output;
+	bool enter;
+};
+
+static void output_emit_iter(struct wlr_surface *surface, int sx, int sy, void *data) {
+	(void)sx;
+	(void)sy;
+	struct output_emit_ctx *ctx = data;
+	if (ctx->enter) {
+		wlr_surface_send_enter(surface, ctx->output);
+	} else {
+		wlr_surface_send_leave(surface, ctx->output);
+	}
+}
+
+static void toplevel_emit_output(toplevel *t, logical_output *old_o, logical_output *new_o, bool new_enter) {
+	if (toplevel_root_surface(t) == NULL) {
+		return;
+	}
+	if (old_o != NULL) {
+		struct output_emit_ctx ctx = { old_o->output, false };
+		if (t->tl != NULL) {
+			wlr_xdg_surface_for_each_surface(t->tl->base, output_emit_iter, &ctx);
+		} else if (t->xs != NULL && t->xs->surface != NULL) {
+			wlr_surface_for_each_surface(t->xs->surface, output_emit_iter, &ctx);
+		}
+	}
+	if (new_enter && new_o != NULL) {
+		struct output_emit_ctx ctx = { new_o->output, true };
+		if (t->tl != NULL) {
+			wlr_xdg_surface_for_each_surface(t->tl->base, output_emit_iter, &ctx);
+		} else if (t->xs != NULL && t->xs->surface != NULL) {
+			wlr_surface_for_each_surface(t->xs->surface, output_emit_iter, &ctx);
+		}
+	}
+}
+
+static void toplevel_assign_output(toplevel *t, int output_id) {
+	struct wl_server *s = t->server;
+	if (t->output_id == output_id) {
+		return;
+	}
+	logical_output *old_o = output_find(s, t->output_id);
+	logical_output *new_o = output_find(s, output_id);
+	t->output_id = output_id;
+	toplevel_emit_output(t, old_o, new_o, t->mapped);
+	if (s->cb.toplevel_output_changed != NULL) {
+		s->cb.toplevel_output_changed(s->cb.ud, t->id, output_id);
+	}
+}
+
 static void toplevel_apply_focus(toplevel *t, bool raise) {
 	struct wl_server *s = t->server;
 	struct wlr_surface *surface;
@@ -907,6 +1036,8 @@ static void handle_toplevel_map(struct wl_listener *listener, void *data) {
 		}
 		handle_toplevel_set_title(&t->set_title, NULL);
 	}
+	// Anuncia la salida asignada (por defecto la principal) al mapear.
+	toplevel_emit_output(t, NULL, output_find(t->server, t->output_id), true);
 	if (t->want_focus) {
 		toplevel_apply_focus(t, true);
 	}
@@ -915,6 +1046,8 @@ static void handle_toplevel_map(struct wl_listener *listener, void *data) {
 static void handle_toplevel_unmap(struct wl_listener *listener, void *data) {
 	toplevel *t = wl_container_of(listener, t, unmap);
 	t->mapped = false;
+	// Desmapeada: sale de su salida (no-op si nunca entro).
+	toplevel_emit_output(t, output_find(t->server, t->output_id), NULL, false);
 }
 
 // El cliente pide minimizarse: xdg_toplevel.set_minimized (CSD, p.ej. GTK/LibreWolf)
@@ -1152,6 +1285,8 @@ static void handle_new_toplevel(struct wl_listener *listener, void *data) {
 	t->id = s->next_id++;
 	t->mapped = false;
 	t->added = true;
+	// Salida por defecto: la principal (el shell puede reasignarla).
+	t->output_id = s->primary_output_id;
 	wl_list_init(&t->associate.link);
 	wl_list_init(&t->dissociate.link);
 	wl_list_init(&t->request_configure.link);
@@ -1964,6 +2099,7 @@ static void handle_new_xsurface(struct wl_listener *listener, void *data) {
 	t->server = s;
 	t->xs = xs;
 	t->id = s->next_id++;
+	t->output_id = s->primary_output_id;
 	wl_list_init(&t->commit.link);
 	// X11 va por decoración del WM (nuestro chrome): nunca CSD. Los listeners de
 	// move/resize de xdg no aplican, pero quedan inicializados para el unlink.
@@ -1994,14 +2130,16 @@ static void handle_new_xsurface(struct wl_listener *listener, void *data) {
 }
 
 static void output_set_size(struct wl_server *s) {
-	struct wlr_output_state state;
-	wlr_output_state_init(&state);
-	wlr_output_state_set_enabled(&state, true);
-	wlr_output_state_set_custom_mode(&state, s->default_w, s->default_h, 60000);
-	if (!wlr_output_commit_state(s->output, &state)) {
-		wlr_log(WLR_ERROR, "wl_server: no se pudo configurar el output %dx%d", s->default_w, s->default_h);
+	// Redimensiona sólo la salida principal (compatibilidad con set_default_size);
+	// las secundarias se ajustan con wl_server_output_configure.
+	logical_output *o = output_find(s, s->primary_output_id);
+	if (o == NULL) {
+		return;
 	}
-	wlr_output_state_finish(&state);
+	o->width = s->default_w;
+	o->height = s->default_h;
+	output_commit(o);
+	wlr_output_layout_add(s->output_layout, o->output, o->x, o->y);
 }
 
 wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h) {
@@ -2013,6 +2151,7 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 	s->default_w = default_w > 0 ? default_w : 1024;
 	s->default_h = default_h > 0 ? default_h : 700;
 	s->next_id = 1;
+	s->next_output_id = 1;
 	s->pointer_id = 0;
 	s->pointer_surface = NULL;
 	s->egl_dpy = EGL_NO_DISPLAY;
@@ -2021,6 +2160,7 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 	wl_list_init(&s->layers);
 	wl_list_init(&s->xors);
 	wl_list_init(&s->text_inputs);
+	wl_list_init(&s->outputs);
 
 	s->display = wl_display_create();
 	if (s->display == NULL) {
@@ -2055,15 +2195,14 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 
 	// Un wl_output del tamaño de la vista: GTK3 (Firefox) limita los popups al área del
 	// monitor, y sin ningún output los configuraba a 1x1 y los descartaba.
-	s->output = wlr_headless_add_output(s->backend, s->default_w, s->default_h);
-	if (s->output != NULL) {
-		output_set_size(s);
-		wlr_output_create_global(s->output, s->display);
-		// xdg-output (tamaño lógico del monitor: Qt/GTK/SDL lo piden) necesita un layout.
-		struct wlr_output_layout *layout = wlr_output_layout_create(s->display);
-		if (layout != NULL && wlr_output_layout_add_auto(layout, s->output) != NULL) {
-			wlr_xdg_output_manager_v1_create(s->display, layout);
-		}
+	// Ahora es la salida "primary" de una colección explícita de salidas lógicas;
+	// el comportamiento observable para un único output es el mismo.
+	s->output_layout = wlr_output_layout_create(s->display);
+	s->creating = true;
+	int primary_id = wl_server_output_add(s, "primary", 0, 0, s->default_w, s->default_h, 1, 1);
+	s->creating = false;
+	if (primary_id > 0 && s->output_layout != NULL) {
+		wlr_xdg_output_manager_v1_create(s->display, s->output_layout);
 	}
 	if (s->compositor == NULL || s->subcompositor == NULL ||
 			s->data_device_manager == NULL || s->xdg_shell == NULL) {
@@ -2169,6 +2308,9 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 		wl_signal_add(&activation->events.request_activate, &s->request_activate);
 	}
 	wlr_primary_selection_v1_device_manager_create(s->display);
+	// Gestores de portapapeles sin ventana (wl-paste --watch): el historial del
+	// applet Portapapeles lee la selección de las apps embebidas por acá.
+	wlr_ext_data_control_manager_v1_create(s->display, 1);
 	s->request_set_selection.notify = handle_request_set_selection;
 	wl_signal_add(&s->seat->events.request_set_selection, &s->request_set_selection);
 	s->request_set_primary_selection.notify = handle_request_set_primary_selection;
@@ -2359,7 +2501,8 @@ void wl_server_set_default_size(wl_server *s, int w, int h) {
 	if (h > 0) {
 		s->default_h = h;
 	}
-	if (s->output != NULL && (s->output->width != s->default_w || s->output->height != s->default_h)) {
+	logical_output *primary = output_find(s, s->primary_output_id);
+	if (primary != NULL && (primary->width != s->default_w || primary->height != s->default_h)) {
 		output_set_size(s);
 		layer_surf *l;
 		wl_list_for_each(l, &s->layers, link) {
@@ -2368,6 +2511,176 @@ void wl_server_set_default_size(wl_server *s, int w, int h) {
 			}
 		}
 	}
+}
+
+// --- Salidas logicas (multi-output) -----------------------------------------
+
+int wl_server_output_add(wl_server *s, const char *name,
+		int x, int y, int width, int height, int scale, int primary) {
+	if (s == NULL || s->backend == NULL || width <= 0 || height <= 0) {
+		return 0;
+	}
+	// La principal se crea una sola vez durante wl_server_create. Permitir otra
+	// dejaría dos outputs marcados primary y ambos serían no removibles.
+	if (primary != 0 && s->primary_output_id != 0) {
+		return 0;
+	}
+	if (scale < 1) {
+		scale = 1;
+	}
+	struct wlr_output *wo = wlr_headless_add_output(s->backend, width * scale, height * scale);
+	if (wo == NULL) {
+		wlr_log(WLR_ERROR, "wl_server: no se pudo crear la salida %dx%d", width, height);
+		return 0;
+	}
+	logical_output *o = calloc(1, sizeof(*o));
+	if (o == NULL) {
+		wlr_output_destroy(wo);
+		return 0;
+	}
+	o->server = s;
+	o->id = s->next_output_id++;
+	o->output = wo;
+	o->x = x;
+	o->y = y;
+	o->width = width;
+	o->height = height;
+	o->scale = scale;
+	o->primary = primary != 0;
+	o->enabled = true;
+	if (name != NULL && name[0] != '\0') {
+		o->name = strdup(name);
+	}
+	// wl_output.name debe ser unico y fijarse antes de anunciar el global.
+	char fallback[32];
+	snprintf(fallback, sizeof(fallback), "GDTK-%d", o->id);
+	wlr_output_set_name(wo, o->name != NULL ? o->name : fallback);
+	output_commit(o);
+	wlr_output_create_global(wo, s->display);
+	if (s->output_layout != NULL) {
+		wlr_output_layout_add(s->output_layout, wo, x, y);
+	}
+	wl_list_insert(s->outputs.prev, &o->link);
+	if (s->primary_output_id == 0 || o->primary) {
+		s->primary_output_id = o->id;
+	}
+	if (s->output == NULL || o->primary) {
+		s->output = wo;
+	}
+	if (!s->creating && s->cb.output_added != NULL) {
+		s->cb.output_added(s->cb.ud, o->id);
+	}
+	return o->id;
+}
+
+int wl_server_output_configure(wl_server *s, int output_id,
+		int x, int y, int width, int height, int scale) {
+	logical_output *o = output_find(s, output_id);
+	if (o == NULL || width <= 0 || height <= 0) {
+		return 0;
+	}
+	if (scale < 1) {
+		scale = 1;
+	}
+	o->x = x;
+	o->y = y;
+	o->width = width;
+	o->height = height;
+	o->scale = scale;
+	output_commit(o);
+	if (s->output_layout != NULL) {
+		wlr_output_layout_add(s->output_layout, o->output, x, y);
+	}
+	if (s->cb.output_changed != NULL) {
+		s->cb.output_changed(s->cb.ud, o->id);
+	}
+	return 1;
+}
+
+void wl_server_output_remove(wl_server *s, int output_id) {
+	logical_output *o = output_find(s, output_id);
+	if (o == NULL) {
+		return;
+	}
+	if (o->primary) {
+		wlr_log(WLR_ERROR, "wl_server: no se retira la salida principal %d", output_id);
+		return;
+	}
+	// Reasignar las ventanas a la principal ANTES de destruir el output: reciben
+	// leave/enter y nunca quedan invisibles ni huerfanas.
+	toplevel *t;
+	wl_list_for_each(t, &s->toplevels, link) {
+		if (t->output_id == o->id) {
+			toplevel_assign_output(t, s->primary_output_id);
+		}
+	}
+	int id = o->id;
+	wl_list_remove(&o->link);
+	if (s->output_layout != NULL) {
+		wlr_output_layout_remove(s->output_layout, o->output);
+	}
+	// wlr_output_destroy destruye tambien el global (via wlr_output_finish).
+	wlr_output_destroy(o->output);
+	free(o->name);
+	free(o);
+	if (s->cb.output_removed != NULL) {
+		s->cb.output_removed(s->cb.ud, id);
+	}
+}
+
+void wl_server_toplevel_set_output(wl_server *s, int toplevel_id, int output_id) {
+	toplevel *t = toplevel_find(s, toplevel_id);
+	if (t == NULL) {
+		return;
+	}
+	if (output_id == 0) {
+		output_id = s->primary_output_id;
+	}
+	if (output_find(s, output_id) == NULL) {
+		return;
+	}
+	toplevel_assign_output(t, output_id);
+}
+
+int wl_server_toplevel_output(wl_server *s, int toplevel_id) {
+	toplevel *t = toplevel_find(s, toplevel_id);
+	return t != NULL ? t->output_id : 0;
+}
+
+int wl_server_output_primary(wl_server *s) {
+	return s != NULL ? s->primary_output_id : 0;
+}
+
+int wl_server_outputs(wl_server *s, int *ids, int max) {
+	if (s == NULL) {
+		return 0;
+	}
+	int n = 0;
+	logical_output *o;
+	wl_list_for_each(o, &s->outputs, link) {
+		if (ids != NULL && n < max) {
+			ids[n] = o->id;
+		}
+		n++;
+	}
+	return n;
+}
+
+int wl_server_output_get(wl_server *s, int output_id, wl_server_output_info *out) {
+	logical_output *o = output_find(s, output_id);
+	if (o == NULL || out == NULL) {
+		return 0;
+	}
+	out->id = o->id;
+	out->name = o->name;
+	out->x = o->x;
+	out->y = o->y;
+	out->width = o->width;
+	out->height = o->height;
+	out->scale = o->scale;
+	out->primary = o->primary ? 1 : 0;
+	out->enabled = o->enabled ? 1 : 0;
+	return 1;
 }
 
 void wl_server_close(wl_server *s, int id) {
@@ -2980,6 +3293,17 @@ void wl_server_destroy(wl_server *s) {
 		surface_state_release_buffer(st);
 		free(st);
 	}
+
+	// Salidas logicas: el backend destruye los wlr_output al destruirse; aca se
+	// liberan solo los descriptores propios (nombre heap + entrada).
+	logical_output *lo, *lotmp;
+	wl_list_for_each_safe(lo, lotmp, &s->outputs, link) {
+		wl_list_remove(&lo->link);
+		free(lo->name);
+		free(lo);
+	}
+	s->primary_output_id = 0;
+	s->output = NULL;
 
 	if (s->backend != NULL) {
 		wlr_backend_destroy(s->backend);

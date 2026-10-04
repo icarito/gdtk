@@ -110,6 +110,9 @@ func _init():
 		and not nd.sanitize_entry({"direction": "east"}).has("along"))
 	check("along round-trip por JSON", abs(nd.parse(nd.to_json({"h": al})).h.along - 0.25) < 0.0001)
 	check("sin along el JSON no cambia", nd.to_json({"h": {"direction": "east"}}).find("along") < 0)
+	# input: interruptor «Compartir teclado y mouse» del Grupo; sólo se guarda encendido.
+	check("input encendido sobrevive a JSON", nd.parse(nd.to_json({"h": {"direction": "east", "input": true}})).h.input == true)
+	check("input apagado no se guarda", not nd.sanitize_entry({"direction": "east", "input": false}).has("input"))
 	var kept = nd.merge({"h": al}, {"h": {"direction": "east", "confirm": "confirmed"}})
 	check("merge conserva along en el mismo lado", abs(kept.h.along - 0.25) < 0.0001)
 	var moved = nd.merge({"h": al}, {"h": {"direction": "west"}})

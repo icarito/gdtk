@@ -199,6 +199,12 @@ static func ssh_target(host):
 	var services = host.get("services", [])
 	if typeof(services) != TYPE_ARRAY:
 		return {"ok": false, "peer": "", "error": "host sin servicios"}
+	# IPv4 primero: mDNS suele anunciar antes la IPv6 global, y el canal peer escucha
+	# sólo IPv4 (y un literal IPv6 no admite el sufijo ".local").
+	for s in services:
+		var a4 = String(s.get("address", "")).strip_edges() if typeof(s) == TYPE_DICTIONARY else ""
+		if a4.is_valid_ip_address() and a4.find(":") < 0 and valid_peer(a4):
+			return {"ok": true, "peer": a4, "error": ""}
 	for s in services:
 		if typeof(s) == TYPE_DICTIONARY and valid_peer(String(s.get("address", "")).strip_edges()):
 			return {"ok": true, "peer": String(s.get("address", "")).strip_edges(), "error": ""}
@@ -218,6 +224,8 @@ static func selftest():
 	assert(safe_hid("../../etc/passwd") == "etcpasswd", "safe_hid descarta traversal")
 	assert(safe_hid("") == "" and not hid_is_safe("a/b"), "hid inválido -> no seguro")
 	assert(proposal_name("hidA") == "hida.json", "proposal_name")
+	assert(ssh_target({"services": [{"address": "2804::1"}, {"address": "192.168.1.5"}]}).peer == "192.168.1.5",
+		"ssh_target prefiere IPv4")
 	assert(response_name("hidA") == "hida.response.json", "response_name")
 	assert(proposal_name("") == "" and response_name("../x") == "x.response.json",
 		"nombres saneados")

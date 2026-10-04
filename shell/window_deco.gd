@@ -87,11 +87,18 @@ func _draw():
 		if not maximized:
 			_draw_shadow(content, scale, id == shell.focused_tile, true)
 		# El asa de mover se dibuja con el puntero encima y también mientras se
-		# repliega (animación de salida); en maximizadas no aplica.
+		# repliega (animación de salida). En maximizadas queda DENTRO del borde
+		# superior, sin animación de subida (arriba no hay hueco): el cliente CSD
+		# que no arrastra su barra (Electron) necesita el asa del shell para salir.
 		var reveal = 0.0
 		if shell.csd_grip_show_id == id:
 			reveal = shell.csd_grip_reveal
-		if maximized or (shell.csd_hover_id != id and reveal <= 0.001):
+		if maximized:
+			if shell.csd_hover_id != id:
+				return
+			_draw_csd(content, scale, id == shell.focused_tile, 1.0, false, true)
+			return
+		if shell.csd_hover_id != id and reveal <= 0.001:
 			return
 		_draw_csd(content, scale, id == shell.focused_tile, reveal, shell.csd_hover_id == id)
 		return
@@ -122,12 +129,13 @@ func _draw():
 # CSD: asa de mover (pastilla del acento con puntos de agarre, como el asa de
 # fronteras tiled) que se desliza desde detrás de la ventana, y franja inferior de
 # redimensión. El asa se dibuja con el puntero encima o mientras se repliega; la
-# franja inferior sólo con el puntero encima (shell.csd_hover_id).
-func _draw_csd(rect, scale, active, reveal = 1.0, hovered = true):
+# franja inferior sólo con el puntero encima (shell.csd_hover_id). Con `inside`
+# (maximizada) el asa queda dentro del borde superior y no se recorta.
+func _draw_csd(rect, scale, active, reveal = 1.0, hovered = true, inside = false):
 	var base = shell.accent if shell.accent != null else Color(0.55, 0.80, 1.0)
 	var col = Color(base.r, base.g, base.b, 0.94 if active else 0.55)
-	var g = WINDOW_CHROME.move_grip_rect(rect, scale, reveal, shell.grid_unit(shell.get_viewport_rect().size))
-	var v = WINDOW_CHROME.reveal_clip(g, rect.position.y)
+	var g = WINDOW_CHROME.move_grip_rect(rect, scale, reveal, shell.grid_unit(shell.get_viewport_rect().size), inside)
+	var v = g if inside else WINDOW_CHROME.reveal_clip(g, rect.position.y)
 	if v.size.x > 0.0 and v.size.y > 0.0:
 		draw_rect(v.grow(max(1.0, scale)), Color(0.05, 0.06, 0.10, 0.55))
 		draw_rect(v, col)

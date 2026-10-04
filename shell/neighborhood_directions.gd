@@ -95,6 +95,9 @@ static func sanitize_entry(entry):
 	var al = entry.get("along", -1.0)
 	if (typeof(al) == TYPE_REAL or typeof(al) == TYPE_INT) and float(al) >= 0.0 and float(al) <= 1.0:
 		out.along = float(al)
+	# input: este equipo le comparte teclado y mouse (interruptor del Grupo). Sólo existe si es true.
+	if bool(entry.get("input", false)):
+		out.input = true
 	return out
 
 
@@ -142,6 +145,9 @@ static func merge(base, overrides):
 			if not e.has("along") and prev != null and prev.has("along") \
 					and String(prev.direction) == String(e.direction):
 				e.along = prev.along
+			# Ni el interruptor de teclado y mouse (sólo lo cambia _group_input_set).
+			if prev != null and prev.has("input") and not overrides[k].has("input"):
+				e.input = true
 			out[String(k)] = e
 	return out
 
@@ -172,6 +178,8 @@ static func _entry_json(e):
 	var along = ""
 	if e.has("along"):
 		along = ",\"along\":" + str(stepify(float(e.along), 0.0001))
+	if e.has("input"):
+		along += ",\"input\":true"
 	return "{" \
 		+ "\"direction\":" + to_json(e.direction) + "," \
 		+ "\"confirm\":" + to_json(e.confirm) + "," \

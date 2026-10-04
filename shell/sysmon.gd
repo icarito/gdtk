@@ -14,6 +14,8 @@ const W = CPU_W + GAUGE_W * 2.0 + 10.0
 # Governor de CPU: se lee siempre; se escribe sólo por acción explícita del usuario.
 const GOV_PATH = "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"
 const GOV_AVAIL = "/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors"
+const Gov = preload("res://governor_control.gd")
+const APPLY_TIMEOUT_MS = 8000  # ventana para que sysfs refleje el cambio antes de error
 
 var cpu = []          # % de CPU por muestra, la más nueva al final
 var ram = 0.0         # % de RAM en uso (MemTotal - MemAvailable)
@@ -27,6 +29,10 @@ var temp_label = ""   # zona elegida (informativa; no se muestra como jerga)
 var governor = ""     # governor de cpu0 (schedutil, performance, …)
 var has_governor = false
 var governor_initial = ""  # governor al arrancar la sesión ("predeterminado")
+var governor_state = "idle"    # máquina de estados visible (governor_control.gd)
+var governor_reason = ""       # diagnóstico corto del último cambio (sin secretos)
+var governor_requested = ""    # governor pedido mientras se espera verificación
+var governor_deadline_ms = 0   # límite de la ventana applying
 var battery_pct = -1.0     # carga de la batería principal (-1 = sin batería)
 var battery_status = ""    # Charging / Discharging / Full / Not charging
 var has_battery = false
@@ -90,6 +96,15 @@ func _sample_thermal():
 		has_governor = governor != ""
 		if governor_initial == "":
 			governor_initial = governor  # "predeterminado" de la sesión
+	# El muestreo, no la UI, resuelve el cambio pedido: verified si sysfs ya lo
+	# refleja; error si venció la ventana sin lograrlo.
+	if governor_state == Gov.STATE_APPLYING:
+		governor_state = Gov.observe_result(governor_state, governor_requested, governor, OS.get_ticks_msec(), governor_deadline_ms)
+		if governor_state == Gov.STATE_VERIFIED:
+			governor_requested = ""
+			governor_reason = ""
+		elif governor_state == Gov.STATE_ERROR:
+			governor_reason = "timeout"
 	var cpu_t = -1.0
 	var any_t = -1.0
 	var cpu_label = ""
@@ -185,26 +200,46 @@ func governors():
 	return out
 
 
-# Aplica un governor. Primero intenta escribir directo (sysfs suele ser root);
-# si falla, delega en pkexec sin bloquear el frame. Devuelve true si pudo escribir.
+# Aplica un governor. Valida token y lista del kernel y, si sysfs no es escribible
+# directo, delega en el helper root vía pkexec --disable-internal-agent (sin agente
+# textual y sin bloquear el frame). No afirma éxito: marca `applying` y el muestreo
+# normal resuelve verified/error. Devuelve true si el pedido quedó en curso.
 func set_governor(gov):
 	var name = String(gov).strip_edges()
-	if name == "":
+	var avail = governors()
+	var v = Gov.validate_request(name, avail)
+	if not v.ok:
+		governor_state = v.state
+		governor_reason = v.reason
+		governor_requested = ""
 		return false
 	var f = File.new()
 	if f.open(GOV_PATH, File.WRITE) == OK:
 		f.store_line(name)
 		f.close()
-		governor = name
-		has_governor = true
+		_mark_applying(name)
 		return true
-	# Sin permiso: pkexec (agente polkit de la sesión). No bloqueante.
-	if File.new().file_exists("/usr/bin/pkexec"):
-		OS.execute("/usr/bin/pkexec", ["sh", "-c", "echo '" + name + "' > " + GOV_PATH], false)
-		governor = name
-		has_governor = true
-		return true
-	return false
+	# Sin permiso directo: helper instalado + action polkit. pkexec no valida
+	# argumentos; el modelo ya validó el token y el helper los revalida.
+	var plan = Gov.plan_apply(name, avail,
+		File.new().file_exists(Gov.HELPER_PATH),
+		File.new().file_exists(Gov.POLICY_PATH),
+		File.new().file_exists(Gov.PKEXEC_PATH))
+	if plan.state != Gov.STATE_APPLYING:
+		governor_state = plan.state
+		governor_reason = plan.reason
+		governor_requested = ""
+		return false
+	OS.execute(plan.program, plan.argv, false)
+	_mark_applying(name)
+	return true
+
+
+func _mark_applying(name):
+	governor_state = Gov.STATE_APPLYING
+	governor_requested = String(name)
+	governor_reason = ""
+	governor_deadline_ms = OS.get_ticks_msec() + APPLY_TIMEOUT_MS
 
 
 func _cpu_now():

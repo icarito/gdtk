@@ -1,0 +1,50 @@
+#!/bin/sh
+# gdtk-health — lee y valida el heartbeat semantico del shell (C2,
+# SPEC-session-continuity). El productor lo escribe de forma atomica (tmp + rename)
+# en $XDG_RUNTIME_DIR/gdtk/health.json; el consumidor valida pid y frescura: la sola
+# existencia del archivo no es salud.
+#
+# Uso:
+#   gdtk-health probe [pid]   -> "estado<TAB>sequence<TAB>reload<TAB>edad_s"
+#   gdtk-health valid [pid]   -> exit 0 solo si el estado es ok
+# Estados: absent | nounjq | invalid | wrongpid | stale | ok
+#
+# Env:
+#   GDTK_HEALTH_FILE          (default $XDG_RUNTIME_DIR/gdtk/health.json)
+#   GDTK_HEALTH_STALE_AFTER   (default = GDTK_HEALTH_TIMEOUT, o 8)
+# No toca la sesion real: si no hay archivo o no hay jq, informa y sale sin daño.
+set -u
+
+cmd="${1:-probe}"
+pid="${2:-}"
+RUN="${XDG_RUNTIME_DIR:-/tmp}"
+FILE="${GDTK_HEALTH_FILE:-$RUN/gdtk/health.json}"
+STALE="${GDTK_HEALTH_STALE_AFTER:-${GDTK_HEALTH_TIMEOUT:-8}}"
+
+finish() { # finish <estado> <sequence> <reload> <edad>
+	printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4"
+	if [ "$cmd" = valid ] && [ "$1" != ok ]; then exit 1; fi
+	exit 0
+}
+
+[ -f "$FILE" ] || finish absent "" "" ""
+command -v jq >/dev/null 2>&1 || finish nounjq "" "" ""
+
+raw="$(cat "$FILE" 2>/dev/null || true)"
+[ -n "$raw" ] || finish invalid "" "" ""
+
+p="$(printf '%s' "$raw" | jq -r '.pid // empty' 2>/dev/null || true)"
+seq="$(printf '%s' "$raw" | jq -r '.sequence // empty' 2>/dev/null || true)"
+reload="$(printf '%s' "$raw" | jq -r '.reload // empty' 2>/dev/null || true)"
+
+case "$p" in ''|*[!0-9]*) finish invalid "" "" "";; esac
+case "$seq" in ''|*[!0-9]*) finish invalid "" "" "";; esac
+
+[ -n "$pid" ] && [ "$p" != "$pid" ] && finish wrongpid "$seq" "$reload" ""
+
+now="$(date +%s)"
+mt="$(stat -c '%Y' "$FILE" 2>/dev/null || echo "$now")"
+age=$((now - mt)); [ "$age" -lt 0 ] && age=0
+[ "$age" -gt "$STALE" ] && finish stale "$seq" "$reload" "$age"
+
+finish ok "$seq" "$reload" "$age"
