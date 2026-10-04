@@ -61,6 +61,8 @@ APP_ID = U.APP_ID
 CURSOR_HELPER = "gvd-cursor"
 CURSOR_HELPER_SRC = "gvd-cursor.c"
 CURSOR_MAX_HZ = 120.0
+VIDEO_DSCP = 8  # CS1/scavenger: Deskflow queda por encima cuando la red honra DSCP.
+VIDEO_NICE = 5  # El input interactivo conserva prioridad de CPU sin privilegios.
 
 # Captura wlroots (sway/gdtk): helper wlr-screencopy que escribe frames crudos por
 # stdout. Sustituye a PipeWire/Mutter cuando el escritorio no es GNOME.
@@ -99,6 +101,14 @@ def log(*a):
 def parse_size(s):
     w, _, h = s.lower().partition("x")
     return int(w), int(h)
+
+
+def lower_video_priority():
+    """Baja sólo esta tarea; nunca intenta elevar Deskflow ni requiere privilegios."""
+    try:
+        os.nice(VIDEO_NICE)
+    except OSError as e:
+        log(f"[!] no pude bajar prioridad de video: {e}")
 
 
 # --------------------------------------------------------------- encoder choice
@@ -567,7 +577,8 @@ class Sender:
             e += ["tcpclientsink", f"host={a.host}", f"port={a.port}", "sync=false"]
         else:
             e += ["rtph264pay", "config-interval=-1", "pt=96", "mtu=1200", "!",
-                  "udpsink", f"host={a.host}", f"port={a.port}"]
+                  "udpsink", f"host={a.host}", f"port={a.port}",
+                  f"qos-dscp={VIDEO_DSCP}"]
         if not a.local and a.stats:
             log("[!] --stats no aplica al send por red (solo --local)")
         return e
@@ -1519,6 +1530,7 @@ def _run_recv_gst(args, sink, cursor):
 
 
 def run_recv(args):
+    lower_video_priority()
     if args.sink == "ffplay" and args.transport != "tcp":
         log("[!] --sink ffplay requiere --transport tcp")
         return 2
@@ -1877,6 +1889,7 @@ def main():
         log("[!] falta gst-launch-1.0")
         return 3
     sender = Sender(args)
+    lower_video_priority()
 
     def on_signal(_sig, _frame):
         sender.request_stop()

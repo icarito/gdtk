@@ -115,6 +115,14 @@ Decisiones tomadas con el usuario:
   ventanas: la original (corta y cierra el receptor remoto) o la «Pantalla compartida» del otro lado
   (termina su `gvd recv` y avisa con `share_stop`). Todo cierre pasa por `shell._close_window_id`.
   Una ventana por equipo a la vez (un receptor por puerto).
+  Mientras esa ventana receptora tiene foco, usa el puntero local (el video sigue con
+  `--cursor none`) y devuelve movimiento normalizado, botones/rueda y teclado por el
+  canal peer autenticado `window_input`. El emisor sólo acepta el lote si ese `hid`
+  tiene una ventana compartida activa y lo inyecta exclusivamente en su `wid`; al
+  perder foco, cerrar o cortar se liberan todas las teclas y botones retenidos.
+  Deskflow tiene precedencia en el arbitraje: si InputCapture tomó el evento, éste no
+  entra a `window_input`. Además gvd corre con nice 5 y su RTP usa DSCP CS1, dejando
+  CPU y colas QoS por encima para el tráfico interactivo de Deskflow.
 - **Audio** = interruptor «Enviar audio — Encendido/Apagado» en el mismo menú del equipo que
   «Extender mi pantalla», pero sin lado (no es espacial): basta con que el equipo esté encendido. Saca
   TODO el sonido por ese equipo. Túnel PulseAudio/PipeWire por `pactl` (`audio_send.gd`): el

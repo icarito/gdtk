@@ -2925,6 +2925,8 @@ func _compositor_focus(id, raise_window):
 func _focus_tile(id, raise_window = true):
 	if id < 0 or not _id_alive(id):
 		return
+	if focused_tile != id and _pantalla_window_ids().has(focused_tile):
+		_window_input_reset()
 	# Enfocar a mano cancela cualquier deslizamiento/hogar en curso y cierra la
 	# grilla de Apps: el flag no debe sobrevivir al volver de la grilla a una app.
 	pan = 0.0
@@ -5967,6 +5969,12 @@ func _exit_tree():
 		th.wait_to_finish()
 	_gvd_peer_threads = []
 	_gvd_peer_states = []
+	_window_input_reset()
+	_window_input_poll()
+	if _window_input_thread != null:
+		_window_input_thread.wait_to_finish()
+		_window_input_thread = null
+		_window_input_state = null
 	# Escrituras de config de plan pendientes: no dejarlas a medias.
 	for th in _plan_write_threads:
 		th.wait_to_finish()
@@ -7041,6 +7049,7 @@ func window_peer_accent(id):
 
 func _pantalla_closed_here():
 	var hid = _pantalla_sender
+	_window_input_reset()
 	_pantalla_sender = ""
 	var ep = _peer_endpoint_for(hid)
 	if bool(ep.get("ok", false)):
@@ -7065,6 +7074,7 @@ func _peer_gvd_open(port, _from, hid = "", video = Vector2()):
 
 
 func _peer_gvd_stop():
+	_window_input_reset()
 	_pantalla_sender = ""   # lo cortó el emisor: no hay que avisarle
 	_close_pantalla_window()
 	return true
@@ -7384,6 +7394,21 @@ func _peer_audio_stop(_hid):
 # recibe una sola cosa por vez (un receptor por puerto).
 const WINDOW_CAST = preload("res://window_cast.gd")
 var _casts = {}   # hid -> {node, wid, sent}
+var _window_input_mutex = Mutex.new()
+var _window_input_queue = []
+var _window_input_motion = null
+var _window_input_thread = null
+var _window_input_state = null
+var _window_input_buttons = {}
+var _window_input_keys = {}
+var _window_input_last_send = 0
+var _window_input_last_keepalive = 0
+const WINDOW_INPUT_KEEPALIVE_MS = 500
+const WINDOW_INPUT_STALE_MS = 1800
+
+
+func _window_input_is_hold_button(button):
+	return [BUTTON_LEFT, BUTTON_RIGHT, BUTTON_MIDDLE, BUTTON_XBUTTON1, BUTTON_XBUTTON2].has(int(button))
 
 
 func _cast_key(hid):
@@ -7447,6 +7472,7 @@ func _group_unshare_window(hid):
 	var c = _casts.get(String(hid))
 	if c == null:
 		return
+	_window_input_release_cast(c)
 	_casts.erase(String(hid))
 	_gvd_mutex.lock()
 	for st in _gvd_peer_states:
@@ -7464,6 +7490,181 @@ func _group_unshare_window(hid):
 	print("compartir: dejé de compartir con ", hid)
 
 
+# El receptor manda input sólo al peer que originó la «Pantalla compartida». Motion
+# se coalesce; los cambios de botón/tecla conservan el orden y fuerzan delante la
+# última posición. La red se atiende en un único Thread, nunca desde el render.
+func _window_input_enqueue(event):
+	if _pantalla_sender == "":
+		return false
+	_window_input_mutex.lock()
+	if String(event.get("kind", "")) == "motion":
+		_window_input_motion = event
+	else:
+		if _window_input_motion != null:
+			_window_input_queue.append(_window_input_motion)
+			_window_input_motion = null
+		_window_input_queue.append(event)
+	_window_input_mutex.unlock()
+	return true
+
+
+func _window_input_reset():
+	if _pantalla_sender == "":
+		_window_input_buttons.clear()
+		_window_input_keys.clear()
+		return
+	if not _window_input_buttons.empty() or not _window_input_keys.empty():
+		_window_input_enqueue({"kind": "reset"})
+	_window_input_buttons.clear()
+	_window_input_keys.clear()
+
+
+func _window_input_pointer(event):
+	if _pantalla_sender == "" or not (event is InputEventMouseMotion \
+			or event is InputEventMouseButton):
+		return false
+	var hit = _view_hit_test(event.position)
+	var over = int(hit.get("id", -1)) >= 0 and _pantalla_window_ids().has(int(hit.id))
+	if event is InputEventMouseMotion:
+		if not over:
+			return not _window_input_buttons.empty()
+		var video = _pantalla_video
+		if video.x < 2.0 or video.y < 2.0:
+			return false
+		var x = clamp(float(hit.pos.x) / video.x, 0.0, 1.0)
+		var y = clamp(float(hit.pos.y) / video.y, 0.0, 1.0)
+		_window_input_enqueue({"kind": "motion", "x": x, "y": y})
+		return true
+	var button = int(event.button_index)
+	if not event.pressed and _window_input_buttons.has(button):
+		_window_input_enqueue({"kind": "button", "button": button, "pressed": false})
+		_window_input_buttons.erase(button)
+		return true
+	if not over:
+		return false
+	# El clic enfoca el marco receptor para que las teclas siguientes vuelvan al wid.
+	if event.pressed:
+		_focus_tile(int(hit.id))
+	_window_input_enqueue({"kind": "button", "button": button,
+		"pressed": bool(event.pressed)})
+	if event.pressed and _window_input_is_hold_button(button):
+		_window_input_buttons[button] = true
+	return true
+
+
+func _window_input_poll():
+	if _window_input_thread != null:
+		_window_input_mutex.lock()
+		var done = bool(_window_input_state.get("done", false))
+		_window_input_mutex.unlock()
+		if not done:
+			return
+		_window_input_thread.wait_to_finish()
+		var token = String(_window_input_state.get("token", ""))
+		var hid = String(_window_input_state.get("hid", ""))
+		if token != "":
+			_peer_token_set(hid, token)
+		_window_input_thread = null
+		_window_input_state = null
+	var now = OS.get_ticks_msec()
+	if (not _window_input_buttons.empty() or not _window_input_keys.empty()) \
+			and now - _window_input_last_keepalive >= WINDOW_INPUT_KEEPALIVE_MS:
+		_window_input_enqueue({"kind": "keepalive"})
+		_window_input_last_keepalive = now
+	if now - _window_input_last_send < 16:
+		return
+	_window_input_mutex.lock()
+	if _window_input_queue.empty() and _window_input_motion != null:
+		_window_input_queue.append(_window_input_motion)
+		_window_input_motion = null
+	var events = []
+	while not _window_input_queue.empty() and events.size() < 64:
+		events.append(_window_input_queue.pop_front())
+	_window_input_mutex.unlock()
+	if events.empty() or _pantalla_sender == "":
+		return
+	var hid = _pantalla_sender
+	var ep = _peer_endpoint_for(hid)
+	if not bool(ep.get("ok", false)):
+		return
+	var state = {"done": false, "token": "", "hid": hid}
+	_window_input_state = state
+	_window_input_thread = Thread.new()
+	_window_input_last_send = now
+	_window_input_thread.start(self, "_window_input_work", {"state": state,
+		"host": String(ep.peer), "port": int(ep.port), "hid": hid,
+		"token": _peer_token_get(hid), "events": events})
+
+
+func _window_input_work(u):
+	var host = String(u.host)
+	if host.find(".") < 0 and not host.is_valid_ip_address():
+		host += ".local"
+	var r = PEER_CALL.request_status(host, int(u.port), _local_hid(), String(u.token),
+		"window_input", {"events": u.events}, 1000)
+	var resp = r.get("response", {})
+	_window_input_mutex.lock()
+	if bool(resp.get("ok", false)) and resp.has("token"):
+		u.state.token = String(resp.token)
+	u.state.done = true
+	_window_input_mutex.unlock()
+
+
+# Origen: el token identifica al peer y `_casts[hid]` fija el único wid permitido.
+func _peer_window_input(hid, events):
+	var c = _casts.get(String(hid))
+	if c == null or not _id_alive(int(c.wid)):
+		return false
+	var id = int(c.wid)
+	if not c.has("input_buttons"):
+		c.input_buttons = {}
+		c.input_keys = {}
+	c.input_seen = OS.get_ticks_msec()
+	for ev in events:
+		match String(ev.kind):
+			"motion":
+				var geo = compositor.get_geometry(id)
+				var pos = Vector2(float(ev.x) * max(1.0, geo.size.x - 1.0),
+					float(ev.y) * max(1.0, geo.size.y - 1.0)) + geo.position
+				compositor.pointer_motion(id, pos)
+			"button":
+				compositor.pointer_button(int(ev.button), bool(ev.pressed))
+				if bool(ev.pressed) and _window_input_is_hold_button(int(ev.button)):
+					c.input_buttons[int(ev.button)] = true
+				else:
+					c.input_buttons.erase(int(ev.button))
+			"key":
+				_compositor_focus(id, false)
+				var key = InputEventKey.new()
+				key.physical_scancode = int(ev.physical)
+				key.scancode = int(ev.physical)
+				key.pressed = bool(ev.pressed)
+				key.echo = bool(ev.get("echo", false))
+				compositor.key(key)
+				if key.pressed:
+					c.input_keys[int(ev.physical)] = true
+				else:
+					c.input_keys.erase(int(ev.physical))
+			"reset":
+				_window_input_release_cast(c)
+			"keepalive":
+				pass
+	return true
+
+
+func _window_input_release_cast(c):
+	for button in c.get("input_buttons", {}).keys():
+		compositor.pointer_button(int(button), false)
+	for physical in c.get("input_keys", {}).keys():
+		var key = InputEventKey.new()
+		key.physical_scancode = int(physical)
+		key.scancode = int(physical)
+		key.pressed = false
+		compositor.key(key)
+	c.input_buttons = {}
+	c.input_keys = {}
+
+
 func _group_casting(wid):
 	for hid in _casts.keys():
 		if int(_casts[hid].wid) == int(wid):
@@ -7476,6 +7677,10 @@ func _group_casting(wid):
 func _casts_poll():
 	for hid in _casts.keys():
 		var c = _casts[hid]
+		if (not c.get("input_buttons", {}).empty() or not c.get("input_keys", {}).empty()) \
+				and OS.get_ticks_msec() - int(c.get("input_seen", 0)) > WINDOW_INPUT_STALE_MS:
+			_window_input_release_cast(c)
+			print("compartir: input remoto liberado por desconexión de ", hid)
 		if not _id_alive(int(c.wid)):
 			_stop_gvd_screen(hid)
 		elif is_instance_valid(c.node) and c.node.size != c.sent:
@@ -7931,6 +8136,7 @@ func _tracked_launch_work(userdata):
 
 # Reapea los Threads de lanzamiento terminados (no bloquea).
 func _gvd_poll():
+	_window_input_poll()
 	if not _casts.empty():
 		_casts_poll()
 	_pantalla_fit_poll()
@@ -8690,6 +8896,11 @@ func _on_view_input(event):
 	if _on_chrome_input(event):
 		return
 	if window_dragging:
+		return
+	# Deskflow se resolvió arriba y tiene prioridad. Si no capturó, una Pantalla
+	# compartida recibe input de retorno sin entregárselo al reproductor gvd local.
+	if _window_input_pointer(event):
+		get_tree().set_input_as_handled()
 		return
 	if event is InputEventMouseMotion:
 		last_pointer_pos = event.position
@@ -9592,6 +9803,17 @@ func _unhandled_input(event):
 	if id < 0:
 		id = last_key_target  # última ventana que recibió teclas (exposé/Home incluidos)
 	if id < 0:
+		return
+	if _pantalla_sender != "" and _pantalla_window_ids().has(id):
+		var physical = int(event.physical_scancode if event.physical_scancode != 0 else event.scancode)
+		if physical > 0:
+			_window_input_enqueue({"kind": "key", "physical": physical,
+				"pressed": bool(event.pressed), "echo": bool(event.echo)})
+			if event.pressed:
+				_window_input_keys[physical] = true
+			else:
+				_window_input_keys.erase(physical)
+			get_tree().set_input_as_handled()
 		return
 	if event.pressed:
 		# Las pulsaciones no van a la app con un overlay del shell delante (exposé,

@@ -15,7 +15,8 @@ const VERSION = 1
 # Métodos permitidos en el canal peer (lista blanca: el canal NO expone el control
 # remoto completo, sólo lo necesario para pantalla y el aviso de lados compartidos).
 const METHODS = ["ping", "gvd_recv", "gvd_stop", "gvd_send", "gvd_status",
-	"share_notify", "share_stop", "clip_set", "audio_recv", "audio_stop", "gvd_size"]
+	"share_notify", "share_stop", "clip_set", "audio_recv", "audio_stop", "gvd_size",
+	"window_input"]
 
 # Parámetros válidos de los avisos de lados compartidos (G5). El `side` llega YA
 # invertido por el emisor: acá sólo se valida el vocabulario, no se transforma.
@@ -37,6 +38,44 @@ static func video_size(params):
 	if w < 2 or h < 2 or w > 8192 or h > 8192:
 		return Vector2()
 	return Vector2(w, h)
+
+
+# Lote de input de una «Pantalla compartida». Se valida aquí para que el canal peer
+# nunca entregue al compositor campos arbitrarios. Las posiciones son normalizadas
+# (0..1), independientes del tamaño con que el receptor dibuja el video.
+static func window_input_events(params):
+	var p = params if typeof(params) == TYPE_DICTIONARY else {}
+	var src = p.get("events", [])
+	if typeof(src) != TYPE_ARRAY or src.empty() or src.size() > 64:
+		return []
+	var out = []
+	for raw in src:
+		if typeof(raw) != TYPE_DICTIONARY:
+			return []
+		var kind = String(raw.get("kind", ""))
+		match kind:
+			"motion":
+				var x = float(raw.get("x", -1.0))
+				var y = float(raw.get("y", -1.0))
+				if x < 0.0 or x > 1.0 or y < 0.0 or y > 1.0:
+					return []
+				out.append({"kind": kind, "x": x, "y": y})
+			"button":
+				var button = int(raw.get("button", 0))
+				if button < 1 or button > 9 or typeof(raw.get("pressed", null)) != TYPE_BOOL:
+					return []
+				out.append({"kind": kind, "button": button, "pressed": bool(raw.pressed)})
+			"key":
+				var physical = int(raw.get("physical", 0))
+				if physical <= 0 or physical > 0xFFFFFF or typeof(raw.get("pressed", null)) != TYPE_BOOL:
+					return []
+				out.append({"kind": kind, "physical": physical, "pressed": bool(raw.pressed),
+					"echo": bool(raw.get("echo", false))})
+			"reset", "keepalive":
+				out.append({"kind": kind})
+			_:
+				return []
+	return out
 
 
 static func valid_share_params(method, params):
@@ -133,6 +172,11 @@ static func selftest():
 	ok = ok and not bool(bad.ok) and String(bad.error) == "unpaired"
 	ok = ok and new_token().length() == 48
 	ok = ok and valid_method("share_notify") and valid_method("share_stop")
+	ok = ok and valid_method("window_input")
+	ok = ok and window_input_events({"events": [{"kind": "motion", "x": 0.5, "y": 1.0},
+		{"kind": "button", "button": 1, "pressed": true},
+		{"kind": "key", "physical": 65, "pressed": false}, {"kind": "reset"}]}).size() == 4
+	ok = ok and window_input_events({"events": [{"kind": "motion", "x": 2.0, "y": 0.0}]}).empty()
 	ok = ok and valid_share_params("share_notify",
 		{"type": "screen", "side": "north", "state": "active"})
 	ok = ok and not valid_share_params("share_notify",

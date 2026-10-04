@@ -28,6 +28,7 @@ class StubShell:
 	var opened = []
 	var shares = []
 	var stops = []
+	var input_events = []
 	func _peer_is_confirmed(hid):
 		return String(hid) == "aaaa" or String(hid) == "bbbb"
 	func _peer_gvd_open(port, from, _hid = "", _video = Vector2()):
@@ -44,6 +45,9 @@ class StubShell:
 		return true
 	func _peer_share_stop(hid, params):
 		stops.append([String(hid), params.duplicate(true)])
+		return true
+	func _peer_window_input(hid, events):
+		input_events.append([String(hid), events.duplicate(true)])
 		return true
 
 
@@ -94,6 +98,15 @@ func _init():
 	r = _resp(pc, peer, LINK.encode_request("aaaa", tok, "gvd_recv", {"port": 5603}))
 	check("token correcto ok", bool(r.get("ok", false)) and not r.has("token"))
 	check("abrió segundo receptor", pc.shell.opened.size() == 2)
+
+	r = _resp(pc, peer, LINK.encode_request("aaaa", tok, "window_input", {"events": [
+		{"kind": "motion", "x": 0.5, "y": 0.25},
+		{"kind": "button", "button": 1, "pressed": true}]}))
+	check("window_input autenticado ejecuta", bool(r.get("ok", false))
+		and pc.shell.input_events.size() == 1 and pc.shell.input_events[0][1].size() == 2)
+	r = _resp(pc, peer, LINK.encode_request("aaaa", tok, "window_input",
+		{"events": [{"kind": "motion", "x": 9.0, "y": 0.0}]}))
+	check("window_input inválido rechazado", not bool(r.get("ok", false)))
 
 	# ping ya emparejado
 	r = _resp(pc, peer, LINK.encode_request("aaaa", "", "ping"))

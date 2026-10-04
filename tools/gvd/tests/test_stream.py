@@ -107,9 +107,16 @@ class StreamTest(unittest.TestCase):
         self.assertNotIn("pipewiresrc", cmd)
         self.assertIn("x264enc", cmd)
         self.assertIn("rtph264pay", cmd)
+        self.assertIn(f"qos-dscp={gvd.VIDEO_DSCP}", cmd)
         # El formato wl_shm XR24/AR24 mapea a BGRx/BGRA.
         self.assertEqual(gvd.CAPTURE_FORMATS["XR24"], "BGRx")
         self.assertEqual(gvd.CAPTURE_FORMATS["AR24"], "BGRA")
+
+    def test_video_priority_is_non_privileged(self):
+        with patch.object(gvd.os, "nice") as nice:
+            gvd.lower_video_priority()
+        nice.assert_called_once_with(gvd.VIDEO_NICE)
+        self.assertGreater(gvd.VIDEO_NICE, 0)
 
     def test_detect_capture_backend(self):
         with patch.dict(gvd.os.environ, {"XDG_CURRENT_DESKTOP": "GNOME",

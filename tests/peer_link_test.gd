@@ -61,6 +61,15 @@ func _init():
 	check("video_size: válido", P.video_size({"w": 944, "h": 500}) == Vector2(944, 500))
 	check("video_size: falta o fuera de rango", P.video_size({}) == Vector2()
 		and P.video_size({"w": 99999, "h": 10}) == Vector2() and P.video_size(null) == Vector2())
+	var wi = P.window_input_events({"events": [{"kind": "motion", "x": 0.25, "y": 0.75},
+		{"kind": "button", "button": 1, "pressed": true},
+		{"kind": "key", "physical": KEY_A, "pressed": false}, {"kind": "reset"},
+		{"kind": "keepalive"}]})
+	check("window_input valida lote", P.valid_method("window_input") and wi.size() == 5)
+	check("window_input rechaza coordenada y botón", P.window_input_events(
+		{"events": [{"kind": "motion", "x": -0.1, "y": 0.5}]}).empty()
+		and P.window_input_events({"events": [{"kind": "button", "button": 99,
+		"pressed": true}]}).empty())
 
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

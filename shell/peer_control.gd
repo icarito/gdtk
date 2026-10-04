@@ -248,6 +248,16 @@ func _handle(conn, line):
 				ok = bool(shell._peer_gvd_size(hid, vs))
 			else:
 				err = "no disponible"
+		"window_input":
+			var events = LINK.window_input_events(params)
+			if events.empty():
+				err = "parámetros inválidos"
+			elif shell.has_method("_peer_window_input"):
+				ok = bool(shell._peer_window_input(hid, events))
+				if not ok:
+					err = "ventana no compartida"
+			else:
+				err = "no disponible"
 		"audio_stop":
 			ok = shell.has_method("_peer_audio_stop") and bool(shell._peer_audio_stop(hid))
 		_:

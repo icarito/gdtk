@@ -53,3 +53,11 @@ Contrato: `specs/SPEC-sugar-group-2026-10.md` § «Enviar audio y ventanas».
   re-emparejar con tengu/cupid.
 - Un resize del emisor después de que el receptor eligió su tamaño vuelve a poner la ventana
   receptora en 1:1 con el video (desde su centro).
+
+## Continuación — control acotado de la ventana
+- La «Pantalla compartida» devuelve mouse, rueda y teclado mediante el método peer autenticado
+  `window_input`; coordenadas normalizadas y lotes de hasta 64 eventos, con motion coalescido en
+  un único worker de red. El origen resuelve `hid -> _casts[hid].wid`, nunca escritorio completo.
+- `reset` y la limpieza local liberan botones/teclas al perder foco, cerrar o cortar.
+- Deskflow se arbitra primero. Para conservar su latencia bajo carga, gvd baja a nice 5 y marca
+  RTP como DSCP CS1 (`qos-dscp=8`); no requiere sudo y las reglas/router pueden ignorar DSCP.
