@@ -385,6 +385,16 @@ void WaylandCompositor::_cb_cursor_hidden(void *p_ud, int p_hidden) {
 	self->emit_signal("client_cursor_hidden", p_hidden != 0);
 }
 
+void WaylandCompositor::_cb_cursor_shape(void *p_ud, int p_shape) {
+	WaylandCompositor *self = static_cast<WaylandCompositor *>(p_ud);
+	self->cursor_image_data = PoolVector<uint8_t>(); // la forma reemplaza a la imagen
+	self->emit_signal("client_cursor_shape", p_shape);
+}
+
+void WaylandCompositor::_cb_cursor_image(void *p_ud, const unsigned char *p_data, int p_w, int p_h, uint32_t p_format, int p_stride, int p_hx, int p_hy) {
+	static_cast<WaylandCompositor *>(p_ud)->_on_cursor_image(p_data, p_w, p_h, p_format, p_stride, p_hx, p_hy);
+}
+
 void WaylandCompositor::_cb_drag_icon(void *p_ud, const unsigned char *p_data, int p_w, int p_h, uint32_t p_format, int p_stride, int p_dx, int p_dy) {
 	static_cast<WaylandCompositor *>(p_ud)->_on_drag_icon(p_data, p_w, p_h, p_format, p_stride, p_dx, p_dy);
 }
@@ -591,6 +601,50 @@ void WaylandCompositor::_on_drag_icon(const unsigned char *p_data, int p_w, int 
 	emit_signal("drag_icon_changed");
 }
 
+// Cursor por surface del cliente con foco (wl_pointer.set_cursor): RGBA8 al shell,
+// que lo dibuja con hotspot. Mismo formato wl_shm que el icono de drag.
+void WaylandCompositor::_on_cursor_image(const unsigned char *p_data, int p_w, int p_h, uint32_t p_format, int p_stride, int p_hx, int p_hy) {
+	if (p_data == NULL || p_w <= 0 || p_h <= 0) {
+		return;
+	}
+	if (p_stride <= 0) {
+		p_stride = p_w * 4;
+	}
+	if (p_stride < p_w * 4) {
+		return;
+	}
+	bool swap_rb = p_format == DRM_FORMAT_ARGB8888 || p_format == DRM_FORMAT_XRGB8888;
+	bool has_alpha = p_format == DRM_FORMAT_ARGB8888 || p_format == DRM_FORMAT_ABGR8888;
+	PoolVector<uint8_t> data;
+	data.resize(p_w * p_h * 4);
+	{
+		PoolVector<uint8_t>::Write w = data.write();
+		for (int y = 0; y < p_h; y++) {
+			const unsigned char *src = p_data + (size_t)y * (size_t)p_stride;
+			uint8_t *d = w.ptr() + (size_t)y * (size_t)p_w * 4;
+			for (int x = 0; x < p_w; x++, src += 4, d += 4) {
+				d[0] = swap_rb ? src[2] : src[0];
+				d[1] = src[1];
+				d[2] = swap_rb ? src[0] : src[2];
+				d[3] = has_alpha ? src[3] : 255;
+			}
+		}
+	}
+	Vector2 hot(p_hx, p_hy);
+	// Ancho y alto van en el tamaño del buffer: mismo largo con otro w/h es raro pero posible.
+	if (hot == cursor_image_hotspot && data.size() == cursor_image_data.size()) {
+		PoolVector<uint8_t>::Read a = data.read();
+		PoolVector<uint8_t>::Read b = cursor_image_data.read();
+		if (memcmp(a.ptr(), b.ptr(), data.size()) == 0) {
+			return;
+		}
+	}
+	cursor_image_data = data;
+	cursor_image_hotspot = hot;
+	Ref<Image> img = memnew(Image(p_w, p_h, false, Image::FORMAT_RGBA8, data));
+	emit_signal("client_cursor_image", img, hot);
+}
+
 void WaylandCompositor::_on_title(int p_id, const char *p_title) {
 	Map<int, Toplevel>::Element *e = toplevels.find(p_id);
 	if (e == NULL) {
@@ -663,6 +717,8 @@ void WaylandCompositor::_bind_methods() {
 	ADD_SIGNAL(MethodInfo("layers_changed"));
 	ADD_SIGNAL(MethodInfo("pointer_lock", PropertyInfo(Variant::INT, "id"), PropertyInfo(Variant::BOOL, "locked")));
 	ADD_SIGNAL(MethodInfo("client_cursor_hidden", PropertyInfo(Variant::BOOL, "hidden")));
+	ADD_SIGNAL(MethodInfo("client_cursor_shape", PropertyInfo(Variant::INT, "shape")));
+	ADD_SIGNAL(MethodInfo("client_cursor_image", PropertyInfo(Variant::OBJECT, "image", PROPERTY_HINT_RESOURCE_TYPE, "Image"), PropertyInfo(Variant::VECTOR2, "hotspot")));
 	ADD_SIGNAL(MethodInfo("drag_icon_changed"));
 	ADD_SIGNAL(MethodInfo("drag_state_changed", PropertyInfo(Variant::BOOL, "active")));
 	ADD_SIGNAL(MethodInfo("process_exited", PropertyInfo(Variant::INT, "pid"), PropertyInfo(Variant::INT, "code")));
@@ -739,6 +795,8 @@ String WaylandCompositor::start() {
 	cb.damage = &WaylandCompositor::_cb_damage;
 	cb.pointer_lock = &WaylandCompositor::_cb_pointer_lock;
 	cb.cursor_hidden = &WaylandCompositor::_cb_cursor_hidden;
+	cb.cursor_shape = &WaylandCompositor::_cb_cursor_shape;
+	cb.cursor_image = &WaylandCompositor::_cb_cursor_image;
 	cb.drag_icon = &WaylandCompositor::_cb_drag_icon;
 	cb.drag_state = &WaylandCompositor::_cb_drag_state;
 

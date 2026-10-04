@@ -20,6 +20,7 @@
 #include <wlr/render/drm_format_set.h>
 #include <wlr/types/wlr_buffer.h>
 #include <wlr/types/wlr_compositor.h>
+#include <wlr/types/wlr_cursor_shape_v1.h>
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_layer_shell_v1.h>
@@ -228,6 +229,12 @@ struct wl_server {
 	// manda surface NULL: el shell oculta su cursor dibujado (juegos con lock).
 	struct wl_listener request_set_cursor;
 	int client_cursor_hidden;
+	// wp_cursor_shape_v1 y cursor por surface (ver handle_request_set_cursor).
+	struct wl_listener request_cursor_shape;
+	struct wlr_surface *cursor_surface; // surface de cursor vigente (NULL si no hay)
+	struct wl_listener cursor_commit;
+	struct wl_listener cursor_destroy;
+	int cursor_hx, cursor_hy;
 
 	// Pointer gestures (zwp_pointer_gesture_pinch_v1): el shell reenvía el pinch
 	// del touchpad (vía sway bindgesture → RPC) y wlroots lo entrega al cliente
@@ -1458,6 +1465,64 @@ static void notify_client_cursor_hidden(struct wl_server *s, int hidden) {
 	}
 }
 
+// Surface de cursor del cliente: se suelta al cambiar el cursor/foco o al destruirse.
+static void cursor_surface_drop(struct wl_server *s) {
+	if (s->cursor_surface == NULL) {
+		return;
+	}
+	wl_list_remove(&s->cursor_commit.link);
+	wl_list_remove(&s->cursor_destroy.link);
+	s->cursor_surface = NULL;
+}
+
+// Lee el buffer shm actual de la surface de cursor y se lo da al shell. Buffers no
+// accesibles desde CPU (dmabuf) o > 256 px se ignoran: queda el cursor anterior.
+static void cursor_surface_import(struct wl_server *s) {
+	struct wlr_buffer *buf = s->cursor_surface->current.buffer;
+	if (s->cb.cursor_image == NULL || buf == NULL || buf->width > 256 || buf->height > 256) {
+		return;
+	}
+	void *ptr = NULL;
+	uint32_t format = 0;
+	size_t stride = 0;
+	if (!wlr_buffer_begin_data_ptr_access(buf, WLR_BUFFER_DATA_PTR_ACCESS_READ,
+			&ptr, &format, &stride)) {
+		return;
+	}
+	s->cb.cursor_image(s->cb.ud, (const unsigned char *)ptr, buf->width, buf->height, format,
+			(int)stride, s->cursor_hx - s->cursor_surface->current.dx,
+			s->cursor_hy - s->cursor_surface->current.dy);
+	wlr_buffer_end_data_ptr_access(buf);
+}
+
+static void handle_cursor_commit(struct wl_listener *listener, void *data) {
+	struct wl_server *s = wl_container_of(listener, s, cursor_commit);
+	cursor_surface_import(s);
+	// Cursores animados esperan el frame callback para el siguiente cuadro.
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	wlr_surface_send_frame_done(s->cursor_surface, &now);
+}
+
+static void handle_cursor_destroy(struct wl_listener *listener, void *data) {
+	struct wl_server *s = wl_container_of(listener, s, cursor_destroy);
+	cursor_surface_drop(s);
+}
+
+static void notify_client_cursor_shape(struct wl_server *s, int shape) {
+	if (s->cb.cursor_shape != NULL) {
+		s->cb.cursor_shape(s->cb.ud, shape);
+	}
+}
+
+// Cambio de foco de puntero: el cursor del cliente anterior no se hereda; el
+// shell vuelve a su cursor (ARROW) hasta que el nuevo cliente pida otro.
+static void client_cursor_reset(struct wl_server *s) {
+	cursor_surface_drop(s);
+	notify_client_cursor_hidden(s, 0);
+	notify_client_cursor_shape(s, 0);
+}
+
 static void handle_request_set_cursor(struct wl_listener *listener, void *data) {
 	struct wl_server *s = wl_container_of(listener, s, request_set_cursor);
 	struct wlr_seat_pointer_request_set_cursor_event *ev = data;
@@ -1466,6 +1531,72 @@ static void handle_request_set_cursor(struct wl_listener *listener, void *data) 
 		return;
 	}
 	notify_client_cursor_hidden(s, ev->surface == NULL);
+	if (ev->surface == NULL) {
+		cursor_surface_drop(s);
+		return;
+	}
+	s->cursor_hx = ev->hotspot_x;
+	s->cursor_hy = ev->hotspot_y;
+	if (s->cursor_surface != ev->surface) {
+		cursor_surface_drop(s);
+		s->cursor_surface = ev->surface;
+		s->cursor_commit.notify = handle_cursor_commit;
+		wl_signal_add(&ev->surface->events.commit, &s->cursor_commit);
+		s->cursor_destroy.notify = handle_cursor_destroy;
+		wl_signal_add(&ev->surface->events.destroy, &s->cursor_destroy);
+	}
+	cursor_surface_import(s);
+}
+
+// wp_cursor_shape_v1 (enum de Godot = Input::CursorShape).
+static int cursor_shape_to_godot(enum wp_cursor_shape_device_v1_shape shape) {
+	switch (shape) {
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_TEXT:
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_VERTICAL_TEXT: return 1; // IBEAM
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_POINTER: return 2; // POINTING_HAND
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_CROSSHAIR:
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_CELL:
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ZOOM_IN:
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ZOOM_OUT: return 3; // CROSS
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_WAIT: return 4; // WAIT (bloquea la app)
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_PROGRESS: return 5; // BUSY (app usable)
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_GRAB:
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_GRABBING: return 6; // DRAG
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_COPY:
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ALIAS: return 7; // CAN_DROP
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NOT_ALLOWED:
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NO_DROP: return 8; // FORBIDDEN
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_N_RESIZE:
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_S_RESIZE:
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NS_RESIZE:
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ROW_RESIZE: return 9; // VSIZE
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_E_RESIZE:
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_W_RESIZE:
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_EW_RESIZE:
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_COL_RESIZE: return 10; // HSIZE
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NE_RESIZE:
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_SW_RESIZE:
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NESW_RESIZE: return 11; // BDIAGSIZE
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NW_RESIZE:
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_SE_RESIZE:
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NWSE_RESIZE: return 12; // FDIAGSIZE
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_MOVE:
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ALL_SCROLL: return 13; // MOVE
+	case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_HELP: return 16; // HELP
+	default: return 0; // DEFAULT, CONTEXT_MENU, ...: ARROW
+	}
+}
+
+static void handle_request_cursor_shape(struct wl_listener *listener, void *data) {
+	struct wl_server *s = wl_container_of(listener, s, request_cursor_shape);
+	struct wlr_cursor_shape_manager_v1_request_set_shape_event *ev = data;
+	if (ev->device_type != WLR_CURSOR_SHAPE_MANAGER_V1_DEVICE_TYPE_POINTER
+			|| ev->seat_client != s->seat->pointer_state.focused_client) {
+		return;
+	}
+	cursor_surface_drop(s); // la forma reemplaza a un cursor por surface previo
+	notify_client_cursor_hidden(s, 0);
+	notify_client_cursor_shape(s, cursor_shape_to_godot(ev->shape));
 }
 
 // --- Drag and drop nativo (wl_data_device) ---
@@ -2033,6 +2164,11 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 	wl_signal_add(&s->seat->events.request_set_primary_selection, &s->request_set_primary_selection);
 	s->request_set_cursor.notify = handle_request_set_cursor;
 	wl_signal_add(&s->seat->events.request_set_cursor, &s->request_set_cursor);
+	struct wlr_cursor_shape_manager_v1 *cursor_shape = wlr_cursor_shape_manager_v1_create(s->display, 1);
+	if (cursor_shape != NULL) {
+		s->request_cursor_shape.notify = handle_request_cursor_shape;
+		wl_signal_add(&cursor_shape->events.request_set_shape, &s->request_cursor_shape);
+	}
 	s->request_start_drag.notify = handle_request_start_drag;
 	wl_signal_add(&s->seat->events.request_start_drag, &s->request_start_drag);
 	s->start_drag.notify = handle_start_drag;
@@ -2340,7 +2476,7 @@ void wl_server_pointer_motion(wl_server *s, int id, double x, double y, uint32_t
 			s->pointer_surface = NULL;
 			s->pointer_id = 0;
 			wlr_seat_pointer_notify_clear_focus(s->seat);
-			notify_client_cursor_hidden(s, 0);
+			client_cursor_reset(s);
 			update_pointer_constraint(s);
 		}
 		return;
@@ -2350,7 +2486,7 @@ void wl_server_pointer_motion(wl_server *s, int id, double x, double y, uint32_t
 		s->pointer_id = id;
 		// Otro cliente paso a tener el foco: su cursor arranca visible hasta que
 		// pida lo contrario (set_cursor). Evita heredar un cursor oculto ajeno.
-		notify_client_cursor_hidden(s, 0);
+		client_cursor_reset(s);
 		wlr_seat_pointer_notify_enter(s->seat, surface, sub_x, sub_y);
 		update_pointer_constraint(s);
 	}
@@ -2392,7 +2528,7 @@ void wl_server_pointer_clear_focus(wl_server *s) {
 	s->pointer_surface = NULL;
 	s->pointer_id = 0;
 	wlr_seat_pointer_notify_clear_focus(s->seat);
-	notify_client_cursor_hidden(s, 0);
+	client_cursor_reset(s);
 	update_pointer_constraint(s);
 }
 
@@ -2726,12 +2862,14 @@ void wl_server_destroy(wl_server *s) {
 	struct wl_listener *extra[] = { &s->new_layer, &s->request_activate,
 		&s->request_set_selection, &s->request_set_primary_selection, &s->new_xsurface,
 		&s->new_text_input, &s->new_input_method, &s->new_constraint,
-		&s->request_start_drag, &s->start_drag, &s->request_set_cursor };
+		&s->request_start_drag, &s->start_drag, &s->request_set_cursor,
+		&s->request_cursor_shape };
 	for (size_t i = 0; i < sizeof(extra) / sizeof(extra[0]); i++) {
 		if (extra[i]->notify != NULL) {
 			wl_list_remove(&extra[i]->link);
 		}
 	}
+	cursor_surface_drop(s);
 
 	// Pointer lock: quitar los watchers de destroy de cada restricción antes de
 	// destruir clientes/display (wlroots asserts si quedan listeners propios).

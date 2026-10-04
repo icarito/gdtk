@@ -45,6 +45,9 @@ class WaylandCompositor : public Node {
 	// un drag en curso. El shell dibuja la textura pegada al puntero y usa
 	// is_dragging() para seguir reenviando el boton aunque el cursor salga de toda
 	// ventana (soltar sobre el escritorio cancela el drop).
+	// Último cursor por surface emitido (para no repetir señales idénticas).
+	PoolVector<uint8_t> cursor_image_data;
+	Vector2 cursor_image_hotspot;
 	Ref<ImageTexture> drag_icon_texture;
 	// Hotspot del icono: top-left = puntero + drag_icon_offset (offset del
 	// wl_surface del icono).
@@ -68,6 +71,8 @@ class WaylandCompositor : public Node {
 	static void _cb_damage(void *p_ud, int p_id);
 	static void _cb_pointer_lock(void *p_ud, int p_id, int p_locked);
 	static void _cb_cursor_hidden(void *p_ud, int p_hidden);
+	static void _cb_cursor_shape(void *p_ud, int p_shape);
+	static void _cb_cursor_image(void *p_ud, const unsigned char *p_data, int p_w, int p_h, uint32_t p_format, int p_stride, int p_hx, int p_hy);
 	static void _cb_drag_icon(void *p_ud, const unsigned char *p_data, int p_w, int p_h, uint32_t p_format, int p_stride, int p_dx, int p_dy);
 	static void _cb_drag_state(void *p_ud, int p_active);
 
@@ -75,6 +80,7 @@ class WaylandCompositor : public Node {
 	void _on_removed(int p_id);
 	void _on_frame(int p_id, uint64_t p_key, const unsigned char *p_data, int p_w, int p_h, uint32_t p_format, int p_stride);
 	void _on_dmabuf(int p_id, uint64_t p_key, int p_w, int p_h);
+	void _on_cursor_image(const unsigned char *p_data, int p_w, int p_h, uint32_t p_format, int p_stride, int p_hx, int p_hy);
 	void _on_drag_icon(const unsigned char *p_data, int p_w, int p_h, uint32_t p_format, int p_stride, int p_dx, int p_dy);
 	void _on_title(int p_id, const char *p_title);
 	void _count_commit(int p_id);

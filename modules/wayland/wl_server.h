@@ -68,6 +68,12 @@ typedef struct {
 	// cuando mando surface NULL (cursor oculto; p.ej. juego con pointer lock) y
 	// el shell debe ocultar su cursor dibujado; 0 cuando mando una surface.
 	void (*cursor_hidden)(void *ud, int hidden);
+	// Forma de cursor pedida por el cliente con foco (wp_cursor_shape_v1), ya como
+	// Input::CursorShape de Godot. 0 (ARROW) tambien al cambiar/perder el foco.
+	void (*cursor_shape)(void *ud, int shape);
+	// Cursor por surface (wl_pointer.set_cursor con surface): buffer shm del cliente
+	// (mismo formato que `frame`, valido SOLO durante la llamada) y hotspot en px.
+	void (*cursor_image)(void *ud, const unsigned char *data, int w, int h, uint32_t format, int stride, int hx, int hy);
 } wl_server_callbacks;
 
 // Superficie layer-shell mapeada: rect en coords del output (la vista), capa 0..3
