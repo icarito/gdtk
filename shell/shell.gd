@@ -7881,18 +7881,23 @@ func _on_view_input(event):
 	if event is InputEventMouseMotion:
 		last_pointer_pos = event.position
 		_sync_drag_icon()
-		# Fuera del chrome (mosaico, o flotante con el puntero en la app): flecha.
-		_reset_cursor()
+		var hit = _view_hit_test(event.position)
+		hover_handle = _handle_at(event.position) if resize_handle == null else null
+		# UNA decisión de cursor por motion: sobre una app, el que ella pidió; si no,
+		# flecha. Godot inyecta un motion falso en cada cambio de forma, así que dos
+		# caminos que se pisaban (app -> flecha -> app...) colgaban el shell.
+		if hit.id >= 0 and resize_handle == null and hover_handle == null:
+			_apply_client_cursor()
+		else:
+			_reset_cursor()
 		# Asa de redimensión de la franja: primero la arrastra, después sólo la insinúa.
 		if resize_handle != null:
 			_resize_to(resize_handle, event.position.x)
 			request_redraw()
 			return
-		hover_handle = _handle_at(event.position)
 		if hover_handle != null:
 			request_redraw()
 			return
-		var hit = _view_hit_test(event.position)
 		if hit.id < 0:
 			# Drag nativo sobre el escritorio: limpiar el foco para que el drop no
 			# caiga en la última ventana; el botón que cierre el drag llega abajo.
@@ -8007,8 +8012,7 @@ func _on_chrome_input(event):
 		var pick = _chrome_pick(event.position)
 		if pick != null:
 			_apply_cursor(_cursor_for_part(pick.part))
-		else:
-			_apply_client_cursor()  # sobre el contenido manda el cursor que pidió la app
+		# Sin chrome debajo decide _on_view_input (una sola vez por motion).
 		return pick != null
 	if event is InputEventMouseButton and event.button_index == BUTTON_RIGHT and event.pressed:
 		# Menú contextual de la barra de título (cambio de modo, maximizar, cerrar).
@@ -8124,7 +8128,7 @@ func _on_client_cursor_image(img, hotspot):
 # movimiento sería caro). La imagen va como cursor custom de la forma ARROW.
 func _apply_client_cursor():
 	var key = client_cursor_tex if client_cursor_tex != null else client_cursor_shape
-	if key == _client_cursor_applied and Input.get_current_cursor_shape() == (Input.CURSOR_ARROW if client_cursor_tex != null else client_cursor_shape):
+	if key == _client_cursor_applied:
 		return
 	_client_cursor_applied = key
 	if client_cursor_tex != null:
