@@ -115,6 +115,8 @@ var pending_wayland = ""
 # con el lanzamiento correcto.
 var pending_launches = []
 var requested_sizes = {}
+var z_stack = []        # ids elevados por clic/foco, de abajo hacia arriba (flotantes y tiled)
+var z_order_now = []    # apilado efectivo del último layout (dibujo y hit-test)
 var popup_owners = []        # ventanas con popups abiertos este frame (van arriba de todo)
 var popup_bounds_sent = {}  # id -> Rect2 enviada a set_popup_bounds
 var resize_since = {}     # id -> ms del último set_size (estirar la textura mientras llega)
@@ -839,15 +841,25 @@ func _compute_float_layout(cr, units = null, s = 0.0):
 			tile_rects[id] = WINDOW_CHROME.content_rect(fr, th, bd, rh)
 		_deco_node(id)
 		_sync_client_maximized(id, wm_maximized.has(id))
-	# Las flotantes van POR ENCIMA de las tiled: se reubican al final del `view` en
-	# z-order (de abajo hacia arriba), con su decoración justo encima del contenido.
+	# Un solo orden de apilado para flotantes y tiled: abajo las tiled nunca elevadas,
+	# después las flotantes en su orden y encima lo elevado por clic/foco (z_stack), sea
+	# flotante o tiled. Antes las flotantes iban siempre encima y clickear una tiled que
+	# estaba debajo no la traía al frente.
+	z_order_now = []
 	for id in float_layout.ids_z():
+		if not z_stack.has(id):
+			z_order_now.append(id)
+	for id in z_stack:
+		if tiles.has(id) and not minimized.has(id):
+			z_order_now.append(id)
+	for id in z_order_now:
 		var n = tile_nodes.get(id)
 		if n != null and is_instance_valid(n):
 			view.move_child(n, view.get_child_count() - 1)
 			var d = deco_nodes.get(id)
 			if d != null and is_instance_valid(d):
-				d.visible = true
+				if hybrid.is_floating(id):
+					d.visible = true
 				view.move_child(d, view.get_child_count() - 1)
 
 
@@ -960,7 +972,7 @@ func _tick_csd_grip(now):
 # luego las tiled en el orden de `tiles`. Las que aún no están en el layout van al final.
 func _hit_order_ids():
 	var out = popup_owners.duplicate()  # sus menús van encima de todo (también al clic)
-	var floats = float_layout.ids_z()
+	var floats = z_order_now.duplicate()  # mismo apilado que el dibujo (ver _compute_float_layout)
 	floats.invert()
 	for id in floats:
 		if not out.has(id):
@@ -981,7 +993,13 @@ func _chrome_pick(pos):
 	var bhit = WINDOW_CHROME.BORDER_HIT * scale
 	var rh = _chrome_resize_h()
 	for id in _hit_order_ids():
-		if id == fullscreen_id or minimized.has(id) or not tiles.has(id) or not hybrid.is_floating(id):
+		if id == fullscreen_id or minimized.has(id) or not tiles.has(id):
+			continue
+		if not hybrid.is_floating(id):
+			# Una tiled elevada por encima tapa el chrome de las flotantes de abajo.
+			var tr = tile_rects.get(id)
+			if z_stack.has(id) and tr != null and tr.has_point(pos):
+				return null
 			continue
 		var fr = window_rects.get(id, null)
 		if fr == null:
@@ -2474,6 +2492,7 @@ func _update_tiles():
 		if not tiles.has(id):
 			var node = tile_nodes[id]
 			tile_nodes.erase(id)
+			z_stack.erase(id)
 			_free_deco(id)
 			tile_rects.erase(id)
 			expose_cards.erase(id)
@@ -2912,8 +2931,11 @@ func _focus_tile(id, raise_window = true):
 	focused_tile = id
 	# En flotante, elevar es una consecuencia del foco explícito (clic, selector,
 	# atajo), no del mero cambio de foco. Lazy focus pasa false para conservar Z.
-	if raise_window and hybrid.is_floating(id) and float_layout.has(id):
-		float_layout.raise(id)
+	if raise_window:
+		z_stack.erase(id)
+		z_stack.append(id)  # al frente del apilado común (flotante o tiled)
+		if hybrid.is_floating(id) and float_layout.has(id):
+			float_layout.raise(id)
 	focus_flash = OS.get_ticks_msec()
 	# Memoriza el miembro enfocado de la pantalla (para volver a él desde otra).
 	for u in _units():
