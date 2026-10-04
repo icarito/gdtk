@@ -38,6 +38,7 @@ const char *eis_server_error(eis_server *s);
 int eis_server_has_input_capture(eis_server *s);
 // Estado actual, también tras Release/Disable/Close o desconexión por D-Bus/EIS.
 int eis_server_is_capturing(eis_server *s);
+int eis_server_release_capture(eis_server *s);
 // No bloquea: procesa lo que haya en el bus y en los sockets EIS.
 void eis_server_dispatch(eis_server *s);
 void eis_server_set_size(eis_server *s, int w, int h);

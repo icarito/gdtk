@@ -62,6 +62,7 @@ public:
 	// 1 si el backend del portal InputCapture quedó registrado en el bus de la sesión.
 	bool has_input_capture() const;
 	bool is_capturing() const;
+	bool release_capture();
 	// Tramos porcentuales por borde donde InputCapture puede activarse, en el orden
 	// [left_lo,left_hi, right_lo,right_hi, top_lo,top_hi, bottom_lo,bottom_hi].
 	// Debe venir del layout de Deskflow (down(0,67) etc.); si no, NULL/[] = 0..100.

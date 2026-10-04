@@ -1257,6 +1257,22 @@ int eis_server_is_capturing(eis_server *s) {
 	return s != NULL && capture_active(s) != NULL;
 }
 
+// Suelta la captura activa por decisión del shell (red de seguridad): si el equipo
+// destino se cayó y el cliente InputCapture (Deskflow) no pide Release, el puntero
+// quedaba atrapado. Igual que un Release sin posición: Deactivated + histéresis del
+// borde activo para no re-disparar en el acto. Devuelve 1 si había captura.
+int eis_server_release_capture(eis_server *s) {
+	if (s == NULL) {
+		return 0;
+	}
+	struct session *se = capture_active(s);
+	if (se == NULL) {
+		return 0;
+	}
+	capture_release(s, se, -1.0, -1.0);
+	return 1;
+}
+
 void eis_server_dispatch(eis_server *s) {
 	if (s->bus) {
 		while (sd_bus_process(s->bus, NULL) > 0) {

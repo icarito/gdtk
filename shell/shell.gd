@@ -34,6 +34,7 @@ const LAYOUT_MODEL = preload("res://deskflow_layout.gd")
 const CONF_MODEL = preload("res://deskflow_conf.gd")
 const DESKFLOW_SETTINGS = preload("res://deskflow_settings.gd")
 const SCREEN_LAYOUT = preload("res://screen_layout.gd")
+const DESKFLOW_WATCH = preload("res://deskflow_watch.gd")
 const SERVICE_STATE = preload("res://service_state.gd")
 # Sesión de pantalla gvd (Kilo F2): modelo puro de estados/planes/clasificación que
 # usa el despacho de acciones del Vecindario (no ejecuta nada por sí mismo).
@@ -189,6 +190,8 @@ var neighborhood_ui = null
 var zoom_level = 0
 var zoom_f = 0.0
 var neighborhood_view = false
+var _df_watch_at = 0       # próximo chequeo del vigía de Deskflow (ms)
+var _df_mismatch = 0       # chequeos seguidos con captura activa y servidor "en local"
 var group_placements = {}   # hid -> grados alrededor del equipo local (de host_directions)
 const ZOOM_MS = 220.0
 var nb_version = -1
@@ -1493,6 +1496,7 @@ func _process(_delta):
 	_svc_poll()
 	# Deskflow por defecto: reintenta el arranque si debía correr y no está.
 	_deskflow_tick(now)
+	_deskflow_watch(now)
 	# Escrituras de dirección: reapea los Threads ya terminados (no bloquea).
 	_dir_poll()
 	# Buzón del handshake de dirección: aplica el snapshot del worker y reapea los
@@ -5584,6 +5588,46 @@ func deskflow_input_sessions():
 		if host != "":
 			out.append({"peer_name": host, "side": "north", "direction": "in"})
 	return out
+
+
+# Red de seguridad del puntero compartido: si la captura está activa pero el equipo al
+# que se fue el puntero se cayó (y Deskflow no pidió Release), se suelta acá. Sólo lee la
+# cola del log del servidor mientras hay captura (una vez por segundo).
+# ponytail: depende del texto del log de Deskflow; si cambia, el vigía no dispara (y queda
+# Ctrl+Alt+Esc). Un canal de estado del propio Deskflow lo reemplazaría.
+func _deskflow_watch(now):
+	if remote_input == null or not remote_input.has_method("release_capture") or now < _df_watch_at:
+		return
+	_df_watch_at = now + 1000
+	if not remote_input.is_capturing():
+		_df_mismatch = 0
+		return
+	var f = File.new()
+	if f.open(OS.get_environment("XDG_RUNTIME_DIR").plus_file("gdtk-deskflow.log"), File.READ) != OK:
+		return
+	var n = f.get_len()
+	f.seek(int(max(0, n - 32768)))
+	var tail = f.get_buffer(int(min(n, 32768))).get_string_from_utf8()
+	f.close()
+	var name = ""
+	if settings_bridge != null and settings_bridge.model != null:
+		name = String(settings_bridge.model.deskflow(settings_bridge.settings.get("deskflow", {})).get("name", ""))
+	var local = _deskflow_local_name(name)
+	var gone = DESKFLOW_WATCH.stuck_on(tail, local)
+	# Discordancia: el servidor ya volvió al local pero la captura sigue activa. Se exige
+	# en dos chequeos seguidos (~1 s): al cruzar, la línea "switch" llega ms después.
+	var mismatch = DESKFLOW_WATCH.server_local(tail, local)
+	_df_mismatch = _df_mismatch + 1 if mismatch else 0
+	var why = ""
+	if gone != "":
+		why = gone + " se cayó con el puntero allá"
+	elif _df_mismatch >= 2:
+		why = "Deskflow volvió a este equipo sin soltar la captura"
+	if why != "" and remote_input.release_capture():
+		print("[deskflow] ", why, ": suelto la captura")
+		_df_mismatch = 0
+		_set_capture_cursor(false)
+		request_redraw()
 
 
 func _deskflow_activity():

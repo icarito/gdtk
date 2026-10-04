@@ -238,6 +238,7 @@ void RemoteInput::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_client_count"), &RemoteInput::get_client_count);
 	ClassDB::bind_method(D_METHOD("has_input_capture"), &RemoteInput::has_input_capture);
 	ClassDB::bind_method(D_METHOD("is_capturing"), &RemoteInput::is_capturing);
+	ClassDB::bind_method(D_METHOD("release_capture"), &RemoteInput::release_capture);
 	ClassDB::bind_method(D_METHOD("set_capture_ranges", "ranges"), &RemoteInput::set_capture_ranges);
 	ClassDB::bind_method(D_METHOD("capture_motion", "position", "relative", "time"), &RemoteInput::capture_motion);
 	ClassDB::bind_method(D_METHOD("capture_button", "button", "pressed", "time"), &RemoteInput::capture_button);
@@ -331,6 +332,10 @@ bool RemoteInput::has_input_capture() const {
 
 bool RemoteInput::is_capturing() const {
 	return eis_server_is_capturing(server);
+}
+
+bool RemoteInput::release_capture() {
+	return eis_server_release_capture(server) != 0;
 }
 
 bool RemoteInput::set_capture_ranges(const PoolRealArray &p_ranges) {
