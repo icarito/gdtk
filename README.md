@@ -38,8 +38,9 @@ your network, and you share things by dragging them onto another computer.
   with WindowMaker-style decorations, exposé, snapping, Super+drag to move/resize
   and support for client-side decorations.
 - **The Frame.** Sugar's edge panels: pinned launchers, a window strip and square
-  "dockapps" (CPU/memory/swap, temperature and CPU governor, clock, keyboard layout,
-  clipboard history, active shares).
+  "dockapps" (CPU/memory/swap, temperature, battery and CPU governor, clock,
+  keyboard layout, clipboard history, active shares), plus on-screen volume and
+  brightness and touchpad gestures.
 - **Hot reload without losing your apps.** The shell's scripts reload
   transactionally while the compositor and every running application stay alive.
   A supervisor with a semantic heartbeat restarts the shell, or falls back to the
@@ -109,8 +110,16 @@ tools/verify_all.sh    # the test suite, isolated from any live session
 
 ## Known gaps
 
-Before gdtk can be anyone's only session it still needs: screen locking and idle
-handling, a battery indicator, suspend on lid/power key, multi-monitor and HiDPI,
-a clipboard bridge to the host compositor, IME composition in the shell's own text
-fields, and moving real windows (not mirrors) to another machine. Streams (gvd)
-and the peer channel are not encrypted: use them on a trusted LAN only.
+Before gdtk can be anyone's only session it still needs:
+
+- **Screen locking and idle handling** (blanking, lock on resume).
+- **Multiple monitors.** HiDPI works through a single global UI scale that is
+  also passed to applications; extending the desktop to more than one physical
+  output is designed (`SPEC-embedded-multi-output.md`) but not wired yet.
+- **IME in the shell's own text fields.** Applications already get input methods
+  (fcitx5, IBus, on-screen keyboards) through text-input-v3/input-method-v2.
+- **Power key.** Suspending on lid close is left to logind; the power key is not
+  mapped to suspend yet.
+
+Streams (gvd), the audio tunnel and the peer channel are not encrypted: use them
+on a trusted LAN only.
