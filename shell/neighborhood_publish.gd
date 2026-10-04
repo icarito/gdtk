@@ -49,15 +49,35 @@ static func which_in_path(prog, path_value) -> String:
 func build_common_txt(identity):
 	var kind = _one_of(String(identity.get("kind", "unknown")), _KINDS, "unknown")
 	var icon = _txt_atom(String(identity.get("icon", kind)), kind)
-	return [
+	var txt = [
 		"v=1",
 		"hid=" + _txt_atom(String(identity.get("hid", "")), ""),
 		"name=" + _txt_value(String(identity.get("name", "gdtk"))),
 		"kind=" + kind,
 		"icon=" + icon,
 		"auth=" + _one_of(String(identity.get("auth", "ask")), _AUTH, "ask"),
-		"ctl=" + _txt_atom(String(identity.get("ctl", "")), "")
 	]
+	# Canal peer: sólo si escucha. "ctl=" vacío no valida y tumbaba TODO el anuncio.
+	var ctl = _txt_atom(String(identity.get("ctl", "")), "")
+	if ctl != "":
+		txt.append("ctl=" + ctl)
+	# Acento del host opcional: sólo "#rrggbb" exacto, normalizado a minúsculas.
+	# Misma regla que NeighborhoodHosts.valid_accent, copiada para no acoplarlos.
+	var accent = _valid_accent(String(identity.get("accent", "")))
+	if accent != "":
+		txt.append("accent=" + accent)
+	return txt
+
+
+# "#rrggbb" exacto (6 hex, sin alfa ni nombres); "" para cualquier otra cosa.
+func _valid_accent(s):
+	var v = String(s).strip_edges().to_lower()
+	if v.length() != 7 or v[0] != "#":
+		return ""
+	for i in range(1, 7):
+		if "0123456789abcdef".find(v[i]) < 0:
+			return ""
+	return v
 
 
 func build_gvd_txt(identity, opts = {}):

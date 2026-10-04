@@ -1558,10 +1558,22 @@ func _draw_center_plate():
 	draw_arc(center, 28.0, 0.0, TAU, 48, NODE_RING, 2.0)
 
 
+# Acento que anuncia el equipo (TXT `accent`), o null si no lo anuncia.
+static func node_accent(node):
+	var host = node.get("host", {}) if typeof(node) == TYPE_DICTIONARY else {}
+	var a = String(host.get("accent", "")) if typeof(host) == TYPE_DICTIONARY else ""
+	return Color(a) if a.begins_with("#") and a.length() == 7 and a.substr(1).is_valid_hex_number() else null
+
+
 func _draw_node(node, c, size):
 	var r = size * 0.5
 	var bg = NODE_BG
 	var ring = NODE_RING
+	# Como el XO de Sugar: cada equipo con su color (relleno suave + anillo).
+	var acc = node_accent(node)
+	if acc != null:
+		bg = NODE_BG.linear_interpolate(acc, 0.35)
+		ring = acc
 	if bool(node.dimmed):
 		bg = Color(bg.r, bg.g, bg.b, NODE_DIM_ALPHA)
 		ring = Color(ring.r, ring.g, ring.b, NODE_DIM_ALPHA)

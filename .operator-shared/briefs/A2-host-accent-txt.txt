@@ -1,0 +1,22 @@
+Agregá el color de acento del equipo al anuncio mDNS y a su lectura (pieza pura de «acento del host en Grupo/Vecindario»).
+
+Write set EXCLUSIVO:
+- shell/neighborhood_publish.gd
+- shell/neighborhood_hosts.gd
+- tests/neighborhood_publish_test.gd
+- tests/neighborhood_hosts_test.gd
+No toques ningún otro archivo.
+
+Godot 3.6 GDScript (NO Godot 4).
+
+1. neighborhood_hosts.gd: nueva `static func valid_accent(s)` -> String: devuelve el color normalizado en minúsculas "#rrggbb" si `s` (strip) es exactamente "#" + 6 hex; si no, "". Sin alfa, sin nombres de color.
+2. neighborhood_hosts.gd `_new_host`: campo nuevo `"accent": valid_accent(str(txt.get("accent", "")))`. `_new_saved_host`: `"accent": ""`. Si un host junta varios servicios, el primero que traiga accent válido lo fija (mirá cómo se arma el host desde varios servicios y no pises un accent válido con "").
+3. neighborhood_publish.gd `build_common_txt(identity)`: si `identity` trae "accent" y `NeighborhoodHosts`-style validación pasa (copiá la misma regla localmente, no dependas del otro archivo), AGREGAR al FINAL de la lista "accent=#rrggbb". Si falta o es inválido, la lista queda EXACTAMENTE como hoy (hay tests que comparan la lista completa).
+4. Tests (patrón del repo, `check()`): publish con accent válido (aparece al final, normalizado), inválido ("red", "#12345", "#gggggg") no aparece; hosts: TXT con accent -> host.accent; sin accent -> ""; inválido -> "".
+
+Correr SÓLO así, desde el repo:
+/home/icarito/Proyectos/godot3-box3d/godot-dev/bin/godot.frt.opt.tools.x86_64.gdtk --no-window --path shell -s $PWD/tests/neighborhood_publish_test.gd
+/home/icarito/Proyectos/godot3-box3d/godot-dev/bin/godot.frt.opt.tools.x86_64.gdtk --no-window --path shell -s $PWD/tests/neighborhood_hosts_test.gd
+Ruido previo de RemoteInput/host.gd es conocido; valen las líneas ok y exit 0.
+
+No investigues la config del usuario ni otros archivos fuera de AGENTS.md y los 4 del write set. No hagas commit, deploy, rsync ni recarga. No reviertas cambios ajenos: hay otro agente editando shell.gd y neighborhood_ui.gd. Reportá API y salida literal de ambos tests.

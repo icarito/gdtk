@@ -86,6 +86,7 @@ func _draw():
 		# una ventana CSD sigue flotando y también lleva su sombra de compositor.
 		if not maximized:
 			_draw_shadow(content, scale, id == shell.focused_tile, true)
+		_draw_peer_outline(content, scale)
 		# El asa de mover se dibuja con el puntero encima y también mientras se
 		# repliega (animación de salida). En maximizadas queda DENTRO del borde
 		# superior, sin animación de subida (arriba no hay hueco): el cliente CSD
@@ -116,6 +117,7 @@ func _draw():
 	var p = WINDOW_CHROME.parts(fr, th, bd, WINDOW_CHROME.BTN * scale, WINDOW_CHROME.BTN_MARGIN, rh)
 	var active = id == shell.focused_tile
 	_draw_frame(p, active, bd)
+	_draw_peer_outline(fr, scale)
 	_draw_buttons(p)
 	_draw_grip(p.resize, scale)
 	var font = get_font("font", "Label")
@@ -131,8 +133,21 @@ func _draw():
 # redimensión. El asa se dibuja con el puntero encima o mientras se repliega; la
 # franja inferior sólo con el puntero encima (shell.csd_hover_id). Con `inside`
 # (maximizada) el asa queda dentro del borde superior y no se recorta.
+# Ventana que llega de otro equipo (gvd): marco con el acento de ese equipo, para
+# que se distinga de un vistazo de las ventanas locales.
+func _draw_peer_outline(rect, scale):
+	var acc = shell.window_peer_accent(id) if shell.has_method("window_peer_accent") else null
+	if acc == null:
+		return
+	var w = max(2.0, 3.0 * scale)
+	draw_rect(rect.grow(w * 0.5), acc, false, w)
+
+
 func _draw_csd(rect, scale, active, reveal = 1.0, hovered = true, inside = false):
 	var base = shell.accent if shell.accent != null else Color(0.55, 0.80, 1.0)
+	var peer = shell.window_peer_accent(id) if shell.has_method("window_peer_accent") else null
+	if peer != null:
+		base = peer
 	var col = Color(base.r, base.g, base.b, 0.94 if active else 0.55)
 	var g = WINDOW_CHROME.move_grip_rect(rect, scale, reveal, shell.grid_unit(shell.get_viewport_rect().size), inside)
 	var v = g if inside else WINDOW_CHROME.reveal_clip(g, rect.position.y)

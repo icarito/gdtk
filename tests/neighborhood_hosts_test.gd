@@ -64,5 +64,27 @@ func _init():
 	var sorted_twice = nb.sort_hosts(reordered)
 	check("sort_hosts estable/repetible", nb.sort_hosts(sorted_twice)[0].id == sorted_twice[0].id)
 
+	# Acento del host: "#rrggbb" normalizado; el primer servicio válido lo fija.
+	check("valid_accent normaliza", nb.valid_accent("#AABBCC") == "#aabbcc")
+	check("valid_accent recorta espacios", nb.valid_accent("  #00ff00 ") == "#00ff00")
+	check("valid_accent rechaza inválidos",
+		nb.valid_accent("red") == "" and nb.valid_accent("#12345") == ""
+		and nb.valid_accent("#gggggg") == "" and nb.valid_accent("#aabbccdd") == "")
+	var color_sample = PoolStringArray([
+		"service _gdtk-gvd._udp name=Color host=color.local port=5600 hid=c1 kind=laptop",
+		"service _gdtk-deskflow._tcp name=Color host=color.local port=24800 hid=c1 kind=laptop accent=#AABBCC",
+		"service _gdtk-clip._tcp name=NoColor host=nc.local port=9911 hid=c2 kind=desktop",
+		"service _gdtk-gvd._udp name=BadColor host=bc.local port=5600 hid=c3 kind=desktop accent=red",
+	]).join("\n")
+	var color_hosts = nb.model_from_text(color_sample, {}, 5)
+	var c1 = nb._find_host(color_hosts, "c1")
+	var c2 = nb._find_host(color_hosts, "c2")
+	var c3 = nb._find_host(color_hosts, "c3")
+	check("accent de un servicio del host se lee", c1 != null and c1.accent == "#aabbcc")
+	check("host sin accent queda vacío", c2 != null and c2.accent == "")
+	check("host con accent inválido queda vacío", c3 != null and c3.accent == "")
+	var saved_hosts = nb.model_from_text("", {"sv1": {"label": "Guardado"}}, 5)
+	check("host guardado sin accent", saved_hosts.size() == 1 and saved_hosts[0].accent == "")
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

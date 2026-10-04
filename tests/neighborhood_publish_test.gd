@@ -47,6 +47,23 @@ func _init():
 	var common = pub.build_common_txt(identity)
 	check("TXT común explícito", common == ["v=1", "hid=b6f4e13b8a2f4d88", "name=Tengu", "kind=laptop", "icon=laptop", "auth=ask"])
 
+	var with_ctl = identity.duplicate()
+	with_ctl["ctl"] = "7788"
+	check("ctl sólo si hay canal", pub.build_common_txt(with_ctl).has("ctl=7788")
+		and not String(common).find("ctl=") >= 0)
+	var with_accent = identity.duplicate()
+	with_accent["accent"] = "#AABBCC"
+	check("accent válido aparece al final y normalizado",
+		pub.build_common_txt(with_accent) == common + ["accent=#aabbcc"])
+	var with_accent_ctl = with_accent.duplicate()
+	with_accent_ctl["ctl"] = "9911"
+	check("accent válido no rompe el TXT", pub.validate_txt(pub.build_common_txt(with_accent_ctl)).ok)
+	for bad in ["red", "#12345", "#gggggg"]:
+		var with_bad = identity.duplicate()
+		with_bad["accent"] = bad
+		check("accent inválido no aparece: " + bad, pub.build_common_txt(with_bad) == common)
+	check("sin accent la lista no cambia", pub.build_common_txt(identity) == common)
+
 	var gvd = pub.build_gvd_txt(identity, {"state": "ready", "size": "1280x800"})
 	var gvd_check = pub.validate_txt(gvd)
 	check("gvd TXT chico y válido", gvd_check.ok and gvd_check.bytes < 200 and gvd.has("role=recv") and gvd.has("cursor_port=+1"))

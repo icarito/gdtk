@@ -363,6 +363,12 @@ func _init():
 		and nui._group_toggle_items(pm, false)[2].reason == "está apagado")
 	check("drop fuera de la vista Grupo: sin destino", nui.group_drop_target(Vector2(5, 5)).empty())
 
+	# Acento del host (TXT accent) para pintar su ícono.
+	var NUI = load("res://neighborhood_ui.gd")
+	check("acento: válido", NUI.node_accent({"host": {"accent": "#ff8800"}}) == Color("#ff8800"))
+	check("acento: ausente o inválido => null", NUI.node_accent({"host": {}}) == null
+		and NUI.node_accent({"host": {"accent": "red"}}) == null and NUI.node_accent({}) == null)
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()
 

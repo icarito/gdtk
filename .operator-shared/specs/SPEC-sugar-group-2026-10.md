@@ -125,6 +125,15 @@ Decisiones tomadas con el usuario:
 - Métodos peer `audio_recv`/`audio_stop`. Como todo cambio de `peer_link.METHODS` o de un `preload`
   (p. ej. `gvd_launch.gd`), entra con el reinicio del proceso del shell; una recarga no alcanza.
 
+### Color de cada equipo (2026-10-04)
+- Cada equipo anuncia su acento de Configuración en el TXT mDNS (`accent=#rrggbb`, sólo ese formato;
+  se re-anuncia al cambiarlo). Como el XO de Sugar: en Grupo y Vecindario cada equipo se dibuja con
+  su acento (anillo + relleno suave) y «Este equipo» con el propio; sin acento, colores neutros.
+- La «Pantalla compartida» que llega de otro equipo lleva un marco (y el asa de mover) con el
+  acento de ese equipo, para distinguirla de las ventanas locales.
+- `ctl=` sólo se anuncia si el canal peer escucha: vacío invalidaba el TXT y el equipo no se
+  anunciaba en absoluto.
+
 ### G5 — Dockapp "Compartiendo" en ambos Frames
 - `shared_block.gd`: además de bloques por sesión, `diagram(sessions)` → un bloque con mini-diagrama:
   cuadro central = mi pantalla, cada lado N/S/E/O encendido por tipo (barra llena = pantalla extendida,

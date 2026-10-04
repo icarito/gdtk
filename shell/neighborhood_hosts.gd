@@ -144,6 +144,18 @@ static func _ctl_port(v):
 	return p if p > 0 and p < 65536 else 0
 
 
+# Acento del host: sólo "#rrggbb" exacto (6 hex), normalizado a minúsculas.
+# Sin alfa ni nombres de color; cualquier otra cosa devuelve "".
+static func valid_accent(s):
+	var v = str(s).strip_edges().to_lower()
+	if v.length() != 7 or v[0] != "#":
+		return ""
+	for i in range(1, 7):
+		if "0123456789abcdef".find(v[i]) < 0:
+			return ""
+	return v
+
+
 static func _new_host(id, hid, svc):
 	var txt = svc.txt
 	var label = str(txt.get("name", svc.name)).strip_edges()
@@ -159,6 +171,7 @@ static func _new_host(id, hid, svc):
 		"icon": icon,
 		"auth": str(txt.get("auth", "")),
 		"ctl": _ctl_port(txt.get("ctl", "")),
+		"accent": valid_accent(str(txt.get("accent", ""))),
 		"state": "visto",
 		"connected": false,
 		"degraded": hid == "",
@@ -179,6 +192,7 @@ static func _new_saved_host(hid):
 		"icon": "unknown",
 		"auth": "",
 		"ctl": 0,
+		"accent": "",
 		"state": "guardado",
 		"connected": false,
 		"degraded": false,
@@ -198,6 +212,11 @@ static func _add_service(host, svc, now_sec, ttl_sec):
 	item.capability = SERVICE_KINDS[svc.service]
 	host.services.append(item)
 	host.last_seen = max(int(host.last_seen), seen)
+	# El primer servicio que traiga un accent válido lo fija; nunca se pisa con "".
+	if host.accent == "":
+		var accent = valid_accent(str(svc.txt.get("accent", "")))
+		if accent != "":
+			host.accent = accent
 	if live:
 		host.live_count += 1
 		host.capabilities[item.capability] = item

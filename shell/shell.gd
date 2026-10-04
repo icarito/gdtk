@@ -4085,8 +4085,14 @@ func _draw_home(offset = 0.0):
 		var cr = min(monitor.size.x, monitor.size.y) * 0.5 - 2.0
 		var ka = Color(1, 1, 1, home_bg_alpha)
 		imgui_draw_circle_filled(cc + Vector2(0.0, 3.0), cr, Color(0, 0, 0, 0.35) * ka, 0)
+		# En Grupo/Vecindario «Este equipo» lleva su acento, como los demás equipos el
+		# suyo (neighborhood_ui._draw_node); en el Hogar entra con el zoom.
+		var acc_k = clamp(zoom_f, 0.0, 1.0)
+		var center_ring = HOME_BLOCK_DARK.linear_interpolate(accent, acc_k)
+		center_face = center_face.linear_interpolate(Color(accent.r, accent.g, accent.b,
+			center_face.a), 0.35 * acc_k)
 		imgui_draw_circle_filled(cc, cr, center_face * ka, 0)
-		imgui_draw_circle(cc, cr, HOME_BLOCK_DARK * ka, 0, 2.0)
+		imgui_draw_circle(cc, cr, center_ring * ka, 0, 2.0)
 		var dev_tex = local_device_icon_tex()
 		if dev_tex != null:
 			var ds = cr * 1.20
@@ -5200,6 +5206,9 @@ func _local_hostname():
 
 # Arranca los anuncios una sola vez. No bloquea: detect_avahi sólo mira el PATH
 # con File y cada proceso se lanza en un Thread.
+var _published_accent = ""
+
+
 func _start_publishers():
 	if _publish_started:
 		return
@@ -5214,6 +5223,10 @@ func _start_publishers():
 	# receptor de pantalla. Vacío si el canal no está escuchando.
 	if Host.peer_control != null and Host.peer_control.listening():
 		identity["ctl"] = str(Host.peer_control.port)
+	# Acento: los vecinos pintan este equipo con él en Grupo/Vecindario y en la
+	# «Pantalla compartida» que les mandamos.
+	_published_accent = "#" + accent.to_html(false)
+	identity["accent"] = _published_accent
 	var caps = {"gvd": true, "gvd_port": 5600, "deskflow": true, "deskflow_port": 24800,
 		"deskflow_role": _deskflow_role}
 	var plan = PUBLISH_PLAN.new().build(identity, caps, avahi.path)
@@ -5450,6 +5463,12 @@ func _go_home():
 func _apply_settings():
 	if settings_bridge != null:
 		accent = settings_bridge.accent
+		# Acento nuevo => re-anunciar (los anuncios mDNS son de una sola vez).
+		if _publish_started and _published_accent != "" \
+				and _published_accent != "#" + accent.to_html(false):
+			_stop_publishers()
+			_publish_started = false
+			_start_publishers()
 		appearance = settings_bridge.appearance()
 		ui_scale_factor = settings_bridge.ui_scale()
 		_apply_ui_scale_env()
@@ -7006,6 +7025,18 @@ func _pantalla_fit_poll():
 			print("pantalla: ", id, " ajustada al video ", _pantalla_video, " -> ", r)
 		_pantalla_fitted[id] = _pantalla_video
 		request_redraw()
+
+
+# Acento del equipo que nos transmite esta «Pantalla compartida» (TXT `accent`), o
+# null si la ventana es local o ese equipo no anuncia color. Lo usa window_deco.
+func window_peer_accent(id):
+	if _pantalla_sender == "" or not _pantalla_window_ids().has(id):
+		return null
+	var host = _neighborhood_host(_pantalla_sender)
+	if neighborhood_ui == null or not is_instance_valid(neighborhood_ui) \
+			or not neighborhood_ui.has_method("node_accent"):
+		return null
+	return neighborhood_ui.node_accent({"host": host if typeof(host) == TYPE_DICTIONARY else {}})
 
 
 func _pantalla_closed_here():

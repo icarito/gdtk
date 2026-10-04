@@ -36,11 +36,19 @@ Contrato: `specs/SPEC-sugar-group-2026-10.md` § «Enviar audio y ventanas».
 - Tests: neighborhood_ui, peer_link, peer_control, group_model, audio_send, gvd_launch, frame_menu,
   neighborhood_actions y `tools/gvd` (10) en verde.
 
+## Color de cada equipo
+- `accent` en el TXT (Kilo, brief `briefs/A2-host-accent-txt.txt`), nodos teñidos en Grupo/Vecindario,
+  centro con el acento local, marco con el acento del emisor en la «Pantalla compartida».
+- Verificado: avahi-browse muestra tengu `#e8615a` y cupid `#9b7ef0`; en cupid tengu se ve rojo en
+  Grupo y Vecindario y el htop compartido llega con marco rojo.
+- De paso: `ctl=` vacío invalidaba el TXT (7 tests de publish fallaban desde b53697b).
+
 ## Pendiente / notas
 - bastion: sólo sincronizado; entra en el próximo login (prohibido reiniciar su shell con VS Code).
 - La ventana compartida no incluye popups que caigan fuera de su rect; readback GL por tick
   (`ponytail` en window_cast.gd) hasta el broker dmabuf de SPEC-embedded-multi-output.md.
 - No hay resaltado del equipo destino mientras se arrastra.
+- Un equipo del Grupo apagado no tiene acento (no se persiste el último visto).
 - bastion corre el peer_control viejo (bug de tokens) hasta su próximo login: puede pedir
   re-emparejar con tengu/cupid.
 - Un resize del emisor después de que el receptor eligió su tamaño vuelve a poner la ventana
