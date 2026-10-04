@@ -239,6 +239,15 @@ func _handle(conn, line):
 				extra["port"] = rport
 			else:
 				err = "no se pudo recibir audio"
+		"gvd_size":
+			# La ventana compartida cambió de tamaño: el receptor reajusta la suya.
+			var vs = LINK.video_size(params)
+			if vs == Vector2():
+				err = "parámetros inválidos"
+			elif shell.has_method("_peer_gvd_size"):
+				ok = bool(shell._peer_gvd_size(hid, vs))
+			else:
+				err = "no disponible"
 		"audio_stop":
 			ok = shell.has_method("_peer_audio_stop") and bool(shell._peer_audio_stop(hid))
 		_:

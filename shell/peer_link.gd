@@ -15,7 +15,7 @@ const VERSION = 1
 # Métodos permitidos en el canal peer (lista blanca: el canal NO expone el control
 # remoto completo, sólo lo necesario para pantalla y el aviso de lados compartidos).
 const METHODS = ["ping", "gvd_recv", "gvd_stop", "gvd_send", "gvd_status",
-	"share_notify", "share_stop", "clip_set", "audio_recv", "audio_stop"]
+	"share_notify", "share_stop", "clip_set", "audio_recv", "audio_stop", "gvd_size"]
 
 # Parámetros válidos de los avisos de lados compartidos (G5). El `side` llega YA
 # invertido por el emisor: acá sólo se valida el vocabulario, no se transforma.

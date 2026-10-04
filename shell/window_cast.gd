@@ -19,6 +19,9 @@ extends Node
 const MAGIC = "GVDSHM1"
 const HEADER = 64
 const MAX_SIZE = Vector2(1920, 1080)
+# Un cambio de tamaño de la ventana se publica cuando se queda quieto este tiempo
+# (arrastrar el borde no rearma el encoder en cada píxel).
+const RESIZE_SETTLE_MS = 300
 
 var compositor = null
 var wid = -1
@@ -36,6 +39,8 @@ var _sem = Semaphore.new()
 var _mutex = Mutex.new()
 var _pending = null
 var _quit = false
+var _want = Vector2()
+var _want_since = 0
 
 
 # Tamaño de salida: el de la ventana, achicado sin deformar hasta MAX_SIZE y con
@@ -106,6 +111,21 @@ func _process(delta):
 	var g = compositor.get_geometry(wid)
 	if g.size.x >= 2 and g.size.y >= 2:
 		_geo = g
+	# La ventana cambió de tamaño: el video la sigue (gvd rearma su pipeline al ver
+	# la cabecera nueva y el shell avisa al receptor).
+	var want = out_size(_geo.size)
+	if want != Vector2() and want != size:
+		if want != _want:
+			_want = want
+			_want_since = OS.get_ticks_msec()
+		elif OS.get_ticks_msec() - _want_since >= RESIZE_SETTLE_MS:
+			_mutex.lock()
+			size = want
+			_pending = null
+			_mutex.unlock()
+			_vp.size = want
+			_canvas.update()
+			return   # el viewport recién se re-renderiza al nuevo tamaño el próximo tick
 	_canvas.update()
 	# Lo que se lee es el render del tick anterior: un frame de latencia, sin esperar.
 	var img = _vp.get_texture().get_data()
@@ -132,8 +152,10 @@ func _writer(_u):
 	if f.open(path, File.WRITE) != OK:
 		printerr("window_cast: no pude abrir ", path)
 		return
+	_mutex.lock()
 	var w = int(size.x)
 	var h = int(size.y)
+	_mutex.unlock()
 	f.store_buffer(MAGIC.to_ascii())
 	f.store_8(0)
 	f.store_64(0)
@@ -154,15 +176,24 @@ func _writer(_u):
 		var quit = _quit
 		var data = _pending
 		_pending = null
+		var cur = size
 		_mutex.unlock()
 		if quit:
 			break
-		if data == null or data.size() != w * h * 4:
+		if data == null or data.size() != int(cur.x) * int(cur.y) * 4:
 			continue
 		seq += 1
 		f.seek(8)
 		f.store_64(seq)
 		f.flush()
+		if int(cur.x) != w or int(cur.y) != h:
+			# Tamaño nuevo: la cabecera cambia dentro del mismo seqlock que el frame.
+			w = int(cur.x)
+			h = int(cur.y)
+			f.seek(16)
+			f.store_32(w)
+			f.store_32(h)
+			f.store_32(w * 4)
 		f.seek(HEADER)
 		f.store_buffer(data)
 		seq += 1

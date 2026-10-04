@@ -554,7 +554,10 @@ func _mouse_button(params):
 	var button = int(params.get("button", BUTTON_LEFT))
 	var pressed = bool(params.get("pressed", true))
 	event_queue.push_back(_event_mouse_motion(x, y))
-	event_queue.push_back(_event_mouse_button(x, y, button, pressed, false))
+	var ev = _event_mouse_button(x, y, button, pressed, false)
+	# `meta`: Super sostenido (Super+arrastre para mover/redimensionar en e2e).
+	ev.meta = bool(params.get("meta", false))
+	event_queue.push_back(ev)
 
 
 func _scroll(params):

@@ -85,8 +85,11 @@ class StreamTest(unittest.TestCase):
                     f.seek(8); f.write(struct.pack("<Q", 3))
                     f.seek(gvd.SHM_HEADER); f.write(b"\xff" * len(frame))
                 self.assertEqual(p.stdout.read(len(frame)), frame)
-                os.unlink(path)
-                self.assertEqual(p.wait(timeout=3), 0)
+                # Cambio de tamaño publicado (seq par): el lector sale con SHM_RESIZED.
+                with open(path, "r+b") as f:
+                    f.seek(8); f.write(struct.pack("<QIII", 4, 2, 2, 8))
+                self.assertEqual(p.wait(timeout=3), gvd.SHM_RESIZED)
+
             finally:
                 if p.poll() is None:
                     p.kill()

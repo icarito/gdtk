@@ -761,6 +761,12 @@ class Sender:
                     break
                 gst_rc = self.proc.returncode if self.proc else "?"
                 cap_rc = self.capture.returncode if self.capture else "?"
+                if self.backend == "shm" and cap_rc == SHM_RESIZED:
+                    # Ventana redimensionada: pipeline nuevo ya, sin backoff ni contar
+                    # intento, y avisando el tamaño nuevo al receptor (first).
+                    self._teardown_stream()
+                    first = True
+                    continue
                 log(f"[!] emisor wlr termino (gst rc={gst_rc}, capture rc={cap_rc})")
                 self._teardown_stream()
                 plan = U.sender_restart_plan(self.attempt + 1, first=False)
@@ -1768,6 +1774,7 @@ def build_parser():
 
 SHM_MAGIC = b"GVDSHM1\0"
 SHM_HEADER = 64
+SHM_RESIZED = 3   # rc de shm_capture: cambió el tamaño, rearmar sin contar como fallo
 
 
 def shm_capture(path, fps, max_frames=0):
@@ -1778,7 +1785,9 @@ def shm_capture(path, fps, max_frames=0):
     stride u32 | fourcc[4] | relleno hasta 64 | frame. seq impar = el escritor
     está a mitad de frame (seqlock): se descarta y se reintenta. Sin frame nuevo
     se repite el anterior para sostener la cadencia del encoder. Termina cuando
-    el archivo desaparece (el shell dejó de compartir) o se cierra stdout."""
+    el archivo desaparece (el shell dejó de compartir) o se cierra stdout, y con
+    SHM_RESIZED si cambia el tamaño (la ventana compartida se redimensionó): el
+    emisor rearma el pipeline con el tamaño nuevo."""
     import struct
     deadline = time.monotonic() + 10
     while True:
@@ -1807,7 +1816,10 @@ def shm_capture(path, fps, max_frames=0):
         while True:
             try:
                 with open(path, "rb") as f:
-                    s1 = struct.unpack("<Q", f.read(16)[8:16])[0]
+                    s1, w2, h2, st2 = struct.unpack_from("<QIII", f.read(SHM_HEADER), 8)
+                    if s1 % 2 == 0 and (w2, h2, st2) != (w, h, stride):
+                        log(f"[*] shm: {w}x{h} -> {w2}x{h2}")
+                        return SHM_RESIZED
                     if s1 % 2 == 0 and s1 != last_seq:
                         f.seek(SHM_HEADER)
                         data = f.read(size)

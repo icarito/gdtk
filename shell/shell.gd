@@ -6953,8 +6953,37 @@ var _pantalla_video = Vector2()   # tamaño anunciado por el emisor (ventana com
 var _pantalla_fitted = {}         # id -> video al que ya se ajustó
 
 
+# Lo que el marco agrega al contenido de una ventana (0 con CSD: gvd recv lo es).
+func _chrome_extra(id):
+	if _is_csd(id):
+		return Vector2()
+	var probe = Rect2(0, 0, 1000, 1000)
+	return probe.size - WINDOW_CHROME.content_rect(probe, _chrome_title_h(), _chrome_border(),
+		_chrome_resize_h()).size
+
+
+# Handler peer `gvd_size`: la ventana original cambió de tamaño y el video con ella.
+func _peer_gvd_size(hid, video):
+	if String(hid) != _pantalla_sender or video == _pantalla_video:
+		return true
+	_pantalla_video = video   # el poll reajusta (las ya ajustadas, desde su centro)
+	request_redraw()
+	return true
+
+
+# La persona soltó un resize de la «Pantalla compartida»: el alto sigue la proporción
+# del video para que no queden franjas (el emisor no cambia).
+func _pantalla_snap_aspect(id, box):
+	if _pantalla_video == Vector2() or not _pantalla_window_ids().has(id) or not float_layout.has(id):
+		return
+	var r = GVD_LAUNCH.aspect_snap_rect(float_layout.rect(id), _pantalla_video, box, _chrome_extra(id))
+	float_layout.resize_to(id, r, box)
+	_pantalla_fitted[id] = _pantalla_video
+
+
 # La «Pantalla compartida» toma el tamaño del video (contenido 1:1, sin franjas), también
-# cada vez que gvd recv recrea su ventana. Sólo flotantes visibles y con chrome del shell.
+# cada vez que gvd recv recrea su ventana o el emisor redimensiona (`gvd_size`), en este
+# caso conservando su centro.
 func _pantalla_fit_poll():
 	if _pantalla_video == Vector2():
 		return
@@ -6964,15 +6993,13 @@ func _pantalla_fit_poll():
 		if hybrid.is_tiled(id):
 			set_window_mode(id, WM_HYBRID.FLOATING)
 		var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(get_viewport_rect().size)
+		var center = null
+		if float_layout.has(id) and _pantalla_fitted.has(id):
+			var cur = float_layout.rect(id)
+			center = cur.position + cur.size * 0.5
 		if not float_layout.has(id):
 			float_layout.place_new(id, box)
-		# Con CSD el contenido es el marco entero; si no, se suma el chrome del shell.
-		var extra = Vector2()
-		if not _is_csd(id):
-			var probe = Rect2(0, 0, 1000, 1000)
-			extra = probe.size - WINDOW_CHROME.content_rect(probe, _chrome_title_h(),
-				_chrome_border(), _chrome_resize_h()).size
-		var r = GVD_LAUNCH.receiver_frame_rect(_pantalla_video, box, extra)
+		var r = GVD_LAUNCH.receiver_frame_rect(_pantalla_video, box, _chrome_extra(id), center)
 		if r.size.x > 0.0:
 			float_layout.resize_to(id, r, box)
 			wm_maximized.erase(id)
@@ -7325,7 +7352,7 @@ func _peer_audio_stop(_hid):
 # la original acá o la «Pantalla compartida» allá (avisa con share_stop). Un equipo
 # recibe una sola cosa por vez (un receptor por puerto).
 const WINDOW_CAST = preload("res://window_cast.gd")
-var _casts = {}   # hid -> {node, wid}
+var _casts = {}   # hid -> {node, wid, sent}
 
 
 func _cast_key(hid):
@@ -7376,7 +7403,7 @@ func _group_share_window(hid, wid):
 		cast.queue_free()
 		activity_error = "compartir: " + String(sp.get("error", ""))
 		return
-	_casts[hid] = {"node": cast, "wid": wid}
+	_casts[hid] = {"node": cast, "wid": wid, "sent": cast.size}
 	_queue_gvd_peer_launch(hid, String(target.peer), int(target.port), "gvd_recv",
 		{"port": 0, "from": _local_hostname(), "w": int(cast.size.x), "h": int(cast.size.y)},
 		String(sp.cmd), sp.args, "", _cast_key(hid))
@@ -7413,11 +7440,21 @@ func _group_casting(wid):
 	return false
 
 
-# Ventana cerrada => se deja de compartir (tick barato, desde _gvd_poll).
+# Ventana cerrada => se deja de compartir; ventana redimensionada => se avisa el tamaño
+# nuevo al receptor (gvd ya rearma su video solo). Tick barato, desde _gvd_poll.
 func _casts_poll():
 	for hid in _casts.keys():
-		if not _id_alive(int(_casts[hid].wid)):
+		var c = _casts[hid]
+		if not _id_alive(int(c.wid)):
 			_stop_gvd_screen(hid)
+		elif is_instance_valid(c.node) and c.node.size != c.sent:
+			c.sent = c.node.size
+			var ep = _peer_endpoint_for(hid)
+			if bool(ep.get("ok", false)):
+				_peer_send_async([{"id": hid, "host": String(ep.peer), "port": int(ep.port),
+					"token": _peer_token_get(hid)}], "gvd_size",
+					{"w": int(c.sent.x), "h": int(c.sent.y)})
+			print("compartir: ventana ", c.wid, " ahora ", c.sent)
 
 
 # --- Dockapp "Compartiendo": avisos de lado compartido (G5) --------------------
@@ -8925,6 +8962,7 @@ func _commit_chrome_drag():
 	if String(chrome_drag.kind) == "resize" and drag_overlay != null and tiles.has(id):
 		var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(get_viewport_rect().size)
 		float_layout.resize_to(id, drag_overlay.rect, box)
+		_pantalla_snap_aspect(id, box)
 	# K13f — Snap flotante: si el drop quedó en una franja del borde, la ventana toma
 	# esa mitad o se maximiza arriba. Un único set de geometría al soltar (igual que
 	# el resize diferido), reusando el convenio de maximizar de flotante.

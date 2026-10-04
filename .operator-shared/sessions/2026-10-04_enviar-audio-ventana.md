@@ -28,6 +28,9 @@ Contrato: `specs/SPEC-sugar-group-2026-10.md` § «Enviar audio y ventanas».
   944×500 a 20 fps). Cerrar la «Pantalla compartida» en cupid → cupid termina su `gvd recv` y avisa;
   tengu corta emisor y archivo. Cerrar la ventana original en tengu → corta y cierra el receptor.
 - Receptor en cupid: ventana 944×500 = video, centrada, también tras recrearse.
+- Resize: maximizar htop en tengu → video 1278×688 y receptor 1278×688 en el mismo centro. Super+
+  arrastre derecho en cupid a 978 de ancho → al soltar 978×526 (proporción del video), emisor igual.
+  El RPC `mouse_button` acepta `meta` para estos Super+arrastres.
 - cupid → tengu: «Enviar audio — Encendido» desde el menú del Grupo → salida por omisión = túnel;
   «Apagado» → salida local restaurada y módulos descargados en ambos.
 - Tests: neighborhood_ui, peer_link, peer_control, group_model, audio_send, gvd_launch, frame_menu,
@@ -40,4 +43,5 @@ Contrato: `specs/SPEC-sugar-group-2026-10.md` § «Enviar audio y ventanas».
 - No hay resaltado del equipo destino mientras se arrastra.
 - bastion corre el peer_control viejo (bug de tokens) hasta su próximo login: puede pedir
   re-emparejar con tengu/cupid.
-- Si la ventana compartida cambia de tamaño, el video mantiene el tamaño inicial (se escala dentro).
+- Un resize del emisor después de que el receptor eligió su tamaño vuelve a poner la ventana
+  receptora en 1:1 con el video (desde su centro).

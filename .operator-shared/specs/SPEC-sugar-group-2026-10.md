@@ -106,7 +106,12 @@ Decisiones tomadas con el usuario:
   seqlock, nunca FIFO: SIGPIPE tumbaría el shell) → `gvd send --capture shm` → del otro lado la misma
   «Pantalla compartida» que al extender (`gvd_recv`, que ahora lleva `w`/`h` del video). El receptor
   ajusta esa ventana para que su contenido mida como el video (sin franjas; achica sin deformar si no
-  entra), también cada vez que gvd la recrea. Se deja de compartir SÓLO cerrando una de las dos
+  entra), también cada vez que gvd la recrea.
+  Redimensionar: si cambia la ventana original, el video la sigue (window_cast publica el tamaño
+  nuevo tras 300 ms quieto; gvd rearma el pipeline sin contarlo como fallo) y el receptor reajusta
+  su ventana al nuevo video conservando su centro (peer `gvd_size`). Si la persona redimensiona la
+  «Pantalla compartida», el emisor no cambia: el video se escala y al soltar el alto sigue la
+  proporción del video (respeta el ancho elegido). Se deja de compartir SÓLO cerrando una de las dos
   ventanas: la original (corta y cierra el receptor remoto) o la «Pantalla compartida» del otro lado
   (termina su `gvd recv` y avisa con `share_stop`). Todo cierre pasa por `shell._close_window_id`.
   Una ventana por equipo a la vez (un receptor por puerto).

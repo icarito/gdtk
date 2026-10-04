@@ -505,11 +505,36 @@ static func window_send_argv(gvd_path, peer, shm_path, fps = 20, port = 0):
 # Marco flotante de la «Pantalla compartida» para que su CONTENIDO mida como el video
 # (sin franjas negras): suma el chrome (`extra` = marco - contenido) y, si no entra en
 # `box`, achica sin deformar. Centrado en la caja; Rect2() si no hay datos. Puro.
-static func receiver_frame_rect(video, box, extra = Vector2()):
+# Con `center` (p. ej. el de la ventana actual) se centra ahí en vez de en la caja.
+static func receiver_frame_rect(video, box, extra = Vector2(), center = null):
 	var v = Vector2(video)
 	var room = box.size - Vector2(extra)
 	if v.x < 2 or v.y < 2 or room.x < 2 or room.y < 2:
 		return Rect2()
 	var k = min(1.0, min(room.x / v.x, room.y / v.y))
 	var size = (v * k).floor() + Vector2(extra)
-	return Rect2(box.position + ((box.size - size) * 0.5).floor(), size)
+	var c = Vector2(center) if center != null else box.position + box.size * 0.5
+	return _clamp_rect(Rect2((c - size * 0.5).floor(), size), box)
+
+
+# La persona redimensionó la «Pantalla compartida»: se respeta el ancho que eligió y
+# el alto sigue la proporción del video (sin franjas); si no entra, manda el alto.
+# Conserva la esquina superior izquierda. Puro.
+static func aspect_snap_rect(rect, video, box, extra = Vector2()):
+	var v = Vector2(video)
+	var e = Vector2(extra)
+	if v.x < 2 or v.y < 2:
+		return rect
+	var cw = max(2.0, rect.size.x - e.x)
+	var ch = floor(cw * v.y / v.x)
+	if ch + e.y > box.size.y:
+		ch = box.size.y - e.y
+		cw = floor(ch * v.x / v.y)
+	return _clamp_rect(Rect2(rect.position, Vector2(cw, ch) + e), box)
+
+
+static func _clamp_rect(r, box):
+	var p = r.position
+	p.x = clamp(p.x, box.position.x, max(box.position.x, box.end.x - r.size.x))
+	p.y = clamp(p.y, box.position.y, max(box.position.y, box.end.y - r.size.y))
+	return Rect2(p, r.size)
