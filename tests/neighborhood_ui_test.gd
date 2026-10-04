@@ -356,6 +356,7 @@ func _init():
 	check("submenú: extender pantalla y compartir teclado y mouse", items.size() == 2
 		and items[0].label.begins_with("Extender mi pantalla")
 		and items[1].label.begins_with("Compartir teclado y mouse"))
+	check("drop fuera de la vista Grupo: sin destino", nui.group_drop_target(Vector2(5, 5)).empty())
 
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

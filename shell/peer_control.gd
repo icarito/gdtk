@@ -5,7 +5,7 @@ extends Node
 # por token por-par (TOFU: el primer pedido de un vecino CONFIRMADO provisiona el
 # token y lo devuelve; después hay que presentarlo). Pensado para LAN de confianza.
 #
-# No expone el control remoto completo: sólo ping/gvd_*.
+# No expone el control remoto completo: sólo los métodos de peer_link.METHODS.
 
 const LINK = preload("res://peer_link.gd")
 
@@ -27,13 +27,24 @@ func start(p_shell, p_port):
 		base = OS.get_environment("HOME").plus_file(".config")
 	tokens_path = base.plus_file("gdtk").plus_file("peer-tokens.json")
 	_load_tokens()
-	server = TCP_Server.new()
-	var err = server.listen(port, "0.0.0.0")
+	_listen()
+
+
+# Al reiniciar el shell el proceso anterior puede tener el puerto unos segundos
+# (ERR_ALREADY_IN_USE): se reintenta cada LISTEN_RETRY_MS en vez de quedar sordo.
+const LISTEN_RETRY_MS = 5000
+var _listen_retry_at = 0
+
+
+func _listen():
+	_listen_retry_at = OS.get_ticks_msec() + LISTEN_RETRY_MS
+	var s = TCP_Server.new()
+	var err = s.listen(port, "0.0.0.0")
 	if err != OK:
-		printerr("PeerControl: no pude escuchar en 0.0.0.0:", port, " (", err, ")")
-		server = null
-	else:
-		print("PeerControl: escuchando en 0.0.0.0:", port)
+		printerr("PeerControl: no pude escuchar en 0.0.0.0:", port, " (", err, "); reintento")
+		return
+	server = s
+	print("PeerControl: escuchando en 0.0.0.0:", port)
 
 
 func _exit_tree():
@@ -41,6 +52,7 @@ func _exit_tree():
 
 
 func stop():
+	port = 0   # parado a propósito: _process no reintenta
 	if server != null:
 		server.stop()
 		server = null
@@ -54,25 +66,41 @@ func listening():
 	return server != null and port > 0
 
 
-func _load_tokens():
-	tokens = {}
+# El archivo lo comparten dos escritores: este canal (claves "srv:<hid>", tokens que
+# emite) y el shell (claves "cli:<hid>", tokens que presenta). Cada uno lee y reescribe
+# SÓLO sus claves: pisar el archivo entero borraba los cli: y el equipo quedaba
+# rechazado ("unauthorized") por sus pares.
+func _read_token_file():
 	var f = File.new()
 	if tokens_path == "" or f.open(tokens_path, File.READ) != OK:
-		return
+		return {}
 	var data = JSON.parse(f.get_as_text()).result
 	f.close()
-	if typeof(data) != TYPE_DICTIONARY:
-		return
+	return data if typeof(data) == TYPE_DICTIONARY else {}
+
+
+func _load_tokens():
+	tokens = {}
+	var data = _read_token_file()
 	for k in data.keys():
-		if LINK.valid_hid(String(k)) and String(data[k]) != "":
-			tokens[String(k)] = String(data[k])
+		var key = String(k)
+		if key.begins_with("srv:") and LINK.valid_hid(key.substr(4)) and String(data[k]) != "":
+			tokens[key] = String(data[k])
 
 
 func _save_tokens():
-	var f = File.new()
-	if tokens_path == "" or f.open(tokens_path, File.WRITE) != OK:
+	if tokens_path == "":
 		return
-	f.store_string(JSON.print(tokens))
+	var data = _read_token_file()
+	for k in data.keys():
+		if String(k).begins_with("srv:"):
+			data.erase(k)
+	for k in tokens.keys():
+		data[k] = tokens[k]
+	var f = File.new()
+	if f.open(tokens_path, File.WRITE) != OK:
+		return
+	f.store_string(JSON.print(data))
 	f.close()
 
 
@@ -83,6 +111,8 @@ func _send(conn, line):
 
 func _process(_delta):
 	if server == null:
+		if port > 0 and OS.get_ticks_msec() >= _listen_retry_at:
+			_listen()
 		return
 	while server.is_connection_available():
 		var peer = server.take_connection()
@@ -158,7 +188,7 @@ func _handle(conn, line):
 	var err = ""
 	match String(r.method):
 		"gvd_recv":
-			ok = bool(shell._peer_gvd_open(int(params.get("port", 0)), String(params.get("from", ""))))
+			ok = bool(shell._peer_gvd_open(int(params.get("port", 0)), String(params.get("from", "")), hid))
 			if not ok:
 				err = "no se pudo abrir el receptor"
 		"gvd_stop":
@@ -189,6 +219,27 @@ func _handle(conn, line):
 					err = "no se pudo detener"
 			else:
 				err = "no disponible"
+		"clip_set":
+			# Portapapeles del Grupo: sólo texto; el token ya autenticó al par.
+			var text = params.get("text", "")
+			if typeof(text) != TYPE_STRING or text == "" or text.length() > 65536:
+				err = "parámetros inválidos"
+			elif shell.has_method("_peer_clip_set"):
+				ok = bool(shell._peer_clip_set(text))
+			else:
+				err = "no disponible"
+		"audio_recv":
+			# Enviar audio (Grupo): este equipo acepta un túnel de audio SÓLO desde la IP
+			# que hizo el pedido; responde el puerto.
+			var rport = int(shell._peer_audio_recv(hid, conn.peer.get_connected_host())) \
+				if shell.has_method("_peer_audio_recv") else 0
+			ok = rport > 0
+			if ok:
+				extra["port"] = rport
+			else:
+				err = "no se pudo recibir audio"
+		"audio_stop":
+			ok = shell.has_method("_peer_audio_stop") and bool(shell._peer_audio_stop(hid))
 		_:
 			err = "método no soportado"
 	_send(conn, LINK.encode_response(ok, err, extra))

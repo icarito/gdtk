@@ -69,6 +69,8 @@ const APPLETS = [
 	{"id": "termico", "name": "Temperatura · Governor", "short": "TEMP", "span": 1},
 	{"id": "reloj", "name": "Reloj", "short": "REL"},
 	{"id": "teclado", "name": "Teclado", "short": "TEC"},
+	{"id": "portapapeles", "name": "Portapapeles", "short": "CLIP"},
+	{"id": "audio", "name": "Audio", "short": "AUD"},
 ]
 const APPLET_DEFAULT = ["recursos", "termico", "reloj", "teclado"]
 # Look WindowMaker de los menús verticales (popups ImGui). Sólo estilo.
@@ -112,6 +114,9 @@ var pin_saved_bottom = false
 # Deslizamiento por barra: último estado dibujado (mostrada u oculta) y cuándo
 # cambió. Antes eran un solo `shown`/`slide_since` compartido por las dos barras.
 var shown_top = false
+# Rects en pantalla de los bloques fijos Vecindario/Grupo/Hogar del último dibujo de la
+# barra superior: la rueda sobre ellos recorre la cadena vertical (shell._wheel_vchain).
+var place_rects = []
 var shown_bottom = false
 var slide_since_top = 0
 var slide_since_bottom = 0
@@ -132,6 +137,12 @@ var show_until = 0         # ms hasta el que el Frame no se auto-oculta (Alt+Tab
 var sysmon = Host.sc("res://sysmon.gd").new()
 var keyboard = Host.sc("res://applet_keyboard.gd").new()
 var bluetooth = Host.sc("res://applet_bluetooth.gd").new()
+var clipboard = Host.sc("res://applet_clipboard.gd").new()
+# Applets con módulo propio (contrato en .operator-shared/guides/dockapp.md): el Frame
+# les pide state/value/detail, los refresca mientras están a la vista y los para al
+# salir. Sumar una dockapp = un archivo + su entrada en APPLETS + una línea acá.
+var audio = Host.sc("res://applet_audio.gd").new()
+var applet_mods = {"teclado": keyboard, "portapapeles": clipboard, "audio": audio}
 var items_layout = []
 var drawn = false
 # Applets del borde inferior: orden visible persistido (no es items_layout, que sigue
@@ -220,11 +231,15 @@ var shared_menu_block = null
 var shared_press = ""
 func _ready():
 	_load_applets()
+	# Host (autoload), no shell.compositor: el onready del padre aún no corrió.
+	if Host.compositor != null:
+		clipboard.wayland_display = Host.compositor.start()
 
 
 # Los applets consultan en workers; al salir del árbol no deben quedar hilos vivos.
 func _exit_tree():
-	keyboard.stop()
+	for m in applet_mods.values():
+		m.stop()
 	bluetooth.stop()
 
 
@@ -798,8 +813,8 @@ func _applet_set_visible(id, v):
 			if not _place_new_token(_tok_applet(id), _applet_span(id), "dock"):
 				return
 			applets_visible.append(id)
-			if id == "teclado":
-				keyboard.refresh(true)
+			if applet_mods.has(id):
+				applet_mods[id].refresh(true)
 			applets_dirty = true
 			_save_applets()
 			shell.request_redraw()
@@ -1461,8 +1476,8 @@ func _applet_state(id):
 			return "activo" if sysmon.has_temp or sysmon.has_governor else "sin_dato"
 		"reloj":
 			return "activo"
-		"teclado":
-			return keyboard.state
+	if applet_mods.has(id):
+		return applet_mods[id].state
 	return "sin_dato"
 
 
@@ -1480,8 +1495,8 @@ func _applet_value(id):
 		"reloj":
 			var t = OS.get_time()
 			return "%02d:%02d" % [t.hour, t.minute]
-		"teclado":
-			return keyboard.value
+	if applet_mods.has(id):
+		return applet_mods[id].value
 	return ""
 
 
@@ -1648,15 +1663,10 @@ func _stop_shared_side(type, key):
 		if shell.has_method("_stop_gvd_screen"):
 			shell._stop_gvd_screen(k)
 	elif t == "input":
+		# Misma salida que el interruptor del Grupo (también avisa al otro equipo).
 		shell.host_deskflow[k] = false
-		var dkey = "deskflow:" + k
-		if shell.has_method("_has_tracked") and shell._has_tracked(dkey) \
-				and shell.has_method("_run_deskflow_server"):
-			# Parada existente del servidor por host (también avisa al otro equipo).
-			shell._run_deskflow_server(k, {})
-		elif shell.has_method("_service_running") and shell._service_running("Deskflow") \
-				and shell.has_method("_toggle_service_by_name"):
-			shell._toggle_service_by_name("Deskflow")
+		if shell.has_method("_group_input_set"):
+			shell._group_input_set(k, false)
 	shell.request_redraw()
 
 
@@ -1895,7 +1905,7 @@ func _tile(ui, pos, side, id, face = NX_FACE, h = -1.0):
 	if hover and not held:
 		face = face.linear_interpolate(Color(1.0, 1.0, 1.0, face.a), 0.08)
 	_bevel(ui, r, face, held, hover)
-	return {"clicked": clicked, "rect": r, "face": face}
+	return {"clicked": clicked, "rect": r, "face": face, "hover": hover}
 
 
 # Mini-tesela de control (minimizar/cerrar) dentro del bloque de ventana. Se dibuja
@@ -2133,7 +2143,7 @@ func switch_to(item, keep_frame := false):
 func close(item):
 	if item.id >= 0:
 		# Cierre educado (xdg_toplevel.close): la app puede preguntar antes de irse.
-		shell.compositor.close(item.id)
+		shell._close_window_id(item.id)
 	else:
 		shell._close_script_activity(item.name)
 
@@ -2171,8 +2181,9 @@ func _process(_delta):
 	var home = shell.current_activity == null
 	if applets_live(home, visible, pin_top_bar, pin_bottom_bar):
 		var changed = sysmon.tick()
-		if applets_visible.has("teclado"):
-			changed = keyboard.refresh() or changed
+		for id in applet_mods:
+			if applets_visible.has(id):
+				changed = applet_mods[id].refresh() or changed
 		if changed:
 			shell.request_redraw()
 
@@ -2234,6 +2245,12 @@ func _input(event):
 		# llamaría a _super_used y limpiaría super_press, cortando el paneo).
 		if event.button_index == BUTTON_WHEEL_UP or event.button_index == BUTTON_WHEEL_DOWN:
 			if not event.pressed:
+				return
+			# Sobre Vecindario/Grupo/Hogar o el ícono central: un paso de la misma cadena
+			# vertical que el gesto de 3 dedos (rueda arriba = dedos arriba).
+			if super_press == null and (_over_place(mouse_pos) or shell._over_center_icon(mouse_pos)):
+				shell._wheel_vchain(1 if event.button_index == BUTTON_WHEEL_UP else -1)
+				get_tree().set_input_as_handled()
 				return
 			# En exposé la rueda desplaza la tira (no cambia la selección).
 			if shell.expose:
@@ -2772,6 +2789,10 @@ func _finish_applet_drag():
 	var zone = _zone_at(mouse_pos)
 	applet_drag = null
 	applet_press = null
+	# Audio soltado en la vista Grupo: sale por ese equipo (o vuelve, sobre el centro).
+	if id == "audio" and shell._group_drop_audio(mouse_pos):
+		shell.request_redraw()
+		return
 	if zone == "":
 		_explode_block("a", id)
 		return
@@ -2839,6 +2860,10 @@ func _strip_arrays():
 # (nuevo escritorio en los bordes/extremos, acople o reancla sobre otra tesela); fuera
 # conserva el comportamiento clásico: sobre otra ventana tilea, si no desacopla.
 func _finish_drag():
+	# Vista Grupo: soltar la ventana sobre un equipo la comparte por gvd.
+	if dragging != null and shell._group_drop_window(dragging.id, mouse_pos):
+		shell.request_redraw()
+		return
 	if dragging != null and _strip_zone(mouse_pos) != "":
 		var sa = _strip_arrays()
 		var t = strip_drop_target(sa.rects, sa.units, mouse_pos.x)
@@ -2981,6 +3006,14 @@ func _draw_applets(ui, vp, off, mouse, grid):
 	MENU_STYLE.begin(ui)
 	if ui.begin_popup("##applet_gov"):
 		MENU_STYLE.chrome(ui, "CPU · Governor")
+		# Estado honesto: la selección se marca recién cuando sysfs la refleja.
+		if sysmon.governor_state == "applying":
+			ui.text_disabled("aplicando…")
+		elif sysmon.governor_state == "not_provisioned":
+			ui.text_disabled("permiso no provisionado")
+			ui.text_disabled("sudo ~/gdtk/session/gdtk-governor-provision install")
+		elif sysmon.governor_state == "error":
+			ui.text_disabled("no se pudo aplicar")
 		var cur = sysmon.governor
 		var def = sysmon.governor_default()
 		if def != "":
@@ -3065,12 +3098,16 @@ func _draw_applet(ui, id, pos, scr, w, side, is_sel, mouse, is_ghost = false):
 		_draw_thermal(ui, gp_scr, gp_loc, gp_w, gp_h)
 	elif id == "reloj":
 		_draw_clock(ui, gp_scr, gp_loc, gp_w, gp_h, v)
+	elif applet_mods.has(id) and applet_mods[id].has_method("draw"):
+		applet_mods[id].draw(self, ui, gp_scr, gp_loc, gp_w, gp_h)
 	else:
 		ui.set_cursor_pos(gp_loc + Vector2(4.0, 3.0))
 		ui.text_colored(NX_TEXT_DIM, a.short)
 		var vw = _text_w(ui, v)
 		ui.set_cursor_pos(gp_loc + Vector2(max(3.0, (gp_w - vw) * 0.5), gp_h * 0.45))
 		ui.text_colored(NX_TEXT, v)
+	if b.hover and not is_ghost and applet_mods.has(id) and applet_mods[id].detail != "":
+		ui.set_tooltip(applet_mods[id].detail)
 	var pct = _applet_pct(id)
 	if pct >= 0.0:
 		var bar_w = (w - 8.0) * clamp(pct, 0.0, 1.0)
@@ -3255,6 +3292,15 @@ func _cur():
 	if shell != null and "accent" in shell:
 		return Color(shell.accent.r, shell.accent.g, shell.accent.b, 1.0)
 	return NX_CUR
+
+
+func _over_place(p):
+	if not shown_top:
+		return false
+	for r in place_rects:
+		if r.has_point(p):
+			return true
+	return false
 
 
 func _draw_home_tile(ui, pos, side):
@@ -3810,6 +3856,7 @@ func draw(ui):
 	_win_pick = null
 	_win_close = null
 	_win_min = null
+	place_rects = []
 	if top_drawn:
 		ui.push_style_var_vec2(ui.STYLE_VAR_WINDOW_PADDING, Vector2.ZERO)
 		ui.set_next_window_pos(Vector2(0.0, off_top), true)
@@ -3823,6 +3870,8 @@ func draw(ui):
 			var y = (bh - side) * 0.5
 			# Celdas fijas: 0 esquina (vacía), 1 Vecindario, 2 Grupo, 3 Hogar. Los
 			# bloques de contenido arrancan en la celda 4 (`bar_base_origin`).
+			for k in [1.0, 2.0, 3.0]:
+				place_rects.append(Rect2(Vector2(margin + k * pitch, off_top + y), Vector2(side, side)))
 			if _draw_neighborhood_tile(ui, Vector2(margin + pitch, y), side):
 				set_visible(false)
 				shell._go_neighborhood()

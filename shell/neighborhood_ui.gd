@@ -332,7 +332,8 @@ func _peer_member(node):
 	var hid = String(host.get("hid", id))
 	var entry = directions.get(id, directions.get(hid, null))
 	var d = compass_direction(id)
-	var paired = typeof(entry) == TYPE_DICTIONARY and String(entry.get("confirm", "")) == "confirmed"
+	var paired = mode == "group" or (typeof(entry) == TYPE_DICTIONARY \
+		and String(entry.get("confirm", "")) == "confirmed")
 	if not paired:
 		var keys = _group_token_keys()
 		paired = keys.has("cli:" + hid) or keys.has("srv:" + hid) \
@@ -407,19 +408,43 @@ func _group_toggle_items(member, include_remove):
 	var host = member.get("host", {})
 	if typeof(host) != TYPE_DICTIONARY or host.empty():
 		host = {"id": id, "label": String(member.get("name", ""))}
-	var on = host_session_state(id) == "active" or host_session_state(id) == "starting"
 	var extend = _group_action(host, "share_my_screen")
 	var keyboard = _group_action(host, "serve_input_here")
 	var rows = []
 	rows.append(_group_toggle_row("group_extend", "Extender mi pantalla", id, extend,
-		online, direction, on))
+		online, direction, _shell_bool("_screen_session_active", id)))
 	rows.append(_group_toggle_row("group_keyboard", "Compartir teclado y mouse", id, keyboard,
-		online, direction, on))
+		online, direction, _shell_bool("_group_input_on", id)))
 	if include_remove:
 		rows.append({"kind": "separator"})
-		rows.append({"kind": "group_remove", "id": "group_remove", "label": "Quitar del grupo",
-			"enabled": true, "reason": "", "member_id": id})
+		if _group_member_by_id(id) != null:
+			rows.append({"kind": "group_remove", "id": "group_remove", "label": "Quitar del grupo",
+				"enabled": true, "reason": "", "member_id": id})
+		else:
+			rows.append({"kind": "group_add", "id": "group_add", "label": "Añadir a mi grupo",
+				"enabled": true, "reason": "", "member_id": id})
 	return rows
+
+
+# Destino de un bloque del Frame (ventana, Audio) soltado sobre el Grupo, en coords
+# globales: {kind: "self"} sobre el ícono central, {kind: "member", id, online, name}
+# sobre un equipo del Grupo, {} en otro lado o fuera de la vista Grupo.
+func group_drop_target(global_pos):
+	if mode != "group" or not is_visible_in_tree():
+		return {}
+	var pos = Vector2(global_pos) - rect_global_position
+	if (pos - center).length() < float(_group_layout.get("center_size", GROUP.CENTER_SIZE)) * 0.5:
+		return {"kind": "self"}
+	var node = MAP.hit_node(pos, host_nodes)
+	var gm = _peer_member(node) if node != null else null
+	if gm == null:
+		return {}
+	return {"kind": "member", "id": String(gm.get("id", "")), "online": bool(gm.get("online", false)),
+		"name": String(gm.get("name", ""))}
+
+
+func _shell_bool(method, arg):
+	return shell != null and shell.has_method(method) and bool(shell.call(method, String(arg)))
 
 
 func _group_toggle_row(kind, label, member_id, action, online, direction, on):
@@ -460,7 +485,13 @@ func _activate_group_row(item):
 	if kind == "group_remove":
 		_group_remove(id)
 		return
+	if kind == "group_add":
+		_group_add(id)
+		return
 	var action = item.get("action", null)
+	if kind == "group_keyboard" and not bool(item.get("is_on", false)):
+		_group_keyboard(id, true)
+		return
 	if not bool(item.get("is_on", false)):
 		if action != null:
 			_run_host_action(id, action)
@@ -468,7 +499,7 @@ func _activate_group_row(item):
 	if kind == "group_extend":
 		_stop_group_extend(id)
 	elif kind == "group_keyboard":
-		_stop_group_keyboard(id, action)
+		_group_keyboard(id, false)
 
 
 # Soltar en cualquier ángulo SÓLO acomoda: el lado y la posición sobre el borde se
@@ -518,11 +549,10 @@ func _stop_group_extend(host_id):
 		shell._stop_gvd_screen(String(host_id))
 
 
-func _stop_group_keyboard(host_id, action):
-	if shell == null or not shell.has_method("_run_deskflow_server"):
-		return
-	var plan = action.get("plan", null) if typeof(action) == TYPE_DICTIONARY else null
-	shell._run_deskflow_server(String(host_id), plan if typeof(plan) == TYPE_DICTIONARY else {})
+func _group_keyboard(host_id, on):
+	if shell != null and shell.has_method("_group_input_set"):
+		shell._group_input_set(String(host_id), bool(on))
+	call_deferred("refresh", true)
 
 
 # G3: pasada final anti-solape. Reúne hosts, Wi-Fi y Bluetooth como cápsulas
@@ -623,8 +653,9 @@ func _on_mouse_button(event):
 			return
 		var node = MAP.hit_node(pos, host_nodes)
 		if node != null:
-			if mode == "group" and node.get("member", null) != null:
-				_open_group_menu(node.member, pos, true)
+			var gm = _peer_member(node) if mode == "group" else null
+			if gm != null:
+				_open_group_menu(gm, pos, true)
 			else:
 				_open_menu(node.host, pos)
 			accept_event()
@@ -687,7 +718,7 @@ func _on_mouse_button(event):
 				# Clic sin arrastre sobre un par: submenú de pantalla / teclado y mouse.
 				var member = _peer_member(node)
 				if member != null:
-					_open_group_menu(member, pos, false)
+					_open_group_menu(member, pos, true)
 		_drag_id = ""
 		_dragging = false
 		update()
@@ -719,8 +750,9 @@ func _on_key(event):
 			and (event.scancode == KEY_ENTER or event.scancode == KEY_KP_ENTER or event.scancode == KEY_SPACE):
 		var node = _node_by_id(selected_host)
 		if node != null:
-			if mode == "group" and node.get("member", null) != null:
-				_open_group_menu(node.member, Vector2(node.center) + Vector2(float(node.size) * 0.5, 0.0), true)
+			var km = _peer_member(node) if mode == "group" else null
+			if km != null:
+				_open_group_menu(km, Vector2(node.center) + Vector2(float(node.size) * 0.5, 0.0), true)
 			else:
 				_open_menu(node.host, Vector2(node.center) + Vector2(float(node.size) * 0.5, 0.0))
 			accept_event()
@@ -796,7 +828,11 @@ func _open_menu(host, at):
 	_menu_is_group = false
 	_menu_group_member = null
 	_menu_title = ""
-	_menu_items = MAP.neighbor_menu(host, _host_actions(host), compass_direction(selected_host),
+	var acts = []
+	for a in _host_actions(host):
+		if not ["use_remote_input", "serve_input_here"].has(String(a.get("id", ""))):
+			acts.append(a)   # teclado y mouse: sólo desde el Grupo
+	_menu_items = MAP.neighbor_menu(host, acts, compass_direction(selected_host),
 		MAP.debug_enabled(OS.get_environment("GDTK_DEBUG")))
 	_menu_open_pos = Vector2(at)
 	_menu_hover = -1

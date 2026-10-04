@@ -30,7 +30,7 @@ class StubShell:
 	var stops = []
 	func _peer_is_confirmed(hid):
 		return String(hid) == "aaaa" or String(hid) == "bbbb"
-	func _peer_gvd_open(port, from):
+	func _peer_gvd_open(port, from, _hid = ""):
 		opened.append([int(port), String(from)])
 		return true
 	func _peer_gvd_stop():
@@ -145,5 +145,25 @@ func _init():
 
 	if d.file_exists(tokens_path):
 		d.remove(tokens_path)
+	# Tokens: el canal conserva sus srv: entre reinicios y no borra los cli: del shell.
+	var tp = OS.get_user_data_dir().plus_file("peer-tokens-test.json")
+	var tf = File.new()
+	tf.open(tp, File.WRITE)
+	tf.store_string(JSON.print({"srv:h1": "S1", "cli:h2": "C2", "srv:bad hid": "X"}))
+	tf.close()
+	var tpc = load("res://peer_control.gd").new()
+	tpc.tokens_path = tp
+	tpc._load_tokens()
+	check("tokens: carga srv: válidos", tpc.tokens.get("srv:h1", "") == "S1" and not tpc.tokens.has("srv:bad hid"))
+	tpc.tokens["srv:h3"] = "S3"
+	tpc._save_tokens()
+	tf.open(tp, File.READ)
+	var saved = JSON.parse(tf.get_as_text()).result
+	tf.close()
+	check("tokens: guardar conserva cli: del shell", saved.get("cli:h2", "") == "C2"
+		and saved.get("srv:h1", "") == "S1" and saved.get("srv:h3", "") == "S3")
+	Directory.new().remove(tp)
+	tpc.free()
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

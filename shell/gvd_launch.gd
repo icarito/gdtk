@@ -30,6 +30,20 @@ static func valid_position(p):
 	return POSITIONS.has(String(p).strip_edges())
 
 
+# Id de salida interna del compositor embebido (`primary`, `remote:<hid>`): seguro
+# como elemento de argv, sin espacios ni metacaracteres de shell. Puro.
+static func valid_output_id(id):
+	var v = String(id).strip_edges()
+	if v == "" or v.length() > 64:
+		return false
+	var safe = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-:"
+	for i in range(v.length()):
+		if safe.find(v[i]) < 0:
+			return false
+	var alnum = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	return alnum.find(v.substr(0, 1)) >= 0
+
+
 # Dirección del compás -> `--position` de gvd. `invert` usa la perspectiva del
 # peer (cuando el emisor remoto coloca su monitor virtual hacia este equipo).
 static func position_for(direction, invert = false):
@@ -40,28 +54,50 @@ static func position_for(direction, invert = false):
 
 
 # Backend de emisión local: "mutter" si el escritorio es GNOME Wayland (ScreenCast
-# por PipeWire), "wlr" si es un compositor wlroots (gdtk, sway, river, hyprland,
-# wayfire, niri, labwc...) donde gvd captura con wlr-screencopy. "" si no puede
-# emitir (X11, sin sesión gráfica). Puro: sólo mira variables de entorno.
-const WLR_DESKTOPS = ["gdtk", "sway", "river", "hyprland", "wayfire", "niri",
+# por PipeWire), "wlr" si es un compositor wlroots CONVENCIONAL (sway, river,
+# hyprland, wayfire, niri, labwc...) donde gvd captura con wlr-screencopy, y
+# "gdtk" sólo cuando el broker de salidas embebidas anuncia capacidad. "" si no
+# puede emitir (X11, sin sesión gráfica, gdtk sin broker).
+#
+# gdtk NO es sway: anida su propio `WaylandCompositor` y las ventanas del usuario
+# viven ahí, no en el sway anfitrión. Crear un output `HEADLESS-*` en sway amplía
+# el escritorio EXTERIOR y sólo captura un workspace vacío (SPEC-embedded-multi-
+# output §1/§13). Por eso, mientras `embedded_ready` sea falso, gdtk no es emisor
+# válido —aunque haya `SWAYSOCK`— y jamás devuelve "wlr". Puro: no lee entorno ni
+# I/O; la capacidad embedded entra como argumento explícito.
+const EMBEDDED_BACKEND = "gdtk"
+const WLR_DESKTOPS = ["sway", "river", "hyprland", "wayfire", "niri",
 	"labwc", "phoc", "miracle", "waybox"]
 
-static func local_emit_backend(desktop, session_type = "wayland"):
+static func local_emit_backend(desktop, session_type = "wayland", embedded_ready = false):
 	var d = String(desktop).strip_edges().to_lower()
 	var s = String(session_type).strip_edges().to_lower()
 	if s != "" and s != "wayland":
 		return ""
 	if d.find("gnome") >= 0:
 		return "mutter"
+	if d.find(EMBEDDED_BACKEND) >= 0:
+		return EMBEDDED_BACKEND if bool(embedded_ready) else ""
 	for name in WLR_DESKTOPS:
 		if d.find(name) >= 0:
 			return "wlr"
 	return ""
 
 
-# ¿Este equipo puede emitir pantalla? Con Mutter (GNOME) o con wlroots (gdtk/sway).
-static func local_can_emit(desktop, session_type = "wayland"):
-	return local_emit_backend(desktop, session_type) != ""
+# ¿Este equipo puede emitir pantalla? GNOME (Mutter), wlroots convencional (sway)
+# o gdtk con capacidad embedded explícita. `embedded_ready` es la capacidad ya
+# resuelta por el caller (p. ej. `caps --json`); este módulo no consulta nada.
+static func local_can_emit(desktop, session_type = "wayland", embedded_ready = false):
+	return local_emit_backend(desktop, session_type, embedded_ready) != ""
+
+
+# ¿Corresponde crear un monitor headless EXTERIOR en sway (`--virtual`)? Sólo un
+# wlroots convencional (sway) con su socket. `gdtk + SWAYSOCK` nunca habilita el
+# `--virtual` exterior: su extensión real debe vivir en el compositor embebido.
+static func local_outer_virtual_allowed(desktop, session_type, sway_socket = false):
+	if not bool(sway_socket):
+		return false
+	return local_emit_backend(desktop, session_type) == "wlr"
 
 
 # Ruta de gvd dentro de un plan puro de neighborhood_actions: `python3 <ruta.py>`
@@ -102,10 +138,19 @@ static func target_host_of(plan):
 
 
 # Plan del emisor LOCAL ("Extender mi escritorio a él"): `gvd send --host <peer>`
-# con `--position` si el mapa la conoce. Delega en neighborhood_actions. Con
-# `wlr_virtual` (sesión wlroots con sway: gdtk/sway) se agrega `--virtual` para
-# que gvd cree un monitor headless y el escritorio se EXTIENDA, no se espeje.
-static func local_send_argv(gvd_path, peer, port = 0, position = "", wlr_virtual = false):
+# con `--position` si el mapa la conoce. Delega en neighborhood_actions.
+#
+# Dos modos de extensión, mutuamente excluyentes:
+#   - `wlr_virtual`: wlroots convencional con sway; agrega `--virtual` para que gvd
+#     cree un monitor headless en el sway EXTERIOR y el escritorio se extienda.
+#   - `capture_backend` + `output_id`: extensión real en el compositor embebido de
+#     gdtk; agrega `--capture gdtk --output <id>` SÓLO con id validado. Este modo
+#     nunca agrega `--virtual`.
+#
+# Compat: los parámetros 5/6 son opcionales y con default vacío, así las llamadas
+# existentes de 4/5 argumentos no cambian de comportamiento ni de argv.
+static func local_send_argv(gvd_path, peer, port = 0, position = "", wlr_virtual = false,
+		capture_backend = "", output_id = ""):
 	var pos = String(position).strip_edges()
 	if pos != "" and not valid_position(pos):
 		return _bad("posición inválida: " + pos)
@@ -113,8 +158,18 @@ static func local_send_argv(gvd_path, peer, port = 0, position = "", wlr_virtual
 	if pos != "":
 		opts["position"] = pos
 	var plan = ACTIONS.gvd_send_plan(gvd_path, peer, port, opts)
-	if bool(wlr_virtual) and bool(plan.get("ok", false)) \
-			and typeof(plan.get("args", [])) == TYPE_ARRAY:
+	if not bool(plan.get("ok", false)) \
+			or typeof(plan.get("args", [])) != TYPE_ARRAY:
+		return plan
+	var cap = String(capture_backend).strip_edges().to_lower()
+	if cap != "":
+		if cap != EMBEDDED_BACKEND:
+			return _bad("backend de captura inválido: " + cap)
+		var oid = String(output_id).strip_edges()
+		if not valid_output_id(oid):
+			return _bad("output id inválido: " + oid)
+		plan["args"].append_array(["--capture", cap, "--output", oid])
+	elif bool(wlr_virtual):
 		plan["args"].append("--virtual")
 	return plan
 
@@ -308,11 +363,22 @@ static func selftest():
 	ok = ok and position_for("east", true) == "left"
 	ok = ok and position_for("none") == "" and position_for("up") == ""
 
-	# Emisor local: GNOME (Mutter) o cualquier compositor wlroots (gdtk/sway...).
+	# Emisor local: GNOME (Mutter) o un compositor wlroots CONVENCIONAL (sway...).
 	ok = ok and local_can_emit("GNOME") and local_can_emit("ubuntu:GNOME", "wayland")
 	ok = ok and local_emit_backend("GNOME") == "mutter"
-	ok = ok and local_can_emit("gdtk") and local_emit_backend("gdtk") == "wlr"
 	ok = ok and local_can_emit("sway") and local_emit_backend("sway") == "wlr"
+	ok = ok and local_can_emit("river") and local_emit_backend("river") == "wlr"
+	# gdtk anida su compositor: sin broker embedded no emite y NUNCA es sway/wlr,
+	# tenga o no SWAYSOCK (que la función pura ni mira).
+	ok = ok and not local_can_emit("gdtk") and local_emit_backend("gdtk") == ""
+	ok = ok and local_emit_backend("gdtk") != "wlr"
+	ok = ok and not local_outer_virtual_allowed("gdtk", "wayland", true)
+	ok = ok and local_outer_virtual_allowed("sway", "wayland", true)
+	ok = ok and not local_outer_virtual_allowed("sway", "wayland", false)
+	# Con capacidad embedded explícita, gdtk devuelve un backend estable "gdtk".
+	ok = ok and local_can_emit("gdtk", "wayland", true)
+	ok = ok and local_emit_backend("gdtk", "wayland", true) == "gdtk"
+	ok = ok and local_emit_backend("gdtk", "x11", true) == ""
 	ok = ok and not local_can_emit("GNOME", "x11")
 	ok = ok and not local_can_emit("XFCE")
 	ok = ok and not local_can_emit("")
@@ -349,6 +415,22 @@ static func selftest():
 	var spv = local_send_argv("/home/u/Proyectos/gvd/gvd.py", "tengu.local", 5600, "right", true)
 	ok = ok and spv.args.find("--virtual") >= 0 and spv.args.find("--position") >= 0
 	ok = ok and sp.args.find("--virtual") < 0
+	# Captura embebida: `--capture gdtk --output <id>` sólo con id validado y sin
+	# --virtual. El id inválido y el backend desconocido fallan cerrados.
+	var spc = local_send_argv("/home/u/Proyectos/gvd/gvd.py", "tengu.local", 5600, "right",
+		false, "gdtk", "remote:ab12")
+	ok = ok and spc.ok and spc.args.has("--capture") and spc.args.has("gdtk")
+	ok = ok and spc.args.has("--output") and spc.args.has("remote:ab12")
+	ok = ok and spc.args.find("--virtual") < 0 and spc.args.find("--position") >= 0
+	ok = ok and not local_send_argv("/home/u/Proyectos/gvd/gvd.py", "tengu.local", 0, "",
+		false, "gdtk", "bad id; rm -rf").ok
+	ok = ok and not local_send_argv("/home/u/Proyectos/gvd/gvd.py", "tengu.local", 0, "",
+		false, "wlr", "remote:ab12").ok
+	# Un capture_backend presente con wlr_virtual=true no produce --virtual.
+	var spcv = local_send_argv("/home/u/Proyectos/gvd/gvd.py", "tengu.local", 0, "",
+		true, "gdtk", "primary")
+	ok = ok and spcv.ok and spcv.args.find("--virtual") < 0
+	ok = ok and sp.args.find("--capture") < 0
 
 	# Receptor remoto por ssh: sin shell-injection y con la variante de cursor.
 	var rr = remote_recv_argv("tengu.local", false)
@@ -404,3 +486,17 @@ static func selftest():
 
 func run_selftest():
 	return selftest()
+
+
+# Plan del emisor de UNA ventana (Grupo: soltar su bloque sobre un equipo): gvd lee
+# los frames del archivo que escribe window_cast.gd (`--capture shm`). Sólo rutas
+# absolutas sin `..` (el archivo vive en XDG_RUNTIME_DIR).
+static func window_send_argv(gvd_path, peer, shm_path, fps = 20, port = 0):
+	var p = String(shm_path).strip_edges()
+	if not p.begins_with("/") or p.find("..") >= 0:
+		return _bad("archivo de frames inválido: " + p)
+	var plan = ACTIONS.gvd_send_plan(gvd_path, peer, port, {})
+	if bool(plan.get("ok", false)) and typeof(plan.get("args", [])) == TYPE_ARRAY:
+		plan["args"].append_array(["--capture", "shm", "--shm", p,
+			"--fps", str(int(clamp(int(fps), 1, 60)))])
+	return plan

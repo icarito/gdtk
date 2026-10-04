@@ -4,10 +4,6 @@ var ACTIVITIES = [
 	{"name": "Terminal", "wayland": ["alacritty"]},
 	{"name": "Gears", "wayland": ["es2gears_wayland"]},
 	{"name": "GTK", "wayland": ["gtk4-widget-factory"]},
-	# Servicio: el botón prende/apaga un proceso en segundo plano (no abre vista).
-	# Deskflow: en X11 inyecta por XTest; en Wayland (cage, sway) pide el portal RemoteDesktop
-	# y le llega un fd del EIS del shell (RemoteInput): se le da permiso sin preguntar.
-	{"name": "Deskflow", "service": "deskflow-core client --new-instance -s ~/gdtk/deskflow-client.conf"},
 	# Pantalla: receptor de gvd (monitor virtual de otro host, H.264/UDP :5600). Se abre como
 	# ventana Wayland; el emisor se arranca en el otro host (gvd.py send --host <este host>).
 	# La ruta se resuelve como neighborhood_actions.gvd_path_candidates: vendoreado
@@ -19,6 +15,16 @@ var ACTIVITIES = [
 	# 'Salir' ya no es una actividad del anillo: es una acción de sesión del ícono central
 	# del Hogar (ver _draw_home / popup ##home_session).
 ]
+
+# Servicios en segundo plano sin ícono en el anillo. Deskflow ("Teclado y mouse") se
+# enciende SÓLO desde el interruptor de la vista Grupo (_group_input_set): en Wayland
+# pide el portal RemoteDesktop/InputCapture y le llega un fd del EIS del shell.
+const SERVICES = [
+	{"name": "Deskflow", "service": ""},
+]
+
+# ImGuiWindowFlags_NoMouseInputs (1 << 9): el binding no lo exporta como constante.
+const IMGUI_WINDOW_NO_MOUSE_INPUTS = 512
 
 const TYPE_DELAY = 60
 const SHOT_DELAY = 90
@@ -43,6 +49,7 @@ const GVD_SESSION = preload("res://gvd_session.gd")
 # ssh, `--position` del mapa, suspensión del vínculo Deskflow).
 const GVD_LAUNCH = preload("res://gvd_launch.gd")
 const PEER_CALL = preload("res://peer_call.gd")
+const AUDIO_SEND = preload("res://audio_send.gd")
 const MENU_STYLE = preload("res://menu_style.gd")
 const HOST_DISPATCH = preload("res://host_dispatch.gd")
 # Modelo puro del Grupo (G4a): el shell sólo lo usa para sumar/quitar miembros
@@ -920,20 +927,21 @@ func _update_csd_hover(pos):
 		for id in _hit_order_ids():
 			if id == fullscreen_id or minimized.has(id) or not tiles.has(id):
 				continue
-			# Una maximizada no muestra asa: la ventana llena el hueco, no hay dónde moverla.
-			if wm_maximized.has(id) or maximize_state.has(id):
-				continue
 			var fr = window_rects.get(id, null)
 			if fr == null:
 				continue
-			if WINDOW_CHROME.move_grip_hover(pos, fr, scale, gin):
+			# Una maximizada no muestra asa; el cliente dibuja su barra y la ventana
+			# llena el hueco. Pero un cliente CSD que no arrastra su propia barra
+			# (Electron/VS Code) quedaría sin forma de restaurar salvo Super, así que
+			# en maximizada el asa se muestra DENTRO del borde superior.
+			var maximized = wm_maximized.has(id) or maximize_state.has(id)
+			if WINDOW_CHROME.move_grip_hover(pos, fr, scale, gin, maximized):
 				h = id if _is_csd(id) else -1
 				break
 	if h != csd_hover_id:
 		csd_hover_id = h
 		request_redraw()
 	_update_csd_grip(h)
-
 
 # Estado del asa de mover CSD: al apuntar una ventana se desliza desde detrás de su
 # borde superior; al salir se repliega. Un solo asa visible a la vez (la de más arriba).
@@ -1010,11 +1018,14 @@ func _chrome_pick(pos):
 		if fr == null:
 			continue
 		# CSD: el cliente dibuja su barra; su rect es contenido salvo el pill de mover
-		# y la franja inferior de redimensión del shell (no si está maximizada).
+		# y la franja inferior de redimensión del shell. En una maximizada el cliente
+		# no puede arrastrar su propia barra (p. ej. Electron no pide xdg move y la
+		# ventana queda sin forma de restaurar salvo Super): el shell deja el asa
+		# DENTRO del borde superior para poder tirar de ella y desmaximizar.
 		if _is_csd(id):
-			var cpart = ""
-			if not (wm_maximized.has(id) or maximize_state.has(id)):
-				cpart = WINDOW_CHROME.csd_hit(pos, fr, scale, grid_unit(get_viewport_rect().size))
+			var maximized = wm_maximized.has(id) or maximize_state.has(id)
+			var cpart = WINDOW_CHROME.csd_hit(pos, fr, scale,
+				grid_unit(get_viewport_rect().size), maximized)
 			if cpart != "":
 				return {"id": id, "part": cpart}
 			if Rect2(fr).has_point(pos):
@@ -1509,6 +1520,7 @@ func _process(_delta):
 	# Sesiones de pantalla gvd y escrituras de config de plan: sólo reap de Threads.
 	_gvd_poll()
 	_plan_poll()
+	_clip_sync_poll()
 	# Configuración: reapa el Thread de lectura y aplica acento/fondo del snapshot.
 	settings_poll()
 	# swaymsg de ajustes de entrada: reap de Threads one-shot (bloqueó a lo sumo su
@@ -3112,6 +3124,39 @@ func _vlevel():
 	return 0
 
 
+# Rueda sobre un ancla (bloques Vecindario/Grupo/Hogar del Frame o ícono central): un
+# paso de la cadena vertical del gesto de 3 dedos, con las mismas transiciones
+# (_apply_vlevel). dir +1 = rueda arriba = dedos arriba. Una muesca = un nivel; las
+# ráfagas (rueda rápida, scroll de touchpad) se recortan con WHEEL_VCHAIN_MS.
+const WHEEL_VCHAIN_MS = 300
+var wheel_vchain_until = 0
+
+
+func _wheel_vchain(dir):
+	var now = OS.get_ticks_msec()
+	if now < wheel_vchain_until or swipe.active or fullscreen_id >= 0 or _home_anim_active():
+		return
+	var levels = SWIPE_MODEL.vertical_levels(not tiles.empty())
+	var i = levels.find(_vlevel())
+	if i < 0:
+		return
+	var j = int(clamp(i + int(dir), 0, levels.size() - 1))
+	if j == i:
+		return
+	wheel_vchain_until = now + WHEEL_VCHAIN_MS
+	swipe_live = levels[j]
+	_apply_vlevel(levels[j])
+
+
+# ¿El punto cae sobre el ícono central (Hogar, Grupo o Vecindario)? Mismo rect que
+# dibuja _draw_home con zoom_model.center_icon_rect.
+func _over_center_icon(p):
+	if not ((_at_home() and not apps_view) or zoom_level > 0):
+		return false
+	var vp = get_viewport_rect().size
+	return ZOOM.center_icon_rect(zoom_f, vp, grid_unit(vp) * 0.90).has_point(p)
+
+
 # Lleva la vista a un nivel de la cadena (salto discreto, con sus animaciones propias).
 func _apply_vlevel(level):
 	match int(level):
@@ -3676,6 +3721,10 @@ func _toggle_minimize_focused():
 # puede preguntar antes de irse.
 func _close_window_id(id):
 	if id >= 0 and _id_alive(id):
+		# Cerrar la «Pantalla compartida» = la persona deja de mirar: corta al emisor.
+		# (gvd recv por sí solo reinicia su ventana, así que también se lo termina.)
+		if _pantalla_sender != "" and _pantalla_window_ids().has(id):
+			_pantalla_closed_here()
 		compositor.close(id)
 	request_redraw()
 
@@ -3989,6 +4038,11 @@ func _draw_home(offset = 0.0):
 	set_next_window_pos(Vector2(offset, 0.0), true)
 	set_next_window_size(vp, true)
 	var flags = WINDOW_NO_DECORATION | WINDOW_NO_BACKGROUND | WINDOW_NO_MOVE | WINDOW_NO_SAVED_SETTINGS | WINDOW_NO_BRING_TO_FRONT_ON_FOCUS
+	# En Grupo/Vecindario esta ventana cubre la pantalla sólo para dibujar el ícono
+	# central: fuera de él no debe querer el mouse, o ImGuiCanvas marca el clic como
+	# manejado y la capa neighborhood_ui (menús, arrastre) nunca lo recibe.
+	if zoom_level > 0 and not _over_center_icon(get_viewport().get_mouse_position()):
+		flags |= IMGUI_WINDOW_NO_MOUSE_INPUTS
 	# Sin padding el fondo y las posiciones absolutas coinciden con la vista.
 	push_style_var_vec2(STYLE_VAR_WINDOW_PADDING, Vector2.ZERO)
 	if begin("##home", flags):
@@ -4907,7 +4961,7 @@ func _start_service_worker():
 
 func _refresh_service_targets():
 	var targets = []
-	for a in ACTIVITIES:
+	for a in ACTIVITIES + SERVICES:
 		if a.has("service"):
 			targets.append({"name": a.name, "cmd": _service_cmd(a)})
 	_svc_mutex.lock()
@@ -5638,7 +5692,7 @@ func _deskflow_watch(now):
 
 
 func _deskflow_activity():
-	for a in ACTIVITIES:
+	for a in SERVICES:
 		if a.has("service") and String(a.get("name", "")) == "Deskflow":
 			return a
 	return null
@@ -5862,6 +5916,12 @@ func _exit_tree():
 	_stop_publishers()
 	# Buzón del handshake: detiene el worker y espera los envíos ssh en curso.
 	_stop_inbox()
+	for th in _bg_threads:
+		th.wait_to_finish()
+	_bg_threads = []
+	# Audio enviado: devolver la salida local, si no quedaría sonando en el otro equipo.
+	if not _audio_send.empty():
+		_audio_work({})
 	# Pantallazo pendiente: espera a que termine de codificar/guardar.
 	if _shot_thread != null:
 		_shot_thread.wait_to_finish()
@@ -6533,7 +6593,7 @@ func _which(prog):
 # Alterna el servicio por nombre de actividad, buscando la que tenga "service".
 func _toggle_service_by_name(name):
 	var want = String(name)
-	for a in ACTIVITIES:
+	for a in ACTIVITIES + SERVICES:
 		if a.has("service") and String(a.get("name", "")) == want:
 			_toggle_service(a)
 			return
@@ -6709,6 +6769,7 @@ func _screen_session_active(host_id):
 
 func _stop_gvd_screen(host_id):
 	var id = String(host_id)
+	_group_unshare_window(id)
 	_gvd_mutex.lock()
 	for st in _gvd_peer_states:
 		if String(st.get("key", "")) == id:
@@ -6735,7 +6796,10 @@ func _pantalla_window_ids():
 		var id = int(wayland_ids[name])
 		if not _id_alive(id):
 			continue
-		if String(name) == "Pantalla" or _is_pantalla_window(id):
+		# gvd recv recrea su ventana al cambiar el tamaño: vuelve como actividad dinámica
+		# con el título («Pantalla compartida»), no como «Pantalla».
+		if String(name) == "Pantalla" or String(name) == "Pantalla compartida" \
+				or _is_pantalla_window(id):
 			out.append(id)
 	for id in compositor.get_ids():
 		if compositor.get_parent_id(id) > 0 or out.has(id):
@@ -6855,7 +6919,7 @@ func _peer_call_result(peer_host, peer_id, method, params = {}, ctl_port = 0):
 	if host == "":
 		out.error = "vecino sin dirección"
 		return out
-	if host.find(".") < 0:
+	if host.find(".") < 0 and not host.is_valid_ip_address():
 		host = host + ".local"
 	var port = int(ctl_port)
 	if port <= 0:
@@ -6882,7 +6946,24 @@ func _peer_call(peer_host, peer_id, method, params = {}):
 
 # --- Acciones que ejecuta el canal peer en ESTE host ----------------------------
 
-func _peer_gvd_open(port, _from):
+# Equipo que nos está transmitiendo (canal peer `gvd_recv`): si la persona cierra la
+# «Pantalla compartida», se le avisa con share_stop para que deje de emitir.
+var _pantalla_sender = ""
+
+
+func _pantalla_closed_here():
+	var hid = _pantalla_sender
+	_pantalla_sender = ""
+	var ep = _peer_endpoint_for(hid)
+	if bool(ep.get("ok", false)):
+		_peer_send_async([{"id": hid, "host": String(ep.peer), "port": int(ep.port),
+			"token": _peer_token_get(hid)}], "share_stop", {"type": "screen"})
+	print("pantalla: cerrada acá; aviso a ", hid)
+	_kill_pantalla_receivers()
+
+
+func _peer_gvd_open(port, _from, hid = ""):
+	_pantalla_sender = String(hid)
 	var path = _gvd_path_local()
 	if path == "":
 		return false
@@ -6894,6 +6975,7 @@ func _peer_gvd_open(port, _from):
 
 
 func _peer_gvd_stop():
+	_pantalla_sender = ""   # lo cortó el emisor: no hay que avisarle
 	_close_pantalla_window()
 	return true
 
@@ -6904,6 +6986,424 @@ func _peer_gvd_active():
 
 func _peer_gvd_send(_port, _target):
 	return false
+
+
+# --- Teclado y mouse del Grupo (única entrada a Deskflow) --------------------
+# El interruptor del Grupo marca `input` en host_directions y deriva de ahí el modo del
+# servicio global: algún equipo encendido -> "share_here" (servidor con la topología de
+# Pantallas), ninguno -> "off". El otro equipo se entera por `share_notify` y se pone
+# solo como cliente (_deskflow_follow). Lo escribe en settings["deskflow"], así el
+# ciclo existente (autoarranque, reintentos, vigía) es el único que lanza procesos.
+# ponytail: la topología incluye todas las pantallas ubicadas, no sólo las encendidas;
+# un vecino apagado no conecta su cliente, así que no recibe el puntero.
+func _group_input_on(host_id):
+	var e = host_directions.get(String(host_id), {})
+	return typeof(e) == TYPE_DICTIONARY and bool(e.get("input", false))
+
+
+func _group_input_set(host_id, on):
+	var id = String(host_id)
+	var e = host_directions.get(id, null)
+	if typeof(e) != TYPE_DICTIONARY:
+		return
+	e = e.duplicate()
+	if on:
+		e["input"] = true
+	else:
+		e.erase("input")
+	host_directions[id] = DIRECTIONS_MODEL.sanitize_entry(e)
+	_persist_directions()
+	var any = false
+	for k in host_directions.keys():
+		if _group_input_on(k):
+			any = true
+			break
+	_deskflow_write("share_here" if any else "off", "")
+	_share_notify(id, "input", "starting" if on else "stopped")
+	request_redraw()
+
+
+# Lado controlado: el que comparte su teclado avisó; este equipo se vuelve cliente de él
+# (o deja de serlo). Sólo si no es servidor de nadie (Deskflow es uno u otro).
+func _deskflow_follow(hid, state):
+	if settings_bridge == null or settings_bridge.model == null:
+		return
+	var cfg = settings_bridge.model.deskflow(settings_bridge.settings.get("deskflow", {}))
+	var ep = _peer_endpoint_for(hid)
+	var host = String(ep.get("peer", ""))
+	if host != "" and host.find(".") < 0 and not host.is_valid_ip_address():
+		host += ".local"
+	if state == "stopped":
+		if String(cfg.get("mode", "")) == "use_remote" and (host == "" or String(cfg.get("host", "")) == host):
+			_deskflow_write("off", "")
+	elif host != "" and String(cfg.get("mode", "")) != "share_here":
+		_deskflow_write("use_remote", host)
+
+
+# Escribe settings["deskflow"] (misma escritura atómica que Configuración) y lo aplica.
+func _deskflow_write(mode, host):
+	if settings_bridge == null or settings_bridge.model == null:
+		return
+	var cfg = settings_bridge.model.deskflow(settings_bridge.settings.get("deskflow", {}))
+	if String(cfg.get("mode", "")) == String(mode) and String(cfg.get("host", "")) == String(host):
+		return
+	cfg["mode"] = String(mode)
+	cfg["host"] = String(host)
+	cfg["auto"] = String(mode) != "off"
+	settings_bridge.settings["deskflow"] = settings_bridge.model.deskflow(cfg)
+	settings_bridge.write_atomic(settings_bridge.settings_path(),
+		settings_bridge.model.to_json(settings_bridge.settings))
+	_apply_deskflow_settings()
+
+
+# --- Portapapeles del Grupo ---------------------------------------------------
+# Cada copia local nueva (applet Portapapeles) va a todos los equipos del Grupo con
+# canal peer vivo, sin opción que activar (SPEC-sugar-group-2026-10 «Portapapeles»).
+# El envío corre en un Thread; los tokens nuevos (TOFU) se guardan al reapear.
+var _clip_states = []
+var _clip_mutex = Mutex.new()
+
+
+func _clip_sync_poll():
+	_clip_mutex.lock()
+	for i in range(_clip_states.size() - 1, -1, -1):
+		var st = _clip_states[i]
+		if bool(st.done):
+			st.thread.wait_to_finish()
+			for t in st.tokens:
+				_peer_token_set(t.id, t.token)
+			_clip_states.remove(i)
+	_clip_mutex.unlock()
+	if frame == null or frame.get("clipboard") == null:
+		return
+	# El vigía corre aunque el applet no esté en ninguna barra (el Frame sólo refresca
+	# los applets ubicados); refresh() arranca el worker la primera vez.
+	if frame.clipboard.get("_thread") == null:
+		frame.clipboard.refresh()
+	var texts = frame.clipboard.take_outbox()
+	if texts.empty():
+		return
+	var ids = _peer_token_hids()
+	for k in host_directions.keys():
+		if not ids.has(String(k)):
+			ids.append(String(k))
+	var targets = []
+	for hid in ids:
+		var ep = _peer_endpoint_for(hid)
+		if not bool(ep.get("ok", false)):
+			continue
+		var host = String(ep.peer)
+		if host.find(".") < 0 and not host.is_valid_ip_address():
+			host += ".local"
+		targets.append({"id": hid, "host": host, "port": int(ep.port), "token": _peer_token_get(hid)})
+	if targets.empty():
+		return
+	_peer_send_async(targets, "clip_set", {"text": String(texts[texts.size() - 1])})
+
+
+# Envía `method` a cada destino {id, host, port, token} en un Thread de un solo uso;
+# los tokens nuevos (TOFU) se guardan al reapear en _clip_sync_poll.
+func _peer_send_async(targets, method, params):
+	var st2 = {"done": false, "tokens": [], "thread": Thread.new()}
+	_clip_mutex.lock()
+	_clip_states.append(st2)
+	_clip_mutex.unlock()
+	st2.thread.start(self, "_peer_send_work", {"state": st2, "targets": targets,
+		"method": String(method), "params": params, "hid": _local_hid()})
+
+
+func _peer_send_work(u):
+	var tokens = []
+	for t in u.targets:
+		var r = PEER_CALL.request_status(t.host, t.port, u.hid, t.token, u.method, u.params)
+		if not bool(r.get("ok", false)) or not bool(r.get("response", {}).get("ok", false)):
+			print("peer: ", u.method, " a ", t.id, " falló: ", String(r.get("error", "")),
+				" ", String(r.get("response", {}).get("error", "")))
+		var resp = r.get("response", {})
+		if bool(resp.get("ok", false)) and resp.has("token"):
+			tokens.append({"id": t.id, "token": String(resp.token)})
+	_clip_mutex.lock()
+	u.state.tokens = tokens
+	u.state.done = true
+	_clip_mutex.unlock()
+
+
+# Handler del método peer `clip_set`: lo copiado en otro equipo del Grupo pasa a
+# ser el portapapeles de acá.
+func _peer_clip_set(text):
+	if frame == null or frame.get("clipboard") == null:
+		return false
+	return bool(frame.clipboard.receive(String(text)))
+
+
+# --- Grupo: enviar audio y ventanas a otro equipo -----------------------------
+# Audio: túnel PulseAudio/PipeWire (`pactl`, modelo audio_send.gd). El receptor abre
+# module-native-protocol-tcp sólo para la IP del emisor; el emisor crea un
+# module-tunnel-sink hacia él, lo pone por omisión y muda los streams. Un destino a la
+# vez, no se persiste. Todo lo bloqueante (peer, pactl) corre en Threads de un solo uso (_bg).
+var _audio_mutex = Mutex.new()
+var _audio_send = {}   # emisor: {hid, module, sink, prev}
+var _audio_recv = {}   # receptor: {hid, module}
+var _bg_threads = []
+
+
+func _bg(method, arg):
+	var t = Thread.new()
+	_bg_threads.append(t)
+	t.start(self, method, arg)
+
+
+func _bg_reap():
+	for i in range(_bg_threads.size() - 1, -1, -1):
+		if not _bg_threads[i].is_alive():
+			_bg_threads[i].wait_to_finish()
+			_bg_threads.remove(i)
+
+
+func _pactl(argv):
+	if argv.empty():
+		return ""
+	var out = []
+	OS.execute("pactl", argv, true, out)
+	return String(out[0]) if not out.empty() else ""
+
+
+# Descarga los módulos de una corrida anterior del shell que quedaron vivos (el
+# puerto quedaría ocupado o un túnel huérfano).
+func _audio_unload_stale(marker):
+	for line in _pactl(["list", "short", "modules"]).split("\n"):
+		if line.find(marker) >= 0:
+			_pactl(AUDIO_SEND.unload_argv(line.split("\t")[0]))
+
+
+# Lo llama el Frame al soltar el bloque Audio. true = el Grupo lo consumió.
+func _group_drop_audio(global_pos):
+	var t = _group_drop_target(global_pos)
+	if t.empty():
+		return false
+	if String(t.kind) == "self":
+		_group_audio_set("", false)
+	elif not bool(t.online):
+		activity_error = "audio: " + String(t.name) + " está apagado"
+	else:
+		_group_audio_set(String(t.id), true)
+	return true
+
+
+# Refleja el destino en el bloque Audio (hilo principal, vía call_deferred).
+func _audio_status_changed():
+	_audio_mutex.lock()
+	var hid = String(_audio_send.get("hid", ""))
+	_audio_mutex.unlock()
+	if frame != null and frame.get("audio") != null:
+		frame.audio.set_dest(_peer_name_for(hid) if hid != "" else "")
+	request_redraw()
+
+
+func _group_audio_on(host_id):
+	_audio_mutex.lock()
+	var on = String(_audio_send.get("hid", "")) == String(host_id)
+	_audio_mutex.unlock()
+	return on
+
+
+func _group_audio_set(host_id, on):
+	var target = {}
+	if on:
+		var ep = _peer_endpoint_for(String(host_id))
+		if not bool(ep.get("ok", false)):
+			activity_error = "audio: " + String(ep.get("error", ""))
+			return
+		var host = String(ep.peer)
+		if host.find(".") < 0 and not host.is_valid_ip_address():
+			host += ".local"
+		target = {"id": String(host_id), "host": host, "port": int(ep.port),
+			"token": _peer_token_get(host_id), "me": _local_hid()}
+	_bg("_audio_work", target)
+
+
+# Thread: apaga el envío actual (si hay) y, si `t` trae destino, enciende hacia él.
+func _audio_work(t):
+	_audio_mutex.lock()
+	var cur = _audio_send.duplicate()
+	_audio_mutex.unlock()
+	if not cur.empty():
+		var back = String(cur.get("prev", ""))
+		_pactl(["set-default-sink", back])
+		for argv in AUDIO_SEND.move_argvs(AUDIO_SEND.parse_sink_inputs(
+				_pactl(["list", "short", "sink-inputs"])), back):
+			_pactl(argv)
+		_pactl(AUDIO_SEND.unload_argv(int(cur.get("module", 0))))
+		var ep = cur.get("ep", {})
+		var rs = PEER_CALL.request_status(ep.host, ep.port, ep.me, ep.token, "audio_stop")
+		if not bool(rs.get("ok", false)):
+			print("audio: ", cur.get("hid", ""), " no confirmó audio_stop: ", rs.get("error", ""))
+		_audio_mutex.lock()
+		_audio_send = {}
+		_audio_mutex.unlock()
+		print("audio: dejé de enviar a ", cur.get("hid", ""))
+		call_deferred("_audio_status_changed")
+	if t.empty():
+		call_deferred("_bg_reap")
+		return
+	var r = PEER_CALL.request_status(t.host, t.port, t.me, t.token, "audio_recv")
+	var resp = r.get("response", {})
+	if resp.has("token"):
+		t.token = String(resp.token)   # el audio_stop posterior lo necesita
+		call_deferred("_peer_token_set", t.id, t.token)
+	var ip = IP.resolve_hostname(t.host, IP.TYPE_IPV4)
+	var argv = AUDIO_SEND.tunnel_load_argv(ip, int(resp.get("port", 0)), t.id)
+	if not bool(resp.get("ok", false)) or argv.empty():
+		print("audio: ", t.id, " no acepta audio: ", r.get("error", ""), " ", ip)
+		call_deferred("_bg_reap")
+		return
+	var sink = AUDIO_SEND.sink_name(t.id)
+	_audio_unload_stale("sink_name=" + sink)
+	var prev = AUDIO_SEND.parse_default_sink(_pactl(["info"]))
+	var module = AUDIO_SEND.parse_module_id(_pactl(argv))
+	if module <= 0:
+		print("audio: no pude crear el túnel hacia ", t.id)
+		PEER_CALL.request_status(t.host, t.port, t.me, t.token, "audio_stop")
+		call_deferred("_bg_reap")
+		return
+	# PipeWire crea el sink del túnel después de que load-module vuelve: esperarlo
+	# (hasta ~3 s) o set-default-sink/move fallan en silencio.
+	for _i in range(30):
+		if _pactl(["list", "short", "sinks"]).find("\t" + sink + "\t") >= 0:
+			break
+		OS.delay_msec(100)
+	_pactl(["set-default-sink", sink])
+	for mv in AUDIO_SEND.move_argvs(AUDIO_SEND.parse_sink_inputs(
+			_pactl(["list", "short", "sink-inputs"])), sink):
+		_pactl(mv)
+	_audio_mutex.lock()
+	_audio_send = {"hid": t.id, "module": module, "sink": sink, "prev": prev, "ep": t}
+	_audio_mutex.unlock()
+	print("audio: enviando a ", t.id, " (", ip, ")")
+	call_deferred("_audio_status_changed")
+	call_deferred("_bg_reap")
+
+
+# Handler peer `audio_recv`: abre el puerto de audio sólo para `ip`. Devuelve el
+# puerto o 0. ponytail: pactl corre en el hilo principal (decenas de ms, una vez).
+func _peer_audio_recv(hid, ip):
+	_peer_audio_stop("")
+	_audio_unload_stale("port=" + str(AUDIO_SEND.RECV_PORT))
+	var module = AUDIO_SEND.parse_module_id(_pactl(AUDIO_SEND.recv_load_argv(String(ip))))
+	if module <= 0:
+		return 0
+	_audio_recv = {"hid": String(hid), "module": module}
+	print("audio: recibiendo de ", hid, " (", ip, ")")
+	return AUDIO_SEND.RECV_PORT
+
+
+func _peer_audio_stop(_hid):
+	if not _audio_recv.empty():
+		_pactl(AUDIO_SEND.unload_argv(int(_audio_recv.get("module", 0))))
+		_audio_recv = {}
+	return true
+
+
+# --- Grupo: compartir una ventana por gvd (arrastrar y soltar) -----------------
+# Soltar el bloque de una ventana del Frame sobre un equipo de la vista Grupo la
+# transmite en vivo (espejo: sigue acá). window_cast.gd la vuelca a un archivo de
+# frames y `gvd send --capture shm` la codifica; del otro lado se abre la misma
+# «Pantalla compartida» que al extender. Se deja de compartir sólo cerrando la ventana:
+# la original acá o la «Pantalla compartida» allá (avisa con share_stop). Un equipo
+# recibe una sola cosa por vez (un receptor por puerto).
+const WINDOW_CAST = preload("res://window_cast.gd")
+var _casts = {}   # hid -> {node, wid}
+
+
+func _cast_key(hid):
+	return "win:" + String(hid)
+
+
+func _group_drop_target(global_pos):
+	if neighborhood_ui == null or not is_instance_valid(neighborhood_ui) \
+			or not neighborhood_ui.has_method("group_drop_target"):
+		return {}
+	return neighborhood_ui.group_drop_target(global_pos)
+
+
+# Lo llama el Frame al soltar el bloque de una ventana. true = el Grupo lo consumió.
+func _group_drop_window(wid, global_pos):
+	var t = _group_drop_target(global_pos)
+	if t.empty():
+		return false
+	if String(t.kind) == "self":
+		return false   # se deja de compartir cerrando la ventana (acá o allá), no con un gesto
+	if not bool(t.online):
+		activity_error = "compartir: " + String(t.name) + " está apagado"
+		return true
+	_group_share_window(String(t.id), int(wid))
+	return true
+
+
+func _group_share_window(hid, wid):
+	var gvd_path = _gvd_path_local()
+	var target = _peer_endpoint_for(hid)
+	if gvd_path == "" or not bool(target.get("ok", false)):
+		activity_error = "compartir: " + ("no se encontró el programa de pantalla" if gvd_path == ""
+			else String(target.get("error", "sin canal peer")))
+		return
+	_group_unshare_window(hid)   # una ventana por equipo: reemplaza la anterior
+	var dir = OS.get_environment("XDG_RUNTIME_DIR").plus_file("gdtk")
+	Directory.new().make_dir_recursive(dir)
+	var path = dir.plus_file("win-" + AUDIO_SEND.sink_name(hid).replace("gdtk_send_", "") + ".frames")
+	var cast = WINDOW_CAST.new()
+	add_child(cast)
+	if not cast.start(compositor, wid, path, 20):
+		cast.queue_free()
+		activity_error = "compartir: la ventana todavía no tiene tamaño"
+		return
+	var sp = GVD_LAUNCH.window_send_argv(gvd_path, String(target.peer), path, 20)
+	if not bool(sp.get("ok", false)):
+		cast.stop()
+		cast.queue_free()
+		activity_error = "compartir: " + String(sp.get("error", ""))
+		return
+	_casts[hid] = {"node": cast, "wid": wid}
+	_queue_gvd_peer_launch(hid, String(target.peer), int(target.port), "gvd_recv",
+		{"port": 0, "from": _local_hostname()}, String(sp.cmd), sp.args, "", _cast_key(hid))
+	_share_notify(hid, "screen", "active")
+	print("compartir: ventana ", wid, " -> ", hid)
+
+
+# Corta sólo la parte de ventana (el resto lo hace _stop_gvd_screen, que la llama).
+func _group_unshare_window(hid):
+	var c = _casts.get(String(hid))
+	if c == null:
+		return
+	_casts.erase(String(hid))
+	_gvd_mutex.lock()
+	for st in _gvd_peer_states:
+		if String(st.get("key", "")) == _cast_key(hid):
+			st.cancelled = true
+	_gvd_mutex.unlock()
+	_stop_tracked(_cast_key(hid))
+	if is_instance_valid(c.node):
+		c.node.stop()
+		c.node.queue_free()
+	var ep = _peer_endpoint_for(hid)
+	if bool(ep.get("ok", false)):
+		_peer_send_async([{"id": hid, "host": String(ep.peer), "port": int(ep.port),
+			"token": _peer_token_get(hid)}], "gvd_stop", {})
+	print("compartir: dejé de compartir con ", hid)
+
+
+func _group_casting(wid):
+	for hid in _casts.keys():
+		if int(_casts[hid].wid) == int(wid):
+			return true
+	return false
+
+
+# Ventana cerrada => se deja de compartir (tick barato, desde _gvd_poll).
+func _casts_poll():
+	for hid in _casts.keys():
+		if not _id_alive(int(_casts[hid].wid)):
+			_stop_gvd_screen(hid)
 
 
 # --- Dockapp "Compartiendo": avisos de lado compartido (G5) --------------------
@@ -6921,8 +7421,10 @@ func _share_notify(host_id, type, state):
 			print("compartir: sin canal hacia ", id, " (", String(target.get("error", "")), ")")
 		return
 	var side = DIRECTIONS_MODEL.inverse(d)
-	_peer_call(String(target.get("peer", "")), id, "share_notify",
-		{"type": String(type), "side": side, "state": String(state)})
+	# Nunca en el hilo de render: un vecino que no responde congelaba el shell 1,5 s+.
+	_peer_send_async([{"id": id, "host": String(target.get("peer", "")),
+		"port": int(target.get("port", 0)), "token": _peer_token_get(id)}],
+		"share_notify", {"type": String(type), "side": side, "state": String(state)})
 
 
 # Nombre visible del equipo por hid, sin exponer el id opaco ni jerga.
@@ -6946,6 +7448,8 @@ func _peer_share_notify(hid, params):
 	if type != "screen" and type != "input":
 		return false
 	var state = String(params.get("state", "active")).strip_edges()
+	if type == "input":
+		_deskflow_follow(id, state)
 	if state == "stopped":
 		for i in range(remote_shares.size() - 1, -1, -1):
 			var old = remote_shares[i]
@@ -7147,7 +7651,10 @@ func _start_gvd_screen(host_id, action):
 				OS.get_environment("XDG_SESSION_TYPE")):
 			activity_error = "pantalla: este equipo no puede emitir su escritorio"
 			return
-		var peer = GVD_LAUNCH.target_host_of(plan)
+		# Mismo destino que el canal peer (IPv4 primero, ver neighborhood_inbox.ssh_target):
+		# la dirección del plan puede ser la IPv6 global que mDNS anuncia primero.
+		var peer = String(target.get("peer", "")) if bool(target.get("ok", false)) \
+			else GVD_LAUNCH.target_host_of(plan)
 		# gdtk/sway (wlroots): captura por wlr-screencopy. Con sway se extiende de
 		# verdad creando un monitor headless (--virtual); GNOME usa su Meta-*.
 		var backend = GVD_LAUNCH.local_emit_backend(
@@ -7235,12 +7742,13 @@ func _apply_capture_ranges():
 		Host.remote_input.set_capture_ranges(_deskflow_capture_ranges())
 
 
-func _queue_gvd_peer_launch(host_id, peer_host, ctl_port, method, params, cmd, args, direction):
+func _queue_gvd_peer_launch(host_id, peer_host, ctl_port, method, params, cmd, args, direction,
+		key = ""):
 	var id = String(host_id)
 	var state = {
 		"done": false,
 		"cancelled": false,
-		"key": id,
+		"key": String(key) if String(key) != "" else id,
 		"peer_id": id,
 		"peer_host": String(peer_host),
 		"ctl_port": int(ctl_port),
@@ -7291,10 +7799,14 @@ func _finish_gvd_peer_state(state):
 	if not bool(state.get("ok", false)):
 		activity_error = "pantalla: el vecino no abrió el receptor (" \
 			+ String(state.get("error", "sin respuesta")) + ")"
+		print(activity_error, " [", state.get("key", ""), "]")
 		return
+	print("pantalla: receptor listo en ", state.get("peer_id", ""), "; lanzo ", state.get("key", ""))
 	_launch_tracked(String(state.get("key", "")), String(state.get("cmd", "")),
 		state.get("args", []))
-	_suspend_deskflow_link(String(state.get("key", "")), String(state.get("direction", "")))
+	# Sólo extender la pantalla toca el borde de Deskflow; compartir una ventana no.
+	if String(state.get("key", "")) == String(state.get("peer_id", "")):
+		_suspend_deskflow_link(String(state.get("key", "")), String(state.get("direction", "")))
 
 
 # Lanza un plan (gvd send, servidor Deskflow) en un Thread de un solo uso; captura
@@ -7337,6 +7849,8 @@ func _tracked_launch_work(userdata):
 
 # Reapea los Threads de lanzamiento terminados (no bloquea).
 func _gvd_poll():
+	if not _casts.empty():
+		_casts_poll()
 	var reaped = false
 	for i in range(_gvd_peer_threads.size() - 1, -1, -1):
 		var pstate = _gvd_peer_states[i]
@@ -8267,7 +8781,7 @@ func _on_chrome_input(event):
 		# que el doble clic de restaurar no tuviera efecto). Desmaximizar sucede recién
 		# cuando el arrastre mueve la ventana (ver _chrome_drag_motion).
 		var now = OS.get_ticks_msec()
-		var dbl = part == "title" and int(_wm_last_title_click.id) == id and now - int(_wm_last_title_click.at) < 350
+		var dbl = (part == "title" or part == "grip") and int(_wm_last_title_click.id) == id and now - int(_wm_last_title_click.at) < 350
 		_wm_last_title_click = {"id": id, "at": now}
 		if dbl:
 			_wm_last_title_click = {"id": -1, "at": 0}

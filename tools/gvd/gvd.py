@@ -69,7 +69,7 @@ CAPTURE_HELPER_SRC = "gvd-capture.c"
 CAPTURE_PROTO_DIR = "protocols"
 CAPTURE_PROTO_C = "wlr-screencopy-unstable-v1-protocol.c"
 CAPTURE_PROTO_H = "wlr-screencopy-unstable-v1-client-protocol.h"
-CAPTURE_FORMATS = {"XR24": "BGRx", "AR24": "BGRA"}
+CAPTURE_FORMATS = {"XR24": "BGRx", "AR24": "BGRA", "AB24": "RGBA"}
 
 # Colorimetría forzada del stream. Sin esto el encoder etiqueta bt601 (default) y
 # los sinks que asumen bt709/HD muestran colores desviados. Override con
@@ -233,6 +233,8 @@ def detect_capture_backend(choice="auto"):
     desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
     if choice == "mutter":
         return "mutter"
+    if choice == "shm":
+        return "shm"
     if choice == "wlr":
         return "wlr" if wlr_capture_available() else None
     if "GNOME" in desktop:
@@ -653,6 +655,8 @@ class Sender:
             pass
 
     def _start_wlr_capture(self):
+        if self.backend == "shm":
+            return self._start_shm_capture()
         helper = ensure_capture_helper()
         if not helper:
             log("[!] sin captura wlroots")
@@ -684,9 +688,12 @@ class Sender:
             log(f"[*] captura wlroots via WAYLAND_DISPLAY={display}")
         self.capture = subprocess.Popen(argv, stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE, env=env)
+        return self._adopt_capture_header("wlroots")
+
+    def _adopt_capture_header(self, what):
         line = self._read_capture_header()
         if line is None:
-            log("[!] sin cabecera de captura wlroots")
+            log(f"[!] sin cabecera de captura {what}")
             return False
         parts = line.split()
         try:
@@ -697,8 +704,18 @@ class Sender:
         fmt = CAPTURE_FORMATS.get(fourcc, "BGRx")
         self.capture_hdr = (fmt, width, height, stride)
         threading.Thread(target=self._drain_capture_stderr, daemon=True).start()
-        log(f"[+] captura wlroots {fmt} {width}x{height}")
+        log(f"[+] captura {what} {fmt} {width}x{height}")
         return True
+
+    def _start_shm_capture(self):
+        # Fuente = archivo de frames que escribe el shell gdtk (una ventana); el
+        # lector es este mismo script, con el contrato de gvd-capture.
+        argv = [sys.executable, os.path.abspath(__file__), "__shm_capture__",
+                self.a.shm, str(self.a.fps)]
+        log("[*] captura: " + " ".join(argv))
+        self.capture = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE)
+        return self._adopt_capture_header("shm")
 
     def _create_and_stream_wlr(self):
         if not self._start_wlr_capture():
@@ -790,7 +807,7 @@ class Sender:
 
     def run(self):
         log(f"[*] backend de captura: {self.backend}")
-        if self.backend == "wlr":
+        if self.backend in ("wlr", "shm"):
             return self.run_wlr()
         self.conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
         self.subscribe_monitors()
@@ -1711,8 +1728,11 @@ def build_parser():
                    choices=["right", "left", "above", "below"])
     s.add_argument("--encoder", default="auto",
                    choices=["auto", "va", "x264"])
-    s.add_argument("--capture", default="auto", choices=["auto", "mutter", "wlr"],
-                   help="backend de captura: auto detecta GNOME(Mutter) o wlroots")
+    s.add_argument("--capture", default="auto", choices=["auto", "mutter", "wlr", "shm"],
+                   help="backend de captura: auto detecta GNOME(Mutter) o wlroots; "
+                        "shm = archivo de frames de una ventana gdtk (--shm)")
+    s.add_argument("--shm", default="",
+                   help="--capture shm: archivo de frames (ver shm_capture)")
     s.add_argument("--output", default="",
                    help="nombre del output wlroots a capturar (default: el primero)")
     s.add_argument("--virtual", action="store_true",
@@ -1746,9 +1766,73 @@ def build_parser():
     return ap
 
 
+SHM_MAGIC = b"GVDSHM1\0"
+SHM_HEADER = 64
+
+
+def shm_capture(path, fps, max_frames=0):
+    """Lector del archivo de frames de una ventana gdtk, con el contrato de
+    gvd-capture (cabecera GVDCAP1 por stderr, frames crudos por stdout).
+
+    Archivo (little endian): magic[8] | seq u64 | width u32 | height u32 |
+    stride u32 | fourcc[4] | relleno hasta 64 | frame. seq impar = el escritor
+    está a mitad de frame (seqlock): se descarta y se reintenta. Sin frame nuevo
+    se repite el anterior para sostener la cadencia del encoder. Termina cuando
+    el archivo desaparece (el shell dejó de compartir) o se cierra stdout."""
+    import struct
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            with open(path, "rb") as f:
+                head = f.read(SHM_HEADER)
+            if len(head) == SHM_HEADER and head[:8] == SHM_MAGIC:
+                seq, w, h, stride = struct.unpack_from("<QIII", head, 8)
+                if w > 0 and h > 0 and seq >= 2:
+                    break
+        except OSError:
+            pass
+        if time.monotonic() > deadline:
+            log("[!] shm: sin frames en " + path)
+            return 2
+        time.sleep(0.05)
+    fourcc = head[28:32].decode("ascii", "replace")
+    size = stride * h
+    sys.stderr.write(f"GVDCAP1 {fourcc} {w} {h} {stride}\n")
+    sys.stderr.flush()
+    out = sys.stdout.buffer
+    last_seq, frame, sent = -1, None, 0
+    period = 1.0 / max(1, fps)
+    nxt = time.monotonic()
+    try:
+        while True:
+            try:
+                with open(path, "rb") as f:
+                    s1 = struct.unpack("<Q", f.read(16)[8:16])[0]
+                    if s1 % 2 == 0 and s1 != last_seq:
+                        f.seek(SHM_HEADER)
+                        data = f.read(size)
+                        f.seek(8)
+                        if struct.unpack("<Q", f.read(8))[0] == s1 and len(data) == size:
+                            frame, last_seq = data, s1
+            except FileNotFoundError:
+                return 0
+            if frame is not None:
+                out.write(frame)
+                out.flush()
+                sent += 1
+                if max_frames and sent >= max_frames:
+                    return 0
+            nxt += period
+            time.sleep(max(0.0, nxt - time.monotonic()))
+    except (BrokenPipeError, KeyboardInterrupt):
+        return 0
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "__gst_child__":
         return run_gst_child(sys.argv[2:])
+    if len(sys.argv) > 3 and sys.argv[1] == "__shm_capture__":
+        return shm_capture(sys.argv[2], int(sys.argv[3]))
     args = build_parser().parse_args()
 
     if args.cmd == "caps":

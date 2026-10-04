@@ -64,6 +64,34 @@ class StreamTest(unittest.TestCase):
             rx.set_state(Gst.State.NULL)
 
     # -- backend de captura wlroots (sway/gdtk), sin PipeWire -------------------
+    def test_shm_capture_reader(self):
+        """El lector shm cumple el contrato de gvd-capture y respeta el seqlock."""
+        import struct, subprocess, tempfile, os
+        w, h = 4, 2
+        frame = bytes(range(w * h * 4))
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "win.frames")
+            head = gvd.SHM_MAGIC + struct.pack("<QIII4s", 2, w, h, w * 4, b"AB24")
+            with open(path, "wb") as f:
+                f.write(head.ljust(gvd.SHM_HEADER, b"\0") + frame)
+            p = subprocess.Popen([sys.executable, gvd.__file__, "__shm_capture__", path, "30"],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                self.assertEqual(p.stderr.readline().decode().split(),
+                                 ["GVDCAP1", "AB24", "4", "2", "16"])
+                self.assertEqual(p.stdout.read(len(frame)), frame)
+                # Escritor a mitad de frame (seq impar): se repite el último completo.
+                with open(path, "r+b") as f:
+                    f.seek(8); f.write(struct.pack("<Q", 3))
+                    f.seek(gvd.SHM_HEADER); f.write(b"\xff" * len(frame))
+                self.assertEqual(p.stdout.read(len(frame)), frame)
+                os.unlink(path)
+                self.assertEqual(p.wait(timeout=3), 0)
+            finally:
+                if p.poll() is None:
+                    p.kill()
+        self.assertEqual(gvd.detect_capture_backend("shm"), "shm")
+
     def test_wlr_source_pipeline(self):
         args = gvd.build_parser().parse_args([
             "send", "--encoder", "x264", "--capture", "wlr", "--host", "127.0.0.1"])

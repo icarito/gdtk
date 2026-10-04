@@ -26,16 +26,28 @@ func _init():
 	check("valid_position rechaza basura",
 		not mod.valid_position("diagonal") and not mod.valid_position(""))
 
-	# GNOME (Mutter) y compositores wlroots (gdtk/sway) pueden emitir.
+	# GNOME (Mutter) y compositores wlroots convencionales (sway) pueden emitir.
 	check("emisor local en GNOME Wayland",
 		mod.local_can_emit("GNOME") and mod.local_can_emit("ubuntu:GNOME", "wayland"))
 	check("GNOME elige Mutter", mod.local_emit_backend("GNOME") == "mutter")
-	check("gdtk/sway emiten por wlroots",
-		mod.local_can_emit("gdtk") and mod.local_emit_backend("gdtk") == "wlr"
-		and mod.local_can_emit("sway") and mod.local_emit_backend("sway") == "wlr")
+	check("sway emite por wlroots",
+		mod.local_can_emit("sway") and mod.local_emit_backend("sway") == "wlr")
+	# Regresión Fase A: gdtk anida su compositor; la captura exterior de sway NO es
+	# su pantalla. `desktop=gdtk` jamás equivale a sway, ni con SWAYSOCK presente.
+	check("gdtk no emite sin broker embedded",
+		not mod.local_can_emit("gdtk") and mod.local_emit_backend("gdtk") == "")
+	check("desktop=gdtk nunca es wlr", mod.local_emit_backend("gdtk") != "wlr")
+	check("gdtk + SWAYSOCK no habilita --virtual exterior",
+		not mod.local_outer_virtual_allowed("gdtk", "wayland", true))
+	check("sway + SWAYSOCK sí habilita --virtual exterior",
+		mod.local_outer_virtual_allowed("sway", "wayland", true)
+		and not mod.local_outer_virtual_allowed("sway", "wayland", false))
+	check("gdtk con capacidad embedded devuelve backend estable gdtk",
+		mod.local_can_emit("gdtk", "wayland", true)
+		and mod.local_emit_backend("gdtk", "wayland", true) == "gdtk")
 	check("x11 y escritorios sin emisor no emiten",
 		not mod.local_can_emit("GNOME", "x11") and not mod.local_can_emit("XFCE")
-		and not mod.local_can_emit(""))
+		and not mod.local_can_emit("") and mod.local_emit_backend("gdtk", "x11", true) == "")
 
 	# Extracción del plan real de neighborhood_actions.
 	var A = load("res://neighborhood_actions.gd")
@@ -70,6 +82,29 @@ func _init():
 		and sp.args.find("right") >= 0)
 	check("emisor local posición inválida falla",
 		not mod.local_send_argv("/home/u/Proyectos/gvd/gvd.py", "tengu.local", 0, "x").ok)
+	check("emisor local sin captura no agrega --capture ni --virtual",
+		sp.args.find("--capture") < 0 and sp.args.find("--virtual") < 0)
+	var spv = mod.local_send_argv("/home/u/Proyectos/gvd/gvd.py", "tengu.local", 5600, "right", true)
+	check("wlr_virtual conserva --virtual",
+		spv.ok and spv.args.find("--virtual") >= 0 and spv.args.find("--position") >= 0)
+
+	# Captura embebida (forward-looking): `--capture gdtk --output <id>` sólo con
+	# output id validado; falla cerrada ante id/backend inválidos y nunca --virtual.
+	var spc = mod.local_send_argv("/home/u/Proyectos/gvd/gvd.py", "tengu.local", 5600, "right",
+		false, "gdtk", "remote:ab12")
+	check("captura gdtk con output id validado", spc.ok and spc.args.has("--capture")
+		and spc.args.has("gdtk") and spc.args.has("--output") and spc.args.has("remote:ab12"))
+	check("captura gdtk no produce --virtual", spc.args.find("--virtual") < 0)
+	check("output id inválido falla",
+		not mod.local_send_argv("/home/u/Proyectos/gvd/gvd.py", "tengu.local", 0, "",
+			false, "gdtk", "bad id; rm -rf").ok)
+	check("backend de captura desconocido falla",
+		not mod.local_send_argv("/home/u/Proyectos/gvd/gvd.py", "tengu.local", 0, "",
+			false, "wlr", "remote:ab12").ok)
+	var spcv = mod.local_send_argv("/home/u/Proyectos/gvd/gvd.py", "tengu.local", 0, "",
+		true, "gdtk", "primary")
+	check("capture_backend gana a wlr_virtual (sin --virtual)",
+		spcv.ok and spcv.args.find("--virtual") < 0)
 
 	# Receptor remoto por ssh (buzón): comando remoto estable, sin inyección.
 	var rr = mod.remote_recv_argv("tengu.local", false)
@@ -130,6 +165,22 @@ func _init():
 	check("otra dirección conserva su tramo", sus_r[4] == 20.0 and sus_r[5] == 80.0)
 	check("sin links queda todo abierto", mod.capture_ranges([])[1] == 100.0 and mod.capture_ranges([])[3] == 100.0)
 	check("dirección inválida se ignora", mod.capture_ranges(lr, ["arriba"])[2] == 0.0)
+
+	# Compartir una ventana (Grupo): gvd lee el archivo de window_cast.gd.
+	var ws = mod.window_send_argv("/opt/gvd/gvd.py", "cupid.local", "/run/user/1000/gdtk/win-a.frames", 90)
+	var wa = ws.get("args", [])
+	check("ventana: argv shm", bool(ws.ok) and wa.has("send") and wa.has("--capture")
+		and wa[wa.find("--capture") + 1] == "shm" and wa[wa.find("--shm") + 1] == "/run/user/1000/gdtk/win-a.frames")
+	check("ventana: fps acotado", wa[wa.find("--fps") + 1] == "60")
+	check("ventana: ruta relativa rechazada", not bool(mod.window_send_argv("/opt/gvd/gvd.py", "cupid", "x.frames").ok))
+	check("ventana: ruta con .. rechazada", not bool(mod.window_send_argv("/opt/gvd/gvd.py", "cupid", "/run/../etc/x").ok))
+	var wc = load("res://window_cast.gd")
+	var big = wc.out_size(Vector2(3841, 2161))
+	check("cast: tamaño par y acotado", big.x <= 1920 and big.y <= 1080 and int(big.x) % 2 == 0 and int(big.y) % 2 == 0 and big.x >= 1916)
+	check("cast: ventana chica conserva tamaño", wc.out_size(Vector2(801, 600)) == Vector2(800, 600))
+	check("cast: tamaño nulo", wc.out_size(Vector2(1, 0)) == Vector2())
+	var lr2 = wc.layer_rect(Rect2(10, 10, 100, 50), Rect2(10, 10, 100, 50), Vector2(200, 200))
+	check("cast: capa raíz escalada y centrada", lr2 == Rect2(0, 50, 200, 100))
 
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

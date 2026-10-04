@@ -39,12 +39,26 @@ func _ready():
 	# una recarga) ya tiene el puerto, esta no debe pisar ni borrar su token. El
 	# orden viejo escribía el token y, al fallar el listen, lo borraba: dejaba al
 	# shell vivo sin token y rompía a todos los clientes del RPC (gestos, MCP).
+	_port = port
+	set_process(true)
+	_open()
+
+
+# Tras recargar (Host.reload_remote) el Remote viejo acaba de soltar el puerto y el
+# bind puede fallar un rato (ERR_ALREADY_IN_USE): se reintenta cada LISTEN_RETRY_MS en
+# vez de dejar al shell sin RPC hasta el próximo reinicio.
+const LISTEN_RETRY_MS = 1000
+var _port = 0
+var _retry_at = 0
+
+
+func _open():
+	_retry_at = OS.get_ticks_msec() + LISTEN_RETRY_MS
 	server = TCP_Server.new()
-	var lerr = server.listen(port, "127.0.0.1")
+	var lerr = server.listen(_port, "127.0.0.1")
 	if lerr != OK:
-		printerr("Remote: no se pudo escuchar en 127.0.0.1:", port, " (error ", lerr, ")")
+		printerr("Remote: no se pudo escuchar en 127.0.0.1:", _port, " (error ", lerr, "); reintento")
 		server = null
-		token = ""
 		return
 
 	var file = File.new()
@@ -54,13 +68,13 @@ func _ready():
 		server.stop()
 		server = null
 		token = ""
+		_port = 0   # sin token no hay RPC posible: no reintentar
 		return
 	file.store_string(token)
 	file.close()
 	_start_watchdog()
 
-	print("Remote: escuchando en 127.0.0.1:", port)
-	set_process(true)
+	print("Remote: escuchando en 127.0.0.1:", _port)
 
 
 func _notification(what):
@@ -115,6 +129,8 @@ func _start_watchdog():
 
 func _process(delta):
 	if server == null:
+		if _port > 0 and not cleaned and OS.get_ticks_msec() >= _retry_at:
+			_open()
 		return
 
 	while server.is_connection_available():
@@ -318,7 +334,7 @@ func _handle_line(conn, line):
 		"launch":
 			_launch(conn, id, params)
 		"close_window":
-			shell.compositor.close(int(params.get("id", -1)))
+			shell._close_window_id(int(params.get("id", -1)))
 			_reply(conn, id, true)
 		"screenshot":
 			_reply(conn, id, _screenshot(params))
@@ -488,8 +504,14 @@ func _hud_command(params):
 	return {"output": hud.command_output(str(params.get("line", "")))}
 
 
+# Botones apretados por RPC: el motion los lleva en button_mask (como el mouse real),
+# así un press + move + release arrastra (Grupo, ventanas).
+var _button_mask = 0
+
+
 func _event_mouse_motion(x, y, rx = 0.0, ry = 0.0):
 	var event = InputEventMouseMotion.new()
+	event.button_mask = _button_mask
 	event.position = Vector2(x, y)
 	event.global_position = Vector2(x, y)
 	event.relative = Vector2(rx, ry)
@@ -502,6 +524,9 @@ func _event_mouse_button(x, y, button, pressed, double):
 	event.global_position = Vector2(x, y)
 	event.button_index = button
 	event.pressed = pressed
+	var bit = 1 << (int(button) - 1)
+	_button_mask = (_button_mask | bit) if pressed else (_button_mask & ~bit)
+	event.button_mask = _button_mask
 	event.doubleclick = double
 	return event
 
