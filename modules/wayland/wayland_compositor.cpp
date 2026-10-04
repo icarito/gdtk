@@ -672,6 +672,7 @@ void WaylandCompositor::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("end_frame"), &WaylandCompositor::end_frame);
 	ClassDB::bind_method(D_METHOD("set_size", "id", "size"), &WaylandCompositor::set_size);
 	ClassDB::bind_method(D_METHOD("set_maximized", "id", "maximized"), &WaylandCompositor::set_maximized);
+	ClassDB::bind_method(D_METHOD("set_popup_bounds", "id", "box"), &WaylandCompositor::set_popup_bounds);
 	ClassDB::bind_method(D_METHOD("set_fullscreen", "id", "fullscreen"), &WaylandCompositor::set_fullscreen);
 	ClassDB::bind_method(D_METHOD("close", "id"), &WaylandCompositor::close);
 	ClassDB::bind_method(D_METHOD("focus", "id", "raise"), &WaylandCompositor::focus, DEFVAL(true));
@@ -1010,6 +1011,13 @@ void WaylandCompositor::end_frame() {
 void WaylandCompositor::set_size(int p_id, const Vector2 &p_size) {
 	if (server != NULL) {
 		wl_server_set_size(server, p_id, (int)p_size.x, (int)p_size.y);
+	}
+}
+
+void WaylandCompositor::set_popup_bounds(int p_id, const Rect2 &p_box) {
+	if (server != NULL) {
+		wl_server_set_popup_bounds(server, p_id, (int)Math::floor(p_box.position.x), (int)Math::floor(p_box.position.y),
+				(int)p_box.size.x, (int)p_box.size.y);
 	}
 }
 

@@ -115,6 +115,7 @@ var pending_wayland = ""
 # con el lanzamiento correcto.
 var pending_launches = []
 var requested_sizes = {}
+var popup_bounds_sent = {}  # id -> Rect2 enviada a set_popup_bounds
 var resize_since = {}     # id -> ms del último set_size (estirar la textura mientras llega)
 const RESIZE_STRETCH_MS = 600
 var last_geo = {}        # id -> último tamaño observado del cliente (para reafirmar el slot)
@@ -2340,7 +2341,9 @@ func _tile_node(id):
 		_ensure_premult_material()
 		node = Control.new()
 		node.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		node.rect_clip_content = true
+		# Sin recorte: los popups (menús) son capas del mismo nodo y pueden salir de la
+		# ventana; recortados quedaban inaccesibles (menú de Firefox flotante).
+		node.rect_clip_content = false
 		view.add_child(node)
 		tile_nodes[id] = node
 	return node
@@ -2388,6 +2391,33 @@ func _resize_pending(id, geo, rect, now):
 	if tile_anim.has(id) or wm_anim.has(id):
 		return true
 	return now - int(resize_since.get(id, -100000)) < RESIZE_STRETCH_MS
+
+
+# Le dice al compositor dónde pueden caer los popups de la ventana: la vista entera
+# en coords del buffer raíz. Él no sabe dónde dibuja el shell la ventana (una flotante
+# corrida no está en 0,0) y acomodaba los menús fuera de pantalla o recortados.
+# ¿`pos` cae en alguna capa de popup (índice >= 1) de la ventana `id`?
+func _popup_layer_hit(id, r, fit, pos):
+	var layers = compositor.get_layers(id)
+	for i in range(1, layers.size()):
+		var lr = layers[i].rect
+		if lr.size.x <= 0.0 or lr.size.y <= 0.0:
+			continue
+		if Rect2(r.position + lr.position * fit.scale + fit.offset, lr.size * fit.scale).has_point(pos):
+			return true
+	return false
+
+
+func _sync_popup_bounds(id, rect, fit):
+	if compositor == null or not compositor.has_method("set_popup_bounds"):
+		return
+	var sc = max(float(fit.scale), 0.001)
+	var box = Rect2((-rect.position - fit.offset) / sc, view.rect_size / sc)
+	var prev = popup_bounds_sent.get(id)
+	if prev != null and prev.position.distance_to(box.position) < 1.0 and prev.size == box.size:
+		return
+	popup_bounds_sent[id] = box
+	compositor.set_popup_bounds(id, box)
 
 
 func _content_fit(csize, ssize, cpos):
@@ -2457,6 +2487,8 @@ func _update_tile(id, now):
 	else:
 		_fill_nodes(node, layers, fit.scale, fit.offset)
 	tile_fit[id] = fit
+	if not expose:
+		_sync_popup_bounds(id, rect, fit)
 
 	# Transición de modo tiled<->flotante (K13): interpola desde el rect visual
 	# previo hacia `rect`. Se deja para después de exposé/intro/zoom.
@@ -8353,6 +8385,8 @@ func _view_hit_test(pos):
 		var content = r
 		if fit != null and fit.scale > 0.0:
 			content = Rect2(r.position + geo.position * fit.scale + fit.offset, geo.size * fit.scale)
+		if not content.has_point(pos) and fit != null and fit.scale > 0.0 and _popup_layer_hit(id, r, fit, pos):
+			content = Rect2(pos, Vector2.ONE)  # cae en un popup que sobresale de la ventana
 		if content.has_point(pos):
 			if fit != null and fit.scale > 0.0:
 				return {"id": id, "pos": (pos - r.position - fit.offset) / fit.scale, "dialog": 0}

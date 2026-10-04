@@ -81,6 +81,11 @@ typedef struct toplevel {
 	// xdg: el cliente se dibuja su propia decoración (CSD). Arranca en true y pasa a
 	// false cuando negocia SERVER_SIDE por xdg-decoration. Xwayland siempre false.
 	bool csd;
+	// Caja donde pueden caer sus popups, en coords de la surface raíz (la pantalla vista
+	// desde la ventana). La fija el shell (wl_server_set_popup_bounds): sólo él sabe dónde
+	// dibuja la ventana; sin ella se asume la ventana en el origen de la vista.
+	bool has_popup_bounds;
+	struct wlr_box popup_bounds;
 	// sólo X
 	struct wl_listener associate;
 	struct wl_listener dissociate;
@@ -1058,6 +1063,8 @@ typedef struct popup {
 // Reubica el popup dentro de lo visible (reglas del xdg_positioner). La caja va en coords
 // de la surface raíz del toplevel: el contenido visible arranca en su geometry (las sombras
 // CSD quedan fuera) y mide lo que la vista (default_w x default_h).
+static toplevel *toplevel_find_xdg(struct wl_server *s, struct wlr_xdg_toplevel *tl);
+
 static void popup_unconstrain(popup *pp) {
 	struct wlr_xdg_surface *xs = wlr_xdg_surface_try_from_wlr_surface(pp->p->parent);
 	while (xs != NULL && xs->role == WLR_XDG_SURFACE_ROLE_POPUP && xs->popup != NULL) {
@@ -1067,6 +1074,10 @@ static void popup_unconstrain(popup *pp) {
 		return;
 	}
 	struct wlr_box box = { xs->geometry.x, xs->geometry.y, pp->s->default_w, pp->s->default_h };
+	toplevel *t = toplevel_find_xdg(pp->s, xs->toplevel);
+	if (t != NULL && t->has_popup_bounds) {
+		box = t->popup_bounds;
+	}
 	wlr_xdg_popup_unconstrain_from_box(pp->p, &box);
 }
 
@@ -2322,6 +2333,20 @@ void wl_server_set_fullscreen(wl_server *s, int id, int fullscreen) {
 	} else if (t != NULL && t->xs != NULL) {
 		wlr_xwayland_surface_set_fullscreen(t->xs, fullscreen != 0);
 	}
+}
+
+// Caja (coords de la surface raíz) donde deben quedar los popups de la ventana `id`:
+// el shell manda la pantalla vista desde la ventana (una flotante corrida no está en 0,0).
+void wl_server_set_popup_bounds(wl_server *s, int id, int x, int y, int w, int h) {
+	if (s == NULL) {
+		return;
+	}
+	toplevel *t = toplevel_find(s, id);
+	if (t == NULL) {
+		return;
+	}
+	t->has_popup_bounds = w > 0 && h > 0;
+	t->popup_bounds = (struct wlr_box){ x, y, w, h };
 }
 
 void wl_server_set_default_size(wl_server *s, int w, int h) {

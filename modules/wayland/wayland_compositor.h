@@ -115,6 +115,7 @@ public:
 
 	void set_size(int p_id, const Vector2 &p_size);
 	void set_maximized(int p_id, bool p_maximized);
+	void set_popup_bounds(int p_id, const Rect2 &p_box);
 	void set_fullscreen(int p_id, bool p_fullscreen);
 	void close(int p_id);
 	void focus(int p_id, bool p_raise = true);
