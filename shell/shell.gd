@@ -115,6 +115,7 @@ var pending_wayland = ""
 # con el lanzamiento correcto.
 var pending_launches = []
 var requested_sizes = {}
+var popup_owners = []        # ventanas con popups abiertos este frame (van arriba de todo)
 var popup_bounds_sent = {}  # id -> Rect2 enviada a set_popup_bounds
 var resize_since = {}     # id -> ms del último set_size (estirar la textura mientras llega)
 const RESIZE_STRETCH_MS = 600
@@ -952,8 +953,12 @@ func _tick_csd_grip(now):
 # Orden de hit-test de las ventanas: flotantes de arriba hacia abajo (z-order),
 # luego las tiled en el orden de `tiles`. Las que aún no están en el layout van al final.
 func _hit_order_ids():
-	var out = float_layout.ids_z()
-	out.invert()
+	var out = popup_owners.duplicate()  # sus menús van encima de todo (también al clic)
+	var floats = float_layout.ids_z()
+	floats.invert()
+	for id in floats:
+		if not out.has(id):
+			out.append(id)
 	for id in tiles:
 		if not out.has(id):
 			out.append(id)
@@ -2396,6 +2401,32 @@ func _resize_pending(id, geo, rect, now):
 # Le dice al compositor dónde pueden caer los popups de la ventana: la vista entera
 # en coords del buffer raíz. Él no sabe dónde dibuja el shell la ventana (una flotante
 # corrida no está en 0,0) y acomodaba los menús fuera de pantalla o recortados.
+# ¿Alguna capa secundaria (popup) sale de la geometría de la ventana? Las subsuperficies
+# (video, etc.) quedan dentro y no cuentan: sólo lo que sobresale puede quedar tapado.
+func _layers_overflow(layers, geo):
+	if layers.size() < 2 or geo.size.x <= 0.0 or geo.size.y <= 0.0:
+		return false
+	var box = geo.grow(2.0)
+	for i in range(1, layers.size()):
+		var lr = layers[i].rect
+		if lr.size.x > 0.0 and lr.size.y > 0.0 and not box.encloses(lr):
+			return true
+	return false
+
+
+# Una ventana con un menú abierto va arriba de todo: si no, su popup quedaba tapado por
+# una vecina (tiled) o una flotante que estuviera encima. Su chrome queda justo debajo.
+func _raise_popup_owners():
+	for id in popup_owners:
+		var n = tile_nodes.get(id)
+		if n == null or not is_instance_valid(n):
+			continue
+		var d = deco_nodes.get(id)
+		if d != null and is_instance_valid(d):
+			view.move_child(d, view.get_child_count() - 1)
+		view.move_child(n, view.get_child_count() - 1)
+
+
 # ¿`pos` cae en alguna capa de popup (índice >= 1) de la ventana `id`?
 func _popup_layer_hit(id, r, fit, pos):
 	var layers = compositor.get_layers(id)
@@ -2451,11 +2482,13 @@ func _update_tiles():
 			if node != null and is_instance_valid(node):
 				node.queue_free()
 	var now = OS.get_ticks_msec()
+	popup_owners = []
 	for id in tiles:
 		if _id_alive(id):
 			_update_tile(id, now)
 			if expose:
 				compositor.get_layers(id)  # cuenta como dibujado: la miniatura sigue viva
+	_raise_popup_owners()
 
 
 func _update_tile(id, now):
@@ -2489,6 +2522,8 @@ func _update_tile(id, now):
 	tile_fit[id] = fit
 	if not expose:
 		_sync_popup_bounds(id, rect, fit)
+		if not minimized.has(id) and _layers_overflow(layers, geo):
+			popup_owners.append(id)  # un popup sale de la ventana (ver _raise_popup_owners)
 
 	# Transición de modo tiled<->flotante (K13): interpola desde el rect visual
 	# previo hacia `rect`. Se deja para después de exposé/intro/zoom.
