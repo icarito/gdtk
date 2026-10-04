@@ -1446,6 +1446,24 @@ func _shared_snapshot():
 			sessions.append({"host": hsid, "peer_name": name, "type": "screen",
 				"side": dir, "state": "starting"})
 	var remote = shell.remote_shares if shell.get("remote_shares") != null else []
+	# Teclado compartido por el servicio global (Pantallas): cuenta aunque el par no esté
+	# descubierto, ni confirmado, ni marcado en host_deskflow. Sin esto la dockapp no
+	# aparecía cuando sólo se compartía el teclado.
+	if shell.has_method("deskflow_input_sessions"):
+		remote = remote.duplicate()
+		for d in shell.deskflow_input_sessions():
+			var pname = String(d.peer_name)
+			var dup = false
+			for s in sessions:
+				if String(s.type) == "input" and (String(s.peer_name) == pname or String(s.host) == pname):
+					dup = true
+			if dup:
+				continue
+			if String(d.direction) == "out":
+				sessions.append({"host": pname, "peer_name": pname, "type": "input",
+					"side": String(d.side), "state": "active"})
+			else:
+				remote.append({"peer_name": pname, "type": "input", "side": String(d.side), "state": "active"})
 	var windows = shell._share_windows() if shell.has_method("_share_windows") else []
 	# Ubicación guardada por la vista Grupo ({clave o nombre: grados}) y foco/captura:
 	# ambos opcionales, con guarda (el shell puede no exponerlos todavía).

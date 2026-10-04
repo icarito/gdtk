@@ -5559,6 +5559,33 @@ func _deskflow_tick(now):
 	_toggle_service_by_name("Deskflow")
 
 
+# Teclado y mouse compartidos según el servicio global (lo que configura Pantallas), no
+# sólo los pares marcados en host_deskflow: share_here = este equipo controla a los
+# vecinos de la topología; use_remote = este equipo es controlado por `host`. Lo usa la
+# dockapp "Compartiendo" para aparecer aunque sólo se comparta el teclado.
+func deskflow_input_sessions():
+	var out = []
+	if settings_bridge == null or settings_bridge.model == null or not _service_running("Deskflow"):
+		return out
+	var cfg = settings_bridge.model.deskflow(settings_bridge.settings.get("deskflow", {}))
+	var mode = String(cfg.get("mode", "off"))
+	if mode == "share_here":
+		var local = _deskflow_local_name(String(cfg.get("name", "")))
+		var side_of = {"up": "north", "down": "south", "right": "east", "left": "west"}
+		for e in SCREEN_LAYOUT.topology(settings_bridge.settings.get("screens", {}), local):
+			if String(e.get("screen", "")) != local:
+				continue
+			var peer = String(e.get("peer", ""))
+			if peer != "":
+				out.append({"peer_name": peer, "side": String(side_of.get(String(e.get("edge", "")), "north")),
+					"direction": "out"})
+	elif mode == "use_remote":
+		var host = String(cfg.get("host", "")).strip_edges()
+		if host != "":
+			out.append({"peer_name": host, "side": "north", "direction": "in"})
+	return out
+
+
 func _deskflow_activity():
 	for a in ACTIVITIES:
 		if a.has("service") and String(a.get("name", "")) == "Deskflow":
