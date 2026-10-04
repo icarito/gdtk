@@ -1,0 +1,24 @@
+Creá el modelo puro `shell/audio_send.gd` y su test `tests/audio_send_test.gd` para la función «Enviar audio a otro equipo» del Grupo (plan: `.operator-shared/plans/group-send-window-audio.md`).
+
+Write set EXCLUSIVO: shell/audio_send.gd (nuevo), tests/audio_send_test.gd (nuevo). No toques ningún otro archivo.
+
+Godot 3.6 GDScript (NO Godot 4). `extends Reference`, sólo funciones `static`, sin I/O, sin OS.execute, sin Nodes. El shell ejecuta los argv que devolvés con OS.execute("pactl", argv, true, out).
+
+API exacta:
+- `const RECV_PORT = 4714`
+- `static func sink_name(hid)` -> "gdtk_send_" + hid con todo carácter fuera de [A-Za-z0-9_] reemplazado por "_".
+- `static func recv_load_argv(sender_ip, port = RECV_PORT)` -> ["load-module", "module-native-protocol-tcp", "port=<port>", "auth-ip-acl=<ip>", "auth-anonymous=1"]; devuelve [] si `sender_ip` no es IPv4/IPv6 válida (String.is_valid_ip_address()) o port fuera de 1..65535.
+- `static func tunnel_load_argv(peer_ip, port, hid)` -> ["load-module", "module-tunnel-sink", "server=tcp:<ip>:<port>", "sink_name=<sink_name(hid)>"]; IPv6 va entre corchetes: "server=tcp:[fe80::1]:4714". [] si ip o port inválidos.
+- `static func unload_argv(module_id)` -> ["unload-module", str(int)]; [] si module_id <= 0 o no numérico.
+- `static func parse_module_id(out_text)` -> int del primer renglón no vacío de la salida de `pactl load-module` (ej. "536870916\n"); -1 si no es entero.
+- `static func parse_default_sink(info_text)` -> nombre tras "Default Sink: " en la salida de `pactl info`; "" si falta.
+- `static func parse_sink_inputs(short_text)` -> Array de ints: primera columna (separada por TAB) de cada renglón de `pactl list short sink-inputs`; ignora renglones vacíos o no numéricos.
+- `static func move_argvs(input_ids, sink)` -> Array de argv ["move-sink-input", str(id), sink] por cada id; [] si sink == "".
+
+Test `extends SceneTree` con el patrón del repo (mirá tests/peer_link_test.gd: `check()`, contador de fallas, `OS.exit_code`, `quit()` en `_init`). Cubrí cada función incluyendo los casos inválidos e IPv6.
+
+Correlo SÓLO así, desde el repo:
+/home/icarito/Proyectos/godot3-box3d/godot-dev/bin/godot.frt.opt.tools.x86_64.gdtk --no-window --path shell -s $PWD/tests/audio_send_test.gd
+Ruido previo de RemoteInput/host.gd/WaylandCompositor es conocido; vale que aparezcan las líneas ok y exit 0.
+
+No investigues la config del usuario ni otros archivos fuera de AGENTS.md y tests/peer_link_test.gd. No hagas commit, deploy, rsync ni recarga. No reviertas cambios ajenos: hay otros agentes en el repo. Reportá API y salida literal del test.

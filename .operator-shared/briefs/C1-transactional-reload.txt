@@ -1,0 +1,10 @@
+Implementá C1 de `.operator-shared/specs/SPEC-session-continuity.md`. Leé también `AGENTS.md` y `SPEC-architecture.md`. Godot 3.6 GDScript, no sintaxis Godot 4.
+
+Objetivo: hacer que una recarga con `shell.gd` inválido conserve el shell activo y que el swap válido sea transaccional. Corregí el `.new()` sobre un posible null. `reload_shell()` debe devolver bool y publicar `Host.reload_status` con los estados de la spec. Diseñá helpers pequeños en `main.gd` si hacen auditable el handoff. No reinicies el proceso por un error esperado de compilación.
+
+Agregá una prueba automatizada que no levante el compositor real. Puede ser un test de un helper/modelo puro nuevo si desacoplar la decisión de handoff es necesario; evitá tests frágiles que sólo busquen texto. Actualizá `tests/parse_check.gd` sólo si hace falta incluir un archivo nuevo.
+
+Write set: `shell/main.gd`, `shell/host.gd`, un helper nuevo bajo `shell/` si es necesario, un test nuevo bajo `tests/`, y `tests/parse_check.gd` sólo si corresponde. Hay cambios ajenos sin commitear en el repo: no los reviertas ni reformatees fuera del write set. No tocar `shell/shell.gd`, `shell/frame.gd`, `session/` ni otras specs. No commit, no deploy, no rsync, no ssh y no recargar/reiniciar el shell principal.
+
+Verificación: corré el test nuevo con el binario dev indicado por AGENTS.md y hacé parse check seguro de los scripts tocados. Reportá archivos, decisiones, comandos y resultados.
+

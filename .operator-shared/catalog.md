@@ -1,0 +1,125 @@
+# Shared Partition Catalog
+
+## Tree
+
+- `operator.md`
+  - Description: Operator Instructions for this partition.
+  - Read If: Auto-injected.
+- `catalog.md`
+  - Description: This catalog.
+  - Read If: Auto-injected.
+- `README.md`
+  - Description: Public explainer of Operator Memory for repo readers.
+  - Read If: Never needed for project work.
+
+### `specs/` - Contratos del sistema (Pasos de construcción + diseño Sugar). Nombres citados por el código; no renombrar.
+
+- `SPEC-architecture.md`
+  - Description: Mapa de capas/procesos, contratos transversales (hilo de render, modelos puros, Host.sc, ciclo de vida de procesos) y tabla «dónde va cada cosa».
+  - Read If: Antes de agregar cualquier funcionalidad nueva, o si no sabés en qué archivo va algo.
+- `SPEC-session-continuity.md`
+  - Description: Contratos de recarga transaccional, heartbeat, promoción de contenido y límite entre rollback de scripts y runtime.
+  - Read If: Tocando `Host`, `main.gd`, supervisor, version store, recuperación o continuidad de ventanas.
+- `SPEC-isolated-development.md`
+  - Description: Lanzador anidado con runtime/XDG/puertos/store aislados para iterar sin afectar la sesión viva.
+  - Read If: Creando herramientas de prueba visual, instancias anidadas o tests e2e del shell.
+- `SPEC-power-governor.md`
+  - Description: Control seguro y verificable del governor con helper mínimo, acción PolicyKit dedicada y provisión explícita.
+  - Read If: Tocando el DockApp de energía, `sysmon.gd`, governors, pkexec o reglas de privilegios.
+- `MOCKUP-sugar-frame.svg`
+  - Description: Mockup del Frame Sugar (bordes y bloques).
+  - Read If: Diseño visual del Frame.
+
+- `SPEC.md`
+  - Description: POC del módulo `imgui` para Godot 3.6 (paso 1-2).
+  - Read If: Tocando `modules/imgui` o su API base.
+- `SPEC-shell.md`
+  - Description: Paso 3: shell tipo Sugar (FRT/SDL2, Wayland nativo).
+  - Read If: Arranque/estructura del shell, `run_shell.sh`.
+- `SPEC-compositor.md`, `SPEC-dmabuf.md`, `SPEC-popups.md`
+  - Description: Pasos 4, 5, 7: compositor Wayland anidado, zero-copy dmabuf, popups/subsurfaces vía wlroots.
+  - Read If: Tocando `modules/wayland` (compositor, buffers, popups).
+- `SPEC-control.md`
+  - Description: Paso 6: control remoto JSON-RPC del shell + puente MCP.
+  - Read If: Tocando `shell/remote.gd`, `mcp/` o RPCs nuevos.
+- `SPEC-windows.md`
+  - Description: Paso 8: diálogos y ventanas sin actividad (parent, app_id).
+  - Read If: Ventanas toplevel sin actividad, diálogos.
+- `SPEC-keys.md`
+  - Description: Paso 9: teclado físico real en FRT (guion, Ctrl+letra, AltGr).
+  - Read If: Mapeo de teclas FRT/SDL2 → compositor.
+- `SPEC-imgui-api.md`
+  - Description: Paso 10: API ImGui + ImPlot/ImPlot3D + menú radial.
+  - Read If: Extendiendo la API GDScript de ImGui.
+- `SPEC-hud.md`, `SPEC-hud-remote.md`
+  - Description: Paso 11/11b: HUD de debug, contadores, benchmark y perfilado remoto.
+  - Read If: Métricas, HUD, `gdtk_metrics`, rendimiento.
+- `SPEC-ime.md`
+  - Description: IME y teclado en pantalla (K14); requiere recompilar el motor.
+  - Read If: Entrada de texto compuesta, OSK.
+- `SPEC-hybrid-windows.md`, `SPEC-wm-mode.md`
+  - Description: Gestión de ventanas por ventana (flotante + mosaico) y modo WindowMaker (K13). El modo es por ventana, no global.
+  - Read If: Tiling, flotantes, decoraciones, exposé, modo ventanas.
+- `SPEC-ui-rework-2026-10.md`
+  - Description: Rediseño Vecindario/Configuración/ventanas: vocabulario de UI, decisiones 2026-10-01 (Extender ≠ Controlar), K16-K19 (pin/autohide de barras).
+  - Read If: Cualquier UI de Vecindario, Configuración, Frame pin/autohide; vocabulario para usuarios.
+- `SPEC-sugar-journal-neighborhood.md`, `SPEC-sugar-neighborhood-host-actions.md`
+  - Description: Dirección de producto Diario/Vecindario; hosts descubiertos y acciones compartidas (Wi-Fi ≠ presencia, host ≠ persona).
+  - Read If: Vecindario, mDNS, acciones por host, Diario.
+- `SPEC-screen-share-compass.md`
+  - Description: Brújula de pantalla compartida: direcciones N/S/E/O, gvd (extender) vs Deskflow (controlar), receptor 1:1 sin escalar.
+  - Read If: gvd, Deskflow, layout de pantallas entre hosts.
+- `SPEC-embedded-multi-output.md`
+  - Description: Salidas múltiples dentro del compositor embebido: Frame sólo en la principal, workspaces/ventanas por output, captura offscreen para gvd y base común para multi-monitor físico.
+  - Read If: Implementando gdtk como emisor, salidas virtuales, captura gvd, cruce de ventanas entre pantallas o soporte multi-monitor.
+- `SPEC-sugar-frame-blocks.md`, `SPEC-sugar-frame-applets.md`
+  - Description: Frame de bloques cuadrados Sugar/NeXT y applets (estados, fuentes, registro `applet_mods`, Portapapeles).
+  - Read If: Tocando `shell/frame.gd` o `shell/applet_*.gd`.
+- `SPEC-sugar-group-2026-10.md`
+  - Description: Grupo (zoom Sugar), Vecindario sin solapes, Hogar por orientación, dockapp Compartiendo (G1-G5), portapapeles y enviar audio/ventanas.
+  - Read If: Vista Grupo, dockapp Compartiendo, briefs `.operator-shared/briefs/G*.txt`.
+- `SPEC-sugar-home-visual.md`, `SPEC-sugar-resource-ring.md`, `SPEC-sugar-spatial.md`
+  - Description: Hogar: identidad visual, anillo de recursos, orientación espacial del shell.
+  - Read If: Vista Hogar, anillo, navegación espacial entre vistas.
+- `SPEC-blackboard-2026-09-30.md`
+  - Description: Pizarra de ideas Vecindario/Hogar/Frame (2026-09-30), previa a las specs Sugar.
+  - Read If: Rastreando el origen de una decisión de diseño Sugar.
+
+### `guides/` - Cómo hacer cosas recurrentes (tutoriales verificados)
+
+- `session-continuity.md`
+  - Description: Recarga transaccional vs corte controlado, sync, heartbeat/rollback y provisión del governor.
+  - Read If: Iterando, aplicando cambios, recuperando una caída o antes de reiniciar la sesión.
+
+- `dockapp.md`
+  - Description: Tutorial de dockapp/applet del Frame: contrato del módulo, registro en `applet_mods`, worker, scripts de `session/`, tests; ejemplo Portapapeles.
+  - Read If: Crear o modificar un applet/dockapp del Frame, o cualquier módulo con worker.
+
+### `briefs/` - Briefs de delegación a Kilo (`G*.txt`, `W*.txt`); sirven de modelo para nuevos
+
+### `sessions/` - Bitácoras de sesiones `/polish` (`YYYY-MM-DD_<tema>.md`): estado, hechos, decisiones, próximos pasos
+
+- `2026-10-03_grupo.md`, `2026-10-04_grupo-gestos.md`
+  - Description: Polish de Grupo, Vecindario, Hogar, dockapp Compartiendo y cadena vertical.
+  - Read If: Retomando trabajo de Grupo/Vecindario/gestos.
+- `2026-10-03_ventanas.md`
+  - Description: Polish de ventanas (exposé, arrastre, tamaño live).
+  - Read If: Retomando trabajo de ventanas.
+- `2026-10-04_portapapeles-grupo.md`
+  - Description: Portapapeles sin ext-data-control en el binario; «Extender» ausente en Grupo.
+  - Read If: Retomando el applet Portapapeles o el menú de Grupo.
+- `2026-10-04_enviar-audio-ventana.md`
+  - Description: Grupo: compartir ventanas por gvd y audio por equipo, arrastrando en Grupo; e2e tengu ↔ cupid y pendientes.
+  - Read If: Retomando envío de audio/ventanas o el canal peer.
+- `2026-10-04_cuelgue-cursor.md`
+  - Description: Diagnóstico del cuelgue del shell en bastion (resuelto f26c8a4).
+  - Read If: El shell se cuelga o el cursor se congela.
+
+### `plans/` - Planes vigentes
+
+- `tech-debt.md`
+  - Description: Registro priorizado de deuda técnica (objetos dios, código muerto, portapapeles partido, tests no aislados, deploy).
+  - Read If: Planificando refactors, algo «raro» en tests/deploy, o antes de agrandar `shell.gd`/`frame.gd`.
+- `bastion-migration.md`
+  - Description: Veredicto y bloqueantes para migrar bastion de GNOME a gdtk.
+  - Read If: Priorizando trabajo, o sesión diaria / funciones de GNOME faltantes.

@@ -1,0 +1,14 @@
+Implementá `.operator-shared/specs/SPEC-power-governor.md`. Leé también `AGENTS.md`, `SPEC-architecture.md`, `shell/sysmon.gd` y la documentación primaria de polkit enlazada en la spec. Godot 3.6 GDScript.
+
+Problema observado: `sysmon.set_governor()` ejecuta `pkexec sh -c "echo ... > sysfs"`, abre un diálogo en la sesión anfitriona que no se puede controlar por Deskflow y además acepta una shell privilegiada. En Cupid a veces funciona tras autenticar localmente. La UI marca éxito antes de verificar el cambio.
+
+Diseño requerido:
+- Crear un helper privilegiado mínimo, sin `sh -c`, que acepte exactamente un governor como argumento, valide token estricto y membresía en `scaling_available_governors`, y escriba todas las políticas CPU presentes (`/sys/devices/system/cpu/cpufreq/policy*/scaling_governor`, con fallback cpu0). Fallo parcial => rc no cero y diagnóstico corto sin secretos.
+- Crear una acción `.policy` dedicada a la ruta instalada del helper usando `org.freedesktop.policykit.exec.path`. Para una sesión local activa, `allow_active=yes`; `allow_any=no`, `allow_inactive=no`. La documentación oficial advierte que pkexec no valida argumentos, por eso el helper debe validarlos por sí mismo. No permitir GUI ni comandos arbitrarios.
+- Crear un instalador/provisionador explícito bajo `session/` que sólo instale el helper root-owned 0755 y la policy 0644 en rutas del sistema cuando el operador lo ejecute con sudo. No ejecutarlo ahora ni desde deploy automático.
+- El lado usuario llama `pkexec --disable-internal-agent <helper> <governor>` de forma no bloqueante para evitar prompt textual. No afirmar éxito: mostrar estado `aplicando`, volver a muestrear sysfs y publicar `ok/error/no_configurado`. Si helper/policy no están instalados, error accionable y sin diálogo.
+- Extraer validación/plan de comando a un helper puro testeable. No cambiar realmente el governor durante tests.
+
+Write set: `shell/sysmon.gd`, un modelo puro nuevo `shell/governor_control.gd`, tests nuevos del modelo, nuevos archivos `session/gdtk-governor*` y policy bajo `session/`, `session/DEPS.md`, y `deploy.sh` sólo para copiar artefactos no privilegiados a `~/gdtk/session/` (no instalarlos en `/usr`). `shell/frame.gd` sólo si es imprescindible para mostrar `aplicando/error`; preservá cambios ajenos. No tocar otros archivos. No commit, no deploy, no sudo, no pkexec real, no escribir sysfs, no ssh y no recargar/reiniciar el shell.
+
+Verificación: tests del modelo/helper contra un árbol sysfs falso configurable por env; prueba que rechaza inyección/nombre no disponible, actualiza todas las policies falsas y reporta fallo parcial. Parseo seguro de GDScript. Reportá resultados y el comando manual de provisión, pero no lo ejecutes.

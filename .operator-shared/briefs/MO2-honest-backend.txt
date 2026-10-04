@@ -1,0 +1,11 @@
+Implementá la Fase A de `.operator-shared/specs/SPEC-embedded-multi-output.md`: impedir que una sesión gdtk use el `HEADLESS-*` del sway exterior como falsa extensión.
+
+Write set EXCLUSIVO:
+- shell/gvd_launch.gd
+- tests/gvd_launch_test.gd (nuevo, preferido) O el test existente específicamente dedicado a gvd_launch si existe
+
+Requisitos: `local_emit_backend()` debe distinguir gdtk de sway convencional. Mientras el broker embedded no anuncie capacidad, gdtk no puede devolver un backend emisor válido ni producir `--virtual`; sway sí conserva `wlr`, GNOME conserva `mutter`. Diseñá la firma para aceptar una capacidad embedded explícita sin leer entorno/I/O; con capacidad devuelve un backend estable `gdtk`. `local_send_argv` debe poder expresar luego `--capture gdtk --output <id>` sólo con output id validado, pero no rompas invocaciones existentes. Actualizá selftest/tests para regresión: `desktop=gdtk + SWAYSOCK` jamás equivale a sway.
+
+Godot 3.6, lógica pura. Corré sólo tests del área con el binario dev. No edites shell.gd, tools/gvd ni otros archivos. No hagas commit, deploy, rsync ni recarga. Preservá cambios ajenos; no estás solo en el repo.
+
+Leé AGENTS.md, SPEC-architecture.md, SPEC-screen-share-compass.md y la spec asignada. Reportá API, compatibilidad y tests.

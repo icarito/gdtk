@@ -10,3 +10,5 @@ kilo_*.log
 .frt-baseline/
 # Copia local generada al correr el proyecto desde un HOME no estándar (no versionar).
 /icarito-none/
+# Capturas y logs viejos de corridas locales (sacados de la raíz).
+/.attic/

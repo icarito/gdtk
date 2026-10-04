@@ -146,6 +146,12 @@ como `recv --sink wayland` hoy); en el **emisor** es un monitor extra del span
 (pantalla compartida), cuya arista determina la dirección y el arrastre de
 ventanas. No son dos modos distintos del cable.
 
+El receptor **nunca escala**: el emisor crea el monitor virtual a la resolución del
+tile receptor y se muestra 1:1. `force-aspect-ratio` hace que `waylandsink` pida
+`wp_viewporter`, que el compositor embebido no implementa (SEGV); el sink es `auto`.
+Pendiente: canal receptor → emisor para redimensionar el monitor virtual cuando
+cambia el tile.
+
 ## 5. Acciones por host
 
 `gvd` (sólo si `role=recv`):
@@ -176,9 +182,10 @@ Deskflow es el caso donde la dirección **tiene efecto real de input**:
   "propuesta pendiente".
 - Cliente Deskflow local (`use_remote_input`) usa el layout del servidor remoto;
   el compás local sólo alimenta la pista visual y la propuesta.
-- Reutilizar `_toggle_service()`, `_service_running()` y `service_pids` con la
-  actividad "Deskflow"; la config se regenera de forma determinista antes del
-  toggle y es borrable. No crear un segundo ciclo de vida.
+- Reutilizar `_toggle_service()`, `_service_running()` y `service_pids` con el
+  servicio "Deskflow" (`SERVICES`, sin ícono en el anillo); la config se regenera de
+  forma determinista y es borrable. No crear un segundo ciclo de vida. Única entrada:
+  el interruptor del Grupo (SPEC-sugar-group-2026-10 «Teclado y mouse»).
 - El portapapeles viaja por el mismo vínculo pero es permiso aparte (`clip`).
 
 ## 7. Cómo gvd usa la dirección

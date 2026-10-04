@@ -1,0 +1,11 @@
+Implementá la Fase B (sólo modelo puro) de `.operator-shared/specs/SPEC-embedded-multi-output.md`.
+
+Write set EXCLUSIVO:
+- shell/output_layout.gd (nuevo)
+- tests/output_layout_test.gd (nuevo)
+
+Godot 3.6 GDScript, no Godot 4. `extends Reference`, funciones static, sin I/O ni Nodes. Debe cubrir: descriptor primary; add de salida remota N/S/E/O sin solapes; validación de exactamente una primary; conversión global/local; output en un punto y cruce de borde; asignar/mover ventanas entre outputs; retirada de output que devuelve todas sus ventanas a primary; rechazo de ids/rects/direcciones inválidos. Diseñá una API pequeña que pueda cablearse luego desde Host/shell.
+
+Test `extends SceneTree` con patrón del repo y binario dev indicado por AGENTS.md. Corré sólo tu test. No edites ningún otro archivo. No hagas commit, deploy, rsync ni recarga. No reviertas cambios ajenos: no estás solo en el repo.
+
+Leé primero AGENTS.md, SPEC-architecture.md y la spec asignada. Al terminar reportá API, archivos y resultado literal del test.

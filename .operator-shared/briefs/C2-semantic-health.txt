@@ -1,0 +1,10 @@
+Implementá C2 y la promoción de contenido de `.operator-shared/specs/SPEC-session-continuity.md`. Leé también `AGENTS.md` y `SPEC-architecture.md`.
+
+Objetivo: el supervisor sólo promueve `last_good` cuando observa progreso semántico del PID correcto; un PID meramente vivo o heartbeat estancado no se promueve. Implementá lectura/validación del `health.json` atómico según la spec y quitá `--no-check` de `autogood`. Conservá compatibilidad de arranque: heartbeat ausente no debe matar por defecto. La terminación por cuelgue sólo se habilita con `GDTK_HEALTH_KILL_HUNG=1`.
+
+El productor GDScript NO pertenece a este write set: para los tests usá un binario/doble que escriba heartbeat avanzando o estancado. Extendé la cobertura del store/supervisor completamente en temporales.
+
+Write set: `session/gdtk-supervisor`, `session/gdtk-version`, `tests/version_store_test.sh` y, si mejora claridad, un helper POSIX nuevo bajo `session/` más su test bajo `tests/`. No tocar `shell/`, deploy, specs ni instalación. Hay cambios ajenos: no revertirlos. No commit, no deploy, no rsync, no ssh y no señalar/matar la sesión real.
+
+Verificación: `tests/version_store_test.sh` debe quedar verde y los casos deben demostrar explícitamente “estancado no promueve” y “avanza sí promueve”. Reportá archivos y resultados.
+

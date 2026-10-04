@@ -22,6 +22,11 @@ Decisiones tomadas con el usuario:
 - Gesto en Grupo = arrastrar el equipo a un lado del ícono central → se imanta (dirección) → popup con
   dos interruptores "Extender mi pantalla" / "Compartir teclado y mouse". Clic derecho = mismo menú.
 - Zoom: F1 Vecindario, F2 Grupo, F3 Hogar (F4 vuelve a la actividad), y Super+rueda vertical / pinch.
+- Cadena vertical (gesto de 3 dedos): Vecindario → Grupo → pantalla → exposé → Hogar → Apps (sin ventanas se
+  saltan pantalla y exposé; `swipe_model.vertical_levels`). La rueda **sin** Super sobre los bloques
+  Vecindario/Grupo/Hogar del Frame o sobre el ícono central de la vista avanza un nivel de esa misma cadena con
+  las mismas transiciones (`shell._wheel_vchain`): rueda arriba = dedos arriba; una muesca = un nivel (ráfagas
+  recortadas a 300 ms). Fuera de esas anclas la rueda conserva su uso.
 - Hogar: transición de zoom + anillo relativo a la orientación (los dos primeros íconos a lo ancho en
   landscape, a lo alto en portrait).
 
@@ -68,6 +73,50 @@ Decisiones tomadas con el usuario:
   dos interruptores que disparan las acciones existentes (`share_my_screen` vía `_start_gvd_screen`,
   `serve_input_here` vía `_run_deskflow_server`). Offline → interruptores deshabilitados con razón.
 - Vocabulario: SPEC-ui-rework "Vocabulario de producto" (nunca gvd/deskflow/hid…).
+
+- Menú único (2026-10-04): en Grupo, cualquier equipo (clic, clic derecho o Enter) abre el MISMO menú:
+  «Extender mi pantalla» y «Compartir teclado y mouse», cada uno con su propio Encendido/Apagado, y al
+  final «Quitar del grupo» o «Añadir a mi grupo». Nunca cae al menú del Vecindario.
+
+### Teclado y mouse: una sola entrada (2026-10-04)
+- Deskflow se enciende y apaga SÓLO con el interruptor «Compartir teclado y mouse» del Grupo. No hay
+  ícono en el anillo del Hogar, ni página «Compartir control» en Configuración, ni acciones de
+  teclado y mouse en el menú del Vecindario. La dockapp «Compartiendo» sólo puede apagar, por el
+  mismo camino.
+- Motor único: el servicio global. Encendido por equipo = `input: true` en host_directions; alguno
+  encendido → servidor (topología de Pantallas), ninguno → apagado. Se guarda en
+  `settings["deskflow"]`, que ahora escribe el shell (Configuración conserva lo del disco al guardar).
+- El otro equipo no configura nada: el aviso `share_notify` (input) lo pone como cliente del que
+  comparte, y el «stopped» lo apaga. Un equipo que es servidor no se vuelve cliente.
+- Al iniciar sesión se restaura solo (`auto`), en ambos lados.
+
+### Portapapeles del Grupo (2026-10-04)
+- Siempre compartido entre los equipos del Grupo, sin opción ni configuración: cada copia local de
+  texto (vigía `session/gdtk-clipboard`, ext-data-control) va por el canal peer (`clip_set`, token
+  por par) a todos los miembros alcanzables; el receptor la pone como su selección.
+- Sólo texto, hasta 64 KiB. Lo marcado sensible no se guarda y por lo tanto no viaja.
+- Lo recibido no se reenvía (anti-rebote). El texto viaja por archivo en `XDG_RUNTIME_DIR`, nunca
+  por argumentos. LAN de confianza: el canal no cifra.
+
+### Enviar audio y ventanas (2026-10-04)
+- Sin menú: todo es arrastrar y soltar en la vista Grupo. El destino se resuelve con
+  `neighborhood_ui.group_drop_target` (equipo encendido, o «Este equipo» en el centro).
+- **Ventana** = compartir en vivo por gvd (espejo: la local sigue visible). Arrastrar el bloque de la
+  ventana del Frame sobre un equipo → `window_cast.gd` la compone fuera de pantalla y la vuelca a
+  `$XDG_RUNTIME_DIR/gdtk/win-<hid>.frames` (archivo con seqlock, nunca FIFO: SIGPIPE tumbaría el
+  shell) → `gvd send --capture shm` → del otro lado el mismo receptor «Pantalla compartida» que al
+  extender (`gvd_recv`). Se deja de compartir SÓLO cerrando una de las dos ventanas: la original
+  (corta y cierra el receptor remoto) o la «Pantalla compartida» del otro lado (que termina su
+  `gvd recv` y avisa al emisor con `share_stop`). No hay gesto para soltar. Todo cierre de ventana
+  pasa por `shell._close_window_id`. Una ventana por equipo a la vez (un receptor por puerto).
+- **Audio** = independiente y por equipo: applet «Audio» del Frame (`applet_audio.gd`). Soltarlo
+  sobre un equipo saca TODO el sonido por ahí; sobre «Este equipo» lo trae de vuelta. Túnel
+  PulseAudio/PipeWire por `pactl` (`audio_send.gd`): el receptor abre `module-native-protocol-tcp`
+  (4714) sólo con `auth-ip-acl` = IP del pedido peer (nunca `auth-anonymous`); el emisor crea
+  `module-tunnel-sink`, lo pone por omisión y muda los streams; volver restaura en ambos lados. Un
+  destino a la vez, no se persiste, se apaga solo al salir el shell. Anda con PipeWire y PulseAudio.
+- Métodos peer `audio_recv`/`audio_stop`. Como todo cambio de `peer_link.METHODS` o de un `preload`
+  (p. ej. `gvd_launch.gd`), entra con el reinicio del proceso del shell; una recarga no alcanza.
 
 ### G5 — Dockapp "Compartiendo" en ambos Frames
 - `shared_block.gd`: además de bloques por sesión, `diagram(sessions)` → un bloque con mini-diagrama:

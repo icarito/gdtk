@@ -1,0 +1,12 @@
+Implementá el productor C2 de `.operator-shared/specs/SPEC-session-continuity.md`. Leé `AGENTS.md` y `SPEC-architecture.md`. Godot 3.6 GDScript.
+
+Objetivo: el event loop de Godot escribe atómicamente `$XDG_RUNTIME_DIR/gdtk/health.json` aproximadamente a 1 Hz con `pid`, `generation`, `sequence`, `monotonic_ms` y `reload`. Debe avanzar sólo cuando el hilo principal procesa el tick; un cuelgue deja de avanzar. Usá temporal + `Directory.rename`, directorio modo razonablemente privado si Godot 3 lo permite, y no incluyas secretos. `generation`/`reload` salen de `Host.reload_status`, con defaults seguros durante arranque. En `GDTK_ISOLATED=1` debe escribir dentro del XDG temporal heredado, no desactivarse.
+
+Preferí un helper puro `extends Reference` para construir/decidir el snapshot, con test headless. El I/O y `_process` pueden vivir en `host.gd`, que ya fue modificado por C1: preservá esos cambios. No hagas polling, procesos ni I/O en `shell.gd`; Host es la capa persistente correcta y la escritura queda limitada a 1 Hz.
+
+Agregá `session/gdtk-health` a la lista de rsync de `deploy.sh`, únicamente ese token y sin reformatear la línea ni pisar cambios ajenos.
+
+Write set: `shell/host.gd`, un helper nuevo bajo `shell/`, su test nuevo bajo `tests/`, y `deploy.sh` sólo la lista de scripts de sesión. No tocar `shell/main.gd`, `shell/shell.gd`, supervisor/store, specs ni instalación. No commit, deploy, rsync, ssh ni recarga/reinicio del shell principal.
+
+Verificación: test puro con binario dev y parseo seguro de `host.gd` con el binario instalado o un parser aislado, sin instanciar Host/compositor. Reportá archivos, comandos y resultados.
+

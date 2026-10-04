@@ -1,0 +1,9 @@
+Implementá `.operator-shared/specs/SPEC-isolated-development.md`. Leé `AGENTS.md` y `SPEC-architecture.md`.
+
+Objetivo: crear un lanzador de desarrollo totalmente aislado y un test no gráfico con ejecutable doble. Respetá argumentos tras `--`, cleanup seguro y `--keep`. Elegí puertos libres sin usar 7777/7788. No uses rutas amplias ni `pkill`; validá antes de borrar el temporal creado. El test nunca debe abrir Godot real.
+
+En esta fase `GDTK_ISOLATED=1` es contrato para consumidores posteriores: no modifiques `Host` ni scripts Godot (otro write set). Documentá en la ayuda del lanzador qué integraciones aún dependen de que los consumidores honren la variable.
+
+Write set: `tools/run-isolated-shell.sh`, `tests/isolated_shell_test.sh` y la lista explícita de tests de `tools/verify_all.sh` si el runner no descubre tests automáticamente. No tocar `shell/`, `session/`, deploy, specs ni instalación. Hay cambios ajenos: no revertirlos. No commit, no deploy, no rsync, no ssh y no lanzar ni recargar el shell principal.
+
+Verificación: corré `tests/isolated_shell_test.sh`; si tocaste `verify_all.sh`, verificá su selección sin ejecutar áreas no relacionadas. Reportá archivos y resultados.

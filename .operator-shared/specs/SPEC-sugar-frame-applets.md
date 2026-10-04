@@ -20,7 +20,10 @@ de primera clase y sumables/quitables por la persona.
 Usar una lista corta de controles incorporados, cada uno con un `id` estable:
 `reloj`, `cpu`, `memoria`, `swap`, `bluetooth`, `teclado`, `deskflow`, `enlace`.
 `frame.gd` decide posición, foco y gesto; `sysmon.gd` sigue midiendo CPU/RAM/swap.
-Separar código en otro módulo sólo cuando una implementación concreta lo necesite.
+Un applet que necesita worker propio vive en `shell/applet_<id>.gd` y se registra en
+`frame.applet_mods` (contrato `state/value/detail/refresh/stop` + `draw` opcional; guía
+paso a paso en `guides/dockapp.md`). Es un diccionario id → módulo, no un sistema de
+providers: los incorporados de lectura (`recursos`, `termico`, `reloj`) siguen inline.
 
 ### Estados (comunes a todos)
 
@@ -50,6 +53,8 @@ texto**, nunca sólo por color.
 | `teclado` | `~/.config/gdtk/keyboard` y `localectl status` | abrir selector de distribución | mostrar variante/opciones |
 | `deskflow` | `shell.service_pids` + `_service_running` | prender/apagar (`_toggle_service`) | detalle en Vecindario (cuando exista) |
 | `enlace` | `nmcli -t -f TYPE,STATE,CONNECTION dev` | abrir Vecindario | — (sólo indicador) |
+| `portapapeles` | `$XDG_RUNTIME_DIR/gdtk/clipboard` (lo llena `session/gdtk-clipboard` vía `wl-paste --watch` + `ext-data-control-v1` del compositor embebido) | último ítem (resumen de una línea; texto en tooltip) | — (historial navegable más adelante) |
+| `audio` | estado del shell (túnel `pactl` hacia un equipo del Grupo) | «Aquí» o el nombre del equipo por donde suena | arrastrar sobre un equipo del Grupo / sobre «Este equipo» para volver |
 
 - **Wi-Fi no es un applet de control.** Su gestión pertenece a Vecindario
   (`SPEC-sugar-journal-neighborhood.md`). En el Frame sólo puede aparecer el bloque

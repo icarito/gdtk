@@ -30,7 +30,7 @@ Si el usuario dice "modo planear", NO toques código: devolvé plan + decisiones
    archivos/diff/test/blocker. No commitear.
 6. **Entregar** (sólo si el usuario lo pide): `rsync -a --exclude '.import' shell settings session ~/gdtk/`,
    `./deploy.sh` a tengu y cupid (+ bastion), verificar md5; commit sólo con pedido explícito.
-7. **Documentar**: actualizar el doc de sesión (`docs/agents/sessions/`) con hechos, estado y pasos
+7. **Documentar**: actualizar el doc de sesión (`.operator-shared/sessions/`) con hechos, estado y pasos
    exactos para retomar.
 
 ## Cuándo delegar (y cuándo no)
@@ -112,11 +112,11 @@ observación, con el estado en que se prueba:
   (contraseña `KILO_SERVER_PASSWORD` del environ del listener :4096, sólo en memoria).
 - Tareas chicas (las grandes cuelgan); vigilar `pgrep -af 'kilo run'` y matar colgados por PID.
 - Atajo: `tools/kilo-launch.sh <titulo> <brief.txt> &` (lee la contraseña, valida que el server esté en el
-  repo, agrega la nota anti-"board", log en /tmp/kilo-gdtk/<titulo>.jsonl). Briefs modelo: `docs/agents/briefs/`.
+  repo, agrega la nota anti-"board", log en /tmp/kilo-gdtk/<titulo>.jsonl). Briefs modelo: `.operator-shared/briefs/`.
 - Kilo ofrece `board_read/board_post`: con `kilo run` cada sesión está sola como `main` y postear falla;
   decirle que no lo use.
 - Los `kilo run` mueren si se cierra Claude Code: al retomar, verificar por tests + `git diff`.
-- Sesión en curso más reciente: ver el último `docs/agents/sessions/*.md`.
+- Sesión en curso más reciente: ver el último `.operator-shared/sessions/*.md`.
 
 ## Tests (local, puntual)
 ```sh
@@ -137,5 +137,5 @@ Scripts con clases nativas (`shell.gd`, `frame.gd`): validar parseo con `~/gdtk/
   (`local_coords`, `randomness`, `spread`, `restart()`), p. ej. `if not (node is CPUParticles): return`.
 
 ## Docs
-- Sesión: `docs/agents/sessions/YYYY-MM-DD_<tema>.md` (estado, hechos, decisiones, próximos pasos).
+- Sesión: `.operator-shared/sessions/YYYY-MM-DD_<tema>.md` (estado, hechos, decisiones, próximos pasos).
 - Specs: `SPEC-*.md` en la raíz; handoffs `HANDOFF-*.md`.

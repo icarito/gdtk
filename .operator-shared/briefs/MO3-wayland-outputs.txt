@@ -1,0 +1,16 @@
+Implementá el primer incremento autocontenido de la Fase B de `.operator-shared/specs/SPEC-embedded-multi-output.md`: API multi-output del compositor embebido, sin captura/broker todavía.
+
+Write set EXCLUSIVO:
+- modules/wayland/wl_server.h
+- modules/wayland/wl_server.c
+- modules/wayland/wayland_compositor.h
+- modules/wayland/wayland_compositor.cpp
+- tests/embedded_outputs_test.gd (nuevo; sólo si puede probar la API sin afectar sesión)
+
+IMPORTANTE: `modules/wayland/wl_server.c` ya tiene cambios ajenos sin commitear. Inspeccioná el diff y preservalo; no reformatees ni reviertas. No toques otros archivos.
+
+Alcance: colección explícita de outputs lógicos sobre el backend headless existente; primary inicial compatible con comportamiento actual; add/configure/remove; asignación/query de toplevel a output; emisión correcta de surface enter/leave donde lo permita wlroots 0.20; bindings GDScript y señales de output. La eliminación debe reasignar toplevels a primary. No implementes OutputContext, render offscreen, broker, gvd ni shell wiring. Verificá firmas contra headers instalados. Si una parte exige una decisión de render aún no disponible, dejá API y estado consistentes y documentá el límite; no simules captura.
+
+Compilá sólo si es seguro hacerlo sin instalar ni activar el binario; nunca copies a ~/gdtk/bin. Corré checks acotados posibles. No commit, deploy, rsync ni recarga. No estás solo en el repo.
+
+Leé AGENTS.md, SPEC-architecture.md, SPEC-compositor.md y la spec asignada. Reportá cambios, compatibilidad, validación y bloqueos exactos.

@@ -6,6 +6,15 @@
 locales de ImGui, Wayland/FRT, portal de input remoto y utilidades de shell tipo
 Sugar. El repo **no** es un proyecto Godot vanilla ni Godot 4.
 
+Specs (`SPEC-*.md`), guías, sesiones `/polish`, planes y briefs viven en
+`.operator-shared/` (`specs/`, `guides/`, `sessions/`, `plans/`, `briefs/`; índice en
+`.operator-shared/catalog.md`). Los comentarios del código citan las specs por nombre
+de archivo.
+
+**Antes de agregar algo**, leer `.operator-shared/specs/SPEC-architecture.md` (capas,
+contratos transversales y tabla «dónde va cada cosa»). Dockapps/applets del Frame:
+`.operator-shared/guides/dockapp.md`. Deuda conocida: `.operator-shared/plans/tech-debt.md`.
+
 ## Motor y binarios
 
 Usar siempre el fork Godot 3 del usuario, no `/usr/bin/godot`:
@@ -20,6 +29,9 @@ Para tests headless de GDScript puro también funciona el mismo binario con
 `/usr/bin/godot` puede ser Godot 4 y no sirve para este repo.
 
 ## Comandos de verificación
+
+Todos los tests, aislados de la sesión viva: `tools/verify_all.sh` (mirar `ok/FAIL`,
+no sólo el rc: hay crash conocido al salir). Correr sólo los del área tocada.
 
 Tests pequeños de modelos/parsers:
 
@@ -207,6 +219,13 @@ Notas del InputCapture (server Deskflow ↔ sway), verificadas e2e:
   shell principal una sola vez al final, después de guardar/cerrar sus clientes.
   Tras cambios de engine: **recompilar**; su activación también requiere ese corte
   controlado final.
+- Para decidir entre recarga y reinicio, consultar
+  `.operator-shared/guides/session-continuity.md`: recarga transaccional para UI
+  recargable; `Host`/`main.gd`/autoloads y engine entran sólo en el próximo login o
+  corte controlado. El heartbeat evita promover un proceso vivo pero colgado.
+- El governor del DockApp de energía requiere provisionar una vez por host con
+  `sudo ~/gdtk/session/gdtk-governor-provision install`; después usa una action
+  PolicyKit dedicada sin diálogo. Nunca volver a `pkexec sh -c` para sysfs.
 - No revertir el trabajo sin commitear de `modules/wayland/` (EIS/Deskflow) ni otros
   cambios ajenos del árbol.
 - No commitear ni deployar sin pedido explícito. Para delegación, ver "Delegación
@@ -228,8 +247,8 @@ Notas del InputCapture (server Deskflow ↔ sway), verificadas e2e:
 
 La dirección de producto está en:
 
-- `SPEC-sugar-journal-neighborhood.md`
-- `SPEC-sugar-neighborhood-host-actions.md`
+- `.operator-shared/specs/SPEC-sugar-journal-neighborhood.md`
+- `.operator-shared/specs/SPEC-sugar-neighborhood-host-actions.md`
 
 Separaciones importantes:
 
@@ -253,7 +272,7 @@ LAN confiable o red protegida.
 ## Sesiones /polish
 
 Pulido iterativo: skill `.claude/skills/iterative-list-hacking/SKILL.md` (comando `/polish`). Estado
-de la última sesión en `docs/agents/sessions/` (p. ej. `2026-10-03_grupo.md`, spec
+de la última sesión en `.operator-shared/sessions/` (p. ej. `2026-10-03_grupo.md`, spec
 `SPEC-sugar-group-2026-10.md`). Lanzar Kilo con `tools/kilo-launch.sh`.
 
 ## Delegación Kilo

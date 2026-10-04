@@ -5,7 +5,7 @@ description: "Pulido iterativo de gdtk: el usuario suelta observaciones de a una
 # /polish — Pulido iterativo (iterative-list-hacking)
 
 Fuente canónica: `.claude/skills/iterative-list-hacking/SKILL.md`. Leerla completa antes de actuar.
-Reglas del repo: `AGENTS.md` (prevalecen). Sesión de continuidad en `docs/agents/sessions/`
+Reglas del repo: `AGENTS.md` (prevalecen). Sesión de continuidad en `.operator-shared/sessions/`
 (estado en disco, no en el chat).
 
 Regla de oro: cada mensaje puede traer 1..N items sin relación. No implementar al bote: plan numerado,
