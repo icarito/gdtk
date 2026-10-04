@@ -29,3 +29,6 @@ el resto cambia al cruzar la mitad de cada tramo; sin ventanas se saltan 0 y 1. 
   conectados; para "al alcance" hace falta rssi/seen de pareados cercanos. Foco remoto: falta `capture_peer`
   (hacia qué equipo va la captura) y `controlled_by` (si nos controlan ahora); la dockapp marca sólo que hay captura.
 - Ojo: el agente G hizo `git stash`/`pop` sobre el árbol con trabajo ajeno sin commit (se restauró bien). No repetir.
+- N11 ✔ (cb0c1bc): un solo apilado flotantes+tiled (`z_stack` por clic/foco, `z_order_now` para dibujo y hit-test;
+  `_chrome_pick` corta en una tiled elevada). Desplegado 3246ad1+cb0c1bc a los 3 hosts (shell md5 97702fdb),
+  tengu/cupid reiniciados sanos; cupid responde con terminal abierta (RPC peor 0.14 s).
