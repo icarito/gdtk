@@ -106,6 +106,9 @@ static func build_server_settings(local_name, layout_conf_path, port = DEFAULT_P
 	lines.append(_setting("computerName", name))
 	lines.append(_setting("screenName", name))
 	lines.append(_setting("port", int(port)))
+	# Escuchar en IPv4 e IPv6 (dual-stack): el mDNS a veces resuelve `bastion.local` sólo a
+	# IPv6 y el cliente quedaba en "Connection refused" contra un servidor sólo IPv4.
+	lines.append(_setting("interface", "::"))
 	lines.append("")
 	lines.append("[server]")
 	lines.append(_setting("externalConfig", "true"))
