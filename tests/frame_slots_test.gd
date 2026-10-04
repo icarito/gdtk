@@ -212,8 +212,8 @@ func _init():
 	check("slot_x celda 6", f.slot_x(x0, 6, cell) == x0 + 6.0 * cell)
 	check("bar_base_origin dock = 1 celda fija",
 		f.bar_base_origin("dock", grid) == float(grid.margin) + 1.0 * float(grid.pitch))
-	check("bar_base_origin top = 3 celdas fijas",
-		f.bar_base_origin("top", grid) == float(grid.margin) + 3.0 * float(grid.pitch))
+	check("bar_base_origin top = 4 celdas fijas",
+		f.bar_base_origin("top", grid) == float(grid.margin) + 4.0 * float(grid.pitch))
 
 	var wide = _layout([{"tok": "w:windows", "kind": "w", "x": x0, "w": 160.0}], side)
 	check("_token_cells hueco = 1", f._token_cells("", [], cell) == 1)
@@ -440,7 +440,9 @@ func _init():
 
 	# Barra llena: no se añade y nada cambia.
 	var small = {"n": 8, "pitch": int(cell), "side": side, "margin": 0}  # top max = 4
-	f.bar_grid_state = {"top": small, "dock": small}
+	# Top tiene 4 celdas fijas (esquina/Vecindario/Grupo/Hogar): mismo tope útil (4) con n=9.
+	var small_top = {"n": 9, "pitch": int(cell), "side": side, "margin": 0}
+	f.bar_grid_state = {"top": small_top, "dock": small}
 	f.bar_cell = {"top": cell, "dock": cell}
 	f.bar_origin = {"top": x0, "dock": 0.0}
 	f.bar_layout = {"top": [], "dock": []}
@@ -450,14 +452,14 @@ func _init():
 	check("barra llena: no se añade y queda igual", f.bar_order["top"] == before)
 
 	# Mover a una barra llena no borra el bloque de su barra original (se restaura).
-	f.bar_grid_state = {"top": small, "dock": small}
+	f.bar_grid_state = {"top": small_top, "dock": small}
 	f.bar_order = {"top": ["p:keep.desktop"], "dock": ["p:a", "p:b", "p:c", "p:d", "p:e", "p:f"]}
 	f._place_pin({"id": "keep.desktop", "name": "Keep"}, "dock", x0 + 1.0 * cell + cell * 0.5)
 	check("mover a barra llena conserva el bloque original",
 		f.bar_order["top"].has("p:keep.desktop") and not f.bar_order["dock"].has("p:keep.desktop"))
 
 	# Datos fuera de rango: se normalizan sin superposición.
-	f.bar_grid_state = {"top": small, "dock": small}
+	f.bar_grid_state = {"top": small_top, "dock": small}
 	f.bar_order = {"top": ["p:a", "", "p:b", "p:c", "p:d", "p:e"], "dock": []}
 	f._normalize_order("top")
 	check("normaliza: todo dentro del tope útil de la barra",

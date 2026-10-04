@@ -73,6 +73,7 @@ func _init():
 	harness += "func set_process_input(value):\n\tinput_enabled = value\n"
 	harness += "func _set_capture_cursor(_active):\n\tpass\nfunc _reset_cursor(_pos = null):\n\tpass\n"
 	harness += "func _focus_tile(_id):\n\tpass\nfunc _id_alive(_id):\n\treturn true\n"
+	harness += "func _forward_pan(_event):\n\tpass\n"  # scroll de dedos: fuera de este test
 	for name in ["_on_client_pointer_lock", "_on_client_cursor_hidden", "_set_client_pointer_lock",
 			"_apply_client_cursor_state", "_forward_client_pointer", "_ptr_log_motion"]:
 		harness += "\n" + _function(source, name)
