@@ -197,6 +197,9 @@ void RemoteInput::_cb_key(void *p_ud, uint32_t p_key, int p_pressed) {
 void RemoteInput::_cb_stop_emulating(void *p_ud) {
 	RemoteInput *self = static_cast<RemoteInput *>(p_ud);
 	self->_release_all();
+	// El cliente remoto (Deskflow) dejó este equipo: el shell oculta el puntero hasta que
+	// se mueva el mouse local (si no, quedan tres punteros a la vista entre equipos).
+	self->emit_signal("remote_left");
 }
 
 void RemoteInput::_cb_request(void *p_ud, int p_id, int p_pid, const char *p_app_id) {
@@ -247,6 +250,8 @@ void RemoteInput::_bind_methods() {
 	ClassDB::bind_integer_constant(get_class_static(), StringName(), "DEVICE_ID", DEVICE_ID);
 	// Un cliente pide controlar el input (Start del portal): responder con respond(id, allow).
 	ADD_SIGNAL(MethodInfo("access_requested", PropertyInfo(Variant::INT, "id"), PropertyInfo(Variant::INT, "pid"), PropertyInfo(Variant::STRING, "app_id")));
+	// El cliente remoto dejó de emular (Deskflow se fue a otro equipo).
+	ADD_SIGNAL(MethodInfo("remote_left"));
 }
 
 void RemoteInput::_notification(int p_what) {

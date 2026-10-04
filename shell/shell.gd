@@ -304,6 +304,8 @@ var client_pointer_locked = false
 # NULL; ver compositor.client_cursor_hidden). El shell debe ocultar su cursor
 # dibujado mientras dure, aunque no haya pointer lock.
 var client_cursor_hidden = false
+var remote_cursor_parked = false  # Deskflow dejó este equipo: puntero oculto hasta mover el mouse
+var remote_parked_at = 0
 var client_cursor_shape = Input.CURSOR_ARROW  # forma pedida por la app (cursor-shape)
 var client_cursor_tex = null                  # o imagen propia (set_cursor con surface)
 var client_cursor_hot = Vector2.ZERO
@@ -1239,6 +1241,8 @@ func _ready():
 
 	remote_input = Host.remote_input
 	remote_input.connect("access_requested", self, "_on_input_access")
+	if remote_input.has_signal("remote_left"):
+		remote_input.connect("remote_left", self, "_on_remote_left")
 	# Nodo hermano de la entrada de ImGui: permanece activo cuando `_set_capture_cursor`
 	# apaga el _input de este canvas para que los clics no entren al Frame/Hogar.
 	capture_input = CAPTURE_INPUT.new()
@@ -8774,7 +8778,7 @@ func _apply_client_cursor_state():
 	# El lock del cliente ya puso MOUSE_MODE_CAPTURED (y oculta el de Godot).
 	if client_pointer_locked:
 		return
-	if client_cursor_hidden:
+	if client_cursor_hidden or remote_cursor_parked:
 		if Input.get_mouse_mode() != Input.MOUSE_MODE_HIDDEN:
 			print("[cursor] oculto: la app enfocada (", focused_tile, ") pidió cursor vacío")
 			Input.set_mouse_mode(Input.MOUSE_MODE_HIDDEN)
@@ -8782,6 +8786,23 @@ func _apply_client_cursor_state():
 		print("[cursor] visible otra vez")
 		Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
 		_reset_cursor()
+
+
+# Deskflow se fue de este equipo: se oculta el puntero (queda donde lo dejó el remoto)
+# hasta el próximo movimiento local, así no se ven tres punteros a la vez.
+func _on_remote_left():
+	remote_cursor_parked = true
+	remote_parked_at = OS.get_ticks_msec()
+	_apply_client_cursor_state()
+
+
+# Primer movimiento local después de que el remoto se fue: el puntero vuelve a verse.
+# Los 200 ms siguientes a la salida se ignoran (último motion del remoto en vuelo).
+func _unpark_remote_cursor():
+	if not remote_cursor_parked or OS.get_ticks_msec() - remote_parked_at < 200:
+		return
+	remote_cursor_parked = false
+	_apply_client_cursor_state()
 
 
 # Reenvía hardware al cliente con lock (lo llama CaptureInput). Sólo consume mouse:
@@ -8918,6 +8939,7 @@ func _input(event):
 		return
 	if event is InputEventMouseMotion:
 		input_motion_count += 1
+		_unpark_remote_cursor()
 	elif event is InputEventMouseButton:
 		# Cualquier suelta del botón que inició un Super+drag lo cierra. El Frame consume
 		# la pulsación en su _input, así que el View no tiene mouse_focus y Godot nunca

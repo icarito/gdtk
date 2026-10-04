@@ -49,3 +49,10 @@ el resto cambia al cruzar la mitad de cada tramo; sin ventanas se saltan 0 y 1. 
   (eis_server.c) + vigía `_deskflow_watch` (shell, 1/s sólo con captura): destino del último switch caído, o servidor
   "en local" dos chequeos seguidos → suelta. Log de Deskflow es por línea (mtime = última línea), sin falsos positivos
   por buffer. Binario 4af2803b en bastion y cupid (cupid sin reiniciar a propósito: bastion aún corre el viejo).
+- cupid no recibía el mouse: el servidor escuchaba sólo IPv4 y el mDNS resolvía bastion.local sólo a IPv6 →
+  `interface=::` en deskflow_settings.build_server_settings (0f2221e); ini vivo de bastion parcheado, cupid y tengu
+  conectan por IPv6. tengu desplegado por IP (192.168.18.163; tengu.local no resuelve).
+- En curso: (a) DockApp como token real arrastrable + `_next_free_slot` único (agente, frame.gd); (b) lead: señal
+  `RemoteInput.remote_left` (stop_emulating) → shell oculta el puntero (`remote_cursor_parked`) hasta el próximo
+  motion local (>200 ms). Falta compilar/desplegar (cambió remote_input.cpp).
+- Nota del usuario: sesión /polish → delegar en subagentes Kilo cuando se pueda (tools/kilo-launch.sh).

@@ -150,6 +150,10 @@ var applets_saved_bottom = []
 # solo bloque con el ícono de clip. Al estar en `bar_order` se puede colocar en
 # cualquier slot, entre los pines/applets, y su posición persiste con el resto.
 const WINDOW_TOKEN = "w:windows"
+# DockApp "Compartiendo": token condicional "s:sharing". Entra al orden (por
+# `_place_new_token`) sólo mientras haya una relación activa y sale al terminar; en
+# medio se arrastra y persiste como cualquier otro token.
+const SHARED_TOKEN = "s:sharing"
 var bar_order = {"top": [], "dock": []}
 var bar_order_saved = {"top": [], "dock": []}
 var pinned_top = []
@@ -198,9 +202,15 @@ var explosions = []
 # Mismo lenguaje de ease-out que el reacomodo del anillo (ver shell._ease_out).
 var bar_anim = {}
 var applet_grab = Vector2.ZERO
-# K10b: bloques "Compartido" (sesiones activas). Ephemerales: no se persisten ni
-# se reordenan; se dibujan a la izquierda de los applets. El estado sale de
-# snapshots cacheados (host_session_state y servicios), nunca de procesos.
+# K10b: DockApp "Compartiendo" (sesiones activas), token SHARED_TOKEN del orden de
+# barra. El estado sale de snapshots cacheados (host_session_state y servicios),
+# nunca de procesos. `shared_diagram` es el snapshot del frame; `shared_pref` recuerda
+# dónde estaba (zona/celda) al terminar la relación para volver ahí.
+var shared_diagram = {}
+var shared_pref = {}
+var shared_drag = false
+var shared_from = Vector2.ZERO
+var shared_grab = Vector2.ZERO
 var shared_layout = []
 var shared_drawn = false
 var shared_menu_id = ""
@@ -280,6 +290,8 @@ func _maybe_order_token(tok):
 		return _tok_id(tok) != ""
 	if kind == "w":
 		return _tok_id(tok) == "windows"
+	if kind == "s":
+		return _tok_id(tok) == "sharing"
 	return kind == "a" and _applet_known(_tok_id(tok))
 
 
@@ -348,6 +360,78 @@ func _place_token_cell(zone, tok, target, span = -1):
 	_bar_set(tok, slot_x(origin, placed.find(tok), cell))
 	shell.request_redraw()
 	return true
+
+
+# Primera celda donde cabe un bloque nuevo de `span` celdas: justo después del último
+# bloque ocupado. Si ese último es el tramo de ventanas (`strip_tok`), que se estira
+# sobre las celdas libres a su derecha, va al extremo de la barra para no recortarlo.
+# Si no entra ahí, la primera celda libre de la barra. -1 = barra llena. Pura.
+static func next_free_slot(cells, span, max_cells, strip_tok = ""):
+	span = max(1, int(span))
+	var last = -1
+	for i in range(cells.size()):
+		if String(cells[i]) != "":
+			last = i
+	var start = last + 1
+	if last >= 0 and strip_tok != "" and String(cells[last]) == strip_tok:
+		start = int(max_cells) - span
+	if start >= 0 and nearest_free(cells, start, span, max_cells) == start:
+		return start
+	return nearest_free(cells, 0, span, max_cells)
+
+
+func _next_free_slot(zone, span):
+	var max_cells = int(_grid_for(zone).n) - 1 - bar_fixed_cells(zone)
+	var spans = {}
+	for t in bar_order[zone]:
+		if t != "":
+			spans[t] = token_span(t)
+	return next_free_slot(seq_to_cells(bar_order[zone], spans), span, max_cells, WINDOW_TOKEN)
+
+
+# ÚNICO camino de alta de un bloque nuevo (applet agregado, DockApp condicional):
+# celda `cell` de `zone` si se pide (y está libre), si no `_next_free_slot`; probando
+# `zone`, luego la barra superior, luego el dock. false = no hubo lugar en ninguna.
+func _place_new_token(tok, span = -1, zone = "", cell = -1):
+	if span < 0:
+		span = token_span(tok)
+	var zones = [zone] if zone != "" else []
+	for z in ["top", "dock"]:
+		if not zones.has(z):
+			zones.append(z)
+	for z in zones:
+		var target = int(cell) if z == zone and int(cell) >= 0 else _next_free_slot(z, span)
+		if target >= 0 and _place_token_cell(z, tok, target, span):
+			return true
+	return false
+
+
+# Mantiene SHARED_TOKEN en el orden sólo mientras haya relación activa. Al aparecer
+# vuelve donde estaba (`shared_pref`) o, la primera vez, a la barra superior; al
+# terminar se retira (como un pin que se estalla: su celda queda libre, sin hueco
+# fantasma) recordando su lugar.
+func _sync_shared_token():
+	shared_diagram = _shared_snapshot()
+	var zone = ""
+	for z in ["top", "dock"]:
+		if bar_order[z].has(SHARED_TOKEN):
+			zone = z
+	if shared_diagram.empty():
+		shared_menu_id = ""
+		shared_drag = false
+		shared_press = ""
+		if zone != "":
+			var spans = {}
+			for t in bar_order[zone]:
+				if t != "":
+					spans[t] = token_span(t)
+			shared_pref = {"zone": zone, "cell": seq_to_cells(bar_order[zone], spans).find(SHARED_TOKEN)}
+			_order_remove(SHARED_TOKEN)
+			applets_dirty = true
+			_save_applets()
+			shell.request_redraw()
+	elif zone == "":
+		_place_new_token(SHARED_TOKEN, 1, String(shared_pref.get("zone", "top")), int(shared_pref.get("cell", -1)))
 
 
 # Igual que `_place_token_cell`, con la x de pantalla del drop.
@@ -709,9 +793,9 @@ func _save_applets():
 func _applet_set_visible(id, v):
 	if v:
 		if not applets_visible.has(id):
-			# Primero se intenta colocar (celda libre más cercana al final); sólo si
+			# Primero se intenta colocar (primera celda libre, ver `_next_free_slot`); sólo si
 			# entra se marca visible. Barra llena: no se añade y el estado no cambia.
-			if not _place_token_cell("dock", _tok_applet(id), -1, _applet_span(id)):
+			if not _place_new_token(_tok_applet(id), _applet_span(id), "dock"):
 				return
 			applets_visible.append(id)
 			if id == "teclado":
@@ -996,6 +1080,8 @@ func _drag_token():
 		return _tok_applet(applet_drag)
 	if win_dock_drag:
 		return WINDOW_TOKEN
+	if shared_drag:
+		return SHARED_TOKEN
 	return ""
 
 
@@ -1218,7 +1304,7 @@ func _draw_bar_blocks(ui, zone, x0, y, grid, mouse):
 			strip_end = cell_i + F
 			cell_i += 1
 			continue
-		var w = side if kind == "p" else _applet_width(id, side)
+		var w = side if kind == "p" or kind == "s" else _applet_width(id, side)
 		var span = max(1, int(round(w / cell))) if cell > 0.0 else 1
 		if cell_i + span > max_cells:
 			break
@@ -1231,7 +1317,18 @@ func _draw_bar_blocks(ui, zone, x0, y, grid, mouse):
 			cell_i += span
 			continue
 		var pos = Vector2(_bar_x(tok, x, now), y)
-		if kind == "p":
+		if kind == "s":
+			if shared_diagram.empty():
+				cell_i += span
+				continue
+			var srect = _draw_shared_tile(ui, pos, side, shared_diagram)
+			bar_layout[zone].append({"kind": "s", "id": "sharing", "tok": tok,
+				"x": srect.position.x, "y": srect.position.y, "w": side, "h": side, "rect": srect})
+			shared_layout.append({"id": "sharing", "x": srect.position.x, "y": srect.position.y,
+				"w": side, "h": side, "block": shared_diagram})
+			shared_drawn = true
+			_draw_shared_menu(ui, shared_diagram)
+		elif kind == "p":
 			var app = _pinned_app(id)
 			if app == null:
 				cell_i += span
@@ -1563,64 +1660,59 @@ func _stop_shared_side(type, key):
 	shell.request_redraw()
 
 
-# Dibuja UN bloque "Compartiendo" (mini-diagrama) a la izquierda de los applets,
-# sin pisarlos: `start_x` es el fin del dock de pines y `limit_x` donde empiezan los
-# applets. Desaparece si no hay nada compartido. Devuelve el x final.
-func _draw_shared(ui, start_x, limit_x, side, mouse, y = 0.0):
-	shared_layout = []
-	shared_drawn = false
-	shared_menu_open = false
-	var diagram = _shared_snapshot()
-	var cx = start_x
-	if not diagram.empty() and cx + side <= limit_x - PAD:
-		var tile = _tile(ui, Vector2(cx, y), side, "shared_sharing", NX_FACE, side)
-		var rect = tile.rect
-		var hovered = ui.is_item_hovered()
-		shared_layout.append({"id": "sharing", "x": rect.position.x, "y": rect.position.y,
-			"w": rect.size.x, "h": rect.size.y, "block": diagram})
-		_draw_shared_face(ui, Vector2(cx, y), rect, diagram, side)
-		var tip = String(diagram.get("tooltip", ""))
-		for p in diagram.get("radial", []):
-			if bool(p.get("input", false)):
-				tip += "\n" + SHARED_BLOCK.focus_text(diagram.radial, bool(diagram.get("local_focus", true)))
-				break
-		if hovered and tip != "":
-			ui.set_tooltip(tip)
-		cx += side + PAD
-	shared_drawn = true
+# Tesela del DockApp "Compartiendo" en `pos` (local a la ventana ImGui de la barra).
+# Devuelve su rect en pantalla; el dibujo radial usa ESE rect (el draw list es en
+# coords absolutas, así que vale en cualquier barra).
+func _draw_shared_tile(ui, pos, side, diagram, ghost = false):
+	var tile = _tile(ui, pos, side, "drag_shared" if ghost else "shared_sharing", NX_FACE)
+	var rect = tile.rect
+	var hovered = ui.is_item_hovered()
+	_draw_shared_face(ui, pos, rect, diagram, side)
+	var tip = String(diagram.get("tooltip", ""))
+	for p in diagram.get("radial", []):
+		if bool(p.get("input", false)):
+			tip += "\n" + SHARED_BLOCK.focus_text(diagram.radial, bool(diagram.get("local_focus", true)))
+			break
+	if hovered and not ghost and not shared_drag and tip != "":
+		ui.set_tooltip(tip)
+	return rect
+
+
+# Menú contextual (clic derecho) del DockApp: se abre/dibuja en la ventana de la barra
+# donde se dibujó la tesela.
+func _draw_shared_menu(ui, diagram):
 	if shared_menu_want != "":
 		shared_menu_id = shared_menu_want
 		shared_menu_want = ""
 		ui.open_popup("##shared_menu")
-	if shared_menu_id != "" and diagram.empty():
-		shared_menu_id = ""
-	if shared_menu_id != "":
-		MENU_STYLE.begin(ui)
-		if ui.begin_popup("##shared_menu"):
-			shared_menu_open = true
-			shared_menu_block = diagram
-			MENU_STYLE.chrome(ui, "Compartiendo")
-			for it in diagram.get("menu", []):
-				if typeof(it) != TYPE_DICTIONARY:
-					continue
-				if String(it.get("kind", "")) == "separator":
-					ui.separator()
-					continue
-				if MENU_STYLE.item(ui, String(it.get("label", ""))):
-					_shared_action(diagram, String(it.get("id", "")))
-			ui.end_popup()
-		MENU_STYLE.end(ui)
-	return cx
+	if shared_menu_id == "":
+		return
+	MENU_STYLE.begin(ui)
+	if ui.begin_popup("##shared_menu"):
+		shared_menu_open = true
+		shared_menu_block = diagram
+		MENU_STYLE.chrome(ui, "Compartiendo")
+		for it in diagram.get("menu", []):
+			if typeof(it) != TYPE_DICTIONARY:
+				continue
+			if String(it.get("kind", "")) == "separator":
+				ui.separator()
+				continue
+			if MENU_STYLE.item(ui, String(it.get("label", ""))):
+				_shared_action(diagram, String(it.get("id", "")))
+		ui.end_popup()
+	MENU_STYLE.end(ui)
 
 
-# Cara radial del bloque: este equipo al centro (borde de acento si el foco está
+# Cara radial del bloque (`pos` local para el texto, `rect` en pantalla para las
+# primitivas del draw list): este equipo al centro (borde de acento si el foco está
 # acá) y cada par en su ángulo con glifo de pantalla y/o teclado e inicial. Entre
 # ambos un tramo punteado con cabeza de flecha hacia quien es controlado; el par
 # con el foco (puntero/teclado allá) se resalta con marco. Color por estado.
 func _draw_shared_face(ui, pos, rect, diagram, side):
 	var bw = _bevel_w(ui)
 	var u = float(side)
-	var c = Vector2(pos.x + u * 0.5, pos.y + u * 0.5)
+	var c = rect.position + Vector2(u * 0.5, u * 0.5)
 	var half = u * 0.14
 	var crect = Rect2(c - Vector2(half, half), Vector2(half, half) * 2.0)
 	var accent = shell.accent if shell != null else NX_CUR
@@ -1651,7 +1743,8 @@ func _draw_shared_face(ui, pos, rect, diagram, side):
 		else:
 			_draw_shared_glyph(ui, nrect, kind, col)
 		if ns >= 16.0 and kind != "both":
-			ui.set_cursor_pos(nrect.position + Vector2(ns * 0.5 - 3.5, ns * 0.22))
+			# El texto usa cursor LOCAL a la ventana: `pos` + desplazamiento dentro del rect.
+			ui.set_cursor_pos(pos + (nrect.position - rect.position) + Vector2(ns * 0.5 - 3.5, ns * 0.22))
 			ui.text_colored(NX_TEXT, String(p.get("initial", "")))
 
 
@@ -1945,6 +2038,7 @@ func set_visible(v):
 		win_dock_drag = false
 		win_scroll_press = false
 		shared_press = ""
+		shared_drag = false
 	# Desde _input (tecla tragada, ImGui no la ve) nadie más pide el frame que lo muestra.
 	shell.request_redraw()
 	shell.last_activity = OS.get_ticks_msec()
@@ -2105,6 +2199,11 @@ func _input(event):
 			applet_drag = applet_press
 		if applet_drag != null:
 			shell.request_redraw()
+		if mouse_down and shared_press != "" and not shared_drag \
+				and mouse_pos.distance_to(shared_from) > DRAG_PX:
+			shared_drag = true
+		if shared_drag:
+			shell.request_redraw()
 		# Arrastre horizontal sobre el tramo del DockApp de ventanas (modo scroll).
 		if mouse_down and win_scroll_press:
 			var szone = _zone_at(mouse_pos)
@@ -2235,6 +2334,8 @@ func _input(event):
 				var hit_shared = _shared_at(mouse_pos)
 				if hit_shared != null and not shared_menu_open:
 					shared_press = String(hit_shared.id)
+					shared_from = mouse_pos
+					shared_grab = mouse_pos - Vector2(hit_shared.x, hit_shared.y)
 					shell.request_redraw()
 					get_tree().set_input_as_handled()
 					return
@@ -2273,13 +2374,15 @@ func _input(event):
 					drag_grab = mouse_pos - Vector2(drag_candidate.x, drag_candidate.y)
 				dragging = null
 			else:
-				# Soltar un bloque "Compartido": primaria (ver detalle) si sigue bajo
-				# el puntero; nunca inicia arrastre (los bloques no se reordenan).
+				# Soltar el DockApp "Compartiendo": si hubo arrastre se reubica; si no,
+				# primaria (ver detalle) si sigue bajo el puntero.
 				if shared_press != "":
 					var cur_shared = _shared_at(mouse_pos)
 					var pressed = shared_press
 					shared_press = ""
-					if cur_shared != null and String(cur_shared.id) == pressed:
+					if shared_drag:
+						_finish_shared_drag()
+					elif cur_shared != null and String(cur_shared.id) == pressed:
 						_shared_primary(cur_shared.block)
 				if app_drag != null:
 					_finish_app_drag()
@@ -2322,8 +2425,10 @@ func _input(event):
 		return
 	var code = event.scancode
 	# Esc cancela el arrastre de un applet (conserva el orden) antes de ocultar el Frame.
-	if event.pressed and code == KEY_ESCAPE and applet_drag != null:
+	if event.pressed and code == KEY_ESCAPE and (applet_drag != null or shared_drag):
 		applet_drag = null
+		shared_drag = false
+		shared_press = ""
 		applet_press = null
 		shell.request_redraw()
 		_gulp(code)
@@ -2675,6 +2780,17 @@ func _finish_applet_drag():
 		shell.request_redraw()
 
 
+# Suelta del DockApp "Compartiendo": se reubica en la barra donde se suelte; fuera de
+# las barras conserva su lugar (no se estalla: depende de la relación, no del usuario).
+func _finish_shared_drag():
+	shared_drag = false
+	var zone = _zone_at(mouse_pos)
+	if zone == "":
+		shell.request_redraw()
+		return
+	_move_token(zone, SHARED_TOKEN, mouse_pos.x)
+
+
 # Suelta del DockApp de ventanas (bloque-clip): se reubica en el slot elegido de la
 # barra donde se suelte (superior o inferior). Soltarlo fuera conserva el layout.
 func _finish_win_dock_drag():
@@ -2812,10 +2928,8 @@ func _draw_applets(ui, vp, off, mouse, grid):
 	# Esquina izquierda reservada (vacía); el dock arranca después. Pines y applets
 	# comparten los slots de la barra (orden unificado); la celda del pin va al final.
 	var dock_x = bar_base_origin("dock", grid)
-	var dock_end = _draw_bar_blocks(ui, "dock", dock_x, 0.0, grid, mouse)
+	_draw_bar_blocks(ui, "dock", dock_x, 0.0, grid, mouse)
 	var pin_x = float(grid.margin) + float(grid.n - 1) * float(grid.pitch)
-	# K10b: sesiones activas entre los bloques y la celda del pin, sin taparlos.
-	_draw_shared(ui, dock_end, pin_x, side, mouse)
 	var y = 0.0
 	# El selector de controles del Frame (fijar/quitar applets y barras) se abre con
 	# clic derecho sobre un applet o sobre la franja; ya no hay celda "+".
@@ -3677,11 +3791,16 @@ func draw(ui):
 		shared_layout = []
 		shared_drawn = false
 
+	shared_layout = []
+	shared_drawn = false
+	shared_menu_open = false
+
 	# Grilla regular: MISMA `n`/`pitch` para las dos barras. Cada bloque es cuadrado
 	# de lado `side` (≈ alto de barra) y la última celda alineada al borde derecho.
 	var grid = bar_grid(vp.x, bh, PAD)
 	bar_grid_state["top"] = grid
 	bar_grid_state["dock"] = grid
+	_sync_shared_token()
 	var side = float(grid.side)
 	var pitch = float(grid.pitch)
 	var margin = float(grid.margin)
@@ -3731,12 +3850,6 @@ func draw(ui):
 			if bar_order["top"].has(WINDOW_TOKEN) and not items.empty():
 				_draw_windows(ui, "top", side, y, off_top, mouse)
 				_draw_window_grip(ui, "top", mouse)
-			# Sin barra inferior (sólo la superior fijada) la dockapp "Compartiendo" va al
-			# final del tramo de ventanas, junto a los applets, si sobra al menos una celda.
-			if not bottom_drawn and bar_order["top"].has(WINDOW_TOKEN):
-				var sreg = window_region.get("top")
-				if sreg != null and items.size() + 1 <= int(window_span.get("top", 0)):
-					_draw_shared(ui, sreg.end.x - side, sreg.end.x + PAD + 1.0, side, mouse, y)
 			# Durante el drag viaja la tesela completa, no un label/tooltip separado.
 			_draw_window_drag_tile(ui, items, side)
 			# Esquina derecha reservada para el pin chico (última celda de la grilla).
@@ -3892,18 +4005,20 @@ func _draw_explosion(ui, ex, t):
 
 
 func _draw_drag_tile(ui, side):
-	if app_drag == null and applet_drag == null:
+	if app_drag == null and applet_drag == null and not shared_drag:
 		return
 	ui.push_style_var_vec2(ui.STYLE_VAR_WINDOW_PADDING, Vector2.ZERO)
 	# El tooltip por defecto se ancla en MousePos + (16,10) (+ padding): eso era el
 	# corrimiento de ~20 px. Se fuerza al cursor MENOS el offset de agarre, para que
 	# la tesela quede exactamente donde estaba respecto del punto que se tomó.
-	var grab = app_grab if app_drag != null else applet_grab
+	var grab = app_grab if app_drag != null else (shared_grab if shared_drag else applet_grab)
 	ui.set_next_window_pos(mouse_pos - grab, true)
 	ui.begin_tooltip()
 	var pos = Vector2.ZERO
 	if app_drag != null:
 		_draw_app_tile(ui, app_drag, pos, side, "drag_app")
+	elif shared_drag:
+		_draw_shared_tile(ui, pos, side, shared_diagram, true)
 	else:
 		ui.set_cursor_pos(pos)
 		_draw_applet(ui, applet_drag, pos, ui.get_cursor_screen_pos(), _applet_width(applet_drag, side), side, false, Vector2(-1, -1), true)
