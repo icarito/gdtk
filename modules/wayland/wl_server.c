@@ -2440,6 +2440,37 @@ void wl_server_pointer_axis_h(wl_server *s, uint32_t time_ms, double dx) {
 	wlr_seat_pointer_notify_frame(s->seat);
 }
 
+// Scroll de touchpad (dos dedos): source FINGER, valores continuos (px de superficie)
+// por eje, sin discretos. Los navegadores lo usan para el gesto atrás/adelante.
+void wl_server_pointer_axis_finger(wl_server *s, uint32_t time_ms, double dx, double dy) {
+	if (s == NULL) {
+		return;
+	}
+	if (dx != 0.0) {
+		wlr_seat_pointer_notify_axis(s->seat, time_ms, WL_POINTER_AXIS_HORIZONTAL_SCROLL,
+				dx, 0, WL_POINTER_AXIS_SOURCE_FINGER,
+				WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
+	}
+	if (dy != 0.0) {
+		wlr_seat_pointer_notify_axis(s->seat, time_ms, WL_POINTER_AXIS_VERTICAL_SCROLL,
+				dy, 0, WL_POINTER_AXIS_SOURCE_FINGER,
+				WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
+	}
+	wlr_seat_pointer_notify_frame(s->seat);
+}
+
+// Dedos levantados: valor 0 con source FINGER = wl_pointer.axis_stop (wlroots) en ambos ejes.
+void wl_server_pointer_axis_stop(wl_server *s, uint32_t time_ms) {
+	if (s == NULL) {
+		return;
+	}
+	wlr_seat_pointer_notify_axis(s->seat, time_ms, WL_POINTER_AXIS_HORIZONTAL_SCROLL,
+			0.0, 0, WL_POINTER_AXIS_SOURCE_FINGER, WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
+	wlr_seat_pointer_notify_axis(s->seat, time_ms, WL_POINTER_AXIS_VERTICAL_SCROLL,
+			0.0, 0, WL_POINTER_AXIS_SOURCE_FINGER, WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
+	wlr_seat_pointer_notify_frame(s->seat);
+}
+
 // Pinch del touchpad hacia el cliente con foco. `phase`: 0 begin, 1 update,
 // 2 end, 3 cancel. En update, `scale` >1 aleja los dedos (zoom in) y <1 los
 // acerca (zoom out); dx/dy/rotation en unidades del protocolo. El shell arma el

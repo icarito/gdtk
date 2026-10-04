@@ -85,6 +85,9 @@ const SCROLL_GESTURE = preload("res://scroll_gesture.gd")
 # 1000+dedos (begin/update), 2000+dedos (fin) o 3000+dedos (cancelado).
 const SWIPE_MODEL = preload("res://swipe_model.gd")
 const SWIPE_DEVICE = 1000
+# Scroll de dos dedos con fuente real (FRT): 900 = delta de un frame, 901 = axis_stop.
+const SCROLL_FINGER_DEVICE = 900
+const SCROLL_STOP_DEVICE = 901
 # Matemática pura del icono de drag (rect/hotspot/tamaño; ver drag_icon.gd).
 const DRAG_ICON = preload("res://drag_icon.gd")
 # G1: zoom Sugar de 3 niveles (Hogar/Grupo/Vecindario) y escala del ícono central.
@@ -7826,15 +7829,15 @@ func _on_view_input(event):
 		# El backend FRT/SDL hoy manda BUTTON_WHEEL_LEFT/RIGHT (wheel.x) en lugar de
 		# este evento, pero si el motor pasa a emitir gestures hay que reenviarlo como
 		# axis (el evento queda marcado como manejado por el Viewport si no lo hacemos).
+		if event.device == SCROLL_STOP_DEVICE:
+			_forward_pan(event)  # el fin del scroll va aunque el puntero ya salió
+			return
 		if event.delta == Vector2.ZERO:
 			return
 		var pan_hit = _view_hit_test(event.position)
 		if pan_hit.id < 0:
 			return
-		var pan_axis = SCROLL_GESTURE.pan_axis(event.delta)
-		if compositor.has_method("pointer_axis_h"):
-			compositor.pointer_axis_h(pan_axis.x)
-		compositor.pointer_axis(pan_axis.y)
+		_forward_pan(event)
 		return
 
 
@@ -8416,14 +8419,32 @@ func _forward_client_pointer(event):
 	if event is InputEventPanGesture:
 		# Scroll de dos dedos con el puntero capturado por un cliente: mismo axis que
 		# el camino sin lock (_on_view_input), en vez de descartar el gesto.
-		if compositor != null and event.delta != Vector2.ZERO:
-			var pan_axis = SCROLL_GESTURE.pan_axis(event.delta)
-			if compositor.has_method("pointer_axis_h"):
-				compositor.pointer_axis_h(pan_axis.x)
-			compositor.pointer_axis(pan_axis.y)
+		_forward_pan(event)
 		get_tree().set_input_as_handled()
 		return true
 	return false
+
+
+# Scroll de dos dedos hacia el cliente. Con FRT nuevo llega con la fuente real
+# (device 900 = dedos, 901 = fin): se reenvía como SOURCE_FINGER continuo + axis_stop,
+# como en GNOME, y así los navegadores hacen atrás/adelante con el deslizamiento
+# horizontal. Sin eso (motor viejo, otra fuente) va como rueda.
+func _forward_pan(event):
+	if compositor == null:
+		return
+	if event.device == SCROLL_STOP_DEVICE:
+		if compositor.has_method("pointer_axis_stop"):
+			compositor.pointer_axis_stop()
+		return
+	if event.delta == Vector2.ZERO:
+		return
+	if event.device == SCROLL_FINGER_DEVICE and compositor.has_method("pointer_axis_finger"):
+		compositor.pointer_axis_finger(event.delta)
+		return
+	var pan_axis = SCROLL_GESTURE.pan_axis(event.delta)
+	if compositor.has_method("pointer_axis_h"):
+		compositor.pointer_axis_h(pan_axis.x)
+	compositor.pointer_axis(pan_axis.y)
 
 
 # Log temporal [ptr-lock]: primeras 20 muestras y luego 1 de cada 100. Quitar

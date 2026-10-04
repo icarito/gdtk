@@ -105,6 +105,8 @@ void wl_server_pointer_button(wl_server *s, uint32_t time_ms, uint32_t evdev_but
 void wl_server_pointer_axis(wl_server *s, uint32_t time_ms, double dy);
 // Eje horizontal (scroll lateral de dos dedos: atrás/adelante en el navegador).
 void wl_server_pointer_axis_h(wl_server *s, uint32_t time_ms, double dx);
+void wl_server_pointer_axis_finger(wl_server *s, uint32_t time_ms, double dx, double dy);
+void wl_server_pointer_axis_stop(wl_server *s, uint32_t time_ms);
 // Pinch del touchpad hacia el cliente con foco. `phase`: 0 begin, 1 update,
 // 2 end, 3 cancel. En update, `scale`>1 aleja (zoom in), <1 acerca (zoom out).
 void wl_server_gesture_pinch(wl_server *s, uint32_t time_ms, int phase,

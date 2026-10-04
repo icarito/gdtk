@@ -121,6 +121,8 @@ public:
 	void pointer_button(int p_button_index, bool p_pressed);
 	void pointer_axis(double p_dy);
 	void pointer_axis_h(double p_dx);
+void pointer_axis_finger(Vector2 p_delta);
+void pointer_axis_stop();
 	void gesture_pinch(int p_phase, int p_fingers, double p_scale);
 	void key(const Ref<InputEventKey> &p_event);
 

@@ -630,6 +630,8 @@ void WaylandCompositor::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("pointer_button", "button_index", "pressed"), &WaylandCompositor::pointer_button);
 	ClassDB::bind_method(D_METHOD("pointer_axis", "dy"), &WaylandCompositor::pointer_axis);
 	ClassDB::bind_method(D_METHOD("pointer_axis_h", "dx"), &WaylandCompositor::pointer_axis_h);
+	ClassDB::bind_method(D_METHOD("pointer_axis_finger", "delta"), &WaylandCompositor::pointer_axis_finger);
+	ClassDB::bind_method(D_METHOD("pointer_axis_stop"), &WaylandCompositor::pointer_axis_stop);
 	ClassDB::bind_method(D_METHOD("gesture_pinch", "phase", "fingers", "scale"),
 			&WaylandCompositor::gesture_pinch);
 	ClassDB::bind_method(D_METHOD("key", "event"), &WaylandCompositor::key);
@@ -1070,6 +1072,19 @@ void WaylandCompositor::pointer_axis(double p_dy) {
 void WaylandCompositor::pointer_axis_h(double p_dx) {
 	if (server != NULL && local_pointer_enabled) {
 		wl_server_pointer_axis_h(server, (uint32_t)OS::get_singleton()->get_ticks_msec(), p_dx);
+	}
+}
+
+// Scroll de touchpad con source FINGER (delta en px de superficie) y su axis_stop.
+void WaylandCompositor::pointer_axis_finger(Vector2 p_delta) {
+	if (server != NULL && local_pointer_enabled) {
+		wl_server_pointer_axis_finger(server, (uint32_t)OS::get_singleton()->get_ticks_msec(), p_delta.x, p_delta.y);
+	}
+}
+
+void WaylandCompositor::pointer_axis_stop() {
+	if (server != NULL && local_pointer_enabled) {
+		wl_server_pointer_axis_stop(server, (uint32_t)OS::get_singleton()->get_ticks_msec());
 	}
 }
 
