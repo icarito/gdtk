@@ -115,6 +115,8 @@ var pending_wayland = ""
 # con el lanzamiento correcto.
 var pending_launches = []
 var requested_sizes = {}
+var resize_since = {}     # id -> ms del último set_size (estirar la textura mientras llega)
+const RESIZE_STRETCH_MS = 600
 var last_geo = {}        # id -> último tamaño observado del cliente (para reafirmar el slot)
 # Los buffers wayland vienen con alfa premultiplicado.
 var premult_material = null
@@ -294,6 +296,10 @@ var client_pointer_locked = false
 # NULL; ver compositor.client_cursor_hidden). El shell debe ocultar su cursor
 # dibujado mientras dure, aunque no haya pointer lock.
 var client_cursor_hidden = false
+var client_cursor_shape = Input.CURSOR_ARROW  # forma pedida por la app (cursor-shape)
+var client_cursor_tex = null                  # o imagen propia (set_cursor con surface)
+var client_cursor_hot = Vector2.ZERO
+var _client_cursor_applied = null
 # Log temporal [ptr-lock] del camino de movimiento relativo: primeras 20 muestras
 # y despues 1 de cada 100. Para quitarlo: borrar _ptr_log_motion/estas vars y las
 # llamadas que buscan "[ptr-lock]" en _set_client_pointer_lock y _forward_client_pointer.
@@ -377,6 +383,7 @@ var swipe = SWIPE_MODEL.new()
 var swipe_mode = ""   # "" | "pan" (escritorios) | "expose" (entrar/salir) | "none"
 var swipe_k = 0.0     # fracción de la animación del exposé fijada por los dedos
 var home_ring_hidden = false  # el anillo se ocultó durante el paneo: re-entra animado
+var fade_skip_until = 0  # ms: el cambio de vista llega por deslizamiento, sin fundido
 var home_bg_alpha = 1.0   # alfa del fondo del Hogar mientras aparece por el paneo
 var _prev_units = [[]]   # unidades del frame anterior (hybrid.heal_anchors)
 var _fs_sent = -1         # última ventana a la que se le avisó xdg "fullscreen"
@@ -1074,6 +1081,11 @@ func _ready():
 	# compatibilidad con binarios viejos (sin el módulo recompilado).
 	if compositor.has_signal("client_cursor_hidden"):
 		compositor.connect("client_cursor_hidden", self, "_on_client_cursor_hidden")
+	# Cursor que pide la app: forma (wp_cursor_shape_v1) o imagen (wl_pointer.set_cursor).
+	if compositor.has_signal("client_cursor_shape"):
+		compositor.connect("client_cursor_shape", self, "_on_client_cursor_shape")
+	if compositor.has_signal("client_cursor_image"):
+		compositor.connect("client_cursor_image", self, "_on_client_cursor_image")
 	# Drag and drop nativo: el compositor avisa del icono y del estado del drag.
 	# has_signal mantiene la compatibilidad con binarios viejos (sin recompilar).
 	if compositor.has_signal("drag_icon_changed"):
@@ -2365,6 +2377,19 @@ func _fill_nodes(box, layers, scale, offset):
 # origen `cpos`) dentro del slot `ssize`. No escala nunca: 1:1 y centrado. Si el cliente
 # es más chico que el slot, queda centrado; si es más grande, se lo recorta el slot
 # (rect_clip_content). El redimensionado real lo hace compositor.set_size.
+# ¿El cliente todavía no tiene el tamaño de su slot porque se lo acabamos de cambiar?
+# (animación de reacomodo en curso, o pedido de set_size reciente). Acotado en el
+# tiempo: una app de tamaño fijo que no acepta el pedido no queda estirada para siempre.
+func _resize_pending(id, geo, rect, now):
+	if expose or geo.size.x <= 0.0 or geo.size.y <= 0.0:
+		return false
+	if geo.size.distance_to(rect.size) < 2.0:
+		return false
+	if tile_anim.has(id) or wm_anim.has(id):
+		return true
+	return now - int(resize_since.get(id, -100000)) < RESIZE_STRETCH_MS
+
+
 func _content_fit(csize, ssize, cpos):
 	if csize.x <= 0.0 or csize.y <= 0.0:
 		return {"scale": 1.0, "offset": -cpos}
@@ -2423,7 +2448,14 @@ func _update_tile(id, now):
 	# El cliente puede no ocupar el slot (elige tamaño propio, o se achica al cambiar
 	# de fuente): se centra 1:1 y, si es más grande que el slot, se reduce para que entre.
 	var fit = _content_fit(geo.size, rect.size, geo.position)
-	_fill_nodes(node, layers, fit.scale, fit.offset)
+	if _resize_pending(id, geo, rect, now):
+		# Maximizar/reacomodar: se estira la textura que el cliente ya tiene al slot
+		# nuevo (antes quedaba 1:1 centrada y crecía recién al llegar el buffer: "primero
+		# la centra y después la agranda"). Se reemplaza sola cuando el cliente commitea.
+		var st = Vector2(rect.size.x / geo.size.x, rect.size.y / geo.size.y)
+		_fill_nodes(node, layers, st, -geo.position * st)
+	else:
+		_fill_nodes(node, layers, fit.scale, fit.offset)
 	tile_fit[id] = fit
 
 	# Transición de modo tiled<->flotante (K13): interpola desde el rect visual
@@ -2633,6 +2665,7 @@ func _request_client_size(id, rect, geo):
 	var drifted = geo.size != Vector2.ZERO and geo.size != rect.size and last_geo.get(id) != geo.size
 	if requested_sizes.get(id) != rect.size or drifted:
 		requested_sizes[id] = rect.size
+		resize_since[id] = OS.get_ticks_msec()
 		compositor.set_size(id, rect.size)
 	last_geo[id] = geo.size
 
@@ -2872,6 +2905,7 @@ func _tick_home_slide():
 		return
 	var to = home_slide_to
 	home_slide_since = -1
+	fade_skip_until = OS.get_ticks_msec() + 200  # ver frame.transition
 	var units = _units()
 	var n = units.size()
 	if int(round(to)) >= n or to <= _row_lo_v(units) + 0.01:
@@ -7904,7 +7938,10 @@ func _on_chrome_input(event):
 			return true
 		_update_csd_hover(event.position)
 		var pick = _chrome_pick(event.position)
-		_apply_cursor(_cursor_for_part(pick.part if pick != null else ""))
+		if pick != null:
+			_apply_cursor(_cursor_for_part(pick.part))
+		else:
+			_apply_client_cursor()  # sobre el contenido manda el cursor que pidió la app
 		return pick != null
 	if event is InputEventMouseButton and event.button_index == BUTTON_RIGHT and event.pressed:
 		# Menú contextual de la barra de título (cambio de modo, maximizar, cerrar).
@@ -7999,7 +8036,43 @@ func _apply_cursor(shape):
 
 
 # Cursor por defecto según lo que haya bajo `pos` (o flecha si no hay chrome).
+# Cursor pedido por la app con foco de puntero: forma de Godot o imagen propia.
+func _on_client_cursor_shape(shape):
+	client_cursor_shape = int(shape)
+	client_cursor_tex = null
+	_apply_client_cursor()
+
+
+func _on_client_cursor_image(img, hotspot):
+	if img == null or img.is_empty():
+		return
+	var tex = ImageTexture.new()
+	tex.create_from_image(img, 0)
+	client_cursor_tex = tex
+	client_cursor_hot = hotspot
+	_apply_client_cursor()
+
+
+# Aplica el cursor de la app sólo si cambió (crear un cursor de SDL por cada
+# movimiento sería caro). La imagen va como cursor custom de la forma ARROW.
+func _apply_client_cursor():
+	var key = client_cursor_tex if client_cursor_tex != null else client_cursor_shape
+	if key == _client_cursor_applied and Input.get_current_cursor_shape() == (Input.CURSOR_ARROW if client_cursor_tex != null else client_cursor_shape):
+		return
+	_client_cursor_applied = key
+	if client_cursor_tex != null:
+		Input.set_custom_mouse_cursor(client_cursor_tex, Input.CURSOR_ARROW, client_cursor_hot)
+		_apply_cursor(Input.CURSOR_ARROW)
+	else:
+		Input.set_custom_mouse_cursor(null, Input.CURSOR_ARROW)
+		_apply_cursor(client_cursor_shape)
+
+
 func _reset_cursor(pos = null):
+	# Fuera del contenido de la app no debe quedar su imagen como flecha del shell.
+	if _client_cursor_applied != null:
+		Input.set_custom_mouse_cursor(null, Input.CURSOR_ARROW)
+		_client_cursor_applied = null
 	if pos != null:
 		var pick = _chrome_pick(pos)
 		_apply_cursor(_cursor_for_part(pick.part if pick != null else ""))

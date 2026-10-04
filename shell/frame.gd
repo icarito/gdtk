@@ -4054,8 +4054,11 @@ func transition():
 			key = shell.current_activity.name + ":" + str(shell.tex_ready_frame >= 0)
 	if key != view_key:
 		view_key = key
-		fade_since = now
-		fading = true
+		# Si la vista cambió al terminar un deslizamiento (paneo/gesto hacia o desde el
+		# Hogar), ese movimiento ya fue la transición: re-fundir desde 0 hacía "flash".
+		if now > int(shell.get("fade_skip_until") if shell.get("fade_skip_until") != null else 0):
+			fade_since = now
+			fading = true
 	if not fading:
 		return 1.0
 	var k = clamp(float(now - fade_since) / FADE_MS, 0.0, 1.0)
