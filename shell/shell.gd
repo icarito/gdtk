@@ -5596,13 +5596,15 @@ func deskflow_input_sessions():
 
 # Red de seguridad del puntero compartido: si la captura está activa pero el equipo al
 # que se fue el puntero se cayó (y Deskflow no pidió Release), se suelta acá. Sólo lee la
-# cola del log del servidor mientras hay captura (una vez por segundo).
+# cola del log del servidor mientras hay captura (cada 300 ms). Caso frecuente: se toca un
+# borde con barrera, Deskflow pide Release en el mismo instante (lo ignoramos 250 ms para que
+# el cruce no rebote) y después NO cruza (tramo sin equipo vinculado): la captura quedaba.
 # ponytail: depende del texto del log de Deskflow; si cambia, el vigía no dispara (y queda
 # Ctrl+Alt+Esc). Un canal de estado del propio Deskflow lo reemplazaría.
 func _deskflow_watch(now):
 	if remote_input == null or not remote_input.has_method("release_capture") or now < _df_watch_at:
 		return
-	_df_watch_at = now + 1000
+	_df_watch_at = now + 300  # rescate en < 1 s (dos chequeos seguidos)
 	if not remote_input.is_capturing():
 		_df_mismatch = 0
 		return
@@ -5610,8 +5612,8 @@ func _deskflow_watch(now):
 	if f.open(OS.get_environment("XDG_RUNTIME_DIR").plus_file("gdtk-deskflow.log"), File.READ) != OK:
 		return
 	var n = f.get_len()
-	f.seek(int(max(0, n - 32768)))
-	var tail = f.get_buffer(int(min(n, 32768))).get_string_from_utf8()
+	f.seek(int(max(0, n - 16384)))
+	var tail = f.get_buffer(int(min(n, 16384))).get_string_from_utf8()
 	f.close()
 	var name = ""
 	if settings_bridge != null and settings_bridge.model != null:
@@ -5628,7 +5630,8 @@ func _deskflow_watch(now):
 	elif _df_mismatch >= 2:
 		why = "Deskflow volvió a este equipo sin soltar la captura"
 	if why != "" and remote_input.release_capture():
-		print("[deskflow] ", why, ": suelto la captura")
+		var t = OS.get_time()
+		print("[deskflow] %02d:%02d:%02d " % [t.hour, t.minute, t.second], why, ": suelto la captura")
 		_df_mismatch = 0
 		_set_capture_cursor(false)
 		request_redraw()
