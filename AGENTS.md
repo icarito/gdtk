@@ -127,7 +127,8 @@ tests/scripts que las usan (`shell.gd`) fallan al parsear con
 
   ```sh
   cd ~/Proyectos/gdtk
-  rsync -a --exclude '.import' shell settings session ~/gdtk/
+  rsync -a --delete --exclude '.import' --exclude '*crash*' shell settings ~/gdtk/  # --delete: sin .gd huérfanos
+  rsync -a session ~/gdtk/   # sin --delete: la instalación tiene .desktop propios
   ```
 
 - **Versiones (store)**: el supervisor arranca SIEMPRE el árbol vivo `~/gdtk/shell`;

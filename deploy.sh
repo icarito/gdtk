@@ -34,7 +34,10 @@ objcopy --remove-section=.note.gnu.property "$BIN" "$TMP/godot-gdtk"
 ssh "$HOST" 'mkdir -p ~/gdtk/bin ~/gdtk/session'
 RHOME="$(ssh "$HOST" 'echo $HOME')"  # Exec= de un .desktop no expande variables
 rsync -a "$TMP/godot-gdtk" "$HOST:gdtk/bin/"
-rsync -a --exclude '*crash*' --exclude '.import' "$GDTK/shell" "$GDTK/addons" "$GDTK/settings" "$HOST:gdtk/"  # shell/addons/settings -> ../addons
+# --delete: un .gd viejo que quede en destino se compila igual (un _remote_input_tmp.gd con
+# class_name RemoteInput tumbó el arranque). El shell no escribe en su árbol (usa user:// y
+# XDG_RUNTIME_DIR); lo excluido (crash, .import) no se borra.
+rsync -a --delete --exclude '*crash*' --exclude '.import' "$GDTK/shell" "$GDTK/addons" "$GDTK/settings" "$HOST:gdtk/"  # shell/addons/settings -> ../addons
 rsync -a "$GDTK/mcp" "$HOST:gdtk/"
 # gvd vendoreado (tools/gvd/DEPS.md). Los helpers se compilan EN el host destino:
 # compilados aquí (con -march nativo de este host) fallaban con "CPU ISA level is
