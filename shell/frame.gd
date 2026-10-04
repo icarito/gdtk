@@ -1,6 +1,6 @@
 extends Node
 
-# El Frame (como en Sugar): franja superpuesta arriba con Inicio, todo lo que
+# El Frame (como en Sugar): franja superpuesta arriba con Hogar, todo lo que
 # corre (actividades internas con instancia viva y toplevels wayland sin padre,
 # los haya lanzado el shell o no) y el reloj. No ocupa espacio: la app usa toda
 # la pantalla y el Frame se dibuja encima (ViewLayer va en layer -1, bajo ImGui).
@@ -31,9 +31,9 @@ const HOT_MS = 250
 const SLIDE_MS = 130
 const SUPER_KEYS = [KEY_META, KEY_SUPER_L, KEY_SUPER_R]
 const PAD = 0.0          # sin separación entre bloques del Frame (pegados al borde)
-# Mínimo de celdas de la grilla regular de barra: 3 fijas (esquina/Vecindario/Inicio),
+# Mínimo de celdas de la grilla regular de barra: 4 fijas (esquina/Vecindario/Grupo/Hogar),
 # la celda del pin a la derecha y al menos cuatro de contenido.
-const MIN_CELLS = 8
+const MIN_CELLS = 9
 const TILE_PAD = 4.0     # aire entre texto/ícono y el borde del bloque (escala con la UI)
 const HOT_EDGE = 4.0     # con autohide sólo revela si el puntero empuja contra este canto
 const DRAG_PX = 8.0
@@ -57,7 +57,7 @@ const SHADOW = 3.0
 const SHADOW_ALPHA = 0.18
 const TITLE_H = 14.0     # alto de la línea de título dentro de la tesela
 const TITLE_MAX = 10     # máximo de caracteres del título (se recorta con ...)
-const ICON_MIN = 48.0    # piso del ícono de un bloque con título (Inicio/Vecindario)
+const ICON_MIN = 48.0    # piso del ícono de un bloque con título (Hogar/Grupo/Vecindario)
 const ICON_MAX = 72.0
 const ICON_TILE_MIN = 64.0  # en bloques de ventana el ícono nunca baja de 64 px
 const MINI = 14.0        # alto de la mini-tesela de cerrar (sólo al hover)
@@ -804,10 +804,10 @@ static func bar_grid(vp_w, target_side, pad):
 	return {"n": n, "pitch": pitch, "side": side, "margin": margin}
 
 
-# Celdas fijas antes del contenido de una barra: la superior reserva 3 (esquina,
-# Vecindario, Inicio); la inferior, 1 (esquina). La última celda es el pin.
+# Celdas fijas antes del contenido de una barra: la superior reserva 4 (esquina,
+# Vecindario, Grupo, Hogar); la inferior, 1 (esquina). La última celda es el pin.
 static func bar_fixed_cells(zone):
-	return 3 if zone == "top" else 1
+	return 4 if zone == "top" else 1
 
 
 # x de la celda 0 del contenido (tras las celdas fijas) para la grilla dada.
@@ -1330,7 +1330,7 @@ static func applet_menu(id):
 
 
 # ¿Hay que muestrear los applets? Sí mientras alguna franja que los contiene esté a
-# la vista: Inicio (home), el Frame abierto a pedido o una barra fijada (pin). Así los
+# la vista: Hogar (home), el Frame abierto a pedido o una barra fijada (pin). Así los
 # diales siguen vivos aunque la ventana enfocada sea otra app. Puro para test.
 static func applets_live(home, frame_visible, pin_top, pin_bottom):
 	return home or frame_visible or pin_top or pin_bottom
@@ -2103,7 +2103,7 @@ func cycle(step):
 
 
 # Monitor del sistema: muestrea mientras una franja con applets esté a la vista
-# (Inicio, Frame abierto a pedido o barra fijada) y pide un frame por muestra
+# (Hogar, Frame abierto a pedido o barra fijada) y pide un frame por muestra
 # (>= 1 Hz) para que la gráfica y los diales avancen aunque la ventana enfocada sea
 # otra app. No se gatea por `visible` sólo: una barra fijada (pin) sigue a la vista.
 func _process(_delta):
@@ -3169,7 +3169,7 @@ func _draw_outline(ui, rect, color):
 	ui.imgui_draw_polyline(p, color, 2.0, true)
 
 
-# Bloque Inicio: tesela cuadrada con el ícono Sugar de hogar y el título corto abajo.
+# Bloque Hogar: tesela cuadrada con el ícono Sugar de hogar y el título corto abajo.
 # Resalta cuando la vista actual es el Hogar (la ranura extra al final de la fila).
 # Color de acento del shell para el bloque actual/fijado.
 func _cur():
@@ -3179,17 +3179,17 @@ func _cur():
 
 
 func _draw_home_tile(ui, pos, side):
-	var at_home = shell.current_activity == null and not shell.neighborhood_view
+	var at_home = shell.current_activity == null and shell.zoom_level == 0 and not shell.neighborhood_view
 	var b = _tile(ui, pos, side, "go_home", _cur() if at_home else NX_FACE)
 	var ts = ui.get_imgui_scale()
 	var pad = TILE_PAD * ts
-	var lines = _title_lines(ui, side, "Inicio") if side >= 76.0 * ts else []
+	var lines = _title_lines(ui, side, "Hogar") if side >= 76.0 * ts else []
 	var title_h = _title_reserved(ui, lines) if not lines.empty() else 0.0
 	var bw = _bevel_w(ui)
 	var inner = side - 2.0 * bw
 	var s = clamp(inner - title_h - 2.0 * pad, ICON_MIN * ts, ICON_MAX * ts)
 	var iy = bw + max(pad, (inner - s - title_h) * 0.5)
-	# Bloque Inicio = "Este equipo": lleva el ícono del equipo local (desktop,
+	# Bloque Hogar = "Este equipo": lleva el ícono del equipo local (desktop,
 	# laptop, tablet, mobile o tv), no una casita genérica.
 	var icon = shell.local_device_icon_tex()
 	if icon != null:
@@ -3198,7 +3198,7 @@ func _draw_home_tile(ui, pos, side):
 		ui.set_cursor_pos(pos + Vector2((side - 7.0 * ui.get_imgui_scale()) * 0.5, (side - 13.0 * ui.get_imgui_scale()) * 0.5))
 		ui.text_colored(NX_TEXT, "H")
 	if not lines.empty():
-		_tile_title(ui, pos, side, "Inicio", false, lines)
+		_tile_title(ui, pos, side, "Hogar", false, lines)
 	return b.clicked
 
 
@@ -3206,7 +3206,7 @@ func _draw_home_tile(ui, pos, side):
 # Project, ver icons/np/CREDITS.txt). Sólo abre la vista (no escanea, no conecta);
 # resalta cuando la vista actual es el Vecindario.
 func _draw_neighborhood_tile(ui, pos, side):
-	var active = shell.neighborhood_view
+	var active = shell.zoom_level == 2
 	var b = _tile(ui, pos, side, "go_neighborhood", _cur() if active else NX_FACE)
 	var ts = ui.get_imgui_scale()
 	var pad = TILE_PAD * ts
@@ -3224,6 +3224,29 @@ func _draw_neighborhood_tile(ui, pos, side):
 		_draw_wifi_glyph(ui, center, s * 0.5, NX_TEXT)
 	if not lines.empty():
 		_tile_title(ui, pos, side, "Vecindario", false, lines)
+	return b.clicked
+
+
+# Bloque Grupo: igual que Vecindario, con el ícono Sugar de red cableada (sin
+# ícono propio en el shell); resalta sólo en la vista Grupo (zoom_level 1).
+func _draw_group_tile(ui, pos, side):
+	var b = _tile(ui, pos, side, "go_group", _cur() if shell.zoom_level == 1 else NX_FACE)
+	var ts = ui.get_imgui_scale()
+	var pad = TILE_PAD * ts
+	var lines = _title_lines(ui, side, "Grupo") if side >= 76.0 * ts else []
+	var title_h = _title_reserved(ui, lines) if not lines.empty() else 0.0
+	var bw = _bevel_w(ui)
+	var inner = side - 2.0 * bw
+	var s = clamp(inner - title_h - 2.0 * pad, ICON_MIN * ts, ICON_MAX * ts)
+	var iy = bw + max(pad, (inner - s - title_h) * 0.5)
+	var icon = shell._load_sugar_svg("network-wired", shell.SUGAR_STROKE, shell.SUGAR_FILL)
+	if icon != null:
+		_draw_emboss_icon(ui, pos + Vector2((side - s) * 0.5, iy), Vector2(s, s), icon, b.face)
+	else:
+		ui.set_cursor_pos(pos + Vector2((side - 7.0 * ts) * 0.5, (side - 13.0 * ts) * 0.5))
+		ui.text_colored(NX_TEXT, "G")
+	if not lines.empty():
+		_tile_title(ui, pos, side, "Grupo", false, lines)
 	return b.clicked
 
 
@@ -3714,12 +3737,15 @@ func draw(ui):
 			if app_drag != null and mouse.y <= bh:
 				ui.imgui_draw_rect_filled(Rect2(Vector2(0.0, off_top + bh - 3.0), Vector2(vp.x, 3.0)), NX_SEL, 0.0)
 			var y = (bh - side) * 0.5
-			# Celdas fijas: 0 esquina (vacía), 1 Vecindario, 2 Inicio. Los bloques de
-			# contenido arrancan en la celda 3 (`bar_base_origin`).
+			# Celdas fijas: 0 esquina (vacía), 1 Vecindario, 2 Grupo, 3 Hogar. Los
+			# bloques de contenido arrancan en la celda 4 (`bar_base_origin`).
 			if _draw_neighborhood_tile(ui, Vector2(margin + pitch, y), side):
 				set_visible(false)
 				shell._go_neighborhood()
-			if _draw_home_tile(ui, Vector2(margin + 2.0 * pitch, y), side):
+			if _draw_group_tile(ui, Vector2(margin + 2.0 * pitch, y), side):
+				set_visible(false)
+				shell._go_group()
+			if _draw_home_tile(ui, Vector2(margin + 3.0 * pitch, y), side):
 				set_visible(false)
 				shell._go_home()
 			_draw_bar_blocks(ui, "top", bar_base_origin("top", grid), y, grid, mouse)

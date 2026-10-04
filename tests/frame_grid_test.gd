@@ -58,8 +58,8 @@ func _init():
 	# Pantalla chica: nunca baja de MIN_CELLS.
 	check("ancho minimo respeta MIN_CELLS", int(F.bar_grid(500, 80, 0.0).n) >= int(F.MIN_CELLS))
 	# Ambas barras comparten grilla (misma n y pitch para distinto rol).
-	check("bar_fixed_cells top = 3 / dock = 1",
-		F.bar_fixed_cells("top") == 3 and F.bar_fixed_cells("dock") == 1)
+	check("bar_fixed_cells top = 4 / dock = 1",
+		F.bar_fixed_cells("top") == 4 and F.bar_fixed_cells("dock") == 1)
 
 	# --- Requisito B: plan del DockApp de ventanas -------------------------------
 	# Modo normal: n <= F.

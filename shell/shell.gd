@@ -376,6 +376,7 @@ var hybrid = WM_HYBRID.new()
 var swipe = SWIPE_MODEL.new()
 var swipe_mode = ""   # "" | "pan" (escritorios) | "expose" (entrar/salir) | "none"
 var swipe_k = 0.0     # fracción de la animación del exposé fijada por los dedos
+var home_ring_hidden = false  # el anillo se ocultó durante el paneo: re-entra animado
 var home_bg_alpha = 1.0   # alfa del fondo del Hogar mientras aparece por el paneo
 var _prev_units = [[]]   # unidades del frame anterior (hybrid.heal_anchors)
 var _fs_sent = -1         # última ventana a la que se le avisó xdg "fullscreen"
@@ -2414,6 +2415,11 @@ func _update_tile(id, now):
 	if drag_card != null:
 		rect = Rect2(Vector2.ZERO, drag_card.local)
 		_request_client_size(id, rect, geo)
+	elif expose and geo.size.x > 0.0 and geo.size.y > 0.0:
+		# La miniatura es la ventana COMPLETA escalada: con el slot del layout, un
+		# cliente más grande que su lugar (o que no aceptó el tamaño) se recortaba al
+		# centro (_content_fit es 1:1) y en exposé se veía sólo una parte.
+		rect = Rect2(rect.position, geo.size)
 	# El cliente puede no ocupar el slot (elige tamaño propio, o se achica al cambiar
 	# de fuente): se centra 1:1 y, si es más grande que el slot, se reduce para que entre.
 	var fit = _content_fit(geo.size, rect.size, geo.position)
@@ -3801,9 +3807,10 @@ func _draw_home(offset = 0.0):
 			set_tooltip("Este equipo · Configuración / Sesión")
 		# Mismo ícono y placa que el centro del Vecindario: un solo "Este equipo".
 		var cr = min(monitor.size.x, monitor.size.y) * 0.5 - 2.0
-		imgui_draw_circle_filled(cc + Vector2(0.0, 3.0), cr, Color(0, 0, 0, 0.35), 0)
-		imgui_draw_circle_filled(cc, cr, center_face, 0)
-		imgui_draw_circle(cc, cr, HOME_BLOCK_DARK, 0, 2.0)
+		var ka = Color(1, 1, 1, home_bg_alpha)
+		imgui_draw_circle_filled(cc + Vector2(0.0, 3.0), cr, Color(0, 0, 0, 0.35) * ka, 0)
+		imgui_draw_circle_filled(cc, cr, center_face * ka, 0)
+		imgui_draw_circle(cc, cr, HOME_BLOCK_DARK * ka, 0, 2.0)
 		var dev_tex = local_device_icon_tex()
 		if dev_tex != null:
 			var ds = cr * 1.20
@@ -3849,6 +3856,18 @@ func _draw_home(offset = 0.0):
 		# Anillo de sólo lectura: actividades abiertas + atajos del Frame, con
 		# reacomodo animado al entrar/salir ítems.
 		ring_layout = []
+		# Paneo/deslizamiento hacia el Hogar: mientras las ventanas siguen en pantalla
+		# sólo se ven fondo e ícono central (el draw list no respeta el alfa: las
+		# burbujas aparecían opacas antes de tiempo). Al llegar, entran con su animación.
+		if home_bg_alpha < 0.999:
+			home_ring_hidden = true
+			end()
+			pop_style_var()
+			return
+		if home_ring_hidden:
+			home_ring_hidden = false
+			for e in entries:
+				ring_intro[e.name] = now
 		var slide = Vector2(offset, 0.0)
 		for i in range(entries.size()):
 			var e = entries[i]
