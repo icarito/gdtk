@@ -61,4 +61,4 @@ el resto cambia al cruzar la mitad de cada tramo; sin ventanas se saltan 0 y 1. 
   b9115026 en los 3 hosts (tengu por IP); tengu/cupid reiniciados sanos. Bastion: reiniciar sesión para el binario.
 - Vigía Deskflow dispara seguido en uso real: "volvió a este equipo sin soltar" = borde con barrera tocado, Release
   ignorado (ventana 250 ms) y Deskflow no cruzó (tramo sin vínculo) → captura trabada; ahora rescate cada 300 ms
-  (aa56e8c, sólo scripts). Raíz pendiente en eis_server.c: re-evaluar el Release ignorado si no hubo switch.
+  (aa56e8c). ✔ Raíz f27ee80: Release ignorado queda pendiente; motion físico hacia adentro >24 px (sin adentrarse >40 px, <1,5 s) lo aplica. Binario 3f6cf649 en los 3 (clientes sin reiniciar: el cambio actúa en el servidor).
