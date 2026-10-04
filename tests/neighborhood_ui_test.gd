@@ -323,6 +323,40 @@ func _init():
 	check("degradado no confiable", loose_actions.size() == 1 and not loose_actions[0].enabled)
 
 	ui.free()
+	# Grupo (N5/N8): soltar en cualquier ángulo sólo acomoda y persiste lado + along.
+	var gui = load("res://neighborhood_ui.gd").new()
+	gui.mode = "group"
+	gui.center = Vector2(640, 360)
+	gui._group_layout = {"ring": Vector2(180, 120), "center_size": 100.0}
+	check("soltar sobre el equipo local no ubica", gui._group_placement_at(Vector2(650, 365)).empty())
+	var east_low = gui._group_placement_at(Vector2(900, 400))
+	check("soltar a la derecha = este, algo por debajo", east_low.side == "east"
+		and east_low.offset > 0.5 and east_low.offset < 1.0)
+	var north_pl = gui._group_placement_at(Vector2(640, 40))
+	check("soltar arriba = norte centrado", north_pl.side == "north"
+		and abs(north_pl.offset - 0.5) < 0.01)
+	var spy = Spy.new()
+	gui.shell = spy
+	gui._apply_group_placement("h1", "south", 0.75)
+	check("placement: guarda entrada confirmada con along", gui.directions.h1.direction == "south"
+		and abs(gui.directions.h1.along - 0.75) < 0.001 and gui.directions.h1.confirm == "confirmed")
+	check("placement: llama al hook del shell con lado y along", spy.calls == [["h1", "south", 0.75]])
+	check("placement: no abre popup de compartir", gui._menu_host == null)
+	gui._apply_group_placement("h1", "none", 0.5)
+	check("placement: lado inválido se ignora", gui.directions.h1.direction == "south")
+
+	# Vecindario: sólo los pares ofrecen el submenú; el Bluetooth ya no se dibuja ahí.
+	var nui = load("res://neighborhood_ui.gd").new()
+	var plain = {"id": "x1", "host": {"id": "x1", "label": "Vecino"}}
+	check("vecino no par: sin submenú", nui._peer_member(plain) == null)
+	nui.directions = {"x1": {"direction": "west", "confirm": "confirmed"}}
+	var pm = nui._peer_member(plain)
+	check("vecino par: ficha con su lado", pm != null and pm.direction == "west" and pm.online)
+	var items = nui._group_toggle_items(pm, false)
+	check("submenú: extender pantalla y compartir teclado y mouse", items.size() == 2
+		and items[0].label.begins_with("Extender mi pantalla")
+		and items[1].label.begins_with("Compartir teclado y mouse"))
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()
 
@@ -350,3 +384,9 @@ class ShellRecorder:
 		return false
 	func apply_deskflow_layout(links):
 		last_links = links
+
+
+class Spy:
+	var calls = []
+	func _set_host_placement(id, side, along):
+		calls.append([id, side, along])

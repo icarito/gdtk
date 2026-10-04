@@ -244,7 +244,7 @@ static func menu(block):
 #   windows:       [{id, title, peer_name, maximized}] ventanas de pantalla extendida.
 # Sin sesiones, remotos ni ventanas devuelve {} para que el Frame no dibuje nada.
 # Puro: sin red, procesos ni disco.
-static func diagram(sessions, remote_shares, windows):
+static func diagram(sessions, remote_shares, windows, placements = {}, focus = {}):
 	var entries = []
 	for s in _as_array(sessions):
 		var e = _diagram_entry(s, "local")
@@ -265,7 +265,118 @@ static func diagram(sessions, remote_shares, windows):
 		"sides": sides,
 		"menu": _diagram_menu(entries, wlist),
 		"tooltip": _diagram_tooltip(entries, wlist),
+		"radial": radial(sessions, remote_shares, windows, placements, focus),
+		"local_focus": not bool(_as_dict(focus).get("capturing", false)),
 	}
+
+
+# --- Vista radial (N10) ------------------------------------------------------
+# Ángulos en grados, sentido horario en pantalla (y hacia abajo): este 0, sur 90,
+# oeste 180, norte 270. El equipo local va al centro; cada par en su ángulo.
+const SIDE_ANGLES = {"east": 0.0, "south": 90.0, "west": 180.0, "north": 270.0}
+# Separación entre pares que caen en el mismo ángulo base.
+const RADIAL_SPREAD = 28.0
+
+
+# Un elemento por par (equipo vecino), fusionando pantalla/teclado/ventanas:
+#   {key, peer_name, label, initial, angle, kind: "screen"|"input"|"both",
+#    direction: "out" (controlas)|"in" (te controla)|"both"|"none",
+#    state, focused, screen, input, viewing}
+# `placements`: {clave o nombre: grados} guardado por la vista Grupo; sin él, el lado
+# de la sesión. `focus`: {capturing: bool, peer: clave/nombre opcional}; con captura
+# activa el foco está en el par que controlas (y no en este equipo). Puro.
+static func radial(sessions, remote_shares, windows, placements = {}, focus = {}):
+	var pl = _as_dict(placements)
+	var fc = _as_dict(focus)
+	var peers = {}
+	var order = []
+	var raw = []
+	for s in _as_array(sessions):
+		var e = _diagram_entry(s, "local")
+		if not e.empty():
+			raw.append(e)
+	for r in _as_array(remote_shares):
+		var e2 = _diagram_entry(r, "remote")
+		if not e2.empty():
+			raw.append(e2)
+	for e in raw:
+		var p = _radial_peer(peers, order, String(e.peer_name), String(e.key))
+		if String(p.side) == "":
+			p.side = String(e.side)
+		var dir = "out" if String(e.origin) == "local" else "in"
+		if String(e.type) == "input":
+			p.input = true
+			p.in_dirs[dir] = true
+		else:
+			p.screen = true
+			p.scr_dirs[dir] = true
+		p.state = _worse_state(String(p.state), String(e.state))
+	for w in _diagram_windows(windows):
+		var name = String(w.peer_name)
+		if name == "":
+			continue
+		var pw = _radial_peer(peers, order, name, name)
+		pw.screen = true
+		pw.viewing = true
+		pw.scr_dirs["in"] = true
+	order.sort()
+	var out = []
+	var slot = {}
+	for k in order:
+		var p = peers[k]
+		var angle = _placement_angle(pl, p)
+		if angle < 0.0:
+			var base = float(SIDE_ANGLES.get(String(p.side), 270.0))
+			var n = int(slot.get(base, 0))
+			slot[base] = n + 1
+			# 0, +28, -28, +56... alrededor del ángulo base.
+			angle = base + float((n + 1) / 2) * RADIAL_SPREAD * (1.0 if n % 2 == 1 else -1.0)
+		angle = fposmod(angle, 360.0)
+		var dirs = p.in_dirs if p.input else p.scr_dirs
+		var direction = "none"
+		if dirs.has("out") and dirs.has("in"):
+			direction = "both"
+		elif dirs.has("out"):
+			direction = "out"
+		elif dirs.has("in"):
+			direction = "in"
+		var fpeer = String(fc.get("peer", ""))
+		var focused = bool(fc.get("capturing", false)) and p.input and dirs.has("out") \
+			and (fpeer == "" or fpeer == String(p.key) or fpeer == String(p.name))
+		out.append({"key": p.key, "peer_name": p.name, "label": p.name,
+			"initial": peer_initial(p.name), "angle": angle,
+			"kind": "both" if (p.input and p.screen) else ("input" if p.input else "screen"),
+			"direction": direction, "state": p.state, "focused": focused,
+			"screen": p.screen, "input": p.input, "viewing": p.viewing})
+	return out
+
+
+static func _radial_peer(peers, order, name, key):
+	var id = name
+	if not peers.has(id):
+		peers[id] = {"name": name, "key": key, "side": "", "screen": false, "input": false,
+			"viewing": false, "state": "active", "in_dirs": {}, "scr_dirs": {}}
+		order.append(id)
+	return peers[id]
+
+
+static func _placement_angle(pl, p):
+	for k in [String(p.key), String(p.name)]:
+		if pl.has(k) and (typeof(pl[k]) == TYPE_REAL or typeof(pl[k]) == TYPE_INT):
+			return fposmod(float(pl[k]), 360.0)
+	return -1.0
+
+
+# error > conectando > activo.
+static func _worse_state(a, b):
+	for s in ["error", "starting"]:
+		if a == s or b == s:
+			return s
+	return "active"
+
+
+static func _as_dict(v):
+	return v if typeof(v) == TYPE_DICTIONARY else {}
 
 
 static func valid_side(s):
@@ -408,6 +519,16 @@ static func _diagram_tooltip(entries, windows):
 		var n = windows.size()
 		parts.append(String(n) + (" ventana compartida" if n == 1 else " ventanas compartidas"))
 	return "Compartiendo: " + PoolStringArray(parts).join("; ")
+
+
+# Frase de foco para el tooltip: dónde están ahora el puntero y el teclado.
+static func focus_text(radial_list, local_focus):
+	if local_focus:
+		return "El teclado y el mouse están en este equipo"
+	for p in _as_array(radial_list):
+		if bool(p.get("focused", false)):
+			return "Controlando a " + String(p.peer_name)
+	return "El teclado y el mouse están en otro equipo"
 
 
 # ¿El punto cae en algún bloque del snapshot de layout? Puro respecto de rects

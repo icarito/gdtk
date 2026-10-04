@@ -187,6 +187,7 @@ var neighborhood_ui = null
 var zoom_level = 0
 var zoom_f = 0.0
 var neighborhood_view = false
+var group_placements = {}   # hid -> grados alrededor del equipo local (de host_directions)
 const ZOOM_MS = 220.0
 var nb_version = -1
 # Dirección por host (brújula): hid -> entry normalizado de DIRECTIONS_MODEL.
@@ -383,6 +384,11 @@ var resize_handle = null
 var hybrid = WM_HYBRID.new()
 var swipe = SWIPE_MODEL.new()
 var swipe_mode = ""   # "" | "pan" (escritorios) | "expose" (entrar/salir) | "none"
+var swipe_levels = []        # niveles de la cadena vertical en este gesto
+var swipe_start_level = 0
+var swipe_live = 0            # nivel que se ve ahora (SWIPE_SEG = dentro del tramo pantalla<->exposé)
+var swipe_seg_from = 0
+const SWIPE_SEG = 99
 var swipe_k = 0.0     # fracción de la animación del exposé fijada por los dedos
 var home_ring_hidden = false  # el anillo se ocultó durante el paneo: re-entra animado
 var fade_skip_until = 0  # ms: el cambio de vista llega por deslizamiento, sin fundido
@@ -1529,7 +1535,7 @@ func _imgui_frame():
 	_prev_units = cur_units
 	_sync_client_fullscreen()
 	# Con los dedos quietos la animación del exposé no debe seguir sola por tiempo.
-	if swipe_mode == "expose":
+	if swipe_mode == "vchain" and swipe_live == SWIPE_SEG:
 		_swipe_scrub(swipe_k, OS.get_ticks_msec())
 	_tick_home_slide()
 	# Fundido al cambiar de vista (ver frame.transition); 0 = ImGuiStyleVar_Alpha.
@@ -1723,12 +1729,11 @@ func _home_vis(units):
 # Hogar, una vuelta entera en cada sentido.
 func _pan_limits(units, a):
 	var vp = get_viewport_rect().size
-	var n = float(units.size())
-	var lo_v = _row_lo_v(units)
-	var hi = (n - a) * vp.x
 	if _at_home():
-		hi = (n - lo_v) * vp.x
-	return Vector2((lo_v - a) * vp.x, hi)
+		return Vector2.ZERO  # el Hogar se deja por la cadena vertical, no por los costados
+	var n = float(units.size())
+	var first = _row_lo_v(units) + 1.0
+	return Vector2(min(0.0, (first - a) * vp.x), max(0.0, (n - 1.0 - a) * vp.x))
 
 
 # Ranura de la última pantalla que tuvo el foco (para volver desde el Hogar).
@@ -2887,6 +2892,12 @@ func _focus_tile(id, raise_window = true):
 	pan_active = false
 	home_slide_since = -1
 	apps_view = false
+	# Ir a una app sale del Grupo/Vecindario al instante: si no, `neighborhood_view`
+	# seguía en true (o mientras se animaba zoom_f) y las teclas de la app se descartaban.
+	if zoom_level > 0 or zoom_f > 0.0:
+		_set_zoom(0)
+		zoom_f = 0.0
+		neighborhood_view = false
 	# Enfocar una minimizada la restaura (así el teclado puede traerlas de vuelta);
 	# la vuelta usa entrada por escala (no deslizamiento desde el borde/Frame).
 	var restoring = minimized.has(id)
@@ -3030,9 +3041,8 @@ func _on_swipe(event):
 			swipe_mode = _swipe_start(p)
 		if swipe_mode == "pan":
 			_swipe_pan(p)
-		elif swipe_mode == "expose":
-			swipe_k = abs(p)
-			_swipe_scrub(swipe_k, now)
+		elif swipe_mode == "vchain":
+			_swipe_vchain(p, now)
 		return
 	var r = swipe.end(kind == 3, now, size)
 	var mode = swipe_mode
@@ -3041,26 +3051,107 @@ func _on_swipe(event):
 	if mode == "pan":
 		# Dedos a la izquierda (step -1) = pantalla siguiente.
 		_snap_pan(-int(r.step))
-	elif mode == "expose":
-		# Se completa si el snap va en el sentido con que se abrió/cerró; si no, vuelve
-		# animando desde donde quedó.
-		if int(r.step) != (-1 if expose else 1):
-			_toggle_expose(not expose)
-		else:
-			_seed_view_anim(now)  # termina con easing desde donde quedó, sin tirón
+	elif mode == "vchain":
+		_swipe_vchain_end(SWIPE_MODEL.vertical_target(swipe_levels, swipe_start_level, r.progress, int(r.step)), now)
 	request_redraw()
 
 
 func _swipe_start(p):
 	if swipe.axis == "x":
-		if expose or fullscreen_id >= 0 or _home_anim_active() or not (tile_mode or _at_home()):
-			return "none"
+		if expose or fullscreen_id >= 0 or _home_anim_active() or not tile_mode:
+			return "none"  # el Hogar ya no está a los costados: se llega por la cadena vertical
 		return "pan"
-	# Arriba abre el exposé; abajo lo cierra. Al revés no hace nada.
-	if (p < 0.0) != expose:
-		_toggle_expose(not expose)
-		return "expose"
-	return "none"
+	if fullscreen_id >= 0 or _home_anim_active():
+		return "none"
+	swipe_levels = SWIPE_MODEL.vertical_levels(not tiles.empty())
+	swipe_start_level = _vlevel()
+	if swipe_levels.find(swipe_start_level) < 0:
+		return "none"
+	swipe_live = swipe_start_level
+	return "vchain"
+
+
+# Nivel actual en la cadena vertical (ver swipe_model.vertical_levels).
+func _vlevel():
+	if zoom_level > 0:
+		return -zoom_level
+	if expose:
+		return 1
+	if _at_home():
+		return 3 if apps_view else 2
+	return 0
+
+
+# Lleva la vista a un nivel de la cadena (salto discreto, con sus animaciones propias).
+func _apply_vlevel(level):
+	match int(level):
+		-2:
+			_go_neighborhood()
+		-1:
+			_go_group()
+		0:
+			if expose:
+				_toggle_expose(false)
+			if _at_home() or zoom_level > 0:
+				_set_zoom(0)
+				apps_view = false
+				var units = _units()
+				if not units.empty():
+					_start_home_leave(units, _last_focus_unit(units))
+		1:
+			if zoom_level > 0:
+				_set_zoom(0)
+			apps_view = false
+			if not expose:
+				_toggle_expose(true)
+		2:
+			_go_home()
+		3:
+			_go_home()
+			apps_view = true
+	request_redraw()
+
+
+# Gesto vertical en curso. El tramo pantalla<->exposé sigue a los dedos (scrub de su
+# animación); el resto de la cadena cambia de vista al cruzar la mitad de cada tramo.
+func _swipe_vchain(p, now):
+	var pos = SWIPE_MODEL.vertical_pos(swipe_levels, swipe_start_level, p)
+	var i0 = swipe_levels.find(0)
+	if i0 >= 0 and pos >= float(i0) and pos <= float(i0 + 1) and (swipe_live == 0 or swipe_live == 1 or swipe_live == SWIPE_SEG):
+		var frac = pos - float(i0)
+		if swipe_live != SWIPE_SEG:
+			swipe_seg_from = swipe_live
+			swipe_live = SWIPE_SEG
+			# Desde la pantalla se abre el exposé; desde el exposé, se cierra.
+			_toggle_expose(swipe_seg_from == 0)
+		swipe_k = frac if swipe_seg_from == 0 else 1.0 - frac
+		_swipe_scrub(swipe_k, now)
+		return
+	if swipe_live == SWIPE_SEG:
+		# Salió del tramo continuo: queda del lado por el que salió y sigue discreto.
+		var out_up = i0 >= 0 and pos > float(i0 + 1)
+		swipe_live = 1 if out_up else 0
+		if expose == out_up:
+			_seed_view_anim(now)  # completa la animación desde donde quedó
+		else:
+			_toggle_expose(out_up)
+	var target = swipe_levels[int(round(pos))]
+	if target != swipe_live:
+		swipe_live = target
+		_apply_vlevel(target)
+
+
+func _swipe_vchain_end(target, now):
+	if swipe_live == SWIPE_SEG:
+		var want = int(target) >= 1
+		if expose == want:
+			_seed_view_anim(now)  # termina con easing desde donde quedó, sin tirón
+		else:
+			_toggle_expose(want)
+		swipe_live = 1 if want else 0
+	if int(target) != swipe_live:
+		_apply_vlevel(target)
+	swipe_live = int(target)
 
 
 # Paneo absoluto de la fila según el avance del gesto (en pantallas, + = dedos a la
@@ -3102,8 +3193,8 @@ func _snap_pan(step = null):
 	var lo_v = _row_lo_v(units)
 	var from_s = _row_s(units)
 	var target = a + float(delta)
-	if _at_home() and target > float(n):
-		target -= float(n) - lo_v  # vuelta: entra por la izquierda
+	if not _at_home():
+		target = clamp(target, lo_v + 1.0, float(n) - 1.0)  # sin Hogar a los costados
 	target = clamp(target, lo_v, float(n))
 	pan_active = false
 	pan = 0.0
@@ -5759,8 +5850,33 @@ func _set_host_direction(host_id, dir):
 	request_redraw()
 
 
+# El equipo se soltó en un ángulo alrededor del local (vista Grupo): lado + posición a lo
+# largo del borde (0..1). Conserva el resto de la entrada (modo, etc.) y queda confirmado;
+# Configuración → Pantallas lo usa para ubicar la pantalla.
+func _set_host_placement(host_id, side, along):
+	var id = String(host_id)
+	if id == "":
+		return
+	var base = host_directions.get(id, {})
+	base = base.duplicate() if typeof(base) == TYPE_DICTIONARY else {}
+	base["direction"] = String(side)
+	base["along"] = clamp(float(along), 0.0, 1.0)
+	base["confirm"] = "confirmed"
+	if not base.has("mode"):
+		base["mode"] = "extend"
+	var entry = DIRECTIONS_MODEL.sanitize_entry(base)
+	if String(entry.get("direction", "none")) == "none":
+		return
+	host_directions[id] = entry
+	_refresh_direction_views()
+	_persist_directions()
+	request_redraw()
+
+
 # Vuelca el estado ya disponible a la vista (nunca consulta red/procesos/disco).
 func _refresh_direction_views():
+	# Ángulo de cada equipo alrededor del local (Grupo y dockapp radial "Compartiendo").
+	group_placements = GROUP_MODEL.placements(host_directions)
 	var conflicts = DIRECTIONS_MODEL.edge_conflicts(host_directions)
 	if neighborhood_ui == null:
 		return
@@ -8743,7 +8859,7 @@ func _unhandled_input(event):
 		# en flotante el foco de ventana y la actividad pueden desincronizarse y la
 		# app quedaba muda de teclado (mouse vivo, teclado muerto). Con foco real
 		# (`_float_key_focus_alive`) se reenvía igual.
-		if expose or apps_view or neighborhood_view:
+		if expose or apps_view or (neighborhood_view and current_activity == null):
 			return
 		if not (current_activity != null and current_activity.has("wayland")) \
 				and not _float_key_focus_alive():

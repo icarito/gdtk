@@ -90,6 +90,11 @@ static func sanitize_entry(entry):
 	elif t == TYPE_STRING and String(raw).is_valid_integer():
 		updated = int(raw)
 	out.updated = updated if updated >= 0 else 0
+	# along: posición 0..1 a lo largo del lado (drag libre de la vista Grupo); la clave sólo
+	# existe si hay dato (los consumidores leen get("along", -1)).
+	var al = entry.get("along", -1.0)
+	if (typeof(al) == TYPE_REAL or typeof(al) == TYPE_INT) and float(al) >= 0.0 and float(al) <= 1.0:
+		out.along = float(al)
 	return out
 
 
@@ -131,7 +136,13 @@ static func merge(base, overrides):
 			out[String(k)] = sanitize_entry(base[k])
 	if typeof(overrides) == TYPE_DICTIONARY:
 		for k in overrides.keys():
-			out[String(k)] = sanitize_entry(overrides[k])
+			var e = sanitize_entry(overrides[k])
+			# Un override sin posición fina no pierde la que ya tenía en el mismo lado.
+			var prev = out.get(String(k), null)
+			if not e.has("along") and prev != null and prev.has("along") \
+					and String(prev.direction) == String(e.direction):
+				e.along = prev.along
+			out[String(k)] = e
 	return out
 
 
@@ -158,12 +169,15 @@ static func edge_conflicts(dict):
 
 
 static func _entry_json(e):
+	var along = ""
+	if e.has("along"):
+		along = ",\"along\":" + str(stepify(float(e.along), 0.0001))
 	return "{" \
 		+ "\"direction\":" + to_json(e.direction) + "," \
 		+ "\"confirm\":" + to_json(e.confirm) + "," \
 		+ "\"mode\":" + to_json(e.mode) + "," \
 		+ "\"link\":" + to_json(e.link) + "," \
-		+ "\"updated\":" + str(int(e.updated)) + "}"
+		+ "\"updated\":" + str(int(e.updated)) + along + "}"
 
 
 static func selftest():

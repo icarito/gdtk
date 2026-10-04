@@ -588,6 +588,71 @@ static func parse(text):
 	return normalize_layout(data)
 
 
+# --- Ubicación por ángulo (vista Grupo, 360°) ------------------------------------
+# El equipo local es un rectángulo de semiejes `half`; un par soltado en cualquier
+# ángulo cae en un punto de su borde: lado cardinal + posición `offset` (0..1) a lo
+# largo de ese lado, medida como `contact()` (desde arriba en E/O, desde la izquierda
+# en N/S). Ángulos en grados, horario en pantalla (y hacia abajo): este 0, sur 90,
+# oeste 180, norte 270. La inversa devuelve el mismo ángulo (salvo el 0..360).
+
+static func _half_ok(half):
+	var h = Vector2(half)
+	return Vector2(max(h.x, 1.0), max(h.y, 1.0))
+
+
+# Punto del borde del rectángulo de semiejes `half` en el ángulo dado (relativo al centro).
+static func edge_point(angle_deg, half = Vector2(DEFAULT_W, DEFAULT_H) * 0.5):
+	var h = _half_ok(half)
+	var a = deg2rad(float(angle_deg))
+	var d = Vector2(cos(a), sin(a))
+	var t = 1.0 / max(abs(d.x) / h.x, abs(d.y) / h.y)
+	return d * t
+
+
+# Ángulo -> {side, offset}. En las esquinas gana el lado horizontal (N/S).
+static func placement_from_angle(angle_deg, half = Vector2(DEFAULT_W, DEFAULT_H) * 0.5):
+	var h = _half_ok(half)
+	var p = edge_point(angle_deg, h)
+	if abs(p.y) * h.x >= abs(p.x) * h.y - 0.0001:
+		return {"side": "south" if p.y > 0.0 else "north",
+			"offset": clamp(0.5 + p.x / (2.0 * h.x), 0.0, 1.0)}
+	return {"side": "east" if p.x > 0.0 else "west",
+		"offset": clamp(0.5 + p.y / (2.0 * h.y), 0.0, 1.0)}
+
+
+# {side, offset} -> ángulo 0..360. Lado inválido => -1.
+static func angle_from_placement(side, offset, half = Vector2(DEFAULT_W, DEFAULT_H) * 0.5):
+	var h = _half_ok(half)
+	var o = clamp(float(offset), 0.0, 1.0)
+	var p = Vector2.ZERO
+	match String(side):
+		"north":
+			p = Vector2((o - 0.5) * 2.0 * h.x, -h.y)
+		"south":
+			p = Vector2((o - 0.5) * 2.0 * h.x, h.y)
+		"east":
+			p = Vector2(h.x, (o - 0.5) * 2.0 * h.y)
+		"west":
+			p = Vector2(-h.x, (o - 0.5) * 2.0 * h.y)
+		_:
+			return -1.0
+	return fposmod(rad2deg(atan2(p.y, p.x)), 360.0)
+
+
+# Offset en px para place_direction: centra al par sobre la posición `offset` (0..1) del
+# borde del ancla, dejando siempre un contacto mínimo (el puntero tiene que poder pasar).
+static func offset_px(direction, offset, anchor, moving):
+	var vertical = String(direction) == "east" or String(direction) == "west"
+	var ra = rect(anchor)
+	var rm = rect(moving)
+	var edge = ra.size.y if vertical else ra.size.x
+	var mine = rm.size.y if vertical else rm.size.x
+	var o = float(offset) * edge - mine * 0.5
+	var lo = MIN_CONTACT - mine
+	var hi = edge - MIN_CONTACT
+	return clamp(o, min(lo, hi), max(lo, hi))
+
+
 # --- Utilidad ------------------------------------------------------------------
 
 static func edge_of(direction):

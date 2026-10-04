@@ -102,5 +102,18 @@ func _init():
 		and merged.h2.direction == "north" and merged.h2.confirm == "unconfirmed"
 		and merged.h2.mode == "extend")
 
+	# along (0..1): posición fina sobre el lado; se valida, se serializa sólo si existe y
+	# sobrevive a un override del mismo lado (apply_deskflow_layout no la pisa).
+	var al = nd.sanitize_entry({"direction": "east", "along": 0.25})
+	check("along válido se conserva", abs(al.along - 0.25) < 0.0001)
+	check("along fuera de rango o ausente = -1", not nd.sanitize_entry({"along": 3}).has("along")
+		and not nd.sanitize_entry({"direction": "east"}).has("along"))
+	check("along round-trip por JSON", abs(nd.parse(nd.to_json({"h": al})).h.along - 0.25) < 0.0001)
+	check("sin along el JSON no cambia", nd.to_json({"h": {"direction": "east"}}).find("along") < 0)
+	var kept = nd.merge({"h": al}, {"h": {"direction": "east", "confirm": "confirmed"}})
+	check("merge conserva along en el mismo lado", abs(kept.h.along - 0.25) < 0.0001)
+	var moved = nd.merge({"h": al}, {"h": {"direction": "west"}})
+	check("merge descarta along si cambia el lado", not moved.h.has("along"))
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

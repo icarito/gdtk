@@ -234,5 +234,38 @@ func _init():
 			d_clean = false
 	check("diagram sin vocabulario interno", d_clean)
 
+	# --- radial(): vista radial de la dockapp (N10) ---------------------------
+	check("radial sin nada vacío", SB.radial([], [], []).empty())
+	var rad = SB.radial(
+		[{"host": "tengu", "peer_name": "Tengu", "type": "input", "side": "east", "state": "active"},
+		{"host": "tengu", "peer_name": "Tengu", "type": "screen", "side": "east", "state": "starting"}],
+		[{"host": "ivan", "peer_name": "Ivan", "type": "input", "side": "west", "state": "active"}],
+		[{"id": "w1", "peer_name": "Cupid", "maximized": false}],
+		{"ivan": 200.0}, {"capturing": true})
+	var by = {}
+	for r in rad:
+		by[String(r.peer_name)] = r
+	check("radial un par por equipo", rad.size() == 3)
+	check("radial fusiona pantalla y teclado", by.Tengu.kind == "both"
+		and by.Tengu.direction == "out" and by.Tengu.state == "starting")
+	check("radial ángulo por lado", is_equal_approx(by.Tengu.angle, 0.0))
+	check("radial ubicación guardada gana", is_equal_approx(by.Ivan.angle, 200.0))
+	check("radial controlado por", by.Ivan.direction == "in" and by.Ivan.kind == "input")
+	check("radial ventana = viendo pantalla de", by.Cupid.viewing and by.Cupid.kind == "screen"
+		and by.Cupid.direction == "in")
+	check("radial foco en quien controlas", by.Tengu.focused and not by.Ivan.focused)
+	check("radial sin captura no hay foco remoto",
+		not SB.radial([{"host": "t", "peer_name": "T", "type": "input", "side": "east",
+			"state": "active"}], [], [], {}, {"capturing": false})[0].focused)
+	var two = SB.radial([
+		{"host": "a", "peer_name": "A", "type": "screen", "side": "north", "state": "active"},
+		{"host": "b", "peer_name": "B", "type": "screen", "side": "north", "state": "active"}], [], [])
+	check("radial separa pares del mismo lado", not is_equal_approx(two[0].angle, two[1].angle))
+	var dr = SB.diagram([{"host": "t", "peer_name": "T", "type": "input", "side": "east",
+		"state": "active"}], [], [], {}, {"capturing": true})
+	check("diagram trae radial y foco", dr.radial.size() == 1 and dr.local_focus == false)
+	check("texto de foco", SB.focus_text(dr.radial, false) == "Controlando a T"
+		and SB.focus_text(dr.radial, true).find("este equipo") >= 0)
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

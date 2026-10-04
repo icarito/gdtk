@@ -104,3 +104,28 @@ func _prune(now_ms):
 	while _samples.size() > 2 \
 			and float(now_ms) - float(_samples[1]["t"]) > VELOCITY_WINDOW_MS:
 		_samples.pop_front()
+
+
+# Cadena vertical de vistas (gesto de 3 dedos arriba/abajo): -2 Vecindario, -1 Grupo,
+# 0 pantalla, 1 exposé, 2 Hogar, 3 Apps. Sin ventanas no hay pantalla ni exposé.
+static func vertical_levels(has_windows):
+	return [-2, -1, 0, 1, 2, 3] if has_windows else [-2, -1, 2, 3]
+
+
+# Posición continua en índices de `levels` desde el nivel `start` con avance `p`
+# (p < 0 = dedos arriba = sube de nivel).
+static func vertical_pos(levels, start, p):
+	var i = levels.find(start)
+	if i < 0:
+		return 0.0
+	return clamp(float(i) - p, 0.0, float(levels.size() - 1))
+
+
+# Nivel al soltar: el más cercano a la posición; si quedó en el de arranque pero hubo
+# snap/fling (`step`, convención de end(): -1 = dedos arriba), avanza uno en ese sentido.
+static func vertical_target(levels, start, p, step):
+	var i = levels.find(start)
+	var j = int(round(vertical_pos(levels, start, p)))
+	if j == i and step != 0:
+		j = int(clamp(i - step, 0, levels.size() - 1))
+	return levels[j]

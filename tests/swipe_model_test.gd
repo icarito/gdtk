@@ -129,5 +129,18 @@ func _init():
 	var r_empty = g.end(false, 0, 100.0)
 	check("end sin eje: step 0", r_empty.axis == "" and r_empty.step == 0)
 
+	# Cadena vertical de vistas.
+	var lv = SM.vertical_levels(true)
+	check("cadena con ventanas", lv == [-2, -1, 0, 1, 2, 3])
+	check("cadena sin ventanas salta pantalla/exposé", SM.vertical_levels(false) == [-2, -1, 2, 3])
+	check("pantalla + 0.4 arriba sigue en pantalla", SM.vertical_target(lv, 0, -0.4, 0) == 0)
+	check("pantalla + 0.6 arriba -> exposé", SM.vertical_target(lv, 0, -0.6, -1) == 1)
+	check("pantalla + 1.6 arriba -> Hogar", SM.vertical_target(lv, 0, -1.6, -1) == 2)
+	check("pantalla + 9 arriba -> Apps (tope)", SM.vertical_target(lv, 0, -9.0, -1) == 3)
+	check("pantalla abajo -> Grupo", SM.vertical_target(lv, 0, 0.7, 1) == -1)
+	check("pantalla mucho abajo -> Vecindario", SM.vertical_target(lv, 0, 1.6, 1) == -2)
+	check("fling corto arriba avanza uno", SM.vertical_target(lv, 0, -0.2, -1) == 1)
+	check("Hogar abajo sin ventanas -> Grupo", SM.vertical_target([-2, -1, 2, 3], 2, 0.6, 1) == -1)
+	check("pos continua del tramo pantalla-exposé", abs(SM.vertical_pos(lv, 0, -0.3) - 2.3) < 0.001)
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

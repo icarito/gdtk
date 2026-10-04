@@ -1447,7 +1447,13 @@ func _shared_snapshot():
 				"side": dir, "state": "starting"})
 	var remote = shell.remote_shares if shell.get("remote_shares") != null else []
 	var windows = shell._share_windows() if shell.has_method("_share_windows") else []
-	return SHARED_BLOCK.diagram(sessions, remote, windows)
+	# Ubicación guardada por la vista Grupo ({clave o nombre: grados}) y foco/captura:
+	# ambos opcionales, con guarda (el shell puede no exponerlos todavía).
+	var placements = shell.get("group_placements") if shell.get("group_placements") != null else {}
+	var focus = {"capturing": false}
+	if shell.get("remote_input") != null and shell.remote_input.has_method("is_capturing"):
+		focus.capturing = bool(shell.remote_input.is_capturing())
+	return SHARED_BLOCK.diagram(sessions, remote, windows, placements, focus)
 
 
 # Nombre visible del equipo: el que ya resuelve el Vecindario (nunca el id opaco
@@ -1556,6 +1562,10 @@ func _draw_shared(ui, start_x, limit_x, side, mouse):
 			"w": rect.size.x, "h": rect.size.y, "block": diagram})
 		_draw_shared_face(ui, Vector2(cx, 0.0), rect, diagram, side)
 		var tip = String(diagram.get("tooltip", ""))
+		for p in diagram.get("radial", []):
+			if bool(p.get("input", false)):
+				tip += "\n" + SHARED_BLOCK.focus_text(diagram.radial, bool(diagram.get("local_focus", true)))
+				break
 		if hovered and tip != "":
 			ui.set_tooltip(tip)
 		cx += side + PAD
@@ -1585,29 +1595,59 @@ func _draw_shared(ui, start_x, limit_x, side, mouse):
 	return cx
 
 
-# Cara del bloque: cuadro central = esta pantalla; en cada lado N/S/E/O una barra
-# llena (pantalla extendida) o una flecha (teclado y mouse), con color por estado
-# (conectando atenuado/pulso, activo acento, error rojo) e inicial del equipo.
+# Cara radial del bloque: este equipo al centro (borde de acento si el foco está
+# acá) y cada par en su ángulo con glifo de pantalla y/o teclado e inicial. Entre
+# ambos un tramo punteado con cabeza de flecha hacia quien es controlado; el par
+# con el foco (puntero/teclado allá) se resalta con marco. Color por estado.
 func _draw_shared_face(ui, pos, rect, diagram, side):
 	var bw = _bevel_w(ui)
 	var u = float(side)
-	var cx = pos.x + u * 0.5
-	var cy = pos.y + u * 0.5
-	var center = u * 0.34
-	var crect = Rect2(cx - center * 0.5, cy - center * 0.5, center, center)
-	ui.imgui_draw_rect_filled(crect, NX_BG, 0.0)
+	var c = Vector2(pos.x + u * 0.5, pos.y + u * 0.5)
+	var half = u * 0.14
+	var crect = Rect2(c - Vector2(half, half), Vector2(half, half) * 2.0)
+	var accent = shell.accent if shell != null else NX_CUR
 	var e = max(1.0, bw * 0.5)
-	ui.imgui_draw_rect_filled(Rect2(crect.position, Vector2(crect.size.x, e)), NX_LIGHT, 0.0)
-	ui.imgui_draw_rect_filled(Rect2(crect.position, Vector2(e, crect.size.y)), NX_LIGHT, 0.0)
-	ui.imgui_draw_rect_filled(Rect2(Vector2(crect.position.x, crect.end.y - e),
-		Vector2(crect.size.x, e)), NX_DARK, 0.0)
-	ui.imgui_draw_rect_filled(Rect2(Vector2(crect.end.x - e, crect.position.y),
-		Vector2(e, crect.size.y)), NX_DARK, 0.0)
-	for name in SHARED_BLOCK.DIAGRAM_SIDES:
-		var list = diagram.sides.get(name, [])
-		if typeof(list) != TYPE_ARRAY or list.empty():
+	if bool(diagram.get("local_focus", true)):
+		ui.imgui_draw_rect_filled(crect.grow(e + 1.0), accent, 0.0)
+	ui.imgui_draw_rect_filled(crect, NX_BG, 0.0)
+	_draw_shared_glyph(ui, crect, "screen", NX_TEXT)
+	var ns = u * 0.28
+	var radius = u * 0.34
+	for p in diagram.get("radial", []):
+		if typeof(p) != TYPE_DICTIONARY:
 			continue
-		_draw_shared_side(ui, rect, String(name), list, u)
+		var col = _shared_state_color(String(p.get("state", "active")))
+		var dir = Vector2(cos(deg2rad(float(p.angle))), sin(deg2rad(float(p.angle))))
+		var nc = c + dir * radius
+		var nrect = Rect2(nc - Vector2(ns, ns) * 0.5, Vector2(ns, ns))
+		_draw_shared_link(ui, c + dir * (half * 1.3), nc - dir * (ns * 0.55), dir,
+			String(p.get("direction", "none")), col)
+		if bool(p.get("focused", false)):
+			ui.imgui_draw_rect_filled(nrect.grow(e + 1.0), accent, 0.0)
+		ui.imgui_draw_rect_filled(nrect, NX_BG, 0.0)
+		var kind = String(p.get("kind", "screen"))
+		if kind == "both":
+			var h2 = Vector2(ns * 0.5, ns)
+			_draw_shared_glyph(ui, Rect2(nrect.position, h2), "screen", col)
+			_draw_shared_glyph(ui, Rect2(nrect.position + Vector2(ns * 0.5, 0.0), h2), "input", col)
+		else:
+			_draw_shared_glyph(ui, nrect, kind, col)
+		if ns >= 16.0 and kind != "both":
+			ui.set_cursor_pos(nrect.position + Vector2(ns * 0.5 - 3.5, ns * 0.22))
+			ui.text_colored(NX_TEXT, String(p.get("initial", "")))
+
+
+# Tramo entre el centro y el par: puntos y cabeza cuadrada del lado de quien es
+# controlado ("out": hacia el par; "in": hacia este equipo; "both": ambas).
+func _draw_shared_link(ui, a, b, dir, direction, col):
+	for k in range(4):
+		var q = a.linear_interpolate(b, float(k) / 3.0)
+		ui.imgui_draw_rect_filled(Rect2(q - Vector2(1.0, 1.0), Vector2(2.0, 2.0)), col, 0.0)
+	var hs = Vector2(3.0, 3.0)
+	if direction == "out" or direction == "both":
+		ui.imgui_draw_rect_filled(Rect2(b - hs, hs * 2.0), col, 0.0)
+	if direction == "in" or direction == "both":
+		ui.imgui_draw_rect_filled(Rect2(a - hs, hs * 2.0), col, 0.0)
 
 
 # Color por estado: activo = acento, conectando = acento atenuado con pulso, error
@@ -1621,99 +1661,6 @@ func _shared_state_color(state):
 			var pulse = 0.35 + 0.35 * (0.5 + 0.5 * sin(float(OS.get_ticks_msec()) * 0.006))
 			return Color(accent.r, accent.g, accent.b, pulse)
 	return accent
-
-
-# Un lado del diagrama: una barra (pantalla) o una flecha (teclado y mouse) por
-# cada equipo, con su inicial. Varias entradas en el mismo lado se escalonan.
-func _draw_shared_side(ui, rect, name, entries, u):
-	var bw = _bevel_w(ui)
-	var margin = bw + 3.0
-	var i = 0
-	for e in entries:
-		if typeof(e) != TYPE_DICTIONARY:
-			continue
-		var col = _shared_state_color(String(e.get("state", "active")))
-		var r = _shared_side_rect(rect, name, float(i) * (u * 0.17), u, margin)
-		if String(e.get("type", "screen")) == "input":
-			_draw_shared_arrow(ui, r, name, col)
-		else:
-			ui.imgui_draw_rect_filled(r, col, 0.0)
-		var ini = String(e.get("initial", ""))
-		if ini != "":
-			var tp = _shared_initial_pos(rect, name, r, u)
-			ui.set_cursor_pos(tp)
-			ui.text_colored(NX_TEXT, ini)
-		i += 1
-
-
-# Rectángulo de la barra/flecha de un lado (N/S horizontales; E/O verticales).
-func _shared_side_rect(rect, name, off, u, margin):
-	var thick = max(5.0, u * 0.15)
-	var long = u * 0.46
-	match name:
-		"north":
-			return Rect2(rect.position.x + (u - long) * 0.5 + off, rect.position.y + margin, long, thick)
-		"south":
-			return Rect2(rect.position.x + (u - long) * 0.5 + off, rect.end.y - margin - thick, long, thick)
-		"east":
-			return Rect2(rect.end.x - margin - thick, rect.position.y + (u - long) * 0.5 + off, thick, long)
-		"west":
-			return Rect2(rect.position.x + margin, rect.position.y + (u - long) * 0.5 + off, thick, long)
-	return Rect2(rect.position, Vector2(thick, thick))
-
-
-# Posición de la inicial del equipo, justo por dentro del lado (junto al centro).
-func _shared_initial_pos(rect, name, r, u):
-	match name:
-		"north":
-			return Vector2(rect.position.x + u * 0.5 - 3.5, r.end.y + 1.0)
-		"south":
-			return Vector2(rect.position.x + u * 0.5 - 3.5, r.position.y - 15.0)
-		"east":
-			return Vector2(r.position.x - 12.0, rect.position.y + u * 0.5 - 7.0)
-		"west":
-			return Vector2(r.end.x + 3.0, rect.position.y + u * 0.5 - 7.0)
-	return r.position
-
-
-# Flecha blocky a lo largo del lado (N/S horizontal; E/O vertical). Distingue el
-# control compartido de la pantalla extendida (barra llena), nunca sólo por color.
-func _draw_shared_arrow(ui, r, name, col):
-	if name == "north" or name == "south":
-		var sh = max(1.0, r.size.y * 0.34)
-		ui.imgui_draw_rect_filled(Rect2(r.position.x, r.position.y + (r.size.y - sh) * 0.5,
-			r.size.x * 0.62, sh), col, 0.0)
-		_shared_tri(ui, Rect2(r.position.x + r.size.x * 0.58, r.position.y,
-			r.size.x * 0.42, r.size.y), "right", col)
-	else:
-		var sw = max(1.0, r.size.x * 0.34)
-		ui.imgui_draw_rect_filled(Rect2(r.position.x + (r.size.x - sw) * 0.5, r.position.y,
-			sw, r.size.y * 0.62), col, 0.0)
-		_shared_tri(ui, Rect2(r.position.x, r.position.y + r.size.y * 0.58,
-			r.size.x, r.size.y * 0.42), "down", col)
-
-
-# Triángulo blocky de 3 escalones dentro de `area`, apuntando down/up/left/right.
-func _shared_tri(ui, area, dir, col):
-	var steps = 3
-	if dir == "down" or dir == "up":
-		var sh = area.size.y / float(steps)
-		for k in range(steps):
-			var frac = 1.0 - float(k) / float(steps)
-			var ww = area.size.x * frac
-			var yy = area.position.y + float(k) * sh if dir == "down" \
-				else area.position.y + float(steps - 1 - k) * sh
-			ui.imgui_draw_rect_filled(Rect2(area.position.x + (area.size.x - ww) * 0.5,
-				yy, ww, sh + 1.0), col, 0.0)
-	else:
-		var sw = area.size.x / float(steps)
-		for k in range(steps):
-			var frac2 = 1.0 - float(k) / float(steps)
-			var hh = area.size.y * frac2
-			var xx = area.position.x + float(k) * sw if dir == "right" \
-				else area.position.x + float(steps - 1 - k) * sw
-			ui.imgui_draw_rect_filled(Rect2(xx, area.position.y + (area.size.y - hh) * 0.5,
-				sw + 1.0, hh), col, 0.0)
 
 
 # Insignia dibujada a mano del tipo de sesión (monitor / teclado / portapapeles),

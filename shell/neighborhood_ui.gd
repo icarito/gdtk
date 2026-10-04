@@ -21,6 +21,8 @@ extends Control
 const MAP = preload("res://neighborhood_map.gd")
 const GROUP = preload("res://group_model.gd")
 const MENU = preload("res://menu_style.gd")
+const SHARED = preload("res://shared_block.gd")
+const SL = preload("res://screen_layout.gd")
 const INBOX = preload("res://neighborhood_inbox.gd")
 
 const BG = Color(0.055, 0.065, 0.095, 1.0)
@@ -165,7 +167,8 @@ func _refresh_neighborhood(vp, bar):
 	center = vp * 0.5
 	radius = radii.outer
 	wifi_points = MAP.wifi_dots(networks, vp, bar)
-	bt_points = MAP.bt_dots(model.bt_devices if model.get("bt_devices") != null else [], vp, bar)
+	# El Bluetooth es cosa del Grupo (sólo lo que está al alcance): el Vecindario no lo muestra.
+	bt_points = []
 	host_nodes = MAP.map_layout(hosts, directions, vp, bar)
 	_spread_map(vp, bar)
 
@@ -178,10 +181,6 @@ func _refresh_neighborhood(vp, bar):
 	var wifi_text = MAP.wifi_label(networks)
 	if wifi_text != "":
 		_label(wifi_text, Vector2(16, bar + 34), 360, Label.ALIGN_LEFT, TEXT_DIM)
-	for d in bt_points:
-		var bc = Vector2(d.pos)
-		_label(_bt_label(d), Vector2(bc.x - 70, bc.y + MAP.BT_ICON_SIZE * 0.5 + 3), 140,
-			Label.ALIGN_CENTER, _bt_color(d))
 
 	for node in host_nodes:
 		var host = node.host
@@ -223,7 +222,7 @@ func _refresh_group(vp, bar):
 			"id": String(n.get("id", "")), "host": host if typeof(host) == TYPE_DICTIONARY else {},
 			"member": n.get("member", {}), "center": Vector2(n.get("center", Vector2.ZERO)),
 			"pos": Vector2(n.get("pos", Vector2.ZERO)), "size": float(n.get("size", GROUP.NODE_SIZE)),
-			"direction": String(n.get("direction", "")), "dimmed": bool(n.get("dimmed", false)),
+			"direction": String(n.get("direction", "")), "angle": float(n.get("angle", -1.0)), "dimmed": bool(n.get("dimmed", false)),
 			"index": idx,
 		})
 		idx += 1
@@ -233,7 +232,7 @@ func _refresh_group(vp, bar):
 		bt_points.append({
 			"pos": Vector2(b.get("center", Vector2.ZERO)), "address": String(b.get("id", "")),
 			"name": String(b.get("name", "")), "connected": bool(b.get("connected", false)),
-			"paired": true, "rssi": 0, "size": float(b.get("size", GROUP.BT_SIZE)),
+			"paired": true, "rssi": int(b.get("rssi", 0)), "size": float(b.get("size", GROUP.BT_SIZE)),
 		})
 
 	_label("Grupo", Vector2(16, bar + 10), 220)
@@ -322,6 +321,28 @@ func _group_member_by_id(id):
 	return null
 
 
+# Ficha de miembro para el submenú de un nodo: en el Grupo viene del modelo; en el
+# Vecindario sólo si el host es un par (ubicado y confirmado, o con token de pareo).
+# null => no es par (sólo se selecciona). La lectura de tokens ocurre en el clic.
+func _peer_member(node):
+	var id = String(node.id)
+	if mode == "group" and node.get("member", null) != null:
+		return node.member
+	var host = node.host if typeof(node.host) == TYPE_DICTIONARY else {}
+	var hid = String(host.get("hid", id))
+	var entry = directions.get(id, directions.get(hid, null))
+	var d = compass_direction(id)
+	var paired = typeof(entry) == TYPE_DICTIONARY and String(entry.get("confirm", "")) == "confirmed"
+	if not paired:
+		var keys = _group_token_keys()
+		paired = keys.has("cli:" + hid) or keys.has("srv:" + hid) \
+			or keys.has("cli:" + id) or keys.has("srv:" + id)
+	if not paired:
+		return null
+	return {"id": id, "name": host_label(host), "online": true, "kind": "host",
+		"direction": "" if d == "none" else d, "host": host}
+
+
 func _group_title(member):
 	if typeof(member) != TYPE_DICTIONARY:
 		return "Equipo"
@@ -334,19 +355,24 @@ func _group_title(member):
 	return nm
 
 
-func _group_side_center(direction):
-	var c = Vector2(center)
-	var row = float(_group_layout.get("side_offset", GROUP.SIDE_OFFSET))
-	match String(direction):
-		"north":
-			return c + Vector2(0.0, -row)
-		"south":
-			return c + Vector2(0.0, row)
-		"east":
-			return c + Vector2(row, 0.0)
-		"west":
-			return c + Vector2(-row, 0.0)
-	return c
+# Punto del anillo del Grupo en el ángulo de `pos` respecto del ícono local: el ángulo
+# manda, la distancia no (marca de destino mientras se arrastra).
+func _group_ring_point(pos):
+	var half = Vector2(_group_layout.get("ring", GROUP.ring_half(rect_size, _bar())))
+	var d = Vector2(pos) - center
+	if d.length() < 1.0:
+		return center
+	return center + SL.edge_point(rad2deg(d.angle()), half)
+
+
+# Posición soltada -> {side, offset} con el anillo de esta vista como rectángulo de
+# referencia; {} si cae sobre el equipo local (no hay ángulo).
+func _group_placement_at(pos):
+	var half = Vector2(_group_layout.get("ring", GROUP.ring_half(rect_size, _bar())))
+	var d = Vector2(pos) - center
+	if d.length() < float(_group_layout.get("center_size", GROUP.CENTER_SIZE)) * 0.5:
+		return {}
+	return SL.placement_from_angle(rad2deg(d.angle()), half)
 
 
 # Menú del Grupo: dos interruptores (extender pantalla, compartir teclado y
@@ -445,15 +471,18 @@ func _activate_group_row(item):
 		_stop_group_keyboard(id, action)
 
 
-func _apply_group_direction(host_id, direction):
+# Soltar en cualquier ángulo SÓLO acomoda: el lado y la posición sobre el borde se
+# guardan (host_directions + "along") y alimentan Configuración > Pantallas.
+func _apply_group_placement(host_id, side, along):
 	var id = String(host_id)
-	var d = String(direction)
-	if id == "" or d == "":
+	var d = String(side)
+	if id == "" or not MAP.valid_direction(d) or d == "none":
 		return
-	# El shell persiste y regenera el layout; la UI adelanta la ficha local.
-	directions[id] = _directions().sanitize_entry({"direction": d, "confirm": "confirmed",
-		"mode": "extend"})
-	if shell != null and shell.has_method("_set_host_direction"):
+	directions[id] = _directions().sanitize_entry({"direction": d, "along": along,
+		"confirm": "confirmed", "mode": "extend"})
+	if shell != null and shell.has_method("_set_host_placement"):
+		shell._set_host_placement(id, d, float(along))
+	elif shell != null and shell.has_method("_set_host_direction"):
 		shell._set_host_direction(id, d)
 	call_deferred("refresh", true)
 	update()
@@ -641,24 +670,24 @@ func _on_mouse_button(event):
 			_drag_id = ""
 		update()
 	else:
-		# Al soltar: si hubo arrastre, imanta a un lado y abre el menú del equipo.
-		if _dragging and _drag_id != "":
+		if _drag_id != "":
 			var node = _node_by_id(_drag_id)
-			var dir = ""
-			if node != null:
-				dir = MAP.drag_direction(Vector2(node.center), pos)
-			if dir != "":
+			if _dragging:
+				# Grupo: se acomoda en cualquier ángulo de los 360°. Vecindario:
+				# imanta a una de las cuatro direcciones.
 				if mode == "group":
-					_apply_group_direction(_drag_id, dir)
-					var member = _group_member_by_id(_drag_id)
-					if member != null:
-						# La ficha todavía trae la dirección vieja; el popup muestra
-						# el lado recién imantado para habilitar los interruptores.
-						var moved = member.duplicate(true)
-						moved.direction = dir
-						_open_group_menu(moved, pos, false)
-				else:
-					_apply_direction(_drag_id, dir)
+					var pl = _group_placement_at(pos)
+					if not pl.empty():
+						_apply_group_placement(_drag_id, pl.side, pl.offset)
+				elif node != null:
+					var dir = MAP.drag_direction(Vector2(node.center), pos)
+					if dir != "":
+						_apply_direction(_drag_id, dir)
+			elif node != null:
+				# Clic sin arrastre sobre un par: submenú de pantalla / teclado y mouse.
+				var member = _peer_member(node)
+				if member != null:
+					_open_group_menu(member, pos, false)
 		_drag_id = ""
 		_dragging = false
 		update()
@@ -1304,6 +1333,7 @@ func _draw():
 # Vista Grupo: sin anillos; cada miembro es un nodo (atenuado si está apagado) y
 # los BT pareados una placa chica al pie. Al arrastrar, se marca el lado imantado.
 func _draw_group():
+	_draw_group_links()
 	for node in host_nodes:
 		if _dragging and String(node.id) == _drag_id:
 			continue
@@ -1313,11 +1343,103 @@ func _draw_group():
 	if _dragging:
 		var drag_node = _node_by_id(_drag_id)
 		if drag_node != null:
-			var dir = MAP.drag_direction(_drag_from, _drag_now)
-			if dir != "":
-				draw_arc(_group_side_center(dir), 24.0, 0.0, TAU, 32, NODE_SEL, 2.0)
+			if not _group_placement_at(_drag_now).empty():
+				draw_arc(_group_ring_point(_drag_now), 24.0, 0.0, TAU, 32, NODE_SEL, 2.0)
 			_draw_node(drag_node, _drag_now, float(drag_node.size))
 	_sync_menu()
+
+
+# --- Conectores del Grupo (N9) ----------------------------------------------
+# Del ícono central a cada par con relación activa: glifo de pantalla y/o teclado,
+# color por estado y flechas hacia donde se controla. Sólo lee las cachés del shell
+# (las mismas de "Compartiendo"); el ciclo de vida de los servicios es del shell.
+
+const LINK_OK = Color(0.52, 0.90, 0.58, 1.0)
+const LINK_WAIT = Color(1.0, 0.84, 0.43, 1.0)
+const LINK_ERR = Color(0.95, 0.42, 0.42, 1.0)
+
+
+# Pares con relación: sesiones locales por equipo del Grupo + avisos remotos, fusionados
+# por shared_block.radial. Misma lógica que el snapshot de "Compartiendo" del Frame.
+func _group_peers():
+	if shell == null or not shell.has_method("_host_session_state"):
+		return []
+	var running = shell._service_running("Deskflow") if shell.has_method("_service_running") else false
+	var deskflow = shell.get("host_deskflow")
+	var sessions = []
+	for m in _group_members:
+		if typeof(m) != TYPE_DICTIONARY or String(m.get("kind", "host")) != "host":
+			continue
+		var hid = String(m.get("id", ""))
+		var side = String(m.get("direction", ""))
+		if hid == "" or side == "":
+			continue
+		var agg = String(shell._host_session_state(hid))
+		var name = String(m.get("name", hid))
+		var screen = shell._gvd_has_session(hid) if shell.has_method("_gvd_has_session") else false
+		var input_on = typeof(deskflow) == TYPE_DICTIONARY and bool(deskflow.get(hid, false)) \
+			and (bool(running) or agg != "idle")
+		if screen:
+			sessions.append({"host": hid, "peer_name": name, "type": "screen", "side": side,
+				"state": "starting" if agg == "starting" else "active"})
+		if input_on:
+			sessions.append({"host": hid, "peer_name": name, "type": "input", "side": side,
+				"state": "active" if bool(running) else "starting"})
+		if not screen and not input_on and agg == "starting":
+			sessions.append({"host": hid, "peer_name": name, "type": "screen", "side": side,
+				"state": "starting"})
+	var remote = shell.get("remote_shares")
+	return SHARED.radial(sessions, remote if typeof(remote) == TYPE_ARRAY else [], [])
+
+
+func _draw_group_links():
+	for l in GROUP.links(_group_layout, _group_peers()):
+		var col = LINK_OK
+		if String(l.state) == "starting":
+			col = LINK_WAIT
+		elif String(l.state) == "error":
+			col = LINK_ERR
+		var a = Vector2(l.a)
+		var b = Vector2(l.b)
+		var dir = (b - a).normalized()
+		draw_line(a, b, col, 2.0, true)
+		# Flecha hacia el par = este equipo lo controla/extiende; hacia el centro = al revés.
+		if String(l.direction) == "out" or String(l.direction) == "both":
+			_draw_arrow(b, dir, col)
+		if String(l.direction) == "in" or String(l.direction) == "both":
+			_draw_arrow(a, -dir, col)
+		var glyphs = []
+		if bool(l.screen):
+			glyphs.append("screen")
+		if bool(l.input):
+			glyphs.append("input")
+		var step = dir * 26.0
+		for i in range(glyphs.size()):
+			var gc = Vector2(l.mid) + step * (float(i) - float(glyphs.size() - 1) * 0.5)
+			draw_circle(gc, 12.0, NODE_BG)
+			draw_arc(gc, 12.0, 0.0, TAU, 24, col, 1.5)
+			if glyphs[i] == "screen":
+				_draw_screen_glyph(gc, col)
+			else:
+				_draw_keyboard_glyph(gc, col)
+
+
+func _draw_arrow(tip, dir, col):
+	var n = Vector2(-dir.y, dir.x)
+	draw_colored_polygon(PoolVector2Array([tip, tip - dir * 10.0 + n * 5.0, tip - dir * 10.0 - n * 5.0]), col)
+
+
+func _draw_screen_glyph(c, col):
+	draw_rect(Rect2(c + Vector2(-7, -7), Vector2(14, 9)), col, false, 1.5)
+	draw_line(c + Vector2(0, 2), c + Vector2(0, 6), col, 1.5)
+	draw_line(c + Vector2(-4, 6), c + Vector2(4, 6), col, 1.5)
+
+
+func _draw_keyboard_glyph(c, col):
+	draw_rect(Rect2(c + Vector2(-8, -4), Vector2(16, 9)), col, false, 1.5)
+	for i in range(3):
+		draw_circle(c + Vector2(-4 + 4 * i, -1), 0.9, col)
+	draw_line(c + Vector2(-4, 2), c + Vector2(4, 2), col, 1.2)
 
 
 # Elipse por muestreo (draw_arc sólo dibuja círculos en Godot 3).

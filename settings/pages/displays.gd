@@ -218,7 +218,13 @@ func _ensure_layout():
 		var entry = dirs.get(sc.id, {})
 		var d = String(entry.get("direction", "none")) if typeof(entry) == TYPE_DICTIONARY else "none"
 		if SL.valid_direction(d) and d != "none":
-			lay = SL.place_direction(lay, sc.id, d)
+			# along (0..1) = dónde sobre ese borde lo dejó la vista Grupo (drag libre
+			# en 360°); sin dato, al inicio del borde como antes.
+			var along = float(entry.get("along", -1.0)) if typeof(entry) == TYPE_DICTIONARY else -1.0
+			var off = 0.0
+			if along >= 0.0 and along <= 1.0:
+				off = SL.offset_px(d, along, lay.local, sc)
+			lay = SL.place_direction(lay, sc.id, d, off)
 	return lay
 
 
