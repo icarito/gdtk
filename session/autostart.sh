@@ -113,7 +113,11 @@ _list_has() { case ";$1;" in *";$2;"*) return 0 ;; esac; return 1; }
 start_desktop_entries() {
 	_dir="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
 	[ -d "$_dir" ] || return 0
-	if have dex; then
+	# Deskflow lo maneja el shell (un solo deskflow-core, que el supervisor mata con el
+	# shell). La app gráfica de Deskflow en autostart lanzaba su PROPIO core con otra config:
+	# un segundo cliente que sobrevivía a los reinicios ("zombi") y retenía el puntero.
+	# dex no permite excluir entradas: si hay alguna de Deskflow se usa el loop propio.
+	if have dex && ! ls "$_dir" | grep -qi deskflow; then
 		dex --autostart --environment "${XDG_CURRENT_DESKTOP:-gdtk}" >>"$log" 2>&1 \
 			|| say "dex falló"
 		return 0
@@ -124,6 +128,9 @@ start_desktop_entries() {
 	for _f in "$_dir"/*.desktop; do
 		[ -f "$_f" ] || continue
 		[ "$(_key "$_f" Hidden)" = "true" ] && { say "omitido (Hidden): ${_f##*/}"; continue; }
+		case "$(printf '%s %s' "${_f##*/}" "$(_key "$_f" Exec)" | tr 'A-Z' 'a-z')" in
+			*deskflow*) say "omitido (Deskflow lo maneja el shell): ${_f##*/}"; continue ;;
+		esac
 		_only="$(_key "$_f" OnlyShowIn)"
 		if [ -n "$_only" ] && ! _list_has "$_only" "${XDG_CURRENT_DESKTOP:-gdtk}" \
 			&& ! _list_has "$_only" gdtk; then

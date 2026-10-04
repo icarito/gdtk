@@ -8274,6 +8274,8 @@ func _apply_cursor(shape):
 # Cursor por defecto según lo que haya bajo `pos` (o flecha si no hay chrome).
 # Cursor pedido por la app con foco de puntero: forma de Godot o imagen propia.
 func _on_client_cursor_shape(shape):
+	if int(shape) != client_cursor_shape or client_cursor_tex != null:
+		print("[cursor] forma de la app: ", int(shape))
 	client_cursor_shape = int(shape)
 	client_cursor_tex = null
 	_apply_client_cursor()
@@ -8282,6 +8284,14 @@ func _on_client_cursor_shape(shape):
 func _on_client_cursor_image(img, hotspot):
 	if img == null or img.is_empty():
 		return
+	# Diagnóstico: una imagen totalmente transparente deja el puntero invisible sobre la app.
+	var amax = 0.0
+	img.lock()
+	for y in range(0, img.get_height(), 2):
+		for x in range(0, img.get_width(), 2):
+			amax = max(amax, img.get_pixel(x, y).a)
+	img.unlock()
+	print("[cursor] imagen de la app ", img.get_width(), "x", img.get_height(), " hotspot ", hotspot, " alfa_max ", stepify(amax, 0.01))
 	var tex = ImageTexture.new()
 	tex.create_from_image(img, 0)
 	client_cursor_tex = tex
@@ -8677,6 +8687,7 @@ func _on_client_pointer_lock(id, locked):
 func _on_client_cursor_hidden(hidden):
 	if client_cursor_hidden == hidden:
 		return
+	print("[cursor] la app pide ", "ocultar" if hidden else "mostrar", " el puntero")
 	client_cursor_hidden = hidden
 	_apply_client_cursor_state()
 

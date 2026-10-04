@@ -1566,19 +1566,19 @@ func _stop_shared_side(type, key):
 # Dibuja UN bloque "Compartiendo" (mini-diagrama) a la izquierda de los applets,
 # sin pisarlos: `start_x` es el fin del dock de pines y `limit_x` donde empiezan los
 # applets. Desaparece si no hay nada compartido. Devuelve el x final.
-func _draw_shared(ui, start_x, limit_x, side, mouse):
+func _draw_shared(ui, start_x, limit_x, side, mouse, y = 0.0):
 	shared_layout = []
 	shared_drawn = false
 	shared_menu_open = false
 	var diagram = _shared_snapshot()
 	var cx = start_x
 	if not diagram.empty() and cx + side <= limit_x - PAD:
-		var tile = _tile(ui, Vector2(cx, 0.0), side, "shared_sharing", NX_FACE, side)
+		var tile = _tile(ui, Vector2(cx, y), side, "shared_sharing", NX_FACE, side)
 		var rect = tile.rect
 		var hovered = ui.is_item_hovered()
 		shared_layout.append({"id": "sharing", "x": rect.position.x, "y": rect.position.y,
 			"w": rect.size.x, "h": rect.size.y, "block": diagram})
-		_draw_shared_face(ui, Vector2(cx, 0.0), rect, diagram, side)
+		_draw_shared_face(ui, Vector2(cx, y), rect, diagram, side)
 		var tip = String(diagram.get("tooltip", ""))
 		for p in diagram.get("radial", []):
 			if bool(p.get("input", false)):
@@ -3731,6 +3731,12 @@ func draw(ui):
 			if bar_order["top"].has(WINDOW_TOKEN) and not items.empty():
 				_draw_windows(ui, "top", side, y, off_top, mouse)
 				_draw_window_grip(ui, "top", mouse)
+			# Sin barra inferior (sólo la superior fijada) la dockapp "Compartiendo" va al
+			# final del tramo de ventanas, junto a los applets, si sobra al menos una celda.
+			if not bottom_drawn and bar_order["top"].has(WINDOW_TOKEN):
+				var sreg = window_region.get("top")
+				if sreg != null and items.size() + 1 <= int(window_span.get("top", 0)):
+					_draw_shared(ui, sreg.end.x - side, sreg.end.x + PAD + 1.0, side, mouse, y)
 			# Durante el drag viaja la tesela completa, no un label/tooltip separado.
 			_draw_window_drag_tile(ui, items, side)
 			# Esquina derecha reservada para el pin chico (última celda de la grilla).
