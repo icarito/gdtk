@@ -353,9 +353,14 @@ func _init():
 	var pm = nui._peer_member(plain)
 	check("vecino par: ficha con su lado", pm != null and pm.direction == "west" and pm.online)
 	var items = nui._group_toggle_items(pm, false)
-	check("submenú: extender pantalla y compartir teclado y mouse", items.size() == 2
+	check("submenú: extender, teclado y mouse, enviar audio", items.size() == 3
 		and items[0].label.begins_with("Extender mi pantalla")
-		and items[1].label.begins_with("Compartir teclado y mouse"))
+		and items[1].label.begins_with("Compartir teclado y mouse")
+		and items[2].label == "Enviar audio — Apagado" and items[2].enabled)
+	pm.online = false
+	check("enviar audio: apagado => deshabilitado con razón",
+		not nui._group_toggle_items(pm, false)[2].enabled
+		and nui._group_toggle_items(pm, false)[2].reason == "está apagado")
 	check("drop fuera de la vista Grupo: sin destino", nui.group_drop_target(Vector2(5, 5)).empty())
 
 	OS.exit_code = 1 if failed > 0 else 0

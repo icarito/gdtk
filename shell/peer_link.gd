@@ -28,6 +28,17 @@ const _HID_OK = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.
 
 # Valida los params de los avisos de lados compartidos. Para cualquier otro
 # método no impone restricciones (cada handler valida lo suyo). Puro.
+# Tamaño del video que anuncia el emisor en `gvd_recv` (w, h): Vector2() si falta o es
+# inválido. El receptor ajusta su ventana a esto. Puro.
+static func video_size(params):
+	var p = params if typeof(params) == TYPE_DICTIONARY else {}
+	var w = int(p.get("w", 0))
+	var h = int(p.get("h", 0))
+	if w < 2 or h < 2 or w > 8192 or h > 8192:
+		return Vector2()
+	return Vector2(w, h)
+
+
 static func valid_share_params(method, params):
 	var p = params if typeof(params) == TYPE_DICTIONARY else {}
 	match String(method):

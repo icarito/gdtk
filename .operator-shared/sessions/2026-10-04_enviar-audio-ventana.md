@@ -9,8 +9,11 @@ Contrato: `specs/SPEC-sugar-group-2026-10.md` § «Enviar audio y ventanas».
 - `shell/window_cast.gd` (Viewport fuera de pantalla → archivo con seqlock, escritura en Thread),
   `gvd_launch.window_send_argv`, `shell._group_drop_window/_group_share_window/_group_unshare_window`,
   hook en `frame._finish_drag`.
-- Audio: `audio_send.gd` (Kilo, brief `briefs/A1-audio-send-model.txt`), `applet_audio.gd`, hook en
-  `frame._finish_applet_drag`, `shell._group_drop_audio`, métodos peer `audio_recv/audio_stop`.
+- Audio: `audio_send.gd` (Kilo, brief `briefs/A1-audio-send-model.txt`), métodos peer
+  `audio_recv/audio_stop`. Primero fue un bloque «Audio» del Frame para arrastrar; el usuario prefirió
+  un interruptor «Enviar audio» en el menú del equipo, análogo a «Extender mi pantalla».
+- Receptor sin franjas: `gvd_recv` lleva `w`/`h`; `shell._pantalla_fit_poll` +
+  `gvd_launch.receiver_frame_rect` (gvd recv es CSD: el contenido es el marco entero).
 - `peer_control`: `peer-tokens.json` tiene dos escritores (srv: el canal, cli: el shell); el canal
   descartaba sus srv: al cargar y pisaba los cli: al guardar → `unauthorized` entre pares tras
   cada recarga. Ahora cada uno lee y reescribe sólo sus claves (test). En tengu se borró a mano el
@@ -24,18 +27,17 @@ Contrato: `specs/SPEC-sugar-group-2026-10.md` § «Enviar audio y ventanas».
 - tengu → cupid: bloque de Alacritty/htop soltado sobre cupid → se ve en vivo en cupid (x264/RTP
   944×500 a 20 fps). Cerrar la «Pantalla compartida» en cupid → cupid termina su `gvd recv` y avisa;
   tengu corta emisor y archivo. Cerrar la ventana original en tengu → corta y cierra el receptor.
-- cupid → tengu: bloque Audio soltado sobre tengu → salida por omisión = túnel, el bloque dice
-  «tengu»; de vuelta sobre «Este equipo» → salida local restaurada y módulos descargados en ambos.
+- Receptor en cupid: ventana 944×500 = video, centrada, también tras recrearse.
+- cupid → tengu: «Enviar audio — Encendido» desde el menú del Grupo → salida por omisión = túnel;
+  «Apagado» → salida local restaurada y módulos descargados en ambos.
 - Tests: neighborhood_ui, peer_link, peer_control, group_model, audio_send, gvd_launch, frame_menu,
   neighborhood_actions y `tools/gvd` (10) en verde.
 
 ## Pendiente / notas
 - bastion: sólo sincronizado; entra en el próximo login (prohibido reiniciar su shell con VS Code).
-- El receptor no ajusta su ventana al tamaño del video: se ve con franjas negras.
 - La ventana compartida no incluye popups que caigan fuera de su rect; readback GL por tick
   (`ponytail` en window_cast.gd) hasta el broker dmabuf de SPEC-embedded-multi-output.md.
 - No hay resaltado del equipo destino mientras se arrastra.
 - bastion corre el peer_control viejo (bug de tokens) hasta su próximo login: puede pedir
   re-emparejar con tengu/cupid.
-- En cupid se agregó el bloque Audio a `frame-applets.json` para la prueba (copia en
-  `/tmp/frame-applets.bak.json` de cupid).
+- Si la ventana compartida cambia de tamaño, el video mantiene el tamaño inicial (se escala dentro).

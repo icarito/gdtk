@@ -99,22 +99,24 @@ Decisiones tomadas con el usuario:
   por argumentos. LAN de confianza: el canal no cifra.
 
 ### Enviar audio y ventanas (2026-10-04)
-- Sin menú: todo es arrastrar y soltar en la vista Grupo. El destino se resuelve con
-  `neighborhood_ui.group_drop_target` (equipo encendido, o «Este equipo» en el centro).
-- **Ventana** = compartir en vivo por gvd (espejo: la local sigue visible). Arrastrar el bloque de la
-  ventana del Frame sobre un equipo → `window_cast.gd` la compone fuera de pantalla y la vuelca a
-  `$XDG_RUNTIME_DIR/gdtk/win-<hid>.frames` (archivo con seqlock, nunca FIFO: SIGPIPE tumbaría el
-  shell) → `gvd send --capture shm` → del otro lado el mismo receptor «Pantalla compartida» que al
-  extender (`gvd_recv`). Se deja de compartir SÓLO cerrando una de las dos ventanas: la original
-  (corta y cierra el receptor remoto) o la «Pantalla compartida» del otro lado (que termina su
-  `gvd recv` y avisa al emisor con `share_stop`). No hay gesto para soltar. Todo cierre de ventana
-  pasa por `shell._close_window_id`. Una ventana por equipo a la vez (un receptor por puerto).
-- **Audio** = independiente y por equipo: applet «Audio» del Frame (`applet_audio.gd`). Soltarlo
-  sobre un equipo saca TODO el sonido por ahí; sobre «Este equipo» lo trae de vuelta. Túnel
-  PulseAudio/PipeWire por `pactl` (`audio_send.gd`): el receptor abre `module-native-protocol-tcp`
-  (4714) sólo con `auth-ip-acl` = IP del pedido peer (nunca `auth-anonymous`); el emisor crea
-  `module-tunnel-sink`, lo pone por omisión y muda los streams; volver restaura en ambos lados. Un
-  destino a la vez, no se persiste, se apaga solo al salir el shell. Anda con PipeWire y PulseAudio.
+- **Ventana** = arrastrar y soltar en la vista Grupo, sin menú. El destino lo resuelve
+  `neighborhood_ui.group_drop_target` (equipo encendido). Compartir en vivo por gvd (espejo: la local
+  sigue visible): soltar el bloque de la ventana del Frame sobre un equipo → `window_cast.gd` la
+  compone fuera de pantalla y la vuelca a `$XDG_RUNTIME_DIR/gdtk/win-<hid>.frames` (archivo con
+  seqlock, nunca FIFO: SIGPIPE tumbaría el shell) → `gvd send --capture shm` → del otro lado la misma
+  «Pantalla compartida» que al extender (`gvd_recv`, que ahora lleva `w`/`h` del video). El receptor
+  ajusta esa ventana para que su contenido mida como el video (sin franjas; achica sin deformar si no
+  entra), también cada vez que gvd la recrea. Se deja de compartir SÓLO cerrando una de las dos
+  ventanas: la original (corta y cierra el receptor remoto) o la «Pantalla compartida» del otro lado
+  (termina su `gvd recv` y avisa con `share_stop`). Todo cierre pasa por `shell._close_window_id`.
+  Una ventana por equipo a la vez (un receptor por puerto).
+- **Audio** = interruptor «Enviar audio — Encendido/Apagado» en el mismo menú del equipo que
+  «Extender mi pantalla», pero sin lado (no es espacial): basta con que el equipo esté encendido. Saca
+  TODO el sonido por ese equipo. Túnel PulseAudio/PipeWire por `pactl` (`audio_send.gd`): el
+  receptor abre `module-native-protocol-tcp` (4714) sólo con `auth-ip-acl` = IP del pedido peer
+  (nunca `auth-anonymous`); el emisor crea `module-tunnel-sink`, lo pone por omisión y muda los
+  streams; apagar restaura en ambos lados. Un destino a la vez, no se persiste, se apaga solo al salir
+  el shell. Anda con PipeWire y PulseAudio.
 - Métodos peer `audio_recv`/`audio_stop`. Como todo cambio de `peer_link.METHODS` o de un `preload`
   (p. ej. `gvd_launch.gd`), entra con el reinicio del proceso del shell; una recarga no alcanza.
 

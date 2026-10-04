@@ -500,3 +500,16 @@ static func window_send_argv(gvd_path, peer, shm_path, fps = 20, port = 0):
 		plan["args"].append_array(["--capture", "shm", "--shm", p,
 			"--fps", str(int(clamp(int(fps), 1, 60)))])
 	return plan
+
+
+# Marco flotante de la «Pantalla compartida» para que su CONTENIDO mida como el video
+# (sin franjas negras): suma el chrome (`extra` = marco - contenido) y, si no entra en
+# `box`, achica sin deformar. Centrado en la caja; Rect2() si no hay datos. Puro.
+static func receiver_frame_rect(video, box, extra = Vector2()):
+	var v = Vector2(video)
+	var room = box.size - Vector2(extra)
+	if v.x < 2 or v.y < 2 or room.x < 2 or room.y < 2:
+		return Rect2()
+	var k = min(1.0, min(room.x / v.x, room.y / v.y))
+	var size = (v * k).floor() + Vector2(extra)
+	return Rect2(box.position + ((box.size - size) * 0.5).floor(), size)

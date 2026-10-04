@@ -174,6 +174,13 @@ func _init():
 	check("ventana: fps acotado", wa[wa.find("--fps") + 1] == "60")
 	check("ventana: ruta relativa rechazada", not bool(mod.window_send_argv("/opt/gvd/gvd.py", "cupid", "x.frames").ok))
 	check("ventana: ruta con .. rechazada", not bool(mod.window_send_argv("/opt/gvd/gvd.py", "cupid", "/run/../etc/x").ok))
+	# Receptor: el contenido mide como el video (chrome aparte); si no entra, se achica.
+	var rcv = mod.receiver_frame_rect(Vector2(944, 500), Rect2(0, 80, 1280, 640), Vector2(4, 30))
+	check("receptor: contenido = video", rcv.size == Vector2(948, 530) and rcv.position == Vector2(166, 135))
+	var rb = mod.receiver_frame_rect(Vector2(1920, 1080), Rect2(0, 0, 1280, 720), Vector2(4, 30))
+	check("receptor: grande se achica sin deformar", rb.size.y <= 720 and rb.size.x <= 1280
+		and abs((rb.size.x - 4) / (rb.size.y - 30) - 16.0 / 9.0) < 0.01)
+	check("receptor: sin video no hay rect", mod.receiver_frame_rect(Vector2(), Rect2(0, 0, 100, 100)) == Rect2())
 	var wc = load("res://window_cast.gd")
 	var big = wc.out_size(Vector2(3841, 2161))
 	check("cast: tamaño par y acotado", big.x <= 1920 and big.y <= 1080 and int(big.x) % 2 == 0 and int(big.y) % 2 == 0 and big.x >= 1916)

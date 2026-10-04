@@ -415,6 +415,12 @@ func _group_toggle_items(member, include_remove):
 		online, direction, _shell_bool("_screen_session_active", id)))
 	rows.append(_group_toggle_row("group_keyboard", "Compartir teclado y mouse", id, keyboard,
 		online, direction, _shell_bool("_group_input_on", id)))
+	# Audio: como extender, pero sin lado (no es espacial); basta con que esté encendido.
+	var audio_on = _shell_bool("_group_audio_on", id)
+	rows.append({"kind": "group_audio", "id": "group_audio", "member_id": id,
+		"label": "Enviar audio — " + ("Encendido" if audio_on else "Apagado"),
+		"enabled": online or audio_on, "reason": "" if online or audio_on else "está apagado",
+		"is_on": audio_on})
 	if include_remove:
 		rows.append({"kind": "separator"})
 		if _group_member_by_id(id) != null:
@@ -487,6 +493,11 @@ func _activate_group_row(item):
 		return
 	if kind == "group_add":
 		_group_add(id)
+		return
+	if kind == "group_audio":
+		if shell != null and shell.has_method("_group_audio_set"):
+			shell._group_audio_set(id, not bool(item.get("is_on", false)))
+		call_deferred("refresh", true)
 		return
 	var action = item.get("action", null)
 	if kind == "group_keyboard" and not bool(item.get("is_on", false)):

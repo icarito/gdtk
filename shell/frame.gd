@@ -70,7 +70,6 @@ const APPLETS = [
 	{"id": "reloj", "name": "Reloj", "short": "REL"},
 	{"id": "teclado", "name": "Teclado", "short": "TEC"},
 	{"id": "portapapeles", "name": "Portapapeles", "short": "CLIP"},
-	{"id": "audio", "name": "Audio", "short": "AUD"},
 ]
 const APPLET_DEFAULT = ["recursos", "termico", "reloj", "teclado"]
 # Look WindowMaker de los menús verticales (popups ImGui). Sólo estilo.
@@ -141,8 +140,7 @@ var clipboard = Host.sc("res://applet_clipboard.gd").new()
 # Applets con módulo propio (contrato en .operator-shared/guides/dockapp.md): el Frame
 # les pide state/value/detail, los refresca mientras están a la vista y los para al
 # salir. Sumar una dockapp = un archivo + su entrada en APPLETS + una línea acá.
-var audio = Host.sc("res://applet_audio.gd").new()
-var applet_mods = {"teclado": keyboard, "portapapeles": clipboard, "audio": audio}
+var applet_mods = {"teclado": keyboard, "portapapeles": clipboard}
 var items_layout = []
 var drawn = false
 # Applets del borde inferior: orden visible persistido (no es items_layout, que sigue
@@ -2789,10 +2787,6 @@ func _finish_applet_drag():
 	var zone = _zone_at(mouse_pos)
 	applet_drag = null
 	applet_press = null
-	# Audio soltado en la vista Grupo: sale por ese equipo (o vuelve, sobre el centro).
-	if id == "audio" and shell._group_drop_audio(mouse_pos):
-		shell.request_redraw()
-		return
 	if zone == "":
 		_explode_block("a", id)
 		return

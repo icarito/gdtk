@@ -188,7 +188,8 @@ func _handle(conn, line):
 	var err = ""
 	match String(r.method):
 		"gvd_recv":
-			ok = bool(shell._peer_gvd_open(int(params.get("port", 0)), String(params.get("from", "")), hid))
+			ok = bool(shell._peer_gvd_open(int(params.get("port", 0)), String(params.get("from", "")), hid,
+				LINK.video_size(params)))
 			if not ok:
 				err = "no se pudo abrir el receptor"
 		"gvd_stop":

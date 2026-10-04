@@ -58,5 +58,9 @@ func _init():
 	check("share_notify parseable", String(sn.method) == "share_notify"
 		and String(sn.params.side) == "south")
 
+	check("video_size: válido", P.video_size({"w": 944, "h": 500}) == Vector2(944, 500))
+	check("video_size: falta o fuera de rango", P.video_size({}) == Vector2()
+		and P.video_size({"w": 99999, "h": 10}) == Vector2() and P.video_size(null) == Vector2())
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

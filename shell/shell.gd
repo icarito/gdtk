@@ -6949,6 +6949,36 @@ func _peer_call(peer_host, peer_id, method, params = {}):
 # Equipo que nos está transmitiendo (canal peer `gvd_recv`): si la persona cierra la
 # «Pantalla compartida», se le avisa con share_stop para que deje de emitir.
 var _pantalla_sender = ""
+var _pantalla_video = Vector2()   # tamaño anunciado por el emisor (ventana compartida)
+var _pantalla_fitted = {}         # id -> video al que ya se ajustó
+
+
+# La «Pantalla compartida» toma el tamaño del video (contenido 1:1, sin franjas), también
+# cada vez que gvd recv recrea su ventana. Sólo flotantes visibles y con chrome del shell.
+func _pantalla_fit_poll():
+	if _pantalla_video == Vector2():
+		return
+	for id in _pantalla_window_ids():
+		if _pantalla_fitted.get(id) == _pantalla_video or not tiles.has(id):
+			continue
+		if hybrid.is_tiled(id):
+			set_window_mode(id, WM_HYBRID.FLOATING)
+		var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(get_viewport_rect().size)
+		if not float_layout.has(id):
+			float_layout.place_new(id, box)
+		# Con CSD el contenido es el marco entero; si no, se suma el chrome del shell.
+		var extra = Vector2()
+		if not _is_csd(id):
+			var probe = Rect2(0, 0, 1000, 1000)
+			extra = probe.size - WINDOW_CHROME.content_rect(probe, _chrome_title_h(),
+				_chrome_border(), _chrome_resize_h()).size
+		var r = GVD_LAUNCH.receiver_frame_rect(_pantalla_video, box, extra)
+		if r.size.x > 0.0:
+			float_layout.resize_to(id, r, box)
+			wm_maximized.erase(id)
+			print("pantalla: ", id, " ajustada al video ", _pantalla_video, " -> ", r)
+		_pantalla_fitted[id] = _pantalla_video
+		request_redraw()
 
 
 func _pantalla_closed_here():
@@ -6962,8 +6992,10 @@ func _pantalla_closed_here():
 	_kill_pantalla_receivers()
 
 
-func _peer_gvd_open(port, _from, hid = ""):
+func _peer_gvd_open(port, _from, hid = "", video = Vector2()):
 	_pantalla_sender = String(hid)
+	_pantalla_video = video
+	_pantalla_fitted = {}
 	var path = _gvd_path_local()
 	if path == "":
 		return false
@@ -7176,27 +7208,8 @@ func _audio_unload_stale(marker):
 			_pactl(AUDIO_SEND.unload_argv(line.split("\t")[0]))
 
 
-# Lo llama el Frame al soltar el bloque Audio. true = el Grupo lo consumió.
-func _group_drop_audio(global_pos):
-	var t = _group_drop_target(global_pos)
-	if t.empty():
-		return false
-	if String(t.kind) == "self":
-		_group_audio_set("", false)
-	elif not bool(t.online):
-		activity_error = "audio: " + String(t.name) + " está apagado"
-	else:
-		_group_audio_set(String(t.id), true)
-	return true
-
-
-# Refleja el destino en el bloque Audio (hilo principal, vía call_deferred).
+# El interruptor del menú del Grupo lee _group_audio_on: redibujar al cambiar.
 func _audio_status_changed():
-	_audio_mutex.lock()
-	var hid = String(_audio_send.get("hid", ""))
-	_audio_mutex.unlock()
-	if frame != null and frame.get("audio") != null:
-		frame.audio.set_dest(_peer_name_for(hid) if hid != "" else "")
 	request_redraw()
 
 
@@ -7365,7 +7378,8 @@ func _group_share_window(hid, wid):
 		return
 	_casts[hid] = {"node": cast, "wid": wid}
 	_queue_gvd_peer_launch(hid, String(target.peer), int(target.port), "gvd_recv",
-		{"port": 0, "from": _local_hostname()}, String(sp.cmd), sp.args, "", _cast_key(hid))
+		{"port": 0, "from": _local_hostname(), "w": int(cast.size.x), "h": int(cast.size.y)},
+		String(sp.cmd), sp.args, "", _cast_key(hid))
 	_share_notify(hid, "screen", "active")
 	print("compartir: ventana ", wid, " -> ", hid)
 
@@ -7851,6 +7865,7 @@ func _tracked_launch_work(userdata):
 func _gvd_poll():
 	if not _casts.empty():
 		_casts_poll()
+	_pantalla_fit_poll()
 	var reaped = false
 	for i in range(_gvd_peer_threads.size() - 1, -1, -1):
 		var pstate = _gvd_peer_states[i]

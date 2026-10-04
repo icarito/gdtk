@@ -30,7 +30,7 @@ class StubShell:
 	var stops = []
 	func _peer_is_confirmed(hid):
 		return String(hid) == "aaaa" or String(hid) == "bbbb"
-	func _peer_gvd_open(port, from, _hid = ""):
+	func _peer_gvd_open(port, from, _hid = "", _video = Vector2()):
 		opened.append([int(port), String(from)])
 		return true
 	func _peer_gvd_stop():
