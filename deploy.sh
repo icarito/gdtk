@@ -68,5 +68,5 @@ ssh "$HOST" 'mkdir -p ~/.config/xdg-desktop-portal ~/.local/share/xdg-desktop-po
 # supervisor puede promover/volver ante un arranque roto. GDTK_NO_STORE=1 lo omite.
 if [ -z "${GDTK_NO_STORE:-}" ]; then
 	ssh "$HOST" 'chmod +x ~/gdtk/session/gdtk-version ~/gdtk/session/gdtk-preflight 2>/dev/null; GDTK_GODOT="$HOME/gdtk/bin/godot-gdtk" ~/gdtk/session/gdtk-version snapshot --from "$HOME/gdtk" --note "deploy $(date +%F_%T)"' \
-		|| echo "aviso: no se creó el snapshot inicial (¿falta jq en $HOST?)"
+		|| echo "aviso: no se creó el snapshot inicial en $HOST (ver el error de gdtk-version arriba)"
 fi

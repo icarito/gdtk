@@ -26,11 +26,22 @@ if [ -z "$GODOT" ]; then
 fi
 [ -x "$GODOT" ] || die "binario no ejecutable: $GODOT"
 
-out="$("$GODOT" --no-window --path "$CONTENT/shell" -s "$SELF_DIR/gdtk-preflight.gd" 2>&1)"
-rc=$?
+# Por ssh no hay display: el binario FRT/SDL aborta en SDL_Init aunque vaya --no-window.
+# Con el driver offscreen compila todo pero aborta al salir (rc 134), así que el
+# veredicto sale del resumen "preflight: N scripts, M fallas" y no del rc.
+if [ -z "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]; then
+	export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-offscreen}"
+fi
+rc=0
+out="$("$GODOT" --no-window --path "$CONTENT/shell" -s "$SELF_DIR/gdtk-preflight.gd" 2>&1)" || rc=$?
 printf '%s\n' "$out" | grep '^FAIL' || true
 printf '%s\n' "$out" | grep '^preflight:' || true
-[ "$rc" -eq 0 ] || die "scripts no compilan (rc=$rc)"
+summary="$(printf '%s\n' "$out" | grep '^preflight:' || true)"
+case "$summary" in
+	*", 0 fallas") ;;
+	"") die "el preflight no llegó a correr (rc=$rc): $(printf '%s\n' "$out" | tail -2 | tr '\n' ' ')" ;;
+	*) die "scripts no compilan (rc=$rc)" ;;
+esac
 
 # Fase 3 pineara el runtime desde un manifiesto; por ahora solo avisamos.
 for sym in ImGuiCanvas SlugVector2D; do
