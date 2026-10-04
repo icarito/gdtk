@@ -8,6 +8,10 @@ extends Control
 
 var shell
 
+# Sombra "drop" de las miniaturas: misma receta que window_deco._draw_shadow
+# (StyleBoxFlat con sombra nativa, barato en GLES2).
+var _thumb_shadow_sb = null
+
 
 func _ready():
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -22,6 +26,90 @@ func refresh():
 func _draw():
 	if shell == null:
 		return
+	_draw_background()
+	if shell.expose and shell.fullscreen_id < 0:
+		_draw_thumb_shadows()
+		_draw_unit_labels()
+
+
+# Rect visible del nodo de la ventana (igual que shell._node_footprint) o null.
+func _visible_rect(id):
+	var node = shell.tile_nodes.get(id)
+	if node == null or not is_instance_valid(node) or not node.visible:
+		return null
+	return shell._node_footprint(node)
+
+
+# Progreso de la animación de entrada de la ventana: 1 si ya se asentó.
+func _settle(id):
+	var a = shell.view_anim.get(id)
+	if a == null:
+		return 1.0
+	return clamp(float(OS.get_ticks_msec() - a.since) / shell.EXPOSE_MS, 0.0, 1.0)
+
+
+# Sombra de las miniaturas TILED (las flotantes ya llevan la suya por window_deco),
+# en el footprint visible y con opacidad ~ progreso^2: aparece al asentarse.
+func _draw_thumb_shadows():
+	var sel_id = -1
+	if shell.expose_sel >= 0 and shell.expose_sel < shell.tiles.size():
+		sel_id = shell.tiles[shell.expose_sel]
+	for id in shell.tile_nodes.keys():
+		if shell.is_floating(id):
+			continue
+		var r = _visible_rect(id)
+		if r != null:
+			var k = _settle(id)
+			_draw_thumb_shadow(r, id == sel_id, k * k)
+
+
+func _draw_thumb_shadow(r, focused, opacity):
+	if r.size.x < 6.0 or r.size.y < 6.0 or opacity <= 0.0:
+		return
+	if _thumb_shadow_sb == null:
+		_thumb_shadow_sb = StyleBoxFlat.new()
+		_thumb_shadow_sb.draw_center = false
+		_thumb_shadow_sb.bg_color = Color(0, 0, 0, 0)
+	_thumb_shadow_sb.set_corner_radius_all(7)
+	_thumb_shadow_sb.shadow_size = 16 if focused else 10
+	_thumb_shadow_sb.shadow_color = Color(0.0, 0.0, 0.0, (0.26 if focused else 0.16) * opacity)
+	_thumb_shadow_sb.shadow_offset = Vector2(0.0, 4.0 if focused else 2.5)
+	draw_style_box(_thumb_shadow_sb, r)
+
+
+# Etiqueta "i/n" bajo cada unidad (workspace). Alfa ~ progreso mínimo de sus ventanas;
+# si cae sobre una ventana visible de la unidad, baja bajo el footprint más bajo.
+func _draw_unit_labels():
+	var font = get_font("font", "Label")
+	var units = shell.expose_units if shell.expose_units != null else []
+	var n = units.size()
+	if font == null:
+		return
+	var sel_id = -1
+	if shell.expose_sel >= 0 and shell.expose_sel < shell.tiles.size():
+		sel_id = shell.tiles[shell.expose_sel]
+	for i in range(min(n, shell.expose_unit_cards.size())):
+		var frame = shell.expose_unit_cards[i]
+		var label = "%d/%d" % [i + 1, n]
+		var lw = font.get_string_size(label).x
+		var lh = font.get_height()
+		var x = frame.position.x + frame.size.x * 0.5 - lw * 0.5
+		var y = frame.position.y + frame.size.y + 16.0
+		var k = 1.0
+		var rects = []
+		for id in units[i]:
+			k = min(k, _settle(id))
+			var r = _visible_rect(id)
+			if r != null:
+				rects.append(r)
+		for r in rects:
+			if Rect2(x, y, lw, lh).intersects(r):
+				y = max(y, r.end.y + 8.0)
+		var base = 0.55 if units[i].has(sel_id) else 0.30
+		draw_string(font, Vector2(x, y + font.get_ascent()), label, Color(1, 1, 1, base * k))
+
+
+func _draw_background():
 	var vp = get_viewport_rect().size
 	var sb = shell.settings_bridge
 	var mode = "gradient"

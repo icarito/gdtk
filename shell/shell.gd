@@ -373,6 +373,7 @@ var hybrid = WM_HYBRID.new()
 var swipe = SWIPE_MODEL.new()
 var swipe_mode = ""   # "" | "pan" (escritorios) | "expose" (entrar/salir) | "none"
 var swipe_k = 0.0     # fracción de la animación del exposé fijada por los dedos
+var home_bg_alpha = 1.0   # alfa del fondo del Hogar mientras aparece por el paneo
 var _prev_units = [[]]   # unidades del frame anterior (hybrid.heal_anchors)
 var _fs_sent = -1         # última ventana a la que se le avisó xdg "fullscreen"
 var float_layout = FLOAT_LAYOUT.new()
@@ -1513,6 +1514,11 @@ func _imgui_frame():
 	# Si el Frame no cargó (p. ej. frame.gd no compila), no hay transición que
 	# aplicar: se dibuja opaco en vez de reventar cada frame.
 	var fade = frame.transition() if frame != null and is_instance_valid(frame) else 1.0
+	# El Hogar no se desliza con la fila (el ícono central queda quieto): está fijo de
+	# fondo y aparece con alfa a medida que el paneo/animación se acerca a su ranura.
+	var home_a = 1.0
+	if _home_anim_active() or pan_active:
+		home_a = _home_vis(_units())
 	if fade < 1.0:
 		push_style_var_float(0, fade)
 	# En exposé el ImGui no dibuja la vista de fondo (Hogar/actividad): las miniaturas
@@ -1521,17 +1527,13 @@ func _imgui_frame():
 		if current_activity == null:
 			# El Hogar se dibuja siempre; con zoom activo _draw_home sólo pinta el
 			# ícono central (ancla continua), y la capa Grupo/Vecindario entra encima.
-			_draw_home(_home_x(_units()))
+			_draw_home_alpha(fade * home_a)
 			if zoom_level > 0 or zoom_f > 0.001:
 				neighborhood_ui.refresh()
 		else:
 			_draw_activity()
-			# Paneo/animación hacia el Hogar: se dibuja deslizándose junto a las ventanas.
-			if _home_anim_active() or pan_active:
-				var hx = _home_x(_units())
-				var vp = get_viewport_rect().size
-				if hx > -vp.x and hx < vp.x:
-					_draw_home(hx)
+			if (_home_anim_active() or pan_active) and home_a > 0.01:
+				_draw_home_alpha(fade * home_a)
 	if fade < 1.0:
 		pop_style_var()
 
@@ -1672,7 +1674,39 @@ func _row_s(units):
 		return lerp(home_slide_from, home_slide_to, _ease(k))
 	var vp = get_viewport_rect().size
 	var a = float(n) if _at_home() else float(_focused_unit_index(units))
-	return a + pan / max(vp.x, 1.0)
+	var s = a + pan / max(vp.x, 1.0)
+	# Desde el Hogar hacia "siguiente" la fila da la vuelta: entra por la izquierda.
+	var span = float(n) - _row_lo_v(units)
+	if s > float(n) and span > 0.0:
+		s -= span
+	return s
+
+
+# Ranura virtual del Hogar a la IZQUIERDA de la primera pantalla: la del Escritorio
+# (0) sólo existe si tiene flotantes; si no, a la izquierda de la 1 está el Hogar
+# (antes había una pantalla gris vacía). El Hogar también es la ranura n (derecha).
+func _row_lo_v(units):
+	return -1.0 if _unit_has_windows(units, 0) else 0.0
+
+
+# Visibilidad del Hogar (0..1): está fijo de fondo (no se desliza: el ícono central
+# no se mueve) y aparece a medida que la fila se acerca a cualquiera de sus ranuras.
+func _home_vis(units):
+	var s = _row_s(units)
+	var d = min(abs(float(units.size()) - s), abs(s - _row_lo_v(units)))
+	return clamp(1.0 - d, 0.0, 1.0)
+
+
+# Límites del paneo (px) desde la ranura `a`: hasta el Hogar por ambos lados; desde el
+# Hogar, una vuelta entera en cada sentido.
+func _pan_limits(units, a):
+	var vp = get_viewport_rect().size
+	var n = float(units.size())
+	var lo_v = _row_lo_v(units)
+	var hi = (n - a) * vp.x
+	if _at_home():
+		hi = (n - lo_v) * vp.x
+	return Vector2((lo_v - a) * vp.x, hi)
 
 
 # Ranura de la última pantalla que tuvo el foco (para volver desde el Hogar).
@@ -1681,6 +1715,18 @@ func _last_focus_unit(units):
 	if ui < 0:
 		ui = units.size() - 1
 	return ui
+
+
+func _draw_home_alpha(alpha):
+	if alpha >= 0.999:
+		_draw_home(0.0)
+		return
+	# El fondo usa primitivas del draw list, que no respetan el Alpha de estilo.
+	home_bg_alpha = alpha
+	push_style_var_float(0, alpha)
+	_draw_home(0.0)
+	pop_style_var()
+	home_bg_alpha = 1.0
 
 
 # x del Hogar dentro de la fila: 0 = centrado en pantalla, ±ancho = fuera de vista.
@@ -2421,7 +2467,7 @@ func _update_tile(id, now):
 				a = {"from": cur, "since": now}
 				view_anim[id] = a
 		if a != null:
-			var e = _ease(float(now - a.since) / EXPOSE_MS)
+			var e = _view_anim_e(a, now)
 			var f = EXPOSE_LAYOUT.lerp_rect(a.from, fp, e)
 			node.rect_position = f.position
 			node.rect_scale = _scale_for(f, rect.size)
@@ -2440,7 +2486,7 @@ func _update_tile(id, now):
 	# de pantalla; el set_size real se pide recién al terminar, no en cada frame.
 	if view_anim.has(id):
 		var a = view_anim[id]
-		var e = _ease(float(now - a.since) / EXPOSE_MS)
+		var e = _view_anim_e(a, now)
 		var f = EXPOSE_LAYOUT.lerp_rect(a.from, rect, e)
 		node.rect_position = f.position
 		node.rect_scale = _scale_for(f, rect.size)
@@ -2517,7 +2563,12 @@ func _update_tile(id, now):
 	var pos = rect.position
 	var animating = false
 	if pan_active or instant_switch or home_slide_since >= 0:
+		# Paneo/deslizamiento: la ventana va pegada a su rect (que ya incluye el
+		# offset de la fila). Sin esto sólo se movía la capa de divisiones.
 		tile_anim.erase(id)
+		node.rect_scale = Vector2.ONE
+		node.rect_position = rect.position
+		node.rect_size = rect.size
 	elif tile_anim.has(id):
 		var a = tile_anim[id]
 		var k = clamp(float(now - a.since) / TILE_ANIM_MS, 0.0, 1.0)
@@ -2814,8 +2865,9 @@ func _tick_home_slide():
 	home_slide_since = -1
 	var units = _units()
 	var n = units.size()
-	if int(round(to)) >= n:
-		_go_home()
+	if int(round(to)) >= n or to <= _row_lo_v(units) + 0.01:
+		if not _at_home():
+			_go_home()
 	elif n > 0:
 		_focus_unit(units, int(clamp(round(to), 0.0, float(n - 1))))
 	request_redraw()
@@ -2838,7 +2890,8 @@ func _pan_by(amount):
 	var vp = get_viewport_rect().size
 	var a = float(n) if _at_home() else float(_focused_unit_index(units))
 	pan_active = true
-	pan = clamp(pan + amount * vp.x * 0.18, -a * vp.x, (float(n) - a) * vp.x)
+	var lim = _pan_limits(units, a)
+	pan = clamp(pan + amount * vp.x * 0.18, lim.x, lim.y)
 	request_redraw()
 
 
@@ -2874,6 +2927,7 @@ func _on_swipe(event):
 	var r = swipe.end(kind == 3, now, size)
 	var mode = swipe_mode
 	swipe_mode = ""
+	print("swipe fin: ", mode, " eje=", r.axis, " p=", stepify(r.progress, 0.01), " v=", stepify(r.velocity, 0.01), " paso=", r.step, " cancelado=", kind == 3)
 	if mode == "pan":
 		# Dedos a la izquierda (step -1) = pantalla siguiente.
 		_snap_pan(-int(r.step))
@@ -2882,6 +2936,8 @@ func _on_swipe(event):
 		# animando desde donde quedó.
 		if int(r.step) != (-1 if expose else 1):
 			_toggle_expose(not expose)
+		else:
+			_seed_view_anim(now)  # termina con easing desde donde quedó, sin tirón
 	request_redraw()
 
 
@@ -2907,7 +2963,8 @@ func _swipe_pan(p):
 	var vp = get_viewport_rect().size
 	var a = float(n) if _at_home() else float(_focused_unit_index(units))
 	pan_active = true
-	pan = clamp(-p * vp.x, -a * vp.x, (float(n) - a) * vp.x)
+	var lim = _pan_limits(units, a)
+	pan = clamp(-p * vp.x, lim.x, lim.y)
 	request_redraw()
 
 
@@ -2917,6 +2974,7 @@ func _swipe_scrub(k, now):
 	var t = clamp(k, 0.0, 0.98) * EXPOSE_MS
 	for id in view_anim.keys():
 		view_anim[id]["since"] = now - int(t)
+		view_anim[id]["lin"] = true
 	request_redraw()
 
 
@@ -2931,14 +2989,22 @@ func _snap_pan(step = null):
 	var a = float(n) if _at_home() else float(_focused_unit_index(units))
 	# `step` (gesto de 3 dedos) decide el destino por snap/fling; si no, el más cercano.
 	var delta = int(step) if step != null else int(round(pan / max(vp.x, 1.0)))
+	var lo_v = _row_lo_v(units)
+	var from_s = _row_s(units)
+	var target = a + float(delta)
+	if _at_home() and target > float(n):
+		target -= float(n) - lo_v  # vuelta: entra por la izquierda
+	target = clamp(target, lo_v, float(n))
 	pan_active = false
 	pan = 0.0
-	var target = int(clamp(a + float(delta), 0.0, float(n)))
-	if target >= n:
-		if not _at_home():
-			_go_home()
-	elif (target != int(a) or _at_home()) and n > 0:
-		_focus_unit(units, target)
+	var to_home = target >= float(n) or target <= lo_v
+	if to_home or _at_home():
+		# El Hogar entra/sale con el deslizamiento animado desde donde quedó la fila.
+		home_slide_from = from_s
+		home_slide_to = target
+		home_slide_since = OS.get_ticks_msec()
+	elif int(target) != int(a) and n > 0:
+		_focus_unit(units, int(target))
 	request_redraw()
 
 
@@ -3236,11 +3302,23 @@ func _toggle_expose(on):
 		release_modifiers()  # no dejar Ctrl/Shift pegados en la app al entrar
 	# El pasaje se anima: cada ventana arranca desde su transform actual (pantalla o tarjeta).
 	var now = OS.get_ticks_msec()
+	_seed_view_anim(now)
+	request_redraw()
+
+
+# Arranca la animación exposé<->pantalla de cada ventana desde lo que se ve ahora.
+func _seed_view_anim(now):
 	for id in tiles:
 		var node = tile_nodes.get(id)
 		if node != null and is_instance_valid(node):
 			view_anim[id] = {"from": _node_footprint(node), "since": now}
-	request_redraw()
+
+
+# Avance de una animación de view_anim: lineal mientras la arrastran los dedos (el
+# rebote de _ease adelantaba la imagen al progreso real y daba un tirón al soltar).
+func _view_anim_e(a, now):
+	var k = clamp(float(now - a.since) / EXPOSE_MS, 0.0, 1.0)
+	return k if a.get("lin", false) else _ease(k)
 
 
 func _expose_move(step):
@@ -5393,12 +5471,13 @@ func _draw_home_background(vp):
 		set_cursor_pos(r.position)
 		image(settings_bridge.wallpaper_texture(), r.size)
 		# Velo tenue para que las etiquetas del anillo sigan legibles sobre la foto.
-		imgui_draw_rect_filled(Rect2(Vector2.ZERO, vp), Color(0.0, 0.0, 0.0, 0.30))
+		imgui_draw_rect_filled(Rect2(Vector2.ZERO, vp), Color(0.0, 0.0, 0.0, 0.30 * home_bg_alpha))
 		return
+	var ka = Color(1, 1, 1, home_bg_alpha)
 	if mode == "solid" and settings_bridge != null and settings_bridge.model != null:
-		imgui_draw_rect_filled(Rect2(Vector2.ZERO, vp), settings_bridge.model.color_of_hex(settings_bridge.settings.get("wallpaper", {}).get("color", "")), 0.0)
+		imgui_draw_rect_filled(Rect2(Vector2.ZERO, vp), settings_bridge.model.color_of_hex(settings_bridge.settings.get("wallpaper", {}).get("color", "")) * ka, 0.0)
 		return
-	imgui_draw_rect_filled_multicolor(Rect2(Vector2.ZERO, vp), HOME_BG_TOP, HOME_BG_TOP, HOME_BG_BOTTOM, HOME_BG_BOTTOM)
+	imgui_draw_rect_filled_multicolor(Rect2(Vector2.ZERO, vp), HOME_BG_TOP * ka, HOME_BG_TOP * ka, HOME_BG_BOTTOM * ka, HOME_BG_BOTTOM * ka)
 
 
 # --- Zoom Sugar (Hogar / Grupo / Vecindario) ---------------------------------

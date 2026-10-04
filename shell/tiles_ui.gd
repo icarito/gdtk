@@ -12,7 +12,7 @@ extends Control
 
 var shell
 
-# Sombra "drop" de las miniaturas: misma receta que window_deco._draw_shadow
+# Sombra "drop" del fantasma de arrastre (la de las miniaturas vive en expose_bg): misma receta que window_deco._draw_shadow
 # (StyleBoxFlat con sombra nativa, barato en GLES2). Se arma acá porque
 # draw_style_box sólo dibuja en la fase _draw() del propio nodo.
 var _thumb_shadow_sb = null
@@ -97,14 +97,6 @@ func _draw_expose(font):
 	var sel_id = -1
 	if shell.expose_sel >= 0 and shell.expose_sel < shell.tiles.size():
 		sel_id = shell.tiles[shell.expose_sel]
-	# Sombra de las miniaturas TILED (las flotantes ya llevan la suya por su nodo
-	# window_deco). Se dibuja antes de bordes y feedback de destino.
-	for id in shell.expose_cards.keys():
-		if shell.is_floating(id):
-			continue
-		var sr = shell.expose_cards.get(id)
-		if sr != null:
-			_draw_thumb_shadow(sr, id == sel_id)
 	# Ranura destino del arrastre entre escritorios: relleno y borde con el acento
 	# (no se marca el escritorio de origen).
 	if shell.expose_drag != null and shell.expose_drag_target >= 0 \
@@ -124,20 +116,16 @@ func _draw_expose(font):
 	for i in range(n):
 		if i >= shell.expose_unit_cards.size():
 			break
-		var frame = shell.expose_unit_cards[i]
-		var on = units[i].has(sel_id)
 		for id in units[i]:
 			var r = shell.expose_cards.get(id)
 			if r == null:
 				continue
+			# Borde en lo que se ve (sigue a la ventana en vuelo, no la espera).
+			var node = shell.tile_nodes.get(id)
+			if node != null and is_instance_valid(node) and node.visible:
+				r = shell._node_footprint(node)
 			if id != sel_id:
 				draw_rect(r, Color(0, 0, 0, 0.45), false, 1.0)
-		if font != null:
-			var label = "%d/%d" % [i + 1, n]
-			var col = Color(1, 1, 1, 0.55) if on else Color(1, 1, 1, 0.30)
-			var lw = font.get_string_size(label).x
-			draw_string(font, Vector2(frame.position.x + frame.size.x * 0.5 - lw * 0.5,
-				frame.position.y + frame.size.y + 16.0 + font.get_ascent()), label, col)
 	# Miniatura arrastrada: sigue al puntero con su forma actual y sombra propia.
 	if shell.expose_drag != null and sel_id >= 0:
 		var card = shell.expose_cards.get(sel_id)
@@ -157,7 +145,7 @@ func _draw_expose(font):
 			_draw_close_glyph(cr)
 
 
-# Sombra "drop" de una miniatura (window_deco._draw_shadow no puede dibujar fuera de
+# Sombra "drop" del fantasma (window_deco._draw_shadow no puede dibujar fuera de
 # su propio _draw, así que se repite la receta acá). No pinta el centro.
 func _draw_thumb_shadow(r, focused):
 	if r.size.x < 6.0 or r.size.y < 6.0:
