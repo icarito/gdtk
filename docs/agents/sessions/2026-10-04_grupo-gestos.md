@@ -56,3 +56,9 @@ el resto cambia al cruzar la mitad de cada tramo; sin ventanas se saltan 0 y 1. 
   `RemoteInput.remote_left` (stop_emulating) → shell oculta el puntero (`remote_cursor_parked`) hasta el próximo
   motion local (>200 ms). Falta compilar/desplegar (cambió remote_input.cpp).
 - Nota del usuario: sesión /polish → delegar en subagentes Kilo cuando se pueda (tools/kilo-launch.sh).
+- 5dd4c3e: dockapp = token `s:sharing` (agente; `_place_new_token`/`next_free_slot` único, también para applets;
+  dibujo radial en coords de pantalla) + `RemoteInput.remote_left` → puntero oculto hasta motion local. Binario
+  b9115026 en los 3 hosts (tengu por IP); tengu/cupid reiniciados sanos. Bastion: reiniciar sesión para el binario.
+- Vigía Deskflow dispara seguido en uso real: "volvió a este equipo sin soltar" = borde con barrera tocado, Release
+  ignorado (ventana 250 ms) y Deskflow no cruzó (tramo sin vínculo) → captura trabada; ahora rescate cada 300 ms
+  (aa56e8c, sólo scripts). Raíz pendiente en eis_server.c: re-evaluar el Release ignorado si no hubo switch.
