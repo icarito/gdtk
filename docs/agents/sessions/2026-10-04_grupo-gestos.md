@@ -44,3 +44,8 @@ el resto cambia al cruzar la mitad de cada tramo; sin ventanas se saltan 0 y 1. 
   `[cursor]` en shell.log de cupid + enter/leave en /run/user/1000/gdtk-deskflow.log de ambos. Escape: Ctrl+Alt+Esc
   (sway, en el equipo que controla) mata deskflow-core.
 - tengu.local no resuelve por mDNS esta mañana: tengu SIN deployar 3246ad1..2f552dd.
+- Corrección: matar el cliente de cupid NO liberó el puntero de bastion; se liberó matando deskflow-core en bastion.
+  Causa probable: el servidor no pidió Release al caerse el destino. Fix 44cb7cc: `RemoteInput.release_capture()`
+  (eis_server.c) + vigía `_deskflow_watch` (shell, 1/s sólo con captura): destino del último switch caído, o servidor
+  "en local" dos chequeos seguidos → suelta. Log de Deskflow es por línea (mtime = última línea), sin falsos positivos
+  por buffer. Binario 4af2803b en bastion y cupid (cupid sin reiniciar a propósito: bastion aún corre el viejo).
