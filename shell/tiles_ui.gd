@@ -141,8 +141,10 @@ func _draw_expose(font):
 	# Miniatura arrastrada: sigue al puntero con su forma actual y sombra propia.
 	if shell.expose_drag != null and sel_id >= 0:
 		var card = shell.expose_cards.get(sel_id)
+		# Con el tamaño que tendrá al soltar (ver shell._expose_drag_card).
+		var dc = shell._expose_drag_card(sel_id)
 		if card != null:
-			var gr = Rect2(shell.expose_drag.pos - shell.expose_drag.grab, card.size)
+			var gr = dc.card if dc != null else Rect2(shell.expose_drag.pos - shell.expose_drag.grab, card.size)
 			_draw_thumb_shadow(gr, true)
 			draw_rect(gr, Color(1, 1, 1, 0.10))
 			draw_rect(gr, _acc(0.95), false, 2.0)

@@ -118,6 +118,42 @@ func ids_mode(m):
 	return out
 
 
+# Índice (>=1) de la unidad de `units` que contiene a `id`; -1 si ninguna.
+static func unit_index(units, id):
+	for i in range(1, units.size()):
+		if units[i].has(id):
+			return i
+	return -1
+
+
+# Reancla las flotantes cuya ancla (id-líder) ya no está en ninguna unidad de `cur`
+# (`prev` = unidades del frame anterior). Preferencia: otro miembro de su unidad
+# previa; la unidad que hoy ocupa ese índice (o la última); el Escritorio. Sin esto
+# `_anchor_index` caía en silencio al Escritorio y la flotante "cambiaba de pantalla".
+func heal_anchors(prev, cur):
+	var n = 0
+	for id in windows.keys():
+		var w = windows[id]
+		if normalize_mode(w.get("mode", FLOATING)) != FLOATING:
+			continue
+		var a = int(w.get("anchor", ESCRITORIO))
+		if a <= 0 or unit_index(cur, a) >= 0:
+			continue
+		var to = ESCRITORIO
+		var pi = unit_index(prev, a)
+		if pi >= 0:
+			for m in prev[pi]:
+				var ci = unit_index(cur, m)
+				if ci >= 0:
+					to = int(cur[ci][0])
+					break
+			if to == ESCRITORIO and cur.size() > 1:
+				to = int(cur[int(clamp(pi, 1, cur.size() - 1))][0])
+		w["anchor"] = to
+		n += 1
+	return n
+
+
 func serialize():
 	var out = {}
 	for id in windows.keys():

@@ -61,6 +61,9 @@ func _draw():
 			return
 	# El cliente dibuja su propia decoración (GTK4/CSD): sólo pill de mover y asas.
 	var csd = shell._is_csd(id)
+	# En exposé la miniatura basta: el chrome del shell (no CSD) no se dibuja.
+	if shell.expose and not csd:
+		return
 	# Con la entrada/zoom (escala) el marco se desalinearía; se dibuja al asentar.
 	if shell.tile_intro.has(id) or shell.view_anim.has(id):
 		return

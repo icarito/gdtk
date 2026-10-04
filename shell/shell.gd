@@ -81,6 +81,10 @@ const WM_HYBRID = preload("res://wm_hybrid.gd")
 const CAPTURE_INPUT = preload("res://capture_input.gd")
 # Mapeo puro rueda/gesto -> eje del compositor (ver scroll_gesture.gd).
 const SCROLL_GESTURE = preload("res://scroll_gesture.gd")
+# Swipe continuo de 3 dedos: FRT lo entrega como InputEventPanGesture con device =
+# 1000+dedos (begin/update), 2000+dedos (fin) o 3000+dedos (cancelado).
+const SWIPE_MODEL = preload("res://swipe_model.gd")
+const SWIPE_DEVICE = 1000
 # Matemática pura del icono de drag (rect/hotspot/tamaño; ver drag_icon.gd).
 const DRAG_ICON = preload("res://drag_icon.gd")
 # G1: zoom Sugar de 3 niveles (Hogar/Grupo/Vecindario) y escala del ícono central.
@@ -366,6 +370,11 @@ var resize_handle = null
 # K13 — Estado híbrido: modo por ventana (flotante/mosaico), ancla a su pantalla y
 # rect flotante recordado. El "modo global" ya no existe; cada ventana decide.
 var hybrid = WM_HYBRID.new()
+var swipe = SWIPE_MODEL.new()
+var swipe_mode = ""   # "" | "pan" (escritorios) | "expose" (entrar/salir) | "none"
+var swipe_k = 0.0     # fracción de la animación del exposé fijada por los dedos
+var _prev_units = [[]]   # unidades del frame anterior (hybrid.heal_anchors)
+var _fs_sent = -1         # última ventana a la que se le avisó xdg "fullscreen"
 var float_layout = FLOAT_LAYOUT.new()
 var window_rects = {}        # id -> Rect2 exterior (marco+barra) en coords de pantalla
 var wm_maximized = {}        # id -> true: maximizada estando en flotante
@@ -604,6 +613,9 @@ func _tile_rect(vp):
 # sólo lo que el Frame reserva). Los diálogos flotan sobre su ventana host dentro
 # de este rect y conservan el tamaño natural que pide el cliente.
 func _content_rect(vp):
+	# Pantalla completa: sin Frame, los diálogos usan todo el viewport.
+	if fullscreen_id >= 0:
+		return Rect2(Vector2.ZERO, vp)
 	return CONTENT_LAYOUT.dialog_area(vp, frame_bar_h(vp))
 
 
@@ -842,6 +854,21 @@ func _sync_client_maximized(id, maximized):
 		return
 	_max_sent[id] = maximized
 	compositor.call("set_maximized", id, maximized)
+
+
+# Estado xdg "fullscreen" del cliente: el shell sale de pantalla completa por muchos
+# caminos (foco a otra ventana, Alt+F10/F11, un selector de archivos nuevo) y el
+# cliente debe enterarse o se queda con su UI de fullscreen. Un solo punto, por frame.
+# Requiere WaylandCompositor.set_fullscreen (un binario anterior no lo expone).
+func _sync_client_fullscreen():
+	if _fs_sent == fullscreen_id or compositor == null:
+		return
+	if compositor.has_method("set_fullscreen"):
+		if _fs_sent >= 0 and _id_alive(_fs_sent):
+			compositor.call("set_fullscreen", _fs_sent, false)
+		if fullscreen_id >= 0 and _id_alive(fullscreen_id):
+			compositor.call("set_fullscreen", fullscreen_id, true)
+	_fs_sent = fullscreen_id
 
 
 # Hover de las ventanas CSD: la de más arriba bajo el puntero (o cerca de su borde
@@ -1472,6 +1499,15 @@ func _imgui_frame():
 		request_redraw()
 	recovery.tick(self)
 	_process_unmanaged()
+	# Flotantes cuyo escritorio cambió/desapareció: se reanclan al vecino en vez de
+	# caer en silencio al Escritorio (maximizar/desmaximizar "cambiaba de pantalla").
+	var cur_units = _units()
+	hybrid.heal_anchors(_prev_units, cur_units)
+	_prev_units = cur_units
+	_sync_client_fullscreen()
+	# Con los dedos quietos la animación del exposé no debe seguir sola por tiempo.
+	if swipe_mode == "expose":
+		_swipe_scrub(swipe_k, OS.get_ticks_msec())
 	_tick_home_slide()
 	# Fundido al cambiar de vista (ver frame.transition); 0 = ImGuiStyleVar_Alpha.
 	# Si el Frame no cargó (p. ej. frame.gd no compila), no hay transición que
@@ -1968,6 +2004,23 @@ func _expose_insert(id, gap):
 				if m != id:
 					anchor_id = m
 					break
+	_insert_solo(id, anchor_id, gap == 0)
+	expose_sel = max(tiles.find(id), 0)
+	expose_drag = null
+	expose_drag_target = -1
+	expose_drag_gap = -1
+	# Invalida el layout cacheado: las posiciones/tamaños de las tarjetas cambian.
+	_compute_expose_layout()
+	request_redraw()
+
+
+# Crea un escritorio NUEVO sólo con `id` (misma operación que el hueco del exposé y
+# de la tira del Frame). Se inserta antes de la unidad de `anchor_id` si se da; si no,
+# al principio si `at_start`, o al final. Tiled: extrae `id` como unidad sola.
+# Flotante: la vuelve tiled en su propia unidad. Limpia el estado de maximizado.
+func _insert_solo(id, anchor_id, at_start):
+	if id < 0 or not tiles.has(id):
+		return
 	var axis = _default_axis()
 	if hybrid.is_floating(id):
 		_remember_float_geometry()
@@ -1975,7 +2028,7 @@ func _expose_insert(id, gap):
 		hybrid.set_tiled(id, id)
 	if anchor_id >= 0:
 		WM_UNITS.solo_before(wm_units, id, anchor_id, axis)
-	elif gap == 0:
+	elif at_start:
 		# Extremo izquierdo: lo más a la izquierda posible (tras el Escritorio virtual).
 		WM_UNITS.solo(wm_units, id, 0, axis)
 	else:
@@ -1985,13 +2038,6 @@ func _expose_insert(id, gap):
 	maximize_state.erase(id)
 	_rebuild_tiles_preserving_floats()
 	_focus_tile(id)
-	expose_sel = max(tiles.find(id), 0)
-	expose_drag = null
-	expose_drag_target = -1
-	expose_drag_gap = -1
-	# Invalida el layout cacheado: las posiciones/tamaños de las tarjetas cambian.
-	_compute_expose_layout()
-	request_redraw()
 
 
 # Rearma `tiles` con las tiled en orden de unidad (miembros contiguos) y conserva las
@@ -2027,21 +2073,7 @@ func _expose_drop(id, target):
 		tid = expose_units[target][0]
 	if tid < 0:
 		return
-	if hybrid.is_floating(id):
-		hybrid.reanchor(id, tid)
-		# Coloca la flotante dentro del área del destino (todos los escritorios
-		# comparten la caja local): encaja sin deformar y la sube al tope.
-		var box = _tile_rect(get_viewport_rect().size)
-		var lr = float_layout.rect(id)
-		if lr != null:
-			float_layout.restore_one(id, lr, box)
-	else:
-		if tid == WM_HYBRID.ESCRITORIO:
-			WM_UNITS.solo(wm_units, id, -1, _default_axis())
-		else:
-			WM_UNITS.join(wm_units, id, tid, "right")
-		hybrid.set_tiled(id, tid)
-		_rebuild_tiles_preserving_floats()
+	_join_into(id, tid, "right")
 	expose_sel = max(tiles.find(id), 0)
 	expose_drag = null
 	expose_drag_target = -1
@@ -2049,6 +2081,156 @@ func _expose_drop(id, target):
 	# Invalida el layout cacheado: las posiciones/tamaños de las tarjetas cambian.
 	_compute_expose_layout()
 	request_redraw()
+
+
+# Escritorio/unidad destino de una ventana o del propio Escritorio: su id-líder.
+# Flotante -> su ancla; tiled -> el líder de su unidad; Escritorio -> 0; -1 si no hay.
+func _desktop_anchor_of(target_id):
+	if target_id == WM_HYBRID.ESCRITORIO:
+		return WM_HYBRID.ESCRITORIO
+	if target_id < 0 or not tiles.has(target_id):
+		return -1
+	if hybrid.is_floating(target_id):
+		return int(hybrid.anchor(target_id, WM_HYBRID.ESCRITORIO))
+	var rec = _record_of(target_id)
+	return int(rec["id"]) if rec != null else target_id
+
+
+# Une/reancla `id` al escritorio de `target_id` (misma operación que el drop del
+# exposé y de la tira del Frame). `target_id` puede ser una ventana (tiled o
+# flotante) o el propio Escritorio (WM_HYBRID.ESCRITORIO). Flotante: reancla y
+# reencaja en su caja. Tiled: se suma a la unidad del destino por el lado pedido
+# ("left"/"right"); si el destino es el Escritorio, queda sola al final anclada a él.
+func _join_into(id, target_id, side):
+	if id < 0 or target_id < 0 or id == target_id:
+		return
+	if not tiles.has(id):
+		return
+	var s = String(side)
+	if s != "left" and s != "right":
+		s = "right"
+	# El destino es una ventana flotante (o el propio Escritorio): la unidad es el
+	# escritorio de su ancla, no una unidad tiled con miembros.
+	var target_is_floating = target_id == WM_HYBRID.ESCRITORIO or hybrid.is_floating(target_id)
+	if hybrid.is_floating(id):
+		var anchor = _desktop_anchor_of(target_id)
+		if anchor < 0:
+			return
+		hybrid.reanchor(id, anchor)
+		# Coloca la flotante dentro del área del destino (todos los escritorios
+		# comparten la caja local): encaja sin deformar y la sube al tope.
+		var box = _tile_rect(get_viewport_rect().size)
+		var lr = float_layout.rect(id)
+		if lr != null:
+			float_layout.restore_one(id, lr, box)
+		return
+	# Tiled: se suma a la unidad destino. Si el destino es tiled se une a ESA ventana
+	# (así reordena al lado pedido cuando ya comparten unidad); si es flotante, a la
+	# unidad de su ancla; si el ancla es el Escritorio, queda sola al final.
+	var jt = int(target_id)
+	if target_is_floating:
+		var anchor = _desktop_anchor_of(target_id)
+		if anchor < 0:
+			return
+		if anchor == WM_HYBRID.ESCRITORIO:
+			WM_UNITS.solo(wm_units, id, -1, _default_axis())
+			hybrid.set_tiled(id, WM_HYBRID.ESCRITORIO)
+			_rebuild_tiles_preserving_floats()
+			return
+		jt = anchor
+	WM_UNITS.join(wm_units, id, jt, s)
+	var rec = _record_of(id)
+	hybrid.set_tiled(id, int(rec["id"]) if rec != null else jt)
+	_rebuild_tiles_preserving_floats()
+
+
+# --- Tira de ventanas del Frame: usan el mismo modelo de unidades que el exposé ----
+
+# Clave estable del escritorio/unidad de una ventana para la tira del Frame: el
+# id-líder de su unidad; las flotantes caen en el escritorio de su ancla; el
+# Escritorio virtual es 0. Coincide con el formato de `frame.strip_drop_target`.
+func frame_strip_unit(id):
+	if id < 0 or not tiles.has(id):
+		return -1
+	if hybrid.is_floating(id):
+		var all_units = _units()
+		var ai = _anchor_index(all_units, id)
+		return 0 if ai <= 0 else int(all_units[ai][0])
+	var rec = _record_of(id)
+	return int(rec["id"]) if rec != null else id
+
+
+# Miembro de la unidad `unit_key` distinto de `id`, para usarlo de ancla al crear un
+# escritorio nuevo antes de esa unidad (-1 si no hay o la clave es el Escritorio).
+func _strip_anchor_member(unit_key, id):
+	if unit_key <= 0:
+		return -1
+	for u in _units():
+		if int(u[0]) == unit_key:
+			for m in u:
+				if m != id:
+					return m
+			break
+	return -1
+
+
+# Suelta una tesela de la tira en un hueco: crea un escritorio NUEVO sólo con `id`
+# (misma semántica que el hueco del exposé). `right_unit_key` es el escritorio que
+# queda a la derecha (null = al final); `at_start` lo deja lo más a la izquierda.
+func frame_strip_new(id, right_unit_key, at_start):
+	if id < 0 or not tiles.has(id):
+		return
+	var rkey = -1 if right_unit_key == null else int(right_unit_key)
+	# Ya está sola justo a la izquierda de esa unidad: es su propia posición.
+	if _unit_is_solo(id) and rkey == int(frame_strip_unit(id)):
+		return
+	_insert_solo(id, _strip_anchor_member(rkey, id), at_start)
+
+
+# Suelta una tesela sobre otra: la une al escritorio de `target_id` por `side`
+# ("left"/"right"), o reancla la flotante a ese escritorio. Misma semántica que el
+# drop del exposé; el destino puede ser una unidad ya compartida (reordena el lado).
+func frame_strip_onto(id, target_id, side):
+	if id < 0 or target_id < 0 or id == target_id:
+		return
+	if not tiles.has(id) or not tiles.has(target_id):
+		return
+	_join_into(id, target_id, side)
+	_focus_tile(id)
+	request_redraw()
+
+
+# Tarjeta de la miniatura arrastrada en exposé con el tamaño que tendrá al soltar:
+# {"card": Rect2 en la vista, "local": tamaño real de la ventana}; null si `id` no se
+# está arrastrando. Hueco -> escritorio nuevo (área entera); otro escritorio -> su
+# parte de la franja con `id` sumada a la derecha (como _expose_drop); flotante
+# sobre un escritorio conserva su tamaño. Escala = la de la miniatura del destino.
+func _expose_drag_card(id):
+	var d = expose_drag
+	if d == null or not d.moved or int(d.id) != id or expose_unit_cards.empty():
+		return null
+	var vp = get_viewport_rect().size
+	var cur = tile_rects.get(id, Rect2(Vector2.ZERO, vp))
+	var local = cur.size
+	var ui = _expose_index_of_window(id)
+	if expose_drag_gap >= 0:
+		local = _tile_rect(vp).size  # escritorio nuevo: tiled sola, área entera
+		ui = int(clamp(expose_drag_gap - 1, 0, expose_unit_cards.size() - 1))
+	elif expose_drag_target >= 0 and expose_drag_target != ui and expose_drag_target < expose_units.size():
+		ui = expose_drag_target
+		if not hybrid.is_floating(id):
+			if expose_unit_src[ui] <= 0 or expose_units[ui].empty():
+				local = _tile_rect(vp).size
+			else:
+				var lay = _unit_local_layout(expose_units[ui] + [id])
+				if lay.has(id):
+					local = lay[id].size
+	ui = int(clamp(ui, 0, expose_unit_cards.size() - 1))
+	var k = expose_unit_cards[ui].size.x / max(vp.x, 1.0)
+	var size = local * k
+	var c0 = expose_cards.get(id, Rect2(d.from - d.grab, size))
+	var frac = Vector2(d.grab.x / max(c0.size.x, 1.0), d.grab.y / max(c0.size.y, 1.0))
+	return {"card": Rect2(d.pos - frac * size, size), "local": local}
 
 
 # Salida pública del exposé (la usa el Frame): delega en el toggle existente.
@@ -2176,6 +2358,13 @@ func _update_tile(id, now):
 	var geo = compositor.get_geometry(id)
 	var layers = compositor.get_layers(id)
 	var rect = tile_rects.get(id, Rect2(Vector2.ZERO, view.rect_size))
+	# Arrastre en exposé: la miniatura toma ya el tamaño que tendrá al soltar (pantalla
+	# entera sobre un hueco, su parte de la franja sobre otro escritorio) y la app se
+	# redimensiona en vivo para que el contenido acompañe.
+	var drag_card = _expose_drag_card(id) if expose else null
+	if drag_card != null:
+		rect = Rect2(Vector2.ZERO, drag_card.local)
+		_request_client_size(id, rect, geo)
 	# El cliente puede no ocupar el slot (elige tamaño propio, o se achica al cambiar
 	# de fuente): se centra 1:1 y, si es más grande que el slot, se reduce para que entre.
 	var fit = _content_fit(geo.size, rect.size, geo.position)
@@ -2200,6 +2389,8 @@ func _update_tile(id, now):
 		# miniatura quedaba en su tamaño real y no se redimensionaba al cambiar de
 		# escritorio ni al entrar al exposé.
 		var card = expose_cards.get(id, Rect2(Vector2.ZERO, view.rect_size))
+		if drag_card != null:
+			card = drag_card.card
 		# Selección sin borde: la elegida se agranda un poco y se aclara (ver _draw_expose).
 		var sel = expose_sel >= 0 and expose_sel < tiles.size() and tiles[expose_sel] == id
 		var bright = EXPOSE_SEL_BRIGHT if sel else 1.0
@@ -2208,6 +2399,19 @@ func _update_tile(id, now):
 			s *= EXPOSE_SEL_SCALE
 		var fp = Rect2(card.position + (card.size - rect.size * s) * 0.5, rect.size * s)
 		node.rect_size = rect.size
+		if drag_card != null:
+			# Sigue al puntero sin la animación de reacomodo; el cambio de tamaño se
+			# suaviza acercándose un tramo por frame.
+			view_anim.erase(id)
+			var v = EXPOSE_LAYOUT.lerp_rect(expose_drag.get("vis", _node_footprint(node)), fp, 0.35)
+			expose_drag["vis"] = v
+			node.rect_position = v.position
+			node.rect_scale = _scale_for(v, rect.size)
+			if not _footprint_near(v, fp):
+				request_redraw()
+			node.modulate = Color(bright, bright, bright, 1.0)
+			node.visible = true
+			return
 		var a = view_anim.get(id)
 		if a == null:
 			# Reacomodo (drop/inserción, cambio de selección, layout nuevo): parte de
@@ -2638,16 +2842,95 @@ func _pan_by(amount):
 	request_redraw()
 
 
+# Swipe de 3 dedos continuo (estilo GNOME): horizontal arrastra la fila de pantallas
+# siguiendo los dedos; vertical abre (arriba) o cierra (abajo) el exposé arrastrando
+# su animación. Al soltar, swipe_model decide el snap (mitad del recorrido o fling).
+func _on_swipe(event):
+	var now = OS.get_ticks_msec()
+	var vp = get_viewport_rect().size
+	var kind = int(event.device) / SWIPE_DEVICE
+	if kind == 1 and not swipe.active:
+		swipe.begin(int(event.device) % SWIPE_DEVICE, now)
+		swipe_mode = ""
+		swipe_k = 0.0
+		return
+	if not swipe.active:
+		return
+	var size = vp.x if swipe.axis == "x" else vp.y
+	if kind == 1:
+		swipe.update(event.delta, now)
+		if swipe.axis == "":
+			return
+		size = vp.x if swipe.axis == "x" else vp.y
+		var p = swipe.progress(size)
+		if swipe_mode == "":
+			swipe_mode = _swipe_start(p)
+		if swipe_mode == "pan":
+			_swipe_pan(p)
+		elif swipe_mode == "expose":
+			swipe_k = abs(p)
+			_swipe_scrub(swipe_k, now)
+		return
+	var r = swipe.end(kind == 3, now, size)
+	var mode = swipe_mode
+	swipe_mode = ""
+	if mode == "pan":
+		# Dedos a la izquierda (step -1) = pantalla siguiente.
+		_snap_pan(-int(r.step))
+	elif mode == "expose":
+		# Se completa si el snap va en el sentido con que se abrió/cerró; si no, vuelve
+		# animando desde donde quedó.
+		if int(r.step) != (-1 if expose else 1):
+			_toggle_expose(not expose)
+	request_redraw()
+
+
+func _swipe_start(p):
+	if swipe.axis == "x":
+		if expose or fullscreen_id >= 0 or _home_anim_active() or not (tile_mode or _at_home()):
+			return "none"
+		return "pan"
+	# Arriba abre el exposé; abajo lo cierra. Al revés no hace nada.
+	if (p < 0.0) != expose:
+		_toggle_expose(not expose)
+		return "expose"
+	return "none"
+
+
+# Paneo absoluto de la fila según el avance del gesto (en pantallas, + = dedos a la
+# derecha = pantalla anterior). Mismo estado `pan` que Super+rueda.
+func _swipe_pan(p):
+	var units = _units()
+	var n = units.size()
+	if n == 0:
+		return
+	var vp = get_viewport_rect().size
+	var a = float(n) if _at_home() else float(_focused_unit_index(units))
+	pan_active = true
+	pan = clamp(-p * vp.x, -a * vp.x, (float(n) - a) * vp.x)
+	request_redraw()
+
+
+# Arrastra la animación de entrada/salida del exposé: la fija en la fracción `k`
+# corriendo su inicio (view_anim usa tiempo transcurrido / EXPOSE_MS).
+func _swipe_scrub(k, now):
+	var t = clamp(k, 0.0, 0.98) * EXPOSE_MS
+	for id in view_anim.keys():
+		view_anim[id]["since"] = now - int(t)
+	request_redraw()
+
+
 # Al soltar Super: cae a la pantalla más cercana según el paneo acumulado (incluido el
 # Hogar, si el paneo lo alcanzó).
-func _snap_pan():
+func _snap_pan(step = null):
 	if not pan_active:
 		return
 	var units = _units()
 	var n = units.size()
 	var vp = get_viewport_rect().size
 	var a = float(n) if _at_home() else float(_focused_unit_index(units))
-	var delta = int(round(pan / max(vp.x, 1.0)))
+	# `step` (gesto de 3 dedos) decide el destino por snap/fling; si no, el más cercano.
+	var delta = int(step) if step != null else int(round(pan / max(vp.x, 1.0)))
 	pan_active = false
 	pan = 0.0
 	var target = int(clamp(a + float(delta), 0.0, float(n)))
@@ -7873,8 +8156,13 @@ func _view_hit_test(pos):
 			request_redraw()
 			return {"id": id, "pos": Vector2.ZERO, "dialog": 0}
 		return {"id": -1, "pos": Vector2.ZERO, "dialog": 0}
+	var cur_root = _current_wayland_id()
 	for i in range(dialogs.size() - 1, -1, -1):
 		var d = dialogs[i]
+		# Un diálogo de otra raíz está oculto (_update_dialogs): no captura input. Si
+		# no, su rect fantasma (raíz fuera de vista, clamp) se comía clics y drops.
+		if cur_root < 0 or _root_of(d) != cur_root:
+			continue
 		var rect = _dialog_rect(d)
 		if rect.has_point(pos):
 			# El compositor espera coords del buffer: la caja alinea la geometry en
@@ -8122,6 +8410,10 @@ func _capture_remote_input_event(event):
 func _input(event):
 	last_activity = OS.get_ticks_msec()
 	if _capture_remote_input_event(event):
+		return
+	if event is InputEventPanGesture and event.device >= SWIPE_DEVICE:
+		_on_swipe(event)
+		get_tree().set_input_as_handled()
 		return
 	# Pantallazo rápido (PrintScreen). El shell compone la pantalla completa (UI Sugar +
 	# ventanas del compositor anidado), así que el viewport es el escritorio entero.

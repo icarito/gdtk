@@ -2174,6 +2174,20 @@ void wl_server_set_maximized(wl_server *s, int id, int maximized) {
 	}
 }
 
+// El shell sale/entra de fullscreen por su cuenta (p.ej. al abrir un selector de otra app):
+// avisa al cliente por xdg_toplevel para que deje su UI de pantalla completa.
+void wl_server_set_fullscreen(wl_server *s, int id, int fullscreen) {
+	if (s == NULL) {
+		return;
+	}
+	toplevel *t = toplevel_find(s, id);
+	if (t != NULL && t->tl != NULL && t->tl->base->initialized) {
+		wlr_xdg_toplevel_set_fullscreen(t->tl, fullscreen != 0);
+	} else if (t != NULL && t->xs != NULL) {
+		wlr_xwayland_surface_set_fullscreen(t->xs, fullscreen != 0);
+	}
+}
+
 void wl_server_set_default_size(wl_server *s, int w, int h) {
 	if (s == NULL) {
 		return;

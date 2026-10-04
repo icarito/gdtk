@@ -88,6 +88,7 @@ void wl_server_frame_done(wl_server *s);
 void wl_server_set_visible(wl_server *s, const int *ids, int n);
 void wl_server_set_size(wl_server *s, int id, int w, int h);
 void wl_server_set_maximized(wl_server *s, int id, int maximized);
+void wl_server_set_fullscreen(wl_server *s, int id, int fullscreen);
 void wl_server_set_default_size(wl_server *s, int w, int h);
 void wl_server_close(wl_server *s, int id);
 // Enfoca el teclado. `raise` controla por separado si una ventana XWayland se

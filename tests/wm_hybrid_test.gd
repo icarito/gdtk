@@ -55,5 +55,19 @@ func _init():
 	check("parse tolerante a basura", H.new().parse({"x": "basura"}).empty())
 	check("normalize", H.normalize_mode("Tiled") == "tiled")
 
+	# heal_anchors: ancla muerta -> sobreviviente / índice / Escritorio.
+	var h = H.new()
+	h.set_tiled(10, 10)
+	h.set_tiled(11, 10)
+	h.set_floating(5, 10)
+	h.heal_anchors([[], [10, 11], [20]], [[], [11], [20]])
+	check("heal: miembro sobreviviente", h.anchor(5) == 11)
+	h.heal_anchors([[], [11], [20]], [[], [20]])
+	check("heal: unidad en su índice", h.anchor(5) == 20)
+	h.heal_anchors([[], [20]], [[]])
+	check("heal: sin unidades -> Escritorio", h.anchor(5) == H.ESCRITORIO)
+	h.set_floating(6, 0)
+	check("heal: estable", h.heal_anchors([[], [20]], [[], [20]]) == 0)
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

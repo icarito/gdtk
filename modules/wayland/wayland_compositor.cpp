@@ -618,6 +618,7 @@ void WaylandCompositor::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("end_frame"), &WaylandCompositor::end_frame);
 	ClassDB::bind_method(D_METHOD("set_size", "id", "size"), &WaylandCompositor::set_size);
 	ClassDB::bind_method(D_METHOD("set_maximized", "id", "maximized"), &WaylandCompositor::set_maximized);
+	ClassDB::bind_method(D_METHOD("set_fullscreen", "id", "fullscreen"), &WaylandCompositor::set_fullscreen);
 	ClassDB::bind_method(D_METHOD("close", "id"), &WaylandCompositor::close);
 	ClassDB::bind_method(D_METHOD("focus", "id", "raise"), &WaylandCompositor::focus, DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("pointer_motion", "id", "pos"), &WaylandCompositor::pointer_motion);
@@ -955,6 +956,12 @@ void WaylandCompositor::set_size(int p_id, const Vector2 &p_size) {
 void WaylandCompositor::set_maximized(int p_id, bool p_maximized) {
 	if (server != NULL) {
 		wl_server_set_maximized(server, p_id, p_maximized ? 1 : 0);
+	}
+}
+
+void WaylandCompositor::set_fullscreen(int p_id, bool p_fullscreen) {
+	if (server != NULL) {
+		wl_server_set_fullscreen(server, p_id, p_fullscreen ? 1 : 0);
 	}
 }
 

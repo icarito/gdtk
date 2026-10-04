@@ -85,11 +85,12 @@ func _init():
 		read_file("res://wm_units.gd").find("static func solo_before(units, id, anchor, axis = AXIS_X):") >= 0)
 
 	# Drop: flotante reancla y normaliza el rect en el destino; tiled solo/join.
-	check("drop reancla la flotante", shell.find("hybrid.reanchor(id, tid)") >= 0)
+	check("drop reancla la flotante", shell.find("hybrid.reanchor(id, anchor)") >= 0
+		and shell.find("_join_into(id, tid, \"right\")") >= 0)
 	check("drop encaja el rect flotante en el destino",
 		shell.find("float_layout.restore_one(id, lr, box)") >= 0)
 	check("drop tiled solo/join", shell.find("WM_UNITS.solo(wm_units, id, -1, _default_axis())") >= 0 and
-		shell.find("WM_UNITS.join(wm_units, id, tid, \"right\")") >= 0)
+		shell.find("WM_UNITS.join(wm_units, id, jt, s)") >= 0)
 
 	# El hit-test de destino usa los mismos marcos que se dibujan.
 	check("_expose_unit_at recorre expose_unit_cards",

@@ -1,0 +1,12 @@
+Tarea W5a (gdtk, Godot 3.6 GDScript, NO Godot 4; reglas en AGENTS.md). Crear un modelo PURO para el gesto continuo de 3 dedos estilo GNOME (arrastre que sigue a los dedos y al soltar hace snap). NO toques shell.gd (lo cablea el lead después).
+Archivo nuevo shell/swipe_model.gd `extends Reference`:
+- `begin(fingers, now_ms)`; `update(delta: Vector2, now_ms)`; `end(cancelled: bool, now_ms) -> Dictionary`.
+- Bloqueo de eje: el eje ("x" o "y") se decide cuando el desplazamiento acumulado supera LOCK_PX (12.0); antes `axis == ""`. Después sólo cuenta ese eje.
+- `progress(size: float) -> float`: desplazamiento acumulado en el eje / (size * DISTANCE_FACTOR) (DISTANCE_FACTOR 0.6: con 60% del ancho de pantalla se completa un paso). Sin clamp aquí.
+- Velocidad: px/ms en el eje usando sólo las muestras de los últimos 100 ms.
+- `end(...)` devuelve {"axis": axis, "progress": p, "velocity": v, "step": s} donde s ∈ {-1,0,+1}: si cancelled o axis=="" -> 0; si |v| > FLING (0.4 px/ms) -> sign(v); si no -> |p| >= 0.5 ? sign(p) : 0. Para el cálculo de p en end usar el último size pasado a progress() (guardarlo) o un parámetro `size` opcional en end.
+- `active` (bool), `reset()`.
+Convención de signo: delta positivo = dedos a la derecha/abajo (como libinput).
+Test tests/swipe_model_test.gd (`extends SceneTree`, `load("res://swipe_model.gd").new()`, `check()`, `OS.exit_code`, `quit()`, como los demás tests de tests/): eje no se bloquea bajo 12 px; bloquea x con movimiento horizontal y luego ignora y; arrastre lento 70% -> step +1; lento 30% -> 0; fling corto rápido -> step con signo del fling; cancelled -> 0; vertical hacia arriba (delta y negativo) 60% -> axis "y", step -1.
+Write set: shell/swipe_model.gd, tests/swipe_model_test.gd. No commit, no deploy.
+Hecho: verde con /home/icarito/Proyectos/godot3-box3d/godot-dev/bin/godot.frt.opt.tools.x86_64.gdtk --no-window --path shell -s /home/icarito/Proyectos/gdtk/tests/swipe_model_test.gd
