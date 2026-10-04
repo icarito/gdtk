@@ -73,6 +73,12 @@ struct session {
 	// equipo vecino. Obedecerlo desactivaba la captura y obligaba a re-activar en
 	// bucle; se ignora si llega pegadísimo a la activación (ver m_ic_release).
 	uint64_t activated_at;
+	// Release ignorado por llegar pegado a la activación: queda pendiente hasta saber si
+	// Deskflow cruzó. Si el mouse vuelve hacia adentro (se aleja del borde) sin haberse
+	// adentrado en el vecino, no cruzó (tramo sin vínculo) y se aplica; si se adentra o
+	// pasa RELEASE_PENDING_US, se descarta. Antes la captura quedaba trabada.
+	int release_pending;
+	double pend_in, pend_out;
 	// Tras activar, Deskflow entra a la pantalla vecina justo EN el borde y un jitter
 	// contrario (p. ej. y=-2) la abandona al instante. Durante esta ventana se anula el
 	// delta contrario a la dirección de cruce para que el puntero remoto se adentre.
@@ -195,6 +201,10 @@ static void session_emulating(struct eis_server *s, struct session *se, int acti
 // --- InputCapture: el compositor local reenvía el hardware físico al cliente EIS ---
 
 // Borde de una barrera válida (mismo convenio que barrier_valid).
+#define RELEASE_PENDING_US 1500000ULL
+#define RELEASE_PENDING_IN_PX 24.0
+#define RELEASE_PENDING_OUT_PX 40.0
+
 static int barrier_edge(struct eis_server *s, const struct capture_barrier *b) {
 	if (b->x1 == b->x2) {
 		return b->x1 <= 0 ? 1 : (b->x1 >= s->w ? 2 : 0);
@@ -959,6 +969,9 @@ static int m_ic_release(sd_bus_message *m, void *ud, sd_bus_error *err) {
 		// dispara el switch: si lo obedecemos, apagamos la captura y re-activamos en
 		// bucle. Sólo en esa ventana pegada a la activación se ignora.
 		if (!has_pos && (capture_time(0) - se->activated_at) < 250000ULL) {
+			se->release_pending = 1;
+			se->pend_in = 0.0;
+			se->pend_out = 0.0;
 			return sd_bus_reply_method_return(m, "ua{sv}", 0, 0);
 		}
 		capture_release(s, se, rx, ry);
@@ -1107,6 +1120,32 @@ static void capture_send_key(struct session *se, uint32_t key, int pressed, uint
 int eis_server_capture_motion(eis_server *s, double x, double y, double dx, double dy, uint64_t time) {
 	uint64_t t = capture_time(time);
 	struct session *act = capture_active(s);
+	if (act != NULL && act->release_pending) {
+		if (capture_time(0) - act->activated_at > RELEASE_PENDING_US) {
+			act->release_pending = 0;
+		} else {
+			// Componente hacia adentro de la pantalla local según el borde del cruce.
+			double in = 0.0;
+			switch (act->kick_edge) {
+				case 1: in = dx; break;   // salió por la izquierda: adentro = +x
+				case 2: in = -dx; break;  // derecha
+				case 3: in = dy; break;   // arriba
+				case 4: in = -dy; break;  // abajo
+			}
+			if (in > 0.0) {
+				act->pend_in += in;
+			} else {
+				act->pend_out -= in;
+			}
+			if (act->pend_out > RELEASE_PENDING_OUT_PX) {
+				act->release_pending = 0;  // se adentró en el vecino: Deskflow sí cruzó
+			} else if (act->pend_in > RELEASE_PENDING_IN_PX) {
+				act->release_pending = 0;
+				capture_release(s, act, -1.0, -1.0);  // no cruzó: soltar ya
+				return 0;  // este motion es local otra vez
+			}
+		}
+	}
 	if (act != NULL) {
 		act->cursor_x = x;
 		act->cursor_y = y;
@@ -1134,6 +1173,7 @@ int eis_server_capture_motion(eis_server *s, double x, double y, double dx, doub
 		se->active = 1;
 		se->active_barrier = id;
 		se->activated_at = capture_time(0);
+		se->release_pending = 0;
 		se->kick_edge = 0;
 		for (size_t i = 0; i < se->nbarriers; i++) {
 			if (se->barriers[i].id == id) {
