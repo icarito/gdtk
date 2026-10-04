@@ -32,3 +32,15 @@ el resto cambia al cruzar la mitad de cada tramo; sin ventanas se saltan 0 y 1. 
 - N11 ✔ (cb0c1bc): un solo apilado flotantes+tiled (`z_stack` por clic/foco, `z_order_now` para dibujo y hit-test;
   `_chrome_pick` corta en una tiled elevada). Desplegado 3246ad1+cb0c1bc a los 3 hosts (shell md5 97702fdb),
   tengu/cupid reiniciados sanos; cupid responde con terminal abierta (RPC peor 0.14 s).
+
+## Mañana 2026-10-04 (~10:00–10:20)
+- DockApp: con sólo la barra superior fijada no se veía (vivía en el dock inferior oculto) → frame.gd la dibuja al final
+  del tramo de ventanas de arriba (2f552dd). `shell.deskflow_input_sessions()` (f79e507) da los pares por el servicio global.
+- Deskflow duplicado en cupid: `autostart.sh` lanzaba `org.deskflow.deskflow.desktop` (app gráfica) que arrancaba su
+  propio deskflow-core con otra config. Ahora se salta (2f552dd). El supervisor ya mataba deskflow-core al terminar el
+  shell; verificado en cupid: tras reiniciar el shell queda un solo core nuevo.
+- Puntero atrapado en cupid (intermitente): liberado matando el cliente de cupid. Sin causa confirmada: el servidor de
+  bastion se relanzó 10:15:09 y luego sólo conectó tengu; a las 10:16 cupid entra/sale normal. Diagnóstico listo:
+  `[cursor]` en shell.log de cupid + enter/leave en /run/user/1000/gdtk-deskflow.log de ambos. Escape: Ctrl+Alt+Esc
+  (sway, en el equipo que controla) mata deskflow-core.
+- tengu.local no resuelve por mDNS esta mañana: tengu SIN deployar 3246ad1..2f552dd.
