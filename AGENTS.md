@@ -130,6 +130,13 @@ tests/scripts que las usan (`shell.gd`) fallan al parsear con
   rsync -a --exclude '.import' shell settings session ~/gdtk/
   ```
 
+- **Versiones (store)**: el supervisor arranca SIEMPRE el árbol vivo `~/gdtk/shell`;
+  con el rsync de arriba basta, no hay `snapshot`/`use` que activar. El store
+  (`session/gdtk-version`) es sólo red de seguridad automática: un shell sano 20 s se
+  guarda solo como `last_good`; si el shell vivo se cae 2 veces seguidas al arrancar,
+  corre `last_good` hasta el próximo reinicio pedido (log `FALLBACK` en
+  `supervisor.log`). `session/gdtk-version status` dice qué corre; el archivo
+  `~/.local/state/gdtk/running-version` también.
 - **Engine** (`modules/wayland/*`, `modules/imgui`, etc.): requiere **recompilar** e
   instalar el binario. `deploy.sh <usuario>@<host>` lo hace para un host remoto
   (`tengu.local`, `cupid`, …). Para bastion mismo `ssh localhost` hoy falla por host
@@ -177,13 +184,28 @@ Notas del InputCapture (server Deskflow ↔ sway), verificadas e2e:
 ### Reglas para agentes futuros
 
 - Editar y commitear **sólo en el repo** (`~/Proyectos/gdtk`), con write set explícito.
+- Todo cambio de scripts debe **sincronizarse siempre** a `~/gdtk` después de pasar
+  tests/preflight. No declarar “listo para probar” si todavía existe sólo en el repo.
+- **No usar `reload_shell`, `restart_shell`, `recovery.restart()`, matar Godot ni
+  reiniciar sway/la sesión mientras VS Code/Codex esté abierto dentro de gdtk**.
+  Aunque la recarga pretenda conservar `Host`, en uso real ya reinició el compositor
+  y tumbó sus clientes varias veces. Tratar cualquier recarga del shell principal
+  como destructiva.
+- Para ciclos rápidos, probar los scripts en una instancia de desarrollo anidada y
+  aislada (puerto, token, runtime, PID/lock y logs propios). Sincronizar la instalación
+  igualmente, pero activar el shell principal una sola vez al final, con el trabajo
+  de VS Code guardado. Si aún no existe un lanzador que garantice ese aislamiento, no
+  improvisar una segunda sesión compartiendo los archivos runtime de producción.
 - **Nunca** crear archivos con `class_name` de una clase nativa (p. ej.
   `RemoteInput`): choca con el binario y rompe la sesión. Un `shell/_remote_input_tmp.gd`
   así llegó a un deploy y tumbó el arranque.
 - No editar `~/gdtk` a mano ni borrar su `bin/`; no confundir `~/gdtk` (instalación)
   con `~/Proyectos/gdtk` (repo).
-- Tras cambios de scripts: recordar **recargar el shell**. Tras cambios de engine:
-  **recompilar**.
+- Tras cambios de scripts: sincronizar siempre, pero **no recargar el shell principal
+  mientras aloje VS Code/Codex**. Probar en la instancia anidada aislada y activar el
+  shell principal una sola vez al final, después de guardar/cerrar sus clientes.
+  Tras cambios de engine: **recompilar**; su activación también requiere ese corte
+  controlado final.
 - No revertir el trabajo sin commitear de `modules/wayland/` (EIS/Deskflow) ni otros
   cambios ajenos del árbol.
 - No commitear ni deployar sin pedido explícito. Para delegación, ver "Delegación
@@ -226,6 +248,12 @@ El prototipo vive en:
 Usar `python3 /home/icarito/Proyectos/gvd/gvd.py caps --json` para detectar
 capacidades sin abrir streams. El stream RTP/H.264/UDP no cifra ni autentica; sólo
 LAN confiable o red protegida.
+
+## Sesiones /polish
+
+Pulido iterativo: skill `.claude/skills/iterative-list-hacking/SKILL.md` (comando `/polish`). Estado
+de la última sesión en `docs/agents/sessions/` (p. ej. `2026-10-03_grupo.md`, spec
+`SPEC-sugar-group-2026-10.md`). Lanzar Kilo con `tools/kilo-launch.sh`.
 
 ## Delegación Kilo
 

@@ -12,6 +12,7 @@ extends Reference
 const REFRESH_MS = 20000      # refresco normal del listado
 const RESCAN_MS = 60000       # rescan best-effort una vez por minuto
 const SLEEP_STEP_MS = 100     # granularidad para que stop() no espere de más
+const AVAHI_TIMEOUT = "4"      # avahi-browse puede quedarse esperando si no hay servicio
 const BT_TIMEOUT = "2"        # timeout de cada bluetoothctl (worker)
 const BT_MAX = 16             # tope de dispositivos para no inflar el mapa
 
@@ -21,6 +22,7 @@ const BT_MAX = 16             # tope de dispositivos para no inflar el mapa
 const HOSTS_SCRIPT = preload("res://neighborhood_hosts.gd")
 const PUBLISH_PLAN = preload("res://neighborhood_publish_plan.gd")
 const BT_APPLET = preload("res://applet_bluetooth.gd")  # reutiliza su parser puro
+const MAP = preload("res://neighborhood_map.gd")        # geometría pura (anti-solape)
 const GDTK_SERVICES = ["_gdtk-gvd._udp", "_gdtk-deskflow._tcp", "_gdtk-clip._tcp"]
 
 # Cápsula de un nodo en la vista: el disco del AP más el alto de su etiqueta
@@ -193,7 +195,7 @@ func _read_hosts():
 	var text = ""
 	for svc in GDTK_SERVICES:
 		out = []
-		if OS.execute("avahi-browse", ["-rtp", svc], true, out) != 0:
+		if OS.execute("timeout", [AVAHI_TIMEOUT, "avahi-browse", "-rtp", svc], true, out) != 0:
 			continue
 		for line in out:
 			text += str(line) + "\n"
@@ -338,10 +340,13 @@ static func _radius_frac(dbm):
 
 
 # Ángulo por banda: 2.4 GHz en el semicírculo derecho, 5 GHz en el izquierdo.
+# G3: arcos más anchos (hasta ±1.9 rad) para repartir las redes por casi toda la
+# elipse y no apilarlas en dos franjas estrechas.
+const WIFI_ARC = 1.9
 static func _angle_for(band, t):
 	if band == "5":
-		return PI + lerp(-1.35, 1.35, t)
-	return lerp(-1.35, 1.35, t)
+		return PI + lerp(-WIFI_ARC, WIFI_ARC, t)
+	return lerp(-WIFI_ARC, WIFI_ARC, t)
 
 
 # Lista de nodos "red" (ESS): agrupa radios con el mismo SSID, elige la primaria
@@ -471,13 +476,19 @@ static func parse_bt_info(text):
 	return res
 
 
-# Ubicación simbólica de un dispositivo: ángulo determinista por dirección y radio
-# por estado/RSSI (conectado más cerca del centro; si hay RSSI, como el Wi-Fi). No
-# es un radar real, sólo una metáfora estable y reproducible.
+# Ubicación simbólica de un dispositivo: **banda propia** en el sector inferior
+# (G3), repartida por índice para no encimarse, y radio por estado/RSSI (conectado
+# más cerca del centro; si hay RSSI, como el Wi-Fi). No es un radar real, sólo una
+# metáfora estable y reproducible.
+const BT_ARC = 1.2
 static func _place_bt(devices):
-	for d in devices:
+	var n = devices.size()
+	for i in range(n):
+		var d = devices[i]
 		var h = abs(String(d.address).hash())
-		d["angle"] = -PI * 0.5 + TAU * (float(h % 1000) / 1000.0)
+		var t = 0.5 if n <= 1 else float(i) / float(n - 1)
+		d["angle"] = PI * 0.5 + lerp(-BT_ARC, BT_ARC, t) \
+			+ (float((h / 100) % 1000) / 1000.0 - 0.5) * 0.10
 		var frac = 0.85
 		if bool(d.connected):
 			frac = 0.26
@@ -489,79 +500,25 @@ static func _place_bt(devices):
 
 
 # Media altura de la cápsula de un nodo de radio `rad`: el disco más la etiqueta.
+# La geometría de relajación vive ahora en neighborhood_map.gd (puro); acá se
+# conservan estos wrappers para no romper la API histórica usada por los tests.
 static func capsule_half_h(rad):
-	return float(rad) + LABEL_TAIL
+	return MAP.capsule_half_h(rad)
 
 
-# Una pasada de repulsión por cápsulas. Empuja cada par a lo largo de la recta que
-# une sus centros, hasta separarlos según la función soporte de la caja en esa
-# dirección ((hw_i+hw_j)|dx| + (hh_i+hh_j)|dy|): es estable y determinista, y no se
-# atasca como el empuje por eje mínimo en un caso denso.
-static func _separate_once(p, half_w, half_h, gap):
-	var n = p.size()
-	for i in range(n):
-		for j in range(i + 1, n):
-			var d = p[j] - p[i]
-			var dist = d.length()
-			var dir
-			if dist < 0.0001:
-				# Coincidencia exacta: se rompe la simetría de forma determinista.
-				dir = Vector2(1.0, 0.0).rotated(float(i * 7 + j) * 0.7)
-				dist = 0.0
-			else:
-				dir = d / dist
-			var need = (float(half_w[i]) + float(half_w[j]) + gap) * abs(dir.x) \
-				+ (float(half_h[i]) + float(half_h[j]) + gap) * abs(dir.y)
-			if dist >= need:
-				continue  # ya separados (hay eje que los separa)
-			var push = (need - dist) * 0.5
-			p[i] -= dir * push
-			p[j] += dir * push
-
-
-# Separación por cápsulas (pura y determinista). Cada nodo ocupa una caja
-# [p - (hw, hh), p + (hw, hh)]; dos cajas nunca deben solaparse (con `gap` de margen),
-# así la etiqueta debajo del disco también queda libre. Se aplica repulsión iterativa
-# con un resorte decreciente hacia la posición original para conservar el anillo y el
-# sector angular aproximados (el nodo puede salir del anillo si hace falta: la última
-# pasada es repulsión pura). Los mismos nodos dan siempre la misma disposición.
 static func relax_capsules(pts, half_w, half_h, gap = 2.0, iterations = 48, spring = 0.02):
-	# Copia a Array: acepta igual Array que PoolVector2Array (este último no tiene
-	# duplicate() en Godot 3).
-	var p = []
-	for v in pts:
-		p.append(v)
-	var n = p.size()
-	for it in range(iterations):
-		_separate_once(p, half_w, half_h, gap)
-		# Resorte decreciente hacia la posición original.
-		var s = spring * float(iterations - it - 1) / float(iterations)
-		if s > 0.0:
-			for i in range(n):
-				p[i] = p[i].linear_interpolate(pts[i], s)
-	# Pasadas finales sin resorte: en un caso denso una sola vuelta puede quedar a
-	# medias. Se insiste sólo mientras quede algún par solapado (acotado y determinista).
-	var guard = 0
-	while guard < iterations and capsules_overlap(p, half_w, half_h, gap):
-		guard += 1
-		_separate_once(p, half_w, half_h, gap)
-	return p
+	return MAP.relax_capsules(pts, half_w, half_h, gap, iterations, spring)
 
 
 # Compatibilidad: la relajación circular histórica es el caso hw == hh == radio.
 static func relax_positions(pts, radii, gap = 2.0, iterations = 16, spring = 0.03):
-	return relax_capsules(pts, radii, radii, gap, iterations, spring)
+	return MAP.relax_positions(pts, radii, gap, iterations, spring)
 
 
 # ¿Se solapa algún par de cápsulas? Prueba pura (misma definición que relax_capsules)
 # para verificar que ninguna etiqueta pisa a otro nodo.
 static func capsules_overlap(pts, half_w, half_h, gap = 0.0):
-	for i in range(pts.size()):
-		for j in range(i + 1, pts.size()):
-			if abs(pts[j].x - pts[i].x) < float(half_w[i]) + float(half_w[j]) + gap \
-					and abs(pts[j].y - pts[i].y) < float(half_h[i]) + float(half_h[j]) + gap:
-				return true
-	return false
+	return MAP.capsules_overlap(pts, half_w, half_h, gap)
 
 
 # Vecinos IPv4 de la red local (ip -4 neigh show): REACHABLE/STALE, sin FAILED ni

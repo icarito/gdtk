@@ -170,6 +170,25 @@ func _handle(conn, line):
 			ok = bool(shell._peer_gvd_send(int(params.get("port", 0)), String(params.get("target", ""))))
 			if not ok:
 				err = "no se pudo abrir el emisor"
+		"share_notify":
+			# El `side` ya viene invertido por el emisor: se delega tal cual.
+			if not LINK.valid_share_params("share_notify", params):
+				err = "parámetros inválidos"
+			elif shell.has_method("_peer_share_notify"):
+				ok = bool(shell._peer_share_notify(hid, params))
+				if not ok:
+					err = "no se pudo avisar"
+			else:
+				err = "no disponible"
+		"share_stop":
+			if not LINK.valid_share_params("share_stop", params):
+				err = "parámetros inválidos"
+			elif shell.has_method("_peer_share_stop"):
+				ok = bool(shell._peer_share_stop(hid, params))
+				if not ok:
+					err = "no se pudo detener"
+			else:
+				err = "no disponible"
 		_:
 			err = "método no soportado"
 	_send(conn, LINK.encode_response(ok, err, extra))

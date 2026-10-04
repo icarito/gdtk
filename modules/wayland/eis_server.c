@@ -403,6 +403,11 @@ static void handle_eis(struct eis_server *s, struct session *se, struct eis *ctx
 			case EIS_EVENT_KEYBOARD_KEY:
 				s->cb.key(ud, eis_event_keyboard_get_key(e), eis_event_keyboard_get_key_is_press(e));
 				break;
+			case EIS_EVENT_DEVICE_STOP_EMULATING:
+				if (s->cb.stop_emulating != NULL) {
+					s->cb.stop_emulating(ud);
+				}
+				break;
 			default:
 				break;
 		}
@@ -1119,14 +1124,13 @@ int eis_server_capture_motion(eis_server *s, double x, double y, double dx, doub
 		if (id == 0) {
 			continue;
 		}
-		// cursor_position puede quedar fuera de la zona: es justo lo que el spec
-		// InputCapture::Activated espera para señalar "el puntero rebasó el borde"
-		// (p.ej. y=h-1+dy). Si publicamos la posición recortada al último píxel,
-		// Deskflow cree que el puntero sigue dentro de la pantalla local, no hace
-		// el switch y su cursor queda clavado en la orilla (fantasma en la pantalla
-		// equivocada) mientras la captura local sigue activa.
-		se->cursor_x = x + dx;
-		se->cursor_y = y + dy;
+		// cursor_position puede quedar fuera de la zona (spec InputCapture::Activated:
+		// así el cliente detecta que el puntero rebasó el borde), pero SÓLO en el eje
+		// del cruce. Si además sobrepasamos el eje perpendicular (x+dx, y+dy), el core
+		// de Deskflow calcula la fracción del borde con ese valor espurio
+		// (Server::mapToFraction: Left/Right -> y; Top/Bottom -> x), cae fuera del rango
+		// del link y NO cambia de pantalla: su cursor queda fuera de la pantalla
+		// (fantasma invisible) y gdtk sigue capturando con pointer lock.
 		se->active = 1;
 		se->active_barrier = id;
 		se->activated_at = capture_time(0);
@@ -1138,6 +1142,13 @@ int eis_server_capture_motion(eis_server *s, double x, double y, double dx, doub
 			}
 		}
 		se->kick_until = se->kick_edge != 0 ? capture_time(0) + 300000ULL : 0;
+		se->cursor_x = x;
+		se->cursor_y = y;
+		if (se->kick_edge == 1 || se->kick_edge == 2) {
+			se->cursor_x = x + dx; // borde izq/der: sólo x sobrepasa
+		} else if (se->kick_edge == 3 || se->kick_edge == 4) {
+			se->cursor_y = y + dy; // borde arriba/abajo: sólo y sobrepasa
+		}
 		se->activation_id += 16; // salto amplio: detecta wrap del contador
 		ic_emit_capture(se, "Activated", 1);
 		session_emulating(s, se, 1);
@@ -1240,6 +1251,10 @@ const char *eis_server_error(eis_server *s) {
 // esto en vez de adivinar por el .portal: la interfaz es lo que atiende a Deskflow).
 int eis_server_has_input_capture(eis_server *s) {
 	return s && s->ic_slot != NULL;
+}
+
+int eis_server_is_capturing(eis_server *s) {
+	return s != NULL && capture_active(s) != NULL;
 }
 
 void eis_server_dispatch(eis_server *s) {

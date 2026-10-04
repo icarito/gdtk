@@ -32,10 +32,20 @@ func _init():
 	var a = m.place_new(1, box)
 	var b = m.place_new(2, box)
 	check("place_new devuelve rect no vacío", a.size.x > 0.0 and a.size.y > 0.0)
-	check("cascada: la segunda corre en diagonal", b.position.x > a.position.x and b.position.y > a.position.y)
+	check("inteligente: la segunda no cae exactamente encima", b.position != a.position)
 	check("ambas dentro de la caja", box.encloses(a) and box.encloses(b))
 	check("z-order: la última arriba", m.ids_z() == [1, 2] and m.top_id() == 2)
 	check("place_new enfoca", m.focused() == 2)
+	# Con obstáculos concentrados a la izquierda, elige una posición con menos
+	# solapamiento que la cascada histórica inmediata.
+	var smart = F.new()
+	smart.set_rect(10, Rect2(box.position + Vector2(8, 8), Vector2(600, 500)))
+	smart.order = [10]
+	var placed = smart.place_new(11, box)
+	var legacy = smart._cascade_rect(box, 1)
+	check("place_new minimiza solapamiento",
+		smart._overlap_area(placed, smart.rect(10)) <= smart._overlap_area(legacy, smart.rect(10)))
+	check("place_new sigue dentro de la caja", box.encloses(placed))
 
 	# Foco reordena sin mover la geometría.
 	var a_rect = m.rect(1)
@@ -87,6 +97,32 @@ func _init():
 	# Caja degenerada: no rompe ni devuelve tamaños negativos.
 	var z = F.new().place_new(1, Rect2(0, 0, 0, 0))
 	check("caja vacía no rompe", z.size.x >= 0.0 and z.size.y >= 0.0)
+
+	# clamp_rect (overlay de resize diferido): encaja posición y tamaño en la caja.
+	var cr1 = F.new().clamp_rect(box, Rect2(-50, 60, 400, 300))
+	check("clamp_rect encaja posición", cr1.position.x == box.position.x and cr1.position.y >= box.position.y)
+	var cr2 = F.new().clamp_rect(box, Rect2(200, 300, 9999, 9999))
+	check("clamp_rect cap de tamaño", cr2.size.x <= box.size.x and cr2.size.y <= box.size.y and box.encloses(cr2))
+	var cr3 = F.new().clamp_rect(box, Rect2(100, 200, 400, 300))
+	check("clamp_rect no cambia un rect que ya entra", cr3 == Rect2(100, 200, 400, 300))
+
+	# Memoria de geometría (K13 punto 4): restore_units conserva el lugar previo y
+	# sólo las ventanas nuevas caen a cascada; siempre encaja en la caja.
+	var mem = {1: Rect2(300, 200, 500, 400)}
+	var m5 = F.new()
+	m5.restore_units([[1], [2]], box, mem, 2)
+	check("restore_units conserva el rect recordado", m5.rect(1) == Rect2(300, 200, 500, 400))
+	check("restore_units cascada para la nueva", m5.rect(2).size.x > 0.0 and box.encloses(m5.rect(2)))
+	check("restore_units enfoca la pedida", m5.focused() == 2 and m5.top_id() == 2)
+	var m6 = F.new()
+	m6.restore_units([[1]], box, {1: Rect2(-999, -999, 500, 400)}, -1)
+	check("restore_units encaja en la caja", box.encloses(m6.rect(1)))
+	var m7 = F.new()
+	m7.restore_one(9, Rect2(100, 200, 400, 300), box)
+	check("restore_one coloca y encaja", m7.rect(9) == Rect2(100, 200, 400, 300))
+	var m8 = F.new()
+	m8.restore_units([[1]], box, {}, -1)
+	check("restore_units sin memoria usa cascada", m8.rect(1).size.x > 0.0 and box.encloses(m8.rect(1)))
 
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

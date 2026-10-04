@@ -1,0 +1,116 @@
+#!/bin/sh
+# Atiende una tecla multimedia que SDL ya no puede entregar al shell.
+#
+#   gdtk-media brightness-up|brightness-down
+#
+# Por qué existe: con sdl2-compat (SDL3) SDL dejó de tener los scancodes
+# SDL_SCANCODE_BRIGHTNESS{UP,DOWN}, así que las teclas XF86MonBrightness* llegan al
+# shell como scancode/keysym 0 y `system_osd.gd` no las puede identificar. sway sí ve
+# el keysym XKB, por eso las intercepta con bindsym y llama acá (ver session/sway.conf).
+#
+# Primero intenta el RPC del shell (mismo camino que las teclas de volumen: ajusta el
+# brillo por el worker y muestra el OSD). Si no hay token o shell escuchando —p. ej.
+# tras una recarga—, ajusta el backlight directo por logind (sin root) para que la
+# tecla nunca quede muerta; en ese caso no hay OSD.
+case "${1:-}" in
+	brightness-up)   ACTION=brightness_up;   DIR=up;;
+	brightness-down) ACTION=brightness_down; DIR=down;;
+	*) exit 0;;
+esac
+
+# 1) RPC del shell (best-effort). Sólo sale 0 si el shell aplicó la acción.
+if command -v python3 >/dev/null 2>&1; then
+	if python3 - "$ACTION" <<'PY'
+import json
+import os
+import socket
+import sys
+
+action = sys.argv[1]
+env_port = os.environ.get("GDTK_CONTROL_PORT")
+try:
+    port = int(env_port) if env_port else 7777
+except ValueError:
+    port = 7777
+
+runtime = os.environ.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid()
+name = ("gdtk-control-%d.token" % port) if env_port else "gdtk-control.token"
+try:
+    with open(os.path.join(runtime, name), "r") as handle:
+        token = handle.read().strip()
+except OSError:
+    sys.exit(1)
+if not token:
+    sys.exit(1)
+
+
+def exchange(handle, request_id, method, params):
+    payload = json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+    handle.write(payload + "\n")
+    handle.flush()
+    return handle.readline()
+
+
+try:
+    sock = socket.create_connection(("127.0.0.1", port), timeout=2)
+except OSError:
+    sys.exit(1)
+ok = False
+try:
+    stream = sock.makefile("rw")
+    auth = exchange(stream, 1, "auth", {"token": token})
+    if auth and json.loads(auth).get("result") is True:
+        reply = exchange(stream, 2, "media", {"action": action})
+        ok = bool(reply) and json.loads(reply).get("result") is True
+except Exception:
+    ok = False
+finally:
+    sock.close()
+sys.exit(0 if ok else 1)
+PY
+	then
+		exit 0
+	fi
+fi
+
+# 2) Fallback directo sobre el backlight (mismos backends que system_osd.gd).
+dev=""
+for d in /sys/class/backlight/*; do
+	[ -d "$d" ] || continue
+	dev="$(basename "$d")"
+	break
+done
+[ -n "$dev" ] || exit 0
+max="$(cat "/sys/class/backlight/$dev/max_brightness" 2>/dev/null || true)"
+cur="$(cat "/sys/class/backlight/$dev/brightness" 2>/dev/null || true)"
+case "$max" in ''|*[!0-9]*) exit 0;; esac
+case "$cur" in ''|*[!0-9]*) exit 0;; esac
+[ "$max" -gt 0 ] || exit 0
+
+step=$(( max * 5 / 100 ))
+[ "$step" -lt 1 ] && step=1
+floor=$step  # ~5% como BRI_MIN del shell: no dejar la pantalla en negro
+if [ "$DIR" = up ]; then
+	new=$(( cur + step ))
+else
+	new=$(( cur - step ))
+fi
+[ "$new" -lt "$floor" ] && new=$floor
+[ "$new" -gt "$max" ] && new=$max
+[ "$new" -eq "$cur" ] && exit 0
+
+if command -v busctl >/dev/null 2>&1; then
+	if busctl --system call --quiet org.freedesktop.login1 \
+			/org/freedesktop/login1/session/auto \
+			org.freedesktop.login1.Session SetBrightness ssu \
+			backlight "$dev" "$new" 2>/dev/null; then
+		exit 0
+	fi
+fi
+if command -v brightnessctl >/dev/null 2>&1; then
+	if brightnessctl set "$(( new * 100 / max ))%" >/dev/null 2>&1; then
+		exit 0
+	fi
+fi
+printf '%s' "$new" >"/sys/class/backlight/$dev/brightness" 2>/dev/null || true
+exit 0

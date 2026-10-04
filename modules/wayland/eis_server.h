@@ -20,6 +20,9 @@ typedef struct {
 	// discrete: dx,dy en 1/120 de muesca; si no, en píxeles lógicos.
 	void (*scroll)(void *ud, double dx, double dy, int discrete);
 	void (*key)(void *ud, uint32_t evdev_key, int pressed);
+	// El cliente dejó de emular (Deskflow: el cursor salió de esta pantalla). Hay que
+	// soltar lo que quedó apretado o queda pegado (p. ej. Super => todo clic es Super+drag).
+	void (*stop_emulating)(void *ud);
 	// Un cliente pide control remoto (Start del portal): responder con eis_server_respond.
 	// pid del proceso que pidió la sesión (0 si no se supo); app_id puede ser "".
 	void (*request)(void *ud, int id, int pid, const char *app_id);
@@ -33,6 +36,8 @@ const char *eis_server_error(eis_server *s);
 // 1 si la interfaz org.freedesktop.impl.portal.InputCapture quedó registrada en el
 // bus de la sesión (RemoteDesktop puede andar y InputCapture no, y viceversa).
 int eis_server_has_input_capture(eis_server *s);
+// Estado actual, también tras Release/Disable/Close o desconexión por D-Bus/EIS.
+int eis_server_is_capturing(eis_server *s);
 // No bloquea: procesa lo que haya en el bus y en los sockets EIS.
 void eis_server_dispatch(eis_server *s);
 void eis_server_set_size(eis_server *s, int w, int h);

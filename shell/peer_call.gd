@@ -24,7 +24,8 @@ static func request_status(host, ctl_port, hid, token, method, params = {}, time
 		return out
 	var deadline = OS.get_ticks_msec() + int(timeout_ms)
 	while OS.get_ticks_msec() < deadline:
-		peer.poll()
+		# En este motor StreamPeerTCP no expone poll(): get_status()/get_partial_data()
+		# ya sondean el socket internamente (core/io/stream_peer_tcp.cpp).
 		var st = peer.get_status()
 		if st == StreamPeerTCP.STATUS_CONNECTED:
 			break
@@ -40,9 +41,8 @@ static func request_status(host, ctl_port, hid, token, method, params = {}, time
 	peer.put_data(LINK.encode_request(hid, token, method, params).to_utf8())
 	var buf = PoolByteArray()
 	while OS.get_ticks_msec() < deadline:
-		peer.poll()
-		if peer.get_status() != StreamPeerTCP.STATUS_CONNECTED:
-			break
+		# Drenar primero: el servidor responde y cierra enseguida; si se mirara el
+		# estado antes, el FIN podía cortar la lectura y perderse la respuesta.
 		var avail = peer.get_available_bytes()
 		if avail > 0:
 			var d = peer.get_partial_data(avail)
@@ -59,6 +59,8 @@ static func request_status(host, ctl_port, hid, token, method, params = {}, time
 					elif not bool(resp.get("ok", false)):
 						out.error = String(resp.get("error", "rechazado"))
 					return out
+		elif peer.get_status() != StreamPeerTCP.STATUS_CONNECTED:
+			break
 		OS.delay_msec(5)
 	peer.disconnect_from_host()
 	out.error = "sin respuesta"

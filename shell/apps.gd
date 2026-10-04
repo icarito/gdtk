@@ -231,6 +231,54 @@ func matches():
 	return out
 
 
+# --- Ventanas (app_id) ---
+
+# Candidatos .desktop que representan a un app_id de Wayland, en orden de confianza.
+# Puro (sin I/O de íconos): el shell resuelve el icono del primero que cargue.
+#
+# El app_id puede ser reverse-DNS ("org.gnome.Nautilus"), el nombre de la clase
+# ("Alacritty") o el binario ("nautilus"). Antes el segmento tras el PRIMER punto
+# daba "gnome.nautilus" y no casaba con `Exec=nautilus`; una ventana cuyo nombre de
+# actividad era el Name del .desktop ("Archivos") igual encontraba el icono, pero
+# otra ventana de la misma app nombrada por el app_id ("Nautilus") caía al genérico.
+func match_window_apps(app_id):
+	var out = []
+	var w = fold(String(app_id).strip_edges())
+	if w == "":
+		return out
+	var tail = w
+	var dot = w.rfind(".")
+	if dot >= 0:
+		tail = w.substr(dot + 1)
+	var seen = {}
+	# 1) StartupWMClass (mapeo canónico app_id -> .desktop).
+	for a in apps:
+		var wm = fold(a.get("wm_class", ""))
+		if wm != "" and (wm == w or wm == tail):
+			if not seen.has(a.id):
+				seen[a.id] = true
+				out.append(a)
+	# 2) id del .desktop == app_id (org.gnome.Nautilus.desktop).
+	for a in apps:
+		if fold(a.id.get_basename()) == w and not seen.has(a.id):
+			seen[a.id] = true
+			out.append(a)
+	# 3) programa del Exec (nautilus) == app_id o su último segmento.
+	for a in apps:
+		var p = fold(_program(a.exec))
+		if p != "" and (p == w or p == tail) and not seen.has(a.id):
+			seen[a.id] = true
+			out.append(a)
+	return out
+
+
+# Primer .desktop que representa el app_id, o null. Estable: dos ventanas con el
+# mismo app_id obtienen la misma entrada (sin cache por id de ventana ni negativa).
+func match_window_app(app_id):
+	var c = match_window_apps(app_id)
+	return c[0] if not c.empty() else null
+
+
 # --- Íconos ---
 
 # ponytail: sólo el layout estándar <tema>/<tamaño>/apps y sin seguir Inherits=;

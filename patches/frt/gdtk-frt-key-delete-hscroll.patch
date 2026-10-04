@@ -1,0 +1,50 @@
+--- a/sdl2_adapter.h
++++ b/sdl2_adapter.h
+@@ -156,7 +156,9 @@
+ 	WheelUp = 4,
+ 	WheelDown = 5,
+ 	ButtonX1 = 6,
+-	ButtonX2 = 7
++	ButtonX2 = 7,
++	WheelLeft = 8,
++	WheelRight = 9
+ };
+ 
+ enum MouseMode {
+@@ -285,6 +287,11 @@
+ 		handler_->handle_key_event(sdl2_code, key_ev_.keysym.scancode, key_unicode_, true);
+ 	}
+ 	bool require_unicode(int c) {
++		// SDLK_DELETE es 0x7F (entra en el rango "imprimible" por error) pero no
++		// produce SDL_TEXTINPUT: si se retiene el keydown nunca sale hacia Godot. El
++		// compositor si sabe traducirlo (KEY_DELETE -> evdev 111).
++		if (c == SDLK_DELETE)
++			return false;
+ 		return (c >= 0x20 && c < 0x80) || (c >= 0xa0 && c < 0xff);
+ 	}
+ 	void key_event(const SDL_KeyboardEvent &key) {
+@@ -339,6 +346,11 @@
+ 				os_button = WheelUp;
+ 			else if (ev.wheel.y < 0)
+ 				os_button = WheelDown;
++			// Scroll horizontal (touchpad de dos dedos): llega en wheel.x.
++			else if (ev.wheel.x < 0)
++				os_button = WheelLeft;
++			else if (ev.wheel.x > 0)
++				os_button = WheelRight;
+ 			else
+ 				return;
+ 			handler_->handle_mouse_button_event(os_button, true, false);
+--- a/sdl2_godot_map.h
++++ b/sdl2_godot_map.h
+@@ -28,6 +28,10 @@
+ 		return BUTTON_WHEEL_UP;
+ 	case WheelDown:
+ 		return BUTTON_WHEEL_DOWN;
++	case WheelLeft:
++		return BUTTON_WHEEL_LEFT;
++	case WheelRight:
++		return BUTTON_WHEEL_RIGHT;
+ 	case ButtonX1:
+ 		return BUTTON_XBUTTON1;
+ 	case ButtonX2:

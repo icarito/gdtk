@@ -118,6 +118,14 @@ enum {
 	EVDEV_KEY_PAGEDOWN = 109,
 	EVDEV_KEY_INSERT = 110,
 	EVDEV_KEY_DELETE = 111,
+	// Multimedia: viajan por Deskflow (InputCapture) y el receptor las vuelve a
+	// teclas Godot para su OSD (sin esto, el emisor no las mandaba y el receptor
+	// las descartaba como scancode 0).
+	EVDEV_KEY_MUTE = 113,
+	EVDEV_KEY_VOLUMEDOWN = 114,
+	EVDEV_KEY_VOLUMEUP = 115,
+	EVDEV_KEY_BRIGHTNESSDOWN = 224,
+	EVDEV_KEY_BRIGHTNESSUP = 225,
 	EVDEV_KEY_KPASTERISK = 55,
 	EVDEV_KEY_PAUSE = 119,
 	EVDEV_KEY_LEFTMETA = 125,
@@ -211,6 +219,16 @@ uint32_t _scancode_to_evdev(uint32_t p_scancode) { // también la usa remote_inp
 			return EVDEV_KEY_INSERT;
 		case KEY_DELETE:
 			return EVDEV_KEY_DELETE;
+		case KEY_VOLUMEMUTE:
+			return EVDEV_KEY_MUTE;
+		case KEY_VOLUMEDOWN:
+			return EVDEV_KEY_VOLUMEDOWN;
+		case KEY_VOLUMEUP:
+			return EVDEV_KEY_VOLUMEUP;
+		case KEY_BRIGHTNESSDOWN:
+			return EVDEV_KEY_BRIGHTNESSDOWN;
+		case KEY_BRIGHTNESSUP:
+			return EVDEV_KEY_BRIGHTNESSUP;
 		case KEY_PAGEUP:
 			return EVDEV_KEY_PAGEUP;
 		case KEY_PAGEDOWN:
@@ -357,6 +375,26 @@ void WaylandCompositor::_cb_damage(void *p_ud, int p_id) {
 	static_cast<WaylandCompositor *>(p_ud)->_count_commit(p_id);
 }
 
+void WaylandCompositor::_cb_pointer_lock(void *p_ud, int p_id, int p_locked) {
+	WaylandCompositor *self = static_cast<WaylandCompositor *>(p_ud);
+	self->emit_signal("pointer_lock", p_id, p_locked != 0);
+}
+
+void WaylandCompositor::_cb_cursor_hidden(void *p_ud, int p_hidden) {
+	WaylandCompositor *self = static_cast<WaylandCompositor *>(p_ud);
+	self->emit_signal("client_cursor_hidden", p_hidden != 0);
+}
+
+void WaylandCompositor::_cb_drag_icon(void *p_ud, const unsigned char *p_data, int p_w, int p_h, uint32_t p_format, int p_stride, int p_dx, int p_dy) {
+	static_cast<WaylandCompositor *>(p_ud)->_on_drag_icon(p_data, p_w, p_h, p_format, p_stride, p_dx, p_dy);
+}
+
+void WaylandCompositor::_cb_drag_state(void *p_ud, int p_active) {
+	WaylandCompositor *self = static_cast<WaylandCompositor *>(p_ud);
+	self->drag_active = p_active != 0;
+	self->emit_signal("drag_state_changed", self->drag_active);
+}
+
 void WaylandCompositor::_cb_activate(void *p_ud, int p_id) {
 	static_cast<WaylandCompositor *>(p_ud)->emit_signal("toplevel_activate", p_id);
 }
@@ -371,6 +409,14 @@ void WaylandCompositor::_cb_maximize(void *p_ud, int p_id, int p_maximized) {
 
 void WaylandCompositor::_cb_fullscreen(void *p_ud, int p_id, int p_fullscreen) {
 	static_cast<WaylandCompositor *>(p_ud)->emit_signal("toplevel_fullscreen", p_id, p_fullscreen);
+}
+
+void WaylandCompositor::_cb_move(void *p_ud, int p_id) {
+	static_cast<WaylandCompositor *>(p_ud)->emit_signal("toplevel_move", p_id);
+}
+
+void WaylandCompositor::_cb_resize(void *p_ud, int p_id, int p_edges) {
+	static_cast<WaylandCompositor *>(p_ud)->emit_signal("toplevel_resize", p_id, p_edges);
 }
 
 // Con end_frame en uso, sólo los commits de lo que se dibujó (o de ventanas nuevas que
@@ -474,6 +520,77 @@ void WaylandCompositor::_on_dmabuf(int p_id, uint64_t p_key, int p_w, int p_h) {
 			(unsigned int)VS::get_singleton()->texture_get_texid(tex->get_rid()));
 }
 
+// Icono de drag and drop: mismo camino shm que _on_frame pero en una textura
+// aparte. `p_data`==NULL limpia el icono (fin del drag o icono reemplazado). El
+// shell lo dibuja pegado al puntero (+ drag_icon_offset) mientras is_dragging()
+// sea true. El buffer wl_shm ARGB8888 viene CON alfa premultiplicado: la shell lo
+// pinta con CanvasItemMaterial BLEND_MODE_PREMULT_ALPHA (igual que los tiles).
+void WaylandCompositor::_on_drag_icon(const unsigned char *p_data, int p_w, int p_h, uint32_t p_format, int p_stride, int p_dx, int p_dy) {
+	if (p_data == NULL || p_w <= 0 || p_h <= 0) {
+		drag_icon_texture = Ref<ImageTexture>();
+		drag_icon_offset = Vector2();
+		emit_signal("drag_icon_changed");
+		return;
+	}
+	// Algunos buffers reportan stride 0 (tightly packed): usar w*4.
+	if (p_stride <= 0) {
+		p_stride = p_w * 4;
+	}
+	if (p_stride < p_w * 4) {
+		drag_icon_texture = Ref<ImageTexture>();
+		drag_icon_offset = Vector2();
+		emit_signal("drag_icon_changed");
+		return;
+	}
+
+	// wl_shm ARGB8888/XRGB8888 (little-endian: bytes B,G,R,A) a Image::FORMAT_RGBA8.
+	bool swap_rb = p_format == DRM_FORMAT_ARGB8888 || p_format == DRM_FORMAT_XRGB8888;
+	bool has_alpha = p_format == DRM_FORMAT_ARGB8888 || p_format == DRM_FORMAT_ABGR8888;
+
+	int size = p_w * p_h * 4;
+	PoolVector<uint8_t> data;
+	data.resize(size);
+	{
+		PoolVector<uint8_t>::Write w = data.write();
+		uint8_t *dst = w.ptr();
+		for (int y = 0; y < p_h; y++) {
+			const unsigned char *src = p_data + (size_t)y * (size_t)p_stride;
+			uint8_t *d = dst + (size_t)y * (size_t)p_w * 4;
+			for (int x = 0; x < p_w; x++) {
+				uint8_t c0 = src[0];
+				uint8_t c1 = src[1];
+				uint8_t c2 = src[2];
+				uint8_t c3 = src[3];
+				if (swap_rb) {
+					d[0] = c2;
+					d[1] = c1;
+					d[2] = c0;
+				} else {
+					d[0] = c0;
+					d[1] = c1;
+					d[2] = c2;
+				}
+				d[3] = has_alpha ? c3 : 255;
+				src += 4;
+				d += 4;
+			}
+		}
+	}
+	Ref<Image> img = memnew(Image(p_w, p_h, false, Image::FORMAT_RGBA8, data));
+
+	Ref<ImageTexture> tex = drag_icon_texture;
+	if (tex.is_null() || tex->get_width() != p_w || tex->get_height() != p_h) {
+		tex.instance();
+		tex->create_from_image(img, 0);
+	} else {
+		tex->set_data(img);
+	}
+	drag_icon_texture = tex;
+	// Hotspot: top-left del icono en puntero+(dx,dy) (offset del attach/offset).
+	drag_icon_offset = Vector2(p_dx, p_dy);
+	emit_signal("drag_icon_changed");
+}
+
 void WaylandCompositor::_on_title(int p_id, const char *p_title) {
 	Map<int, Toplevel>::Element *e = toplevels.find(p_id);
 	if (e == NULL) {
@@ -492,15 +609,28 @@ void WaylandCompositor::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_title", "id"), &WaylandCompositor::get_title);
 	ClassDB::bind_method(D_METHOD("get_parent_id", "id"), &WaylandCompositor::get_parent_id);
 	ClassDB::bind_method(D_METHOD("get_app_id", "id"), &WaylandCompositor::get_app_id);
+	ClassDB::bind_method(D_METHOD("is_csd", "id"), &WaylandCompositor::is_csd);
 	ClassDB::bind_method(D_METHOD("get_ids"), &WaylandCompositor::get_ids);
 	ClassDB::bind_method(D_METHOD("get_layer_surfaces"), &WaylandCompositor::get_layer_surfaces);
+	ClassDB::bind_method(D_METHOD("get_drag_icon_texture"), &WaylandCompositor::get_drag_icon_texture);
+	ClassDB::bind_method(D_METHOD("get_drag_icon_offset"), &WaylandCompositor::get_drag_icon_offset);
+	ClassDB::bind_method(D_METHOD("is_dragging"), &WaylandCompositor::is_dragging);
 	ClassDB::bind_method(D_METHOD("end_frame"), &WaylandCompositor::end_frame);
 	ClassDB::bind_method(D_METHOD("set_size", "id", "size"), &WaylandCompositor::set_size);
+	ClassDB::bind_method(D_METHOD("set_maximized", "id", "maximized"), &WaylandCompositor::set_maximized);
 	ClassDB::bind_method(D_METHOD("close", "id"), &WaylandCompositor::close);
-	ClassDB::bind_method(D_METHOD("focus", "id"), &WaylandCompositor::focus);
+	ClassDB::bind_method(D_METHOD("focus", "id", "raise"), &WaylandCompositor::focus, DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("pointer_motion", "id", "pos"), &WaylandCompositor::pointer_motion);
+	ClassDB::bind_method(D_METHOD("pointer_motion_relative", "delta"), &WaylandCompositor::pointer_motion_relative);
+	ClassDB::bind_method(D_METHOD("pointer_clear_focus"), &WaylandCompositor::pointer_clear_focus);
+	ClassDB::bind_method(D_METHOD("pointer_has_focus"), &WaylandCompositor::pointer_has_focus);
+	ClassDB::bind_method(D_METHOD("client_cursor_hidden"), &WaylandCompositor::client_cursor_hidden);
+	ClassDB::bind_method(D_METHOD("set_local_pointer_enabled", "enabled"), &WaylandCompositor::set_local_pointer_enabled);
 	ClassDB::bind_method(D_METHOD("pointer_button", "button_index", "pressed"), &WaylandCompositor::pointer_button);
 	ClassDB::bind_method(D_METHOD("pointer_axis", "dy"), &WaylandCompositor::pointer_axis);
+	ClassDB::bind_method(D_METHOD("pointer_axis_h", "dx"), &WaylandCompositor::pointer_axis_h);
+	ClassDB::bind_method(D_METHOD("gesture_pinch", "phase", "fingers", "scale"),
+			&WaylandCompositor::gesture_pinch);
 	ClassDB::bind_method(D_METHOD("key", "event"), &WaylandCompositor::key);
 
 	ClassDB::bind_method(D_METHOD("set_default_size", "size"), &WaylandCompositor::set_default_size);
@@ -525,7 +655,13 @@ void WaylandCompositor::_bind_methods() {
 	ADD_SIGNAL(MethodInfo("toplevel_minimize", PropertyInfo(Variant::INT, "id")));
 	ADD_SIGNAL(MethodInfo("toplevel_maximize", PropertyInfo(Variant::INT, "id"), PropertyInfo(Variant::INT, "maximized")));
 	ADD_SIGNAL(MethodInfo("toplevel_fullscreen", PropertyInfo(Variant::INT, "id"), PropertyInfo(Variant::INT, "fullscreen")));
+	ADD_SIGNAL(MethodInfo("toplevel_move", PropertyInfo(Variant::INT, "id")));
+	ADD_SIGNAL(MethodInfo("toplevel_resize", PropertyInfo(Variant::INT, "id"), PropertyInfo(Variant::INT, "edges")));
 	ADD_SIGNAL(MethodInfo("layers_changed"));
+	ADD_SIGNAL(MethodInfo("pointer_lock", PropertyInfo(Variant::INT, "id"), PropertyInfo(Variant::BOOL, "locked")));
+	ADD_SIGNAL(MethodInfo("client_cursor_hidden", PropertyInfo(Variant::BOOL, "hidden")));
+	ADD_SIGNAL(MethodInfo("drag_icon_changed"));
+	ADD_SIGNAL(MethodInfo("drag_state_changed", PropertyInfo(Variant::BOOL, "active")));
 	ADD_SIGNAL(MethodInfo("process_exited", PropertyInfo(Variant::INT, "pid"), PropertyInfo(Variant::INT, "code")));
 }
 
@@ -550,6 +686,8 @@ WaylandCompositor::WaylandCompositor() {
 	dmabuf_commits = 0;
 	shm_commits = 0;
 	throttle = false;
+	local_pointer_enabled = true;
+	drag_active = false;
 }
 
 // Recoge los hijos lanzados que terminaron (si no, quedan zombies) y avisa con su código.
@@ -593,7 +731,13 @@ String WaylandCompositor::start() {
 	cb.minimize = &WaylandCompositor::_cb_minimize;
 	cb.maximize = &WaylandCompositor::_cb_maximize;
 	cb.fullscreen = &WaylandCompositor::_cb_fullscreen;
+	cb.move = &WaylandCompositor::_cb_move;
+	cb.resize = &WaylandCompositor::_cb_resize;
 	cb.damage = &WaylandCompositor::_cb_damage;
+	cb.pointer_lock = &WaylandCompositor::_cb_pointer_lock;
+	cb.cursor_hidden = &WaylandCompositor::_cb_cursor_hidden;
+	cb.drag_icon = &WaylandCompositor::_cb_drag_icon;
+	cb.drag_state = &WaylandCompositor::_cb_drag_state;
 
 	server = wl_server_create(cb, (int)default_size.x, (int)default_size.y);
 	if (server == NULL) {
@@ -733,6 +877,13 @@ String WaylandCompositor::get_app_id(int p_id) const {
 	return String::utf8(wl_server_app_id(server, p_id));
 }
 
+bool WaylandCompositor::is_csd(int p_id) const {
+	if (server == NULL) {
+		return false;
+	}
+	return wl_server_csd(server, p_id) != 0;
+}
+
 Array WaylandCompositor::get_ids() const {
 	Array ids;
 	for (const Map<int, Toplevel>::Element *e = toplevels.front(); e != NULL; e = e->next()) {
@@ -763,6 +914,22 @@ Array WaylandCompositor::get_layer_surfaces() {
 	return out;
 }
 
+// Textura del icono de drag and drop (null si no hay drag o el cliente no lo envio).
+Ref<Texture> WaylandCompositor::get_drag_icon_texture() const {
+	return drag_icon_texture;
+}
+
+// Hotspot del icono: top-left = puntero + este offset.
+Vector2 WaylandCompositor::get_drag_icon_offset() const {
+	return drag_icon_offset;
+}
+
+// Hay un drag and drop nativo en curso. El shell lo consulta para no perder el
+// boton cuando el cursor sale de toda ventana (cancelar el drop).
+bool WaylandCompositor::is_dragging() const {
+	return drag_active;
+}
+
 // Fin de un frame del shell: lo que no se dibujó deja de recibir frame callbacks (la app
 // oculta deja de pintar, como en cualquier compositor) y sus commits no piden redibujo.
 void WaylandCompositor::end_frame() {
@@ -785,33 +952,79 @@ void WaylandCompositor::set_size(int p_id, const Vector2 &p_size) {
 	}
 }
 
+void WaylandCompositor::set_maximized(int p_id, bool p_maximized) {
+	if (server != NULL) {
+		wl_server_set_maximized(server, p_id, p_maximized ? 1 : 0);
+	}
+}
+
 void WaylandCompositor::close(int p_id) {
 	if (server != NULL) {
 		wl_server_close(server, p_id);
 	}
 }
 
-void WaylandCompositor::focus(int p_id) {
+void WaylandCompositor::focus(int p_id, bool p_raise) {
 	if (server != NULL) {
-		wl_server_focus(server, p_id);
+		wl_server_focus(server, p_id, p_raise ? 1 : 0);
 	}
 }
 
 void WaylandCompositor::pointer_motion(int p_id, const Vector2 &p_pos) {
-	if (server != NULL) {
+	if (server != NULL && local_pointer_enabled) {
 		wl_server_pointer_motion(server, p_id, p_pos.x, p_pos.y,
 				(uint32_t)OS::get_singleton()->get_ticks_msec());
 	}
 }
 
+// Movimiento relativo para el cliente con pointer lock (SDL emuladores/juegos).
+// El shell lo llama con event.relative mientras tiene el puntero capturado.
+void WaylandCompositor::pointer_motion_relative(const Vector2 &p_delta) {
+	if (server != NULL && local_pointer_enabled) {
+		wl_server_pointer_motion_relative(server, p_delta.x, p_delta.y,
+				(uint32_t)OS::get_singleton()->get_ticks_msec());
+	}
+}
+
+void WaylandCompositor::pointer_clear_focus() {
+	if (server != NULL) {
+		wl_server_pointer_clear_focus(server);
+	}
+}
+
+bool WaylandCompositor::pointer_has_focus() const {
+	return server != NULL && wl_server_pointer_has_focus(server);
+}
+
+bool WaylandCompositor::client_cursor_hidden() const {
+	return server != NULL && wl_server_client_cursor_hidden(server);
+}
+
+void WaylandCompositor::set_local_pointer_enabled(bool p_enabled) {
+	if (local_pointer_enabled == p_enabled) {
+		return;
+	}
+	local_pointer_enabled = p_enabled;
+	if (!local_pointer_enabled) {
+		pointer_clear_focus();
+	}
+}
+
 void WaylandCompositor::pointer_button(int p_button_index, bool p_pressed) {
-	if (server == NULL) {
+	if (server == NULL || !local_pointer_enabled) {
 		return;
 	}
 	uint32_t t = (uint32_t)OS::get_singleton()->get_ticks_msec();
 	if (p_button_index == BUTTON_WHEEL_UP || p_button_index == BUTTON_WHEEL_DOWN) {
 		if (p_pressed) {
 			wl_server_pointer_axis(server, t, p_button_index == BUTTON_WHEEL_UP ? -10.0 : 10.0);
+		}
+		return;
+	}
+	// Scroll horizontal de dos dedos (atrás/adelante en el navegador).
+	if (p_button_index == BUTTON_WHEEL_LEFT || p_button_index == BUTTON_WHEEL_RIGHT) {
+		if (p_pressed) {
+			wl_server_pointer_axis_h(server, t, p_button_index == BUTTON_WHEEL_LEFT ? -10.0 : 10.0);
 		}
 		return;
 	}
@@ -839,8 +1052,28 @@ void WaylandCompositor::pointer_button(int p_button_index, bool p_pressed) {
 }
 
 void WaylandCompositor::pointer_axis(double p_dy) {
-	if (server != NULL) {
+	if (server != NULL && local_pointer_enabled) {
 		wl_server_pointer_axis(server, (uint32_t)OS::get_singleton()->get_ticks_msec(), p_dy);
+	}
+}
+
+// Eje horizontal continuo (pan de dos dedos). Complementa pointer_axis: el shell lo
+// usa para InputEventPanGesture cuando el backend lo emite; la rueda clásica llega
+// por pointer_button(BUTTON_WHEEL_LEFT/RIGHT) y también termina en axis_h.
+void WaylandCompositor::pointer_axis_h(double p_dx) {
+	if (server != NULL && local_pointer_enabled) {
+		wl_server_pointer_axis_h(server, (uint32_t)OS::get_singleton()->get_ticks_msec(), p_dx);
+	}
+}
+
+// Pinch del touchpad: el shell arma begin→update→end por cada gesto detectado por
+// sway. Se reenvía al cliente con foco del puntero (ver wl_server_gesture_pinch).
+// dx/dy/rotation no se usan para zoom: van en 0.
+void WaylandCompositor::gesture_pinch(int p_phase, int p_fingers, double p_scale) {
+	if (server != NULL && local_pointer_enabled) {
+		wl_server_gesture_pinch(server, (uint32_t)OS::get_singleton()->get_ticks_msec(),
+				p_phase, p_fingers < 0 ? 0u : (uint32_t)p_fingers,
+				0.0, 0.0, p_scale, 0.0);
 	}
 }
 

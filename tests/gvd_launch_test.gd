@@ -118,5 +118,18 @@ func _init():
 	check("dirección none no suspende",
 		not mod.deskflow_suspend(links, "none").suspended)
 
+	# Rangos del portal InputCapture: los links fijan el tramo; una dirección
+	# suspendida (gvd extendiendo hacia ese borde) queda deshabilitada (0..0) y no
+	# afecta a las demás. Orden [w_lo,w_hi, e_lo,e_hi, n_lo,n_hi, s_lo,s_hi].
+	var lr = [{"direction": "east", "peer": "tengu", "local_range": [0.0, 67.0]},
+		{"direction": "north", "peer": "cupid", "local_range": [20.0, 80.0]}]
+	var full = mod.capture_ranges(lr)
+	check("rangos sin suspensión", full[2] == 0.0 and full[3] == 67.0 and full[4] == 20.0 and full[5] == 80.0)
+	var sus_r = mod.capture_ranges(lr, ["east"])
+	check("borde extendido deshabilitado", sus_r[2] == 0.0 and sus_r[3] == 0.0)
+	check("otra dirección conserva su tramo", sus_r[4] == 20.0 and sus_r[5] == 80.0)
+	check("sin links queda todo abierto", mod.capture_ranges([])[1] == 100.0 and mod.capture_ranges([])[3] == 100.0)
+	check("dirección inválida se ignora", mod.capture_ranges(lr, ["arriba"])[2] == 0.0)
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

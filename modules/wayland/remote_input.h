@@ -38,6 +38,7 @@ class RemoteInput : public Node {
 	static void _cb_button(void *p_ud, uint32_t p_button, int p_pressed);
 	static void _cb_scroll(void *p_ud, double p_dx, double p_dy, int p_discrete);
 	static void _cb_key(void *p_ud, uint32_t p_key, int p_pressed);
+	static void _cb_stop_emulating(void *p_ud);
 	static void _cb_request(void *p_ud, int p_id, int p_pid, const char *p_app_id);
 
 	void _set_mods(InputEventWithModifiers *p_event) const;
@@ -60,6 +61,7 @@ public:
 	int get_client_count() const;
 	// 1 si el backend del portal InputCapture quedó registrado en el bus de la sesión.
 	bool has_input_capture() const;
+	bool is_capturing() const;
 	// Tramos porcentuales por borde donde InputCapture puede activarse, en el orden
 	// [left_lo,left_hi, right_lo,right_hi, top_lo,top_hi, bottom_lo,bottom_hi].
 	// Debe venir del layout de Deskflow (down(0,67) etc.); si no, NULL/[] = 0..100.

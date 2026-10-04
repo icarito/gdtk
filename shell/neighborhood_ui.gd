@@ -19,6 +19,7 @@ extends Control
 # neighborhood.gd (Thread) y de las cachés del shell.
 
 const MAP = preload("res://neighborhood_map.gd")
+const GROUP = preload("res://group_model.gd")
 const MENU = preload("res://menu_style.gd")
 const INBOX = preload("res://neighborhood_inbox.gd")
 
@@ -64,6 +65,10 @@ const HOST_FALLBACK_ICONS = ["sugar/network-wired", "sugar/computer-xo", "networ
 
 var shell = null
 var model = null
+# G3: interfaz para que otro agente traiga la vista Grupo en esta misma Control.
+# mode = "neighborhood" | "group"; draw_center controla la placa central.
+var mode = "neighborhood"
+var draw_center = true
 var selected = ""            # SSID (compatibilidad; el Wi-Fi ya no se selecciona)
 var selected_host = ""       # id del vecino seleccionado
 var drawn_version = -1
@@ -98,7 +103,21 @@ var _menu_is_wifi = false    # true = el menú es de una red Wi-Fi, no de un hos
 var _menu_wifi = null        # red Wi-Fi del menú (ver _open_wifi_menu)
 var _menu_is_bt = false      # true = el menú es de un dispositivo Bluetooth
 var _menu_bt = null          # dispositivo Bluetooth del menú
+var _menu_title = ""         # título propio del menú (Grupo); "" = según el tipo
+var _menu_is_group = false   # true = popup de un miembro del Grupo
+var _menu_group_member = null
+
+# Vista Grupo (mode == "group"): fichas y layout puros de group_model.gd.
+var _group_members = []
+var _group_layout = {}
 var _since_ms = -1
+
+
+# G3: cambia el modo de la vista ("neighborhood" | "group") y refresca. La vista
+# Grupo la implementa otro agente sobre esta misma Control.
+func set_mode(m):
+	mode = String(m)
+	refresh(true)
 
 
 func refresh(force = false):
@@ -117,7 +136,29 @@ func refresh(force = false):
 		child.free()
 	wifi_points = []
 	host_nodes = []
+	bt_points = []
 	var bar = _bar()
+	if mode == "group":
+		_refresh_group(vp, bar)
+	else:
+		_refresh_neighborhood(vp, bar)
+	if _menu_host != null:
+		_build_menu_rows()
+	# El menú vive en un nodo propio agregado al final: los íconos/etiquetas son
+	# hijos nativos y se dibujan por encima del _draw del padre, así que el menú
+	# debe ser el último hijo (raise()) para no quedar oculto.
+	if _menu_layer == null or not is_instance_valid(_menu_layer):
+		_menu_layer = preload("res://neighborhood_menu.gd").new()
+		_menu_layer.name = "MenuLayer"
+		_menu_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		add_child(_menu_layer)
+	_menu_layer.rect_size = vp
+	_menu_layer.raise()
+	_sync_menu()
+	update()
+
+
+func _refresh_neighborhood(vp, bar):
 	var networks = model.networks if model.get("networks") != null else []
 	var hosts = model.hosts if model.get("hosts") != null else []
 	var radii = MAP.map_radii(vp, bar)
@@ -126,6 +167,7 @@ func refresh(force = false):
 	wifi_points = MAP.wifi_dots(networks, vp, bar)
 	bt_points = MAP.bt_dots(model.bt_devices if model.get("bt_devices") != null else [], vp, bar)
 	host_nodes = MAP.map_layout(hosts, directions, vp, bar)
+	_spread_map(vp, bar)
 
 	_label("Vecindario", Vector2(16, bar + 10), 220)
 	_label(MAP.CENTER_TITLE, center + Vector2(-90, 34), 180, Label.ALIGN_CENTER)
@@ -159,20 +201,328 @@ func refresh(force = false):
 		if msg != "":
 			_label(msg, center + Vector2(-160, 92), 320, Label.ALIGN_CENTER, TEXT_DIM)
 
-	if _menu_host != null:
-		_build_menu_rows()
-	# El menú vive en un nodo propio agregado al final: los íconos/etiquetas son
-	# hijos nativos y se dibujan por encima del _draw del padre, así que el menú
-	# debe ser el último hijo (raise()) para no quedar oculto.
-	if _menu_layer == null or not is_instance_valid(_menu_layer):
-		_menu_layer = preload("res://neighborhood_menu.gd").new()
-		_menu_layer.name = "MenuLayer"
-		_menu_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		add_child(_menu_layer)
-	_menu_layer.rect_size = vp
-	_menu_layer.raise()
-	_sync_menu()
+
+# --- Vista Grupo ------------------------------------------------------------
+# Sólo los miembros del Grupo (equipos conocidos/pareados + Bluetooth pareados):
+# el centro es el ancla y cada equipo se pega a su lado; los sin ubicar van en un
+# arco inferior y los BT pareados en una banda al pie. Las posiciones salen del
+# modelo puro group_model.group_layout; acá sólo se dibuja y se delega al shell.
+
+func _refresh_group(vp, bar):
+	var hosts = model.hosts if model.get("hosts") != null else []
+	var bts = model.bt_devices if model.get("bt_devices") != null else []
+	_group_members = GROUP.members(directions, _group_token_keys(), _group_screens(), hosts, bts)
+	_group_layout = GROUP.group_layout(_group_members, vp, bar)
+	center = Vector2(_group_layout.get("center", vp * 0.5))
+	radius = 0.0
+	var nodes = []
+	var idx = 0
+	for n in _group_layout.get("nodes", []):
+		var host = n.get("member", {}).get("host", {})
+		nodes.append({
+			"id": String(n.get("id", "")), "host": host if typeof(host) == TYPE_DICTIONARY else {},
+			"member": n.get("member", {}), "center": Vector2(n.get("center", Vector2.ZERO)),
+			"pos": Vector2(n.get("pos", Vector2.ZERO)), "size": float(n.get("size", GROUP.NODE_SIZE)),
+			"direction": String(n.get("direction", "")), "dimmed": bool(n.get("dimmed", false)),
+			"index": idx,
+		})
+		idx += 1
+	host_nodes = nodes
+	bt_points = []
+	for b in _group_layout.get("bt", []):
+		bt_points.append({
+			"pos": Vector2(b.get("center", Vector2.ZERO)), "address": String(b.get("id", "")),
+			"name": String(b.get("name", "")), "connected": bool(b.get("connected", false)),
+			"paired": true, "rssi": 0, "size": float(b.get("size", GROUP.BT_SIZE)),
+		})
+
+	_label("Grupo", Vector2(16, bar + 10), 220)
+	var ch = float(_group_layout.get("center_size", GROUP.CENTER_SIZE)) * 0.5
+	_label(MAP.CENTER_TITLE, center + Vector2(-90, ch + 8), 180, Label.ALIGN_CENTER)
+	_label(local_name(), center + Vector2(-90, ch + 28), 180, Label.ALIGN_CENTER, TEXT_DIM)
+
+	for node in nodes:
+		var m = node.member
+		var c = Vector2(node.center)
+		var size = float(node.size)
+		var col = TEXT_DIM if bool(node.dimmed) else TEXT
+		_label(String(m.get("name", "")), Vector2(c.x - 80, c.y + size * 0.5 + 4), 160,
+			Label.ALIGN_CENTER, col)
+		if bool(node.dimmed):
+			_label("apagado", Vector2(c.x - 80, c.y + size * 0.5 + 24), 160,
+				Label.ALIGN_CENTER, TEXT_DIM)
+		_make_icon(self, _host_icon(node.host), Vector2(node.pos) + Vector2(4, 4), size - 8.0)
+
+	if not _group_layout.get("unplaced", []).empty():
+		_label("Sin ubicar", Vector2(_group_layout.get("unplaced_label", Vector2.ZERO)),
+			200, Label.ALIGN_LEFT, TEXT_DIM)
+
+	for d in bt_points:
+		var bc = Vector2(d.pos)
+		_label(_bt_label(d), Vector2(bc.x - 70, bc.y + float(d.size) * 0.5 + 3), 140,
+			Label.ALIGN_CENTER, _bt_color(d))
+
+
+# Claves de los tokens por-par, sin leer jamás el valor del token: el shell lista
+# sólo los hid con token; sin ese getter no se inventa pertenencia.
+func _group_token_keys():
+	var out = {}
+	if shell == null or not shell.has_method("_peer_token_hids"):
+		return out
+	var hids = shell._peer_token_hids()
+	if typeof(hids) == TYPE_ARRAY:
+		for h in hids:
+			var hid = String(h).strip_edges()
+			if hid != "":
+				out["cli:" + hid] = ""
+	elif typeof(hids) == TYPE_DICTIONARY:
+		for k in hids.keys():
+			out[String(k)] = ""
+	return out
+
+
+# Pantallas configuradas (settings["screens"]["screens"]), ya leídas por el shell.
+func _group_screens():
+	if shell == null:
+		return []
+	var bridge = shell.get("settings_bridge")
+	if bridge == null:
+		return []
+	var settings = bridge.get("settings")
+	if typeof(settings) != TYPE_DICTIONARY:
+		return []
+	var stored = settings.get("screens", {})
+	if typeof(stored) == TYPE_DICTIONARY:
+		var arr = stored.get("screens", [])
+		return arr if typeof(arr) == TYPE_ARRAY else []
+	return stored if typeof(stored) == TYPE_ARRAY else []
+
+
+# Conjunto de ids/hid/nombres de los miembros actuales (sin secretos).
+func _group_member_set():
+	var out = {}
+	if typeof(_group_members) != TYPE_ARRAY:
+		return out
+	for m in _group_members:
+		if typeof(m) != TYPE_DICTIONARY:
+			continue
+		var id = String(m.get("id", "")).strip_edges()
+		if id != "":
+			out[id] = true
+		var nm = String(m.get("name", "")).strip_edges()
+		if nm != "":
+			out[nm.to_lower()] = true
+	return out
+
+
+func _group_member_by_id(id):
+	for m in _group_members:
+		if typeof(m) == TYPE_DICTIONARY and String(m.get("id", "")) == String(id):
+			return m
+	return null
+
+
+func _group_title(member):
+	if typeof(member) != TYPE_DICTIONARY:
+		return "Equipo"
+	var nm = String(member.get("name", "")).strip_edges()
+	if nm == "":
+		nm = String(member.get("id", ""))
+	var d = String(member.get("direction", ""))
+	if MAP.valid_direction(d):
+		return nm + " — al " + MAP.direction_label(d).to_lower()
+	return nm
+
+
+func _group_side_center(direction):
+	var c = Vector2(center)
+	var row = float(_group_layout.get("side_offset", GROUP.SIDE_OFFSET))
+	match String(direction):
+		"north":
+			return c + Vector2(0.0, -row)
+		"south":
+			return c + Vector2(0.0, row)
+		"east":
+			return c + Vector2(row, 0.0)
+		"west":
+			return c + Vector2(-row, 0.0)
+	return c
+
+
+# Menú del Grupo: dos interruptores (extender pantalla, compartir teclado y
+# mouse) con su estado; el clic derecho agrega "Quitar del grupo". Offline o sin
+# ubicar => filas deshabilitadas con la razón.
+func _open_group_menu(member, at, include_remove):
+	if typeof(member) != TYPE_DICTIONARY:
+		return
+	_menu_is_wifi = false
+	_menu_wifi = null
+	_menu_is_bt = false
+	_menu_bt = null
+	_menu_is_group = true
+	_menu_group_member = member
+	var host = member.get("host", {})
+	if typeof(host) != TYPE_DICTIONARY or host.empty():
+		host = {"id": String(member.get("id", "")), "label": String(member.get("name", ""))}
+	_menu_host = host
+	selected_host = String(member.get("id", ""))
+	_menu_items = _group_toggle_items(member, include_remove)
+	_menu_title = _group_title(member)
+	_menu_open_pos = Vector2(at)
+	_menu_hover = -1
+	_build_menu_rows()
 	update()
+
+
+func _group_toggle_items(member, include_remove):
+	var id = String(member.get("id", ""))
+	var online = bool(member.get("online", false))
+	var direction = String(member.get("direction", ""))
+	var host = member.get("host", {})
+	if typeof(host) != TYPE_DICTIONARY or host.empty():
+		host = {"id": id, "label": String(member.get("name", ""))}
+	var on = host_session_state(id) == "active" or host_session_state(id) == "starting"
+	var extend = _group_action(host, "share_my_screen")
+	var keyboard = _group_action(host, "serve_input_here")
+	var rows = []
+	rows.append(_group_toggle_row("group_extend", "Extender mi pantalla", id, extend,
+		online, direction, on))
+	rows.append(_group_toggle_row("group_keyboard", "Compartir teclado y mouse", id, keyboard,
+		online, direction, on))
+	if include_remove:
+		rows.append({"kind": "separator"})
+		rows.append({"kind": "group_remove", "id": "group_remove", "label": "Quitar del grupo",
+			"enabled": true, "reason": "", "member_id": id})
+	return rows
+
+
+func _group_toggle_row(kind, label, member_id, action, online, direction, on):
+	var enabled = false
+	var reason = ""
+	if not bool(online):
+		reason = "está apagado"
+	elif String(direction) == "":
+		reason = "falta ubicarlo"
+	elif on:
+		enabled = true
+	elif action == null:
+		reason = "no disponible en este equipo"
+	elif not bool(action.get("enabled", false)):
+		reason = MAP.human_reason(action)
+		if reason == "":
+			reason = "no disponible en este equipo"
+	else:
+		enabled = true
+	var text = String(label) + " — " + ("Encendido" if on else "Apagado")
+	return {"kind": kind, "id": kind, "label": text, "enabled": enabled, "reason": reason,
+		"action": action, "member_id": String(member_id), "is_on": bool(on)}
+
+
+# Acción del módulo puro para este host, forzando la dirección recién puesta como
+# confirmada (el arrastre ES la confirmación en el Grupo).
+func _group_action(host, action_id):
+	var actions = _host_actions(host, "confirmed")
+	for a in actions:
+		if String(a.get("id", "")) == String(action_id):
+			return a
+	return null
+
+
+func _activate_group_row(item):
+	var kind = String(item.get("kind", ""))
+	var id = String(item.get("member_id", ""))
+	if kind == "group_remove":
+		_group_remove(id)
+		return
+	var action = item.get("action", null)
+	if not bool(item.get("is_on", false)):
+		if action != null:
+			_run_host_action(id, action)
+		return
+	if kind == "group_extend":
+		_stop_group_extend(id)
+	elif kind == "group_keyboard":
+		_stop_group_keyboard(id, action)
+
+
+func _apply_group_direction(host_id, direction):
+	var id = String(host_id)
+	var d = String(direction)
+	if id == "" or d == "":
+		return
+	# El shell persiste y regenera el layout; la UI adelanta la ficha local.
+	directions[id] = _directions().sanitize_entry({"direction": d, "confirm": "confirmed",
+		"mode": "extend"})
+	if shell != null and shell.has_method("_set_host_direction"):
+		shell._set_host_direction(id, d)
+	call_deferred("refresh", true)
+	update()
+
+
+func _group_add(host_id):
+	var id = String(host_id)
+	if id == "":
+		return
+	if shell != null and shell.has_method("_group_add"):
+		shell._group_add(id)
+	else:
+		directions = GROUP.add_member(directions, id)
+	call_deferred("refresh", true)
+
+
+func _group_remove(host_id):
+	var id = String(host_id)
+	if id == "":
+		return
+	if shell != null and shell.has_method("_group_remove"):
+		shell._group_remove(id)
+	else:
+		directions = GROUP.remove_member(directions, id)
+		if shell != null and shell.has_method("_set_host_direction"):
+			shell._set_host_direction(id, "none")
+	selected_host = ""
+	call_deferred("refresh", true)
+
+
+func _stop_group_extend(host_id):
+	if shell != null and shell.has_method("_stop_gvd_screen"):
+		shell._stop_gvd_screen(String(host_id))
+
+
+func _stop_group_keyboard(host_id, action):
+	if shell == null or not shell.has_method("_run_deskflow_server"):
+		return
+	var plan = action.get("plan", null) if typeof(action) == TYPE_DICTIONARY else null
+	shell._run_deskflow_server(String(host_id), plan if typeof(plan) == TYPE_DICTIONARY else {})
+
+
+# G3: pasada final anti-solape. Reúne hosts, Wi-Fi y Bluetooth como cápsulas
+# (centro + tamaño de ícono + rótulo truncado) y reescribe sus centros con
+# spread_all, de modo que ningún par se pise y todos queden dentro de la vista.
+func _spread_map(vp, bar):
+	var items = []
+	for node in host_nodes:
+		items.append({"kind": "host", "id": String(node.id), "center": Vector2(node.center),
+			"size": float(node.size), "label": host_label(node.host)})
+	for w in wifi_points:
+		items.append({"kind": "wifi", "id": String(w.ssid), "center": Vector2(w.pos),
+			"size": MAP.WIFI_ICON_SIZE, "label": String(w.ssid)})
+	for d in bt_points:
+		items.append({"kind": "bt", "id": String(d.address), "center": Vector2(d.pos),
+			"size": MAP.BT_ICON_SIZE, "label": _bt_label(d)})
+	var spread = MAP.spread_all(items, vp, bar)
+	var wi = host_nodes.size()
+	var bi = wi + wifi_points.size()
+	for i in range(spread.size()):
+		var c = Vector2(spread[i].center)
+		if i < wi:
+			var node = host_nodes[i]
+			node.center = c
+			node.pos = c - Vector2(node.size, node.size) * 0.5
+		elif i < bi:
+			wifi_points[i - wi].pos = c
+		else:
+			bt_points[i - bi].pos = c
 
 
 # Vuelca el estado del menú (filas, rect, hover) a la capa que lo dibuja.
@@ -180,7 +530,10 @@ func _sync_menu():
 	if _menu_layer == null or not is_instance_valid(_menu_layer):
 		return
 	_menu_layer.visible = _menu_host != null
-	_menu_layer.title = "Wi-Fi" if _menu_is_wifi else ("Bluetooth" if _menu_is_bt else "Vecino")
+	if String(_menu_title) != "":
+		_menu_layer.title = _menu_title
+	else:
+		_menu_layer.title = "Wi-Fi" if _menu_is_wifi else ("Bluetooth" if _menu_is_bt else "Vecino")
 	_menu_layer.rows = _menu_rows
 	_menu_layer.rect = _menu_rect
 	_menu_layer.hover = _menu_hover
@@ -241,7 +594,10 @@ func _on_mouse_button(event):
 			return
 		var node = MAP.hit_node(pos, host_nodes)
 		if node != null:
-			_open_menu(node.host, pos)
+			if mode == "group" and node.get("member", null) != null:
+				_open_group_menu(node.member, pos, true)
+			else:
+				_open_menu(node.host, pos)
 			accept_event()
 		elif _menu_host != null:
 			_close_menu()
@@ -276,16 +632,37 @@ func _on_mouse_button(event):
 		var hit = MAP.hit_node(pos, host_nodes)
 		if hit != null:
 			selected_host = String(hit.id)
-			_drag_id = ""
+			_drag_id = String(hit.id)
+			_drag_from = pos
+			_drag_now = pos
+			_dragging = false
 		else:
 			selected_host = ""
 			_drag_id = ""
 		update()
-		call_deferred("refresh", true)
 	else:
+		# Al soltar: si hubo arrastre, imanta a un lado y abre el menú del equipo.
+		if _dragging and _drag_id != "":
+			var node = _node_by_id(_drag_id)
+			var dir = ""
+			if node != null:
+				dir = MAP.drag_direction(Vector2(node.center), pos)
+			if dir != "":
+				if mode == "group":
+					_apply_group_direction(_drag_id, dir)
+					var member = _group_member_by_id(_drag_id)
+					if member != null:
+						# La ficha todavía trae la dirección vieja; el popup muestra
+						# el lado recién imantado para habilitar los interruptores.
+						var moved = member.duplicate(true)
+						moved.direction = dir
+						_open_group_menu(moved, pos, false)
+				else:
+					_apply_direction(_drag_id, dir)
 		_drag_id = ""
 		_dragging = false
 		update()
+		call_deferred("refresh", true)
 
 
 func _on_mouse_motion(event):
@@ -298,7 +675,7 @@ func _on_mouse_motion(event):
 		return
 	if _drag_id != "" and (int(event.button_mask) & BUTTON_LEFT) != 0:
 		_drag_now = Vector2(event.position)
-		if not _dragging and (_drag_now - _drag_from).length() > 8.0:
+		if not _dragging and (_drag_now - _drag_from).length() > 6.0:
 			_dragging = true
 		update()
 
@@ -313,7 +690,10 @@ func _on_key(event):
 			and (event.scancode == KEY_ENTER or event.scancode == KEY_KP_ENTER or event.scancode == KEY_SPACE):
 		var node = _node_by_id(selected_host)
 		if node != null:
-			_open_menu(node.host, Vector2(node.center) + Vector2(float(node.size) * 0.5, 0.0))
+			if mode == "group" and node.get("member", null) != null:
+				_open_group_menu(node.member, Vector2(node.center) + Vector2(float(node.size) * 0.5, 0.0), true)
+			else:
+				_open_menu(node.host, Vector2(node.center) + Vector2(float(node.size) * 0.5, 0.0))
 			accept_event()
 
 
@@ -384,6 +764,9 @@ func _open_menu(host, at):
 	_menu_wifi = null
 	_menu_is_bt = false
 	_menu_bt = null
+	_menu_is_group = false
+	_menu_group_member = null
+	_menu_title = ""
 	_menu_items = MAP.neighbor_menu(host, _host_actions(host), compass_direction(selected_host),
 		MAP.debug_enabled(OS.get_environment("GDTK_DEBUG")))
 	_menu_open_pos = Vector2(at)
@@ -401,6 +784,9 @@ func _open_wifi_menu(w, at):
 	_menu_wifi = w
 	_menu_is_bt = false
 	_menu_bt = null
+	_menu_is_group = false
+	_menu_group_member = null
+	_menu_title = ""
 	_menu_host = {}  # no-null: hay menú abierto (los huéspedes del menú son de host)
 	_menu_items = _wifi_menu_items(w)
 	_menu_open_pos = Vector2(at)
@@ -437,6 +823,9 @@ func _open_bt_menu(d, at):
 	_menu_bt = d
 	_menu_is_wifi = false
 	_menu_wifi = null
+	_menu_is_group = false
+	_menu_group_member = null
+	_menu_title = ""
 	_menu_host = {}
 	_menu_items = _bt_menu_items(d)
 	_menu_open_pos = Vector2(at)
@@ -477,6 +866,9 @@ func _close_menu():
 	_menu_wifi = null
 	_menu_is_bt = false
 	_menu_bt = null
+	_menu_is_group = false
+	_menu_group_member = null
+	_menu_title = ""
 	_menu_items = []
 	_menu_rows = []
 	_menu_rect = Rect2()
@@ -531,6 +923,11 @@ func _activate_row(row):
 	if item == null or not bool(item.get("enabled", false)):
 		return
 	var kind = String(item.get("kind", ""))
+	if kind.begins_with("group_"):
+		_activate_group_row(item)
+		_close_menu()
+		update()
+		return
 	if _menu_is_bt:
 		var addr = String(item.get("address", ""))
 		if kind == "bt_connect" and shell != null and shell.has_method("_bt_connect"):
@@ -572,6 +969,13 @@ func _activate_row(row):
 
 func _run_host_action(host_id, action):
 	var label = String(action.get("label", ""))
+	var aid = String(action.get("id", ""))
+	if aid == "add_to_group":
+		_group_add(String(host_id))
+		return
+	if aid == "remove_from_group":
+		_group_remove(String(host_id))
+		return
 	if not bool(action.get("enabled", false)):
 		print("vecindario: ", host_id, " · ", label, " no disponible: ", String(action.get("reason", "")))
 		return
@@ -590,7 +994,7 @@ func _run_host_action(host_id, action):
 
 # --- Contexto y acciones puras (API conservada) ------------------------------
 
-func _host_actions(host):
+func _host_actions(host, confirm_override = ""):
 	var script = _actions_script()
 	if script == null:
 		return []
@@ -602,8 +1006,14 @@ func _host_actions(host):
 		if d != "none":
 			ctx.direction = d
 			ctx.direction_confirm = String(entry.get("confirm", "unconfirmed"))
+	if String(confirm_override) != "" and String(ctx.get("direction", "")) != "":
+		ctx.direction_confirm = String(confirm_override)
 	if _in_conflict(id):
 		ctx.direction_conflict = true
+	# Grupo: sólo en la vista Grupo se ofrece sumar/quitar; el Vecindario conserva
+	# su menú. El conjunto de miembros se pasa sin tokens ni secretos.
+	ctx.group_menu = (mode == "group")
+	ctx.group_members = _group_member_set()
 	# Emisor gdtk habilitado (GVD_SESSION.EMITTER_ENABLED): con gvd local resuelto y
 	# un host confiable se ofrece también "Extender mi escritorio a él".
 	if String(ctx.get("gvd_path", "")) != "" and not bool(host.get("degraded", false)):
@@ -856,16 +1266,21 @@ func _host_initial(label):
 
 func _draw():
 	draw_rect(Rect2(Vector2.ZERO, rect_size), BG)
+	if mode == "group":
+		_draw_group()
+		return
 	var bar = _bar()
 	var radii = MAP.map_radii(rect_size, bar)
-	for r in [radii.inner, radii.mid, radii.outer]:
-		draw_arc(center, float(r), 0.0, TAU, 96, RING_MID if r == radii.mid else RING, 1.0)
+	_draw_ring(radii.rx_inner, radii.ry_inner, RING, 1.0)
+	_draw_ring(radii.rx_mid, radii.ry_mid, RING_MID, 1.0)
+	_draw_ring(radii.rx_outer, radii.ry_outer, RING, 1.0)
 	for dot in wifi_points:
 		var active = bool(dot.in_use)
 		# AP con la antena clásica de Sugar (no el router genérico): mástil, bola y
 		# ondas. Sigue siendo infraestructura, no presencia social.
 		_draw_ap(Vector2(dot.pos), MAP.WIFI_ICON_SIZE * 0.5 + (2.0 if active else 0.0), active)
-	_draw_center_plate()
+	if draw_center:
+		_draw_center_plate()
 	for node in host_nodes:
 		if _dragging and String(node.id) == _drag_id:
 			continue
@@ -878,11 +1293,41 @@ func _draw():
 		if drag_node != null:
 			var dir = MAP.drag_direction(_drag_from, _drag_now)
 			if dir != "":
-				var target = MAP.directional_center(dir, 0, 1, center, float(radii.mid))
+				var target = MAP.directional_center_ellipse(dir, 0, 1, center,
+					float(radii.rx_mid), float(radii.ry_mid))
 				draw_arc(target, 22.0, 0.0, TAU, 32, NODE_SEL, 2.0)
 			_draw_node(drag_node, _drag_now, float(drag_node.size))
 	# El menú lo dibuja _menu_layer (nodo propio, por encima); acá sólo se sincroniza.
 	_sync_menu()
+
+
+# Vista Grupo: sin anillos; cada miembro es un nodo (atenuado si está apagado) y
+# los BT pareados una placa chica al pie. Al arrastrar, se marca el lado imantado.
+func _draw_group():
+	for node in host_nodes:
+		if _dragging and String(node.id) == _drag_id:
+			continue
+		_draw_node(node, Vector2(node.center), float(node.size))
+	for d in bt_points:
+		_draw_bt_icon(Vector2(d.pos), float(d.get("size", MAP.BT_ICON_SIZE)) * 0.5, d)
+	if _dragging:
+		var drag_node = _node_by_id(_drag_id)
+		if drag_node != null:
+			var dir = MAP.drag_direction(_drag_from, _drag_now)
+			if dir != "":
+				draw_arc(_group_side_center(dir), 24.0, 0.0, TAU, 32, NODE_SEL, 2.0)
+			_draw_node(drag_node, _drag_now, float(drag_node.size))
+	_sync_menu()
+
+
+# Elipse por muestreo (draw_arc sólo dibuja círculos en Godot 3).
+func _draw_ring(rx, ry, color, width):
+	var pts = PoolVector2Array()
+	var steps = 96
+	for i in range(steps + 1):
+		var a = TAU * float(i) / float(steps)
+		pts.append(center + Vector2(cos(a) * float(rx), sin(a) * float(ry)))
+	draw_polyline(pts, color, width, true)
 
 
 # Antena clásica de Sugar para el AP de Wi-Fi: base, mástil, bola y ondas. Se

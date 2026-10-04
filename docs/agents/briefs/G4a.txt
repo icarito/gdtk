@@ -1,0 +1,14 @@
+Tarea G4a de SPEC-sugar-group-2026-10.md (sección "G4", sólo el modelo puro). Godot 3.6 GDScript, NO Godot 4. Reglas: AGENTS.md y vocabulario de SPEC-ui-rework-2026-10.md.
+Crear shell/group_model.gd (extends Reference, funciones static, sin I/O). El "Grupo" son los equipos conocidos/pareados aunque estén apagados, más los Bluetooth pareados.
+static func members(directions, tokens, screens, live_hosts, bt_devices) -> Array de dicts {id, name, online(bool), direction("north|south|east|west|"), kind("host"|"bt"), bt_kind(icono por tipo: "audio","input","phone","computer","other"), connected(bool para bt), host(dict del host vivo o {})}.
+Fuentes (leé los formatos reales en el código):
+- directions: contenido de ~/.config/gdtk/neighborhood-directions.json = {hid: {direction, confirm, mode, link, updated}} (shell.gd _load_directions/_persist_directions).
+- tokens: peer-tokens.json = {"cli:<hid>": token} (peer_control.gd _load_tokens). Nunca copiar el token al resultado.
+- screens: settings.json["screens"]["screens"] = [{id,label,peer,local,x,y,w,h,offset}] (settings/settings_model.gd, shell/screen_layout.gd). El vínculo con hosts vivos es por nombre (peer/label) — revisá cómo screen_layout/shell asocia peer con host.
+- live_hosts: el modelo de hosts de neighborhood_hosts.gd (build_hosts) — online = presente aquí; matchear por hid y por nombre.
+- bt_devices: lo que produce neighborhood.gd _read_bt / parse_bt_devices + parse_bt_info; incluir sólo paired; bt_kind desde el campo Icon de bluetoothctl (audio-*, input-*, phone, computer).
+Dedup por hid/nombre; orden estable: con dirección primero (N,E,S,O), luego sin ubicar, luego BT; nombre visible humano.
+También: static func add_member(directions, hid) -> directions con entrada {direction:"", confirm:"proposed", mode:"", link:"", updated:0} si no existe; static func remove_member(directions, hid) -> copia sin hid (el shell también borrará el token y la pantalla: devolver además static func removal_plan(hid, name) -> {"directions":hid, "token":"cli:"+hid, "screen":name}).
+Test tests/group_model_test.gd (extends SceneTree, modelo tests/neighborhood_hosts_test.gd): conocido offline aparece con online=false; vivo no conocido NO aparece; BT no pareado no aparece; dedup host en directions+screens+tokens; tokens no se filtran al resultado; add/remove.
+Write set: shell/group_model.gd, tests/group_model_test.gd. No edites otros archivos. No commit, no deploy.
+Hecho: verde con /home/icarito/Proyectos/godot3-box3d/godot-dev/bin/godot.frt.opt.tools.x86_64.gdtk --no-window --path shell -s /home/icarito/Proyectos/gdtk/tests/group_model_test.gd

@@ -24,8 +24,11 @@
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_layer_shell_v1.h>
 #include <wlr/types/wlr_output_layout.h>
+#include <wlr/types/wlr_pointer_constraints_v1.h>
+#include <wlr/types/wlr_pointer_gestures_v1.h>
 #include <wlr/types/wlr_primary_selection.h>
 #include <wlr/types/wlr_primary_selection_v1.h>
+#include <wlr/types/wlr_relative_pointer_v1.h>
 #include <wlr/types/wlr_xdg_activation_v1.h>
 #include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_linux_dmabuf_v1.h>
@@ -45,6 +48,7 @@
 #include <xkbcommon/xkbcommon.h>
 
 struct wl_server;
+struct drag_icon_watch;
 
 // Una ventana: xdg (tl) o X11 vía Xwayland (xs); exactamente uno de los dos.
 typedef struct toplevel {
@@ -69,6 +73,13 @@ typedef struct toplevel {
 	struct wl_listener request_maximize;
 	// xdg y Xwayland: pantalla completa (video de YouTube, etc.)
 	struct wl_listener request_fullscreen;
+	// xdg: arrastre/redimensión interactiva pedida por el cliente (CSD: barra de
+	// GTK4, bordes de la app). El shell la ejecuta (ver wl_server_callbacks.move/resize).
+	struct wl_listener request_move;
+	struct wl_listener request_resize;
+	// xdg: el cliente se dibuja su propia decoración (CSD). Arranca en true y pasa a
+	// false cuando negocia SERVER_SIDE por xdg-decoration. Xwayland siempre false.
+	bool csd;
 	// sólo X
 	struct wl_listener associate;
 	struct wl_listener dissociate;
@@ -176,6 +187,15 @@ struct wl_server {
 	struct wl_listener request_activate;
 	struct wl_listener request_set_selection;
 	struct wl_listener request_set_primary_selection;
+	// Drag and drop nativo (wl_data_device). wlroots pide arrancar el drag vía
+	// request_start_drag; el compositor valida el serial y llama a
+	// wlr_seat_start_pointer_drag. En start_drag se registra el drag (para
+	// restaurar el foco de puntero al terminar) y su icono, si lo hay.
+	struct wl_listener request_start_drag;
+	struct wl_listener start_drag;
+	struct wl_listener drag_destroy;
+	struct wlr_drag *drag;
+	struct drag_icon_watch *drag_icon;
 	struct wl_list toplevels;
 	struct wl_list layers;
 	struct wlr_xwayland *xwayland;
@@ -193,7 +213,31 @@ struct wl_server {
 	const char *socket_name;
 	struct wlr_surface *pointer_surface;
 	int pointer_id;
+
+	// Pointer lock de clientes alojados (zwp_pointer_constraints_v1 + relative
+	// pointer). Los emuladores/juegos SDL piden lock para capturar el mouse; el
+	// compositor activa la restricción de la surface enfocada, avisa al shell
+	// (cb.pointer_lock) y reenvía el movimiento relativo que el shell captura.
+	struct wlr_pointer_constraints_v1 *pointer_constraints;
+	struct wlr_relative_pointer_manager_v1 *relative_pointer_manager;
+	struct wl_listener new_constraint;
+	struct wlr_pointer_constraint_v1 *active_constraint;
+	int pointer_locked;
+
+	// Cursor pedido por el cliente con foco (wl_pointer.set_cursor). 1 mientras
+	// manda surface NULL: el shell oculta su cursor dibujado (juegos con lock).
+	struct wl_listener request_set_cursor;
+	int client_cursor_hidden;
+
+	// Pointer gestures (zwp_pointer_gesture_pinch_v1): el shell reenvía el pinch
+	// del touchpad (vía sway bindgesture → RPC) y wlroots lo entrega al cliente
+	// con foco (Firefox/Nautilus). El global se crea siempre; sólo se emiten
+	// eventos cuando el shell llama wl_server_gesture_pinch.
+	struct wlr_pointer_gestures_v1 *pointer_gestures;
 };
+
+static void handle_new_constraint(struct wl_listener *listener, void *data);
+static void update_pointer_constraint(struct wl_server *s);
 
 static toplevel *toplevel_find(struct wl_server *s, int id) {
 	toplevel *t;
@@ -552,12 +596,28 @@ static void handle_input_method_grab_keyboard(struct wl_listener *listener, void
 	s->keyboard_grab_destroy.notify = handle_keyboard_grab_destroy;
 	wl_signal_add(&grab->events.destroy, &s->keyboard_grab_destroy);
 }
-
 static void handle_keyboard_grab_destroy(struct wl_listener *listener, void *data) {
 	struct wl_server *s = wl_container_of(listener, s, keyboard_grab_destroy);
+
 	wl_list_remove(&s->keyboard_grab_destroy.link);
 	wl_list_init(&s->keyboard_grab_destroy.link);
 	s->keyboard_grab = NULL;
+}
+
+// Suelta un grab del teclado del IME que ya no tiene de qué apropiarse (IME
+// colgado o apagado sin que llegue el destroy del grab). La soltar por el canal
+// del protocolo: destroy del recurso dispara events.destroy, así que el handler
+// oficial vuelve a correr; con la lista del listener auto-inicializada esa doble
+// pasada es inocua. Sin esto el teclado queda mudo hasta matar el IME.
+static void release_stale_keyboard_grab(struct wl_server *s) {
+	if (s->keyboard_grab == NULL) {
+		return;
+	}
+	wl_list_remove(&s->keyboard_grab_destroy.link);
+	wl_list_init(&s->keyboard_grab_destroy.link);
+	wlr_input_method_keyboard_grab_v2_destroy(s->keyboard_grab);
+	s->keyboard_grab = NULL;
+	wlr_log(WLR_INFO, "wl_server: keyboard_grab del IME soltado sin text-input activo");
 }
 
 static void handle_input_method_destroy(struct wl_listener *listener, void *data) {
@@ -566,6 +626,9 @@ static void handle_input_method_destroy(struct wl_listener *listener, void *data
 	wl_list_remove(&s->input_method_commit.link);
 	wl_list_remove(&s->input_method_grab_keyboard.link);
 	wl_list_remove(&s->input_method_destroy.link);
+	// Mismo safety que wl_server_key: si el grab sobrevivió (orden de señales
+	// atípico del kill del IME), no puede sobrevivir al IME.
+	release_stale_keyboard_grab(s);
 	s->input_method = NULL;
 }
 
@@ -782,7 +845,7 @@ static void handle_toplevel_set_title(struct wl_listener *listener, void *data) 
 	}
 }
 
-static void toplevel_apply_focus(toplevel *t) {
+static void toplevel_apply_focus(toplevel *t, bool raise) {
 	struct wl_server *s = t->server;
 	struct wlr_surface *surface;
 	if (t->tl != NULL) {
@@ -796,7 +859,9 @@ static void toplevel_apply_focus(toplevel *t) {
 			return;
 		}
 		wlr_xwayland_surface_activate(t->xs, true);
-		wlr_xwayland_surface_restack(t->xs, NULL, XCB_STACK_MODE_ABOVE);
+		if (raise) {
+			wlr_xwayland_surface_restack(t->xs, NULL, XCB_STACK_MODE_ABOVE);
+		}
 		s->x_focus_id = t->id;
 		surface = t->xs->surface;
 	}
@@ -831,7 +896,7 @@ static void handle_toplevel_map(struct wl_listener *listener, void *data) {
 		handle_toplevel_set_title(&t->set_title, NULL);
 	}
 	if (t->want_focus) {
-		toplevel_apply_focus(t);
+		toplevel_apply_focus(t, true);
 	}
 }
 
@@ -909,9 +974,29 @@ static void handle_toplevel_request_fullscreen(struct wl_listener *listener, voi
 	}
 }
 
+// El cliente pide mover su ventana (xdg_toplevel.move): arrastre de su barra CSD.
+// El compositor no mueve nada: avisa al shell, que hace el arrastre interactivo.
+static void handle_toplevel_request_move(struct wl_listener *listener, void *data) {
+	toplevel *t = wl_container_of(listener, t, request_move);
+	if (t->server->cb.move != NULL) {
+		t->server->cb.move(t->server->cb.ud, t->id);
+	}
+}
+
+// El cliente pide redimensionar por un borde (xdg_toplevel.resize). Se pasa el
+// bitfield de bordes tal cual; el shell arma el rect nuevo y llama set_size.
+static void handle_toplevel_request_resize(struct wl_listener *listener, void *data) {
+	toplevel *t = wl_container_of(listener, t, request_resize);
+	struct wlr_xdg_toplevel_resize_event *ev = data;
+	if (t->server->cb.resize != NULL) {
+		t->server->cb.resize(t->server->cb.ud, t->id, (int)ev->edges);
+	}
+}
+
 static void toplevel_unlink(toplevel *t) {
 	struct wl_listener *all[] = { &t->commit, &t->map, &t->unmap, &t->destroy, &t->set_title,
 		&t->request_minimize, &t->request_maximize, &t->request_fullscreen,
+		&t->request_move, &t->request_resize,
 		&t->associate, &t->dissociate, &t->request_configure };
 	for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
 		wl_list_remove(&all[i]->link);
@@ -1071,6 +1156,13 @@ static void handle_new_toplevel(struct wl_listener *listener, void *data) {
 	wl_signal_add(&tl->events.request_maximize, &t->request_maximize);
 	t->request_fullscreen.notify = handle_toplevel_request_fullscreen;
 	wl_signal_add(&tl->events.request_fullscreen, &t->request_fullscreen);
+	t->request_move.notify = handle_toplevel_request_move;
+	wl_signal_add(&tl->events.request_move, &t->request_move);
+	t->request_resize.notify = handle_toplevel_request_resize;
+	wl_signal_add(&tl->events.request_resize, &t->request_resize);
+	// Sin xdg-decoration negociado, el protocolo asume decoración del cliente (CSD):
+	// se dibuja el chrome sólo si un decoration object negocia SERVER_SIDE.
+	t->csd = true;
 
 	wl_list_insert(s->toplevels.prev, &t->link);
 
@@ -1083,19 +1175,67 @@ static void handle_new_toplevel(struct wl_listener *listener, void *data) {
 	}
 }
 
-// Decoraciones: pedimos server-side a todos y no dibujamos ninguna (la barra la pone el
-// shell). Así alacritty/SDL/Qt no dibujan su propia barra de título. GTK4 lo ignora (CSD siempre).
+// Decoraciones: respetamos lo que pide el cliente para no duplicar decoración.
+//   - CLIENT_SIDE: el cliente dibuja su propia barra -> csd=true y el shell NO le
+//     pinta chrome encima (antes se forzaba SERVER_SIDE y quedaban las dos).
+//   - SERVER_SIDE o sin preferencia: el chrome OpenStep lo dibuja el shell
+//     (csd=false), así alacritty/SDL/Qt no dibujan su propia barra.
+// El arrastre en CSD llega por request_move/request_resize.
 typedef struct decoration {
+	struct wl_server *s;
+	struct wlr_xdg_toplevel *tl;
 	struct wlr_xdg_toplevel_decoration_v1 *d;
 	struct wl_listener request_mode;
 	struct wl_listener commit;
 	struct wl_listener destroy;
 } decoration;
 
-static void decoration_apply(decoration *dd) {
-	if (dd->d->toplevel->base->initialized) {
-		wlr_xdg_toplevel_decoration_v1_set_mode(dd->d, WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+static toplevel *toplevel_find_xdg(struct wl_server *s, struct wlr_xdg_toplevel *tl) {
+	toplevel *t;
+	wl_list_for_each(t, &s->toplevels, link) {
+		if (t->tl == tl) {
+			return t;
+		}
 	}
+	return NULL;
+}
+
+// El modo efectivo decide si el cliente se decora solo. Mientras el configure no
+// se confirme (current.mode aún 0) usamos lo que pidió el cliente, para no pintar
+// chrome sobre una ventana que ya está dibujando su CSD (doble decoración).
+static void decoration_sync_csd(decoration *dd) {
+	toplevel *t = toplevel_find_xdg(dd->s, dd->tl);
+	if (t == NULL) {
+		return;
+	}
+	enum wlr_xdg_toplevel_decoration_v1_mode mode = dd->d->current.mode;
+	if (mode == WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE) {
+		t->csd = true;
+	} else if (mode == WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE) {
+		t->csd = false;
+	} else {
+		t->csd = (dd->d->requested_mode == WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE);
+	}
+}
+
+// Respetamos la decoración pedida: CLIENT_SIDE se confirma como CLIENT_SIDE (el
+// cliente sigue con su barra), el resto va a SERVER_SIDE (chrome del shell). No
+// tocamos nada antes del commit inicial (base sin inicializar): wlroots aborta.
+// Se llama en cada commit, pero sólo manda set_mode si el modo deseado no está ya
+// fijado: wlr_xdg_toplevel_decoration_v1_set_mode agenda un configure cada vez que
+// se lo llama, así que repetirlo por commit sería una tormenta de configures.
+static void decoration_apply(decoration *dd) {
+	if (!dd->d->toplevel->base->initialized) {
+		return;
+	}
+	enum wlr_xdg_toplevel_decoration_v1_mode want =
+		(dd->d->requested_mode == WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE)
+		? WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE
+		: WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE;
+	if (dd->d->current.mode != want && dd->d->pending.mode != want) {
+		wlr_xdg_toplevel_decoration_v1_set_mode(dd->d, want);
+	}
+	decoration_sync_csd(dd);
 }
 
 static void handle_decoration_request_mode(struct wl_listener *listener, void *data) {
@@ -1106,13 +1246,19 @@ static void handle_decoration_request_mode(struct wl_listener *listener, void *d
 static void handle_decoration_commit(struct wl_listener *listener, void *data) {
 	decoration *dd = wl_container_of(listener, dd, commit);
 	// set_mode agenda un configure: sólo válido desde el commit inicial en adelante.
-	if (dd->d->toplevel->base->initial_commit) {
-		decoration_apply(dd);
-	}
+	// Reintentamos en cada commit porque el request_mode suele llegar ANTES del
+	// commit inicial (base aún sin inicializar) y antes no se podía fijar.
+	decoration_apply(dd);
+	decoration_sync_csd(dd);
 }
 
 static void handle_decoration_destroy(struct wl_listener *listener, void *data) {
 	decoration *dd = wl_container_of(listener, dd, destroy);
+	// Sin objeto, el protocolo vuelve al default client-side.
+	toplevel *t = toplevel_find_xdg(dd->s, dd->tl);
+	if (t != NULL) {
+		t->csd = true;
+	}
 	wl_list_remove(&dd->request_mode.link);
 	wl_list_remove(&dd->commit.link);
 	wl_list_remove(&dd->destroy.link);
@@ -1120,11 +1266,14 @@ static void handle_decoration_destroy(struct wl_listener *listener, void *data) 
 }
 
 static void handle_new_decoration(struct wl_listener *listener, void *data) {
+	struct wl_server *s = wl_container_of(listener, s, new_decoration);
 	struct wlr_xdg_toplevel_decoration_v1 *d = data;
 	decoration *dd = calloc(1, sizeof(*dd));
 	if (dd == NULL) {
 		return;
 	}
+	dd->s = s;
+	dd->tl = d->toplevel;
 	dd->d = d;
 	dd->request_mode.notify = handle_decoration_request_mode;
 	wl_signal_add(&d->events.request_mode, &dd->request_mode);
@@ -1294,6 +1443,195 @@ static void handle_request_set_primary_selection(struct wl_listener *listener, v
 	struct wl_server *s = wl_container_of(listener, s, request_set_primary_selection);
 	struct wlr_seat_request_set_primary_selection_event *ev = data;
 	wlr_seat_set_primary_selection(s->seat, ev->source, ev->serial);
+}
+
+// Cursor del cliente con foco (wl_pointer.set_cursor): surface NULL = ocultar.
+// No se instala el cursor del cliente (el shell dibuja el suyo); solo se refleja
+// el pedido de ocultarlo para que el shell oculte/restaure su cursor dibujado.
+static void notify_client_cursor_hidden(struct wl_server *s, int hidden) {
+	if (s->client_cursor_hidden == hidden) {
+		return;
+	}
+	s->client_cursor_hidden = hidden;
+	if (s->cb.cursor_hidden != NULL) {
+		s->cb.cursor_hidden(s->cb.ud, hidden);
+	}
+}
+
+static void handle_request_set_cursor(struct wl_listener *listener, void *data) {
+	struct wl_server *s = wl_container_of(listener, s, request_set_cursor);
+	struct wlr_seat_pointer_request_set_cursor_event *ev = data;
+	// Solo el cliente con foco puede mandar cursor; el resto se ignora.
+	if (ev->seat_client != s->seat->pointer_state.focused_client) {
+		return;
+	}
+	notify_client_cursor_hidden(s, ev->surface == NULL);
+}
+
+// --- Drag and drop nativo (wl_data_device) ---
+// El cliente pide iniciar el drag; wlroots no lo arranca solo: hay que validar el
+// serial del puntero (o touch) y llamar a wlr_seat_start_*_drag. Si no valida, se
+// destruye el data source y el drag no ocurre. En start_drag se registra el drag
+// (para restaurar el foco de puntero al terminar) y su icono, si lo hay. Ojo: el
+// icono NO existe necesariamente en start_drag (GTK4 lo manda por set_icon
+// despues) ni su buffer; por eso el watch se re-sincroniza en cada motion
+// (drag_icon_sync) y el buffer se reimporta en cada commit del surface.
+struct drag_icon_watch {
+	struct wl_server *server;
+	struct wlr_drag_icon *icon;
+	struct wlr_surface *surface;
+	struct wl_listener commit;
+	struct wl_listener destroy;
+};
+
+static void handle_drag_icon_import(struct drag_icon_watch *w) {
+	struct wl_server *s = w->server;
+	if (s->cb.drag_icon == NULL || w->surface == NULL) {
+		return;
+	}
+	struct wlr_buffer *buf = w->surface->current.buffer;
+	if (buf == NULL) {
+		return;
+	}
+	void *ptr = NULL;
+	uint32_t format = 0;
+	size_t stride = 0;
+	// Solo los buffers accesibles desde CPU (wl_shm) se pueden leer. Con dmabuf/GL
+	// begin_data_ptr_access falla: no se manda textura y el shell dibuja su
+	// placeholder mientras drag_state siga activo (siempre hay feedback visual).
+	if (!wlr_buffer_begin_data_ptr_access(buf, WLR_BUFFER_DATA_PTR_ACCESS_READ,
+			&ptr, &format, &stride)) {
+		return;
+	}
+	// `dx`/`dy` = offset del attach/offset del surface: top-left del icono en
+	// puntero+(dx,dy). Se lee al importar porque cambia con cada commit.
+	s->cb.drag_icon(s->cb.ud, (const unsigned char *)ptr, buf->width, buf->height,
+			format, (int)stride, w->surface->current.dx, w->surface->current.dy);
+	wlr_buffer_end_data_ptr_access(buf);
+}
+
+static void handle_drag_icon_commit(struct wl_listener *listener, void *data) {
+	struct drag_icon_watch *w = wl_container_of(listener, w, commit);
+	handle_drag_icon_import(w);
+}
+
+static void handle_drag_icon_destroy(struct wl_listener *listener, void *data) {
+	struct drag_icon_watch *w = wl_container_of(listener, w, destroy);
+	struct wl_server *s = w->server;
+	wl_list_remove(&w->commit.link);
+	wl_list_remove(&w->destroy.link);
+	if (s->drag_icon == w) {
+		s->drag_icon = NULL;
+		if (s->cb.drag_icon != NULL) {
+			s->cb.drag_icon(s->cb.ud, NULL, 0, 0, 0, 0, 0, 0);
+		}
+	}
+	free(w);
+}
+
+// Suelta el watch activo. `notify`=1 avisa al shell que borre la textura (fin del
+// icono); 0 cuando se reemplaza por otro sin parpadeo.
+static void drag_icon_watch_drop(struct wl_server *s, int notify) {
+	struct drag_icon_watch *w = s->drag_icon;
+	if (w == NULL) {
+		return;
+	}
+	s->drag_icon = NULL;
+	wl_list_remove(&w->commit.link);
+	wl_list_remove(&w->destroy.link);
+	free(w);
+	if (notify && s->cb.drag_icon != NULL) {
+		s->cb.drag_icon(s->cb.ud, NULL, 0, 0, 0, 0, 0, 0);
+	}
+}
+
+// Re-sincroniza el icono del drag en curso: wlroots lo expone en drag->icon, que
+// puede aparecer despues de start_drag (set_icon) o cambiar de surface durante el
+// drag. Si aparece uno nuevo se enganchan sus listeners y se importa su buffer.
+// Se llama desde start_drag y desde cada motion/button (barato: compara punteros).
+static void drag_icon_sync(struct wl_server *s) {
+	if (s == NULL) {
+		return;
+	}
+	struct wlr_drag_icon *icon = (s->drag != NULL) ? s->drag->icon : NULL;
+	struct wlr_surface *surface = (icon != NULL) ? icon->surface : NULL;
+	if (surface == NULL) {
+		// Todavia sin icono: el shell mantiene su placeholder. Si teniamos uno
+		// viejo (surface destruida), soltarlo avisando.
+		drag_icon_watch_drop(s, 1);
+		return;
+	}
+	if (s->drag_icon != NULL && s->drag_icon->icon == icon
+			&& s->drag_icon->surface == surface) {
+		handle_drag_icon_import(s->drag_icon);
+		return;
+	}
+	// Icono nuevo/distinto: reemplazar sin notificar (evita parpadeo) y enganchar.
+	drag_icon_watch_drop(s, 0);
+	struct drag_icon_watch *w = calloc(1, sizeof(*w));
+	if (w == NULL) {
+		return;
+	}
+	w->server = s;
+	w->icon = icon;
+	w->surface = surface;
+	w->commit.notify = handle_drag_icon_commit;
+	wl_signal_add(&surface->events.commit, &w->commit);
+	w->destroy.notify = handle_drag_icon_destroy;
+	wl_signal_add(&icon->events.destroy, &w->destroy);
+	s->drag_icon = w;
+	handle_drag_icon_import(w);
+}
+
+static void handle_drag_destroy(struct wl_listener *listener, void *data) {
+	struct wl_server *s = wl_container_of(listener, s, drag_destroy);
+	wl_list_remove(&s->drag_destroy.link);
+	s->drag = NULL;
+	drag_icon_watch_drop(s, 1);
+	// El grab de drag ya se solto. Invalidar el cache: la proxima motion del
+	// shell vuelve a hacer notify_enter y el cliente bajo el cursor recupera el
+	// foco del puntero.
+	s->pointer_surface = NULL;
+	s->pointer_id = 0;
+	if (s->cb.drag_state != NULL) {
+		s->cb.drag_state(s->cb.ud, 0);
+	}
+}
+
+static void handle_start_drag(struct wl_listener *listener, void *data) {
+	struct wl_server *s = wl_container_of(listener, s, start_drag);
+	struct wlr_drag *drag = data;
+	s->drag = drag;
+	s->drag_destroy.notify = handle_drag_destroy;
+	wl_signal_add(&drag->events.destroy, &s->drag_destroy);
+	// wlr_seat_start_pointer_drag ya limpio el foco del wl_pointer: el shell cree
+	// que el cursor sigue sobre `pointer_surface`, hay que invalidarlo para que
+	// reenvie un notify_enter en la proxima motion.
+	s->pointer_surface = NULL;
+	s->pointer_id = 0;
+	// Engancha el icono si ya existe en start_drag; si no, drag_icon_sync lo
+	// recogera en la primera motion tras el set_icon del cliente.
+	drag_icon_sync(s);
+	if (s->cb.drag_state != NULL) {
+		s->cb.drag_state(s->cb.ud, 1);
+	}
+}
+
+static void handle_request_start_drag(struct wl_listener *listener, void *data) {
+	struct wl_server *s = wl_container_of(listener, s, request_start_drag);
+	struct wlr_seat_request_start_drag_event *ev = data;
+	if (wlr_seat_validate_pointer_grab_serial(s->seat, ev->origin, ev->serial)) {
+		wlr_seat_start_pointer_drag(s->seat, ev->drag, ev->serial);
+		return;
+	}
+	struct wlr_touch_point *point = NULL;
+	if (wlr_seat_validate_touch_grab_serial(s->seat, ev->origin, ev->serial, &point)) {
+		wlr_seat_start_touch_drag(s->seat, ev->drag, ev->serial, point);
+		return;
+	}
+	if (ev->drag->source != NULL) {
+		wlr_data_source_destroy(ev->drag->source);
+	}
 }
 
 // --- Xwayland (perezoso: el X arranca con el primer cliente X). Las ventanas X normales
@@ -1485,6 +1823,11 @@ static void handle_new_xsurface(struct wl_listener *listener, void *data) {
 	t->xs = xs;
 	t->id = s->next_id++;
 	wl_list_init(&t->commit.link);
+	// X11 va por decoración del WM (nuestro chrome): nunca CSD. Los listeners de
+	// move/resize de xdg no aplican, pero quedan inicializados para el unlink.
+	wl_list_init(&t->request_move.link);
+	wl_list_init(&t->request_resize.link);
+	t->csd = false;
 	t->map.notify = handle_toplevel_map;
 	wl_list_init(&t->map.link);
 	t->unmap.notify = handle_toplevel_unmap;
@@ -1623,6 +1966,29 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 	wlr_seat_set_capabilities(s->seat,
 			WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD);
 
+	// Pointer lock de clientes alojados: los emuladores/juegos SDL piden
+	// zwp_locked_pointer_v1 junto con el relative pointer para capturar el mouse.
+	// Sin ambos globals SDL_SetRelativeMouseMode falla (Wayland_input_lock_pointer).
+	s->pointer_constraints = wlr_pointer_constraints_v1_create(s->display);
+	if (s->pointer_constraints != NULL) {
+		s->new_constraint.notify = handle_new_constraint;
+		wl_signal_add(&s->pointer_constraints->events.new_constraint, &s->new_constraint);
+	} else {
+		wlr_log(WLR_ERROR, "wl_server: fallo wlr_pointer_constraints_v1_create");
+	}
+	s->relative_pointer_manager = wlr_relative_pointer_manager_v1_create(s->display);
+	if (s->relative_pointer_manager == NULL) {
+		wlr_log(WLR_ERROR, "wl_server: fallo wlr_relative_pointer_manager_v1_create");
+	}
+
+	// Gestos de puntero (pinch): global zwp_pointer_gesture_pinch_v1. El shell
+	// reenvía el pinch como pasos begin/update/end (wl_server_gesture_pinch) y
+	// wlroots lo entrega al cliente con foco del puntero.
+	s->pointer_gestures = wlr_pointer_gestures_v1_create(s->display);
+	if (s->pointer_gestures == NULL) {
+		wlr_log(WLR_ERROR, "wl_server: fallo wlr_pointer_gestures_v1_create");
+	}
+
 	// IME (K14): text-input-v3 para los clientes y input-method-v2 para el motor.
 	// Si no hay motor conectado, text-input queda anunciado pero inactivo.
 	s->text_input_manager = wlr_text_input_manager_v3_create(s->display);
@@ -1665,6 +2031,12 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 	wl_signal_add(&s->seat->events.request_set_selection, &s->request_set_selection);
 	s->request_set_primary_selection.notify = handle_request_set_primary_selection;
 	wl_signal_add(&s->seat->events.request_set_primary_selection, &s->request_set_primary_selection);
+	s->request_set_cursor.notify = handle_request_set_cursor;
+	wl_signal_add(&s->seat->events.request_set_cursor, &s->request_set_cursor);
+	s->request_start_drag.notify = handle_request_start_drag;
+	wl_signal_add(&s->seat->events.request_start_drag, &s->request_start_drag);
+	s->start_drag.notify = handle_start_drag;
+	wl_signal_add(&s->seat->events.start_drag, &s->start_drag);
 
 	struct wlr_server_decoration_manager *kde_deco = wlr_server_decoration_manager_create(s->display);
 	if (kde_deco != NULL) {
@@ -1787,6 +2159,21 @@ void wl_server_set_size(wl_server *s, int id, int w, int h) {
 	}
 }
 
+// El shell fija el estado xdg "maximized" del cliente (bordes, sombra e ícono de
+// restaurar que dibuja la app). Sin esto, una ventana que la app maximizó seguía
+// viéndose maximizada al pasarla a flotante con Super+arrastre.
+void wl_server_set_maximized(wl_server *s, int id, int maximized) {
+	if (s == NULL) {
+		return;
+	}
+	toplevel *t = toplevel_find(s, id);
+	if (t != NULL && t->tl != NULL && t->tl->base->initialized) {
+		wlr_xdg_toplevel_set_maximized(t->tl, maximized != 0);
+	} else if (t != NULL && t->xs != NULL) {
+		wlr_xwayland_surface_set_maximized(t->xs, maximized != 0, maximized != 0);
+	}
+}
+
 void wl_server_set_default_size(wl_server *s, int w, int h) {
 	if (s == NULL) {
 		return;
@@ -1820,7 +2207,7 @@ void wl_server_close(wl_server *s, int id) {
 	}
 }
 
-void wl_server_focus(wl_server *s, int id) {
+void wl_server_focus(wl_server *s, int id, int raise) {
 	if (s == NULL) {
 		return;
 	}
@@ -1829,12 +2216,94 @@ void wl_server_focus(wl_server *s, int id) {
 		return;
 	}
 	t->want_focus = true;
-	toplevel_apply_focus(t);
+	toplevel_apply_focus(t, raise != 0);
+}
+
+// --- Pointer lock de clientes alojados ---------------------------------------
+// wlroots crea el objeto de zwp_pointer_constraints_v1 y avisa por new_constraint;
+// el compositor decide cuándo activarlo (surface con foco de puntero). Cada
+// restricción lleva un listener de destroy para soltar el lock si el cliente la
+// destruye (SDL_SetRelativeMouseMode(false), cierre de la app).
+
+struct constraint_watch {
+	struct wl_listener destroy;
+	struct wl_server *server;
+};
+
+static void notify_pointer_lock(struct wl_server *s, int locked) {
+	if (s->pointer_locked == locked) {
+		return;
+	}
+	s->pointer_locked = locked;
+	if (s->cb.pointer_lock != NULL) {
+		s->cb.pointer_lock(s->cb.ud, locked ? s->pointer_id : 0, locked);
+	}
+}
+
+static void update_pointer_constraint(struct wl_server *s) {
+	struct wlr_pointer_constraint_v1 *constraint = NULL;
+	if (s->pointer_constraints != NULL && s->pointer_surface != NULL) {
+		constraint = wlr_pointer_constraints_v1_constraint_for_surface(
+				s->pointer_constraints, s->pointer_surface, s->seat);
+	}
+	if (constraint == s->active_constraint) {
+		return;
+	}
+	struct wlr_pointer_constraint_v1 *old = s->active_constraint;
+	// Fijar el nuevo antes de desactivar el viejo: send_deactivated puede
+	// destruir una restricción oneshot y disparar su destroy (que no debe
+	// volver a soltar el lock ya reemplazado).
+	s->active_constraint = constraint;
+	if (old != NULL) {
+		wlr_pointer_constraint_v1_send_deactivated(old);
+	}
+	if (constraint != NULL) {
+		wlr_pointer_constraint_v1_send_activated(constraint);
+	}
+	notify_pointer_lock(s, constraint != NULL &&
+			constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED);
+}
+
+static void handle_constraint_destroy(struct wl_listener *listener, void *data) {
+	struct constraint_watch *w = wl_container_of(listener, w, destroy);
+	struct wlr_pointer_constraint_v1 *constraint = data;
+	wl_list_remove(&w->destroy.link);
+	if (constraint->data == w) {
+		constraint->data = NULL;
+	}
+	if (w->server->active_constraint == constraint) {
+		w->server->active_constraint = NULL;
+		notify_pointer_lock(w->server, 0);
+	}
+	free(w);
+}
+
+static void handle_new_constraint(struct wl_listener *listener, void *data) {
+	struct wl_server *s = wl_container_of(listener, s, new_constraint);
+	struct wlr_pointer_constraint_v1 *constraint = data;
+	struct constraint_watch *w = calloc(1, sizeof(*w));
+	if (w == NULL) {
+		return;
+	}
+	w->server = s;
+	w->destroy.notify = handle_constraint_destroy;
+	constraint->data = w;
+	wl_signal_add(&constraint->events.destroy, &w->destroy);
+	// Si la surface ya tiene el foco del puntero, el lock se activa ya.
+	if (s->pointer_surface != NULL && constraint->surface == s->pointer_surface) {
+		update_pointer_constraint(s);
+	}
 }
 
 void wl_server_pointer_motion(wl_server *s, int id, double x, double y, uint32_t time_ms) {
 	if (s == NULL) {
 		return;
+	}
+	// El icono del drag puede haber aparecido o cambiado de surface desde la
+	// ultima motion (set_icon del cliente): re-sincronizar aca garantiza que se
+	// enganche sin depender de un evento que wlroots no expone.
+	if (s->drag != NULL) {
+		drag_icon_sync(s);
 	}
 	// Hit-test sobre todo el arbol (popups primero). x,y llegan relativos a la
 	// raiz; sub_x,sub_y quedan en coords locales de la surface elegida.
@@ -1857,21 +2326,78 @@ void wl_server_pointer_motion(wl_server *s, int id, double x, double y, uint32_t
 			s->pointer_surface = NULL;
 			s->pointer_id = 0;
 			wlr_seat_pointer_notify_clear_focus(s->seat);
+			notify_client_cursor_hidden(s, 0);
+			update_pointer_constraint(s);
 		}
 		return;
 	}
 	if (s->pointer_surface != surface) {
 		s->pointer_surface = surface;
 		s->pointer_id = id;
+		// Otro cliente paso a tener el foco: su cursor arranca visible hasta que
+		// pida lo contrario (set_cursor). Evita heredar un cursor oculto ajeno.
+		notify_client_cursor_hidden(s, 0);
 		wlr_seat_pointer_notify_enter(s->seat, surface, sub_x, sub_y);
+		update_pointer_constraint(s);
 	}
 	wlr_seat_pointer_notify_motion(s->seat, time_ms, sub_x, sub_y);
 	wlr_seat_pointer_notify_frame(s->seat);
 }
 
+void wl_server_pointer_motion_relative(wl_server *s, double dx, double dy, uint32_t time_ms) {
+	if (s == NULL || s->relative_pointer_manager == NULL) {
+		return;
+	}
+	// El relative pointer comparte foco con wl_pointer. Si el lock esta activo,
+	// caer a la surface de la restriccion: con el puntero capturado el shell deja
+	// de mandar motion absoluto y alguna ruta pudo limpiar pointer_surface; sin
+	// foco wlroots descarta el relativo y la camara del cliente no se mueve.
+	if (s->pointer_surface == NULL && s->active_constraint != NULL
+			&& s->active_constraint->surface != NULL) {
+		struct wlr_surface *surf = s->active_constraint->surface;
+		toplevel *t = toplevel_find_surface(s, surf);
+		s->pointer_surface = surf;
+		if (t != NULL) {
+			s->pointer_id = t->id;
+		}
+		wlr_seat_pointer_notify_enter(s->seat, surf, 0.0, 0.0);
+	}
+	if (s->pointer_surface == NULL) {
+		return;
+	}
+	// Tiempo en microsegundos (wl_pointer usa milisegundos). El relative pointer
+	// comparte el foco del wl_pointer: llega sólo al cliente con lock activo.
+	wlr_relative_pointer_manager_v1_send_relative_motion(s->relative_pointer_manager,
+			s->seat, (uint64_t)time_ms * 1000ull, dx, dy, dx, dy);
+}
+
+void wl_server_pointer_clear_focus(wl_server *s) {
+	if (s == NULL || s->pointer_surface == NULL) {
+		return;
+	}
+	s->pointer_surface = NULL;
+	s->pointer_id = 0;
+	wlr_seat_pointer_notify_clear_focus(s->seat);
+	notify_client_cursor_hidden(s, 0);
+	update_pointer_constraint(s);
+}
+
+// 1 si hay surface con foco de puntero: requisito de wl_server_pointer_motion_relative.
+int wl_server_pointer_has_focus(wl_server *s) {
+	return s != NULL && s->pointer_surface != NULL;
+}
+
+// 1 mientras el cliente con foco pidio ocultar el cursor (set_cursor surface NULL).
+int wl_server_client_cursor_hidden(wl_server *s) {
+	return s != NULL && s->client_cursor_hidden;
+}
+
 void wl_server_pointer_button(wl_server *s, uint32_t time_ms, uint32_t evdev_button, int pressed) {
 	if (s == NULL) {
 		return;
+	}
+	if (s->drag != NULL) {
+		drag_icon_sync(s);
 	}
 	wlr_seat_pointer_notify_button(s->seat, time_ms, evdev_button,
 			pressed ? WL_POINTER_BUTTON_STATE_PRESSED : WL_POINTER_BUTTON_STATE_RELEASED);
@@ -1888,6 +2414,47 @@ void wl_server_pointer_axis(wl_server *s, uint32_t time_ms, double dy) {
 	wlr_seat_pointer_notify_frame(s->seat);
 }
 
+// Eje horizontal (scroll de dos dedos hacia los lados: atrás/adelante en el
+// navegador). Mismo contrato que el vertical pero con WL_POINTER_AXIS_HORIZONTAL_SCROLL.
+void wl_server_pointer_axis_h(wl_server *s, uint32_t time_ms, double dx) {
+	if (s == NULL) {
+		return;
+	}
+	wlr_seat_pointer_notify_axis(s->seat, time_ms, WL_POINTER_AXIS_HORIZONTAL_SCROLL,
+			dx, (int32_t)(dx * 10.0), WL_POINTER_AXIS_SOURCE_WHEEL,
+			WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
+	wlr_seat_pointer_notify_frame(s->seat);
+}
+
+// Pinch del touchpad hacia el cliente con foco. `phase`: 0 begin, 1 update,
+// 2 end, 3 cancel. En update, `scale` >1 aleja los dedos (zoom in) y <1 los
+// acerca (zoom out); dx/dy/rotation en unidades del protocolo. El shell arma el
+// ciclo completo begin→update→end por cada pinch detectado por sway.
+void wl_server_gesture_pinch(wl_server *s, uint32_t time_ms, int phase,
+		uint32_t fingers, double dx, double dy, double scale, double rotation) {
+	if (s == NULL || s->pointer_gestures == NULL) {
+		return;
+	}
+	switch (phase) {
+	case 0:
+		wlr_pointer_gestures_v1_send_pinch_begin(s->pointer_gestures, s->seat,
+				time_ms, fingers);
+		break;
+	case 1:
+		wlr_pointer_gestures_v1_send_pinch_update(s->pointer_gestures, s->seat,
+				time_ms, dx, dy, scale, rotation);
+		break;
+	case 3:
+		wlr_pointer_gestures_v1_send_pinch_end(s->pointer_gestures, s->seat,
+				time_ms, true);
+		break;
+	default:
+		wlr_pointer_gestures_v1_send_pinch_end(s->pointer_gestures, s->seat,
+				time_ms, false);
+		break;
+	}
+}
+
 void wl_server_key(wl_server *s, uint32_t time_ms, uint32_t evdev_key, int pressed) {
 	if (s == NULL) {
 		return;
@@ -1899,14 +2466,21 @@ void wl_server_key(wl_server *s, uint32_t time_ms, uint32_t evdev_key, int press
 		.state = pressed ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED,
 	};
 	// IME (K14): con un grab activo el motor procesa la tecla (composicion) y
-	// decide que reenviar; no llega directo al cliente.
+	// decide que reenviar; no llega directo al cliente. Sanity previo: un grab
+	// sobreviviente (IME colgado / deactivate perdido) sin IME vivo o sin
+	// text-input habilitado bajo el foco manda el teclado a un agujero negro; en
+	// ese caso se suelta acá y la tecla toma el camino normal.
 	if (s->keyboard_grab != NULL) {
-		wlr_keyboard_notify_key(&s->keyboard, &ev);
-		wlr_input_method_keyboard_grab_v2_send_key(s->keyboard_grab, time_ms,
-				evdev_key, ev.state);
-		wlr_input_method_keyboard_grab_v2_send_modifiers(s->keyboard_grab,
-				&s->keyboard.modifiers);
-		return;
+		if (s->input_method == NULL || s->active_text_input == NULL) {
+			release_stale_keyboard_grab(s);
+		} else {
+			wlr_keyboard_notify_key(&s->keyboard, &ev);
+			wlr_input_method_keyboard_grab_v2_send_key(s->keyboard_grab, time_ms,
+					evdev_key, ev.state);
+			wlr_input_method_keyboard_grab_v2_send_modifiers(s->keyboard_grab,
+					&s->keyboard.modifiers);
+			return;
+		}
 	}
 	wlr_keyboard_notify_key(&s->keyboard, &ev);
 	wlr_seat_keyboard_notify_modifiers(s->seat, &s->keyboard.modifiers);
@@ -1989,6 +2563,15 @@ const char *wl_server_app_id(wl_server *s, int id) {
 	toplevel *t = toplevel_find(s, id);
 	const char *app_id = t == NULL ? NULL : t->tl != NULL ? t->tl->app_id : t->xs->class;
 	return app_id != NULL ? app_id : "";
+}
+
+// 1 si el cliente se decora solo (CSD). Xwayland siempre 0.
+int wl_server_csd(wl_server *s, int id) {
+	if (s == NULL) {
+		return 0;
+	}
+	toplevel *t = toplevel_find(s, id);
+	return (t != NULL && t->csd) ? 1 : 0;
 }
 
 int wl_server_layers(wl_server *s, int id, wl_server_layer *out, int max) {
@@ -2097,10 +2680,27 @@ void wl_server_destroy(wl_server *s) {
 	}
 	struct wl_listener *extra[] = { &s->new_layer, &s->request_activate,
 		&s->request_set_selection, &s->request_set_primary_selection, &s->new_xsurface,
-		&s->new_text_input, &s->new_input_method };
+		&s->new_text_input, &s->new_input_method, &s->new_constraint,
+		&s->request_start_drag, &s->start_drag, &s->request_set_cursor };
 	for (size_t i = 0; i < sizeof(extra) / sizeof(extra[0]); i++) {
 		if (extra[i]->notify != NULL) {
 			wl_list_remove(&extra[i]->link);
+		}
+	}
+
+	// Pointer lock: quitar los watchers de destroy de cada restricción antes de
+	// destruir clientes/display (wlroots asserts si quedan listeners propios).
+	s->active_constraint = NULL;
+	s->pointer_locked = 0;
+	if (s->pointer_constraints != NULL) {
+		struct wlr_pointer_constraint_v1 *c, *ctmp;
+		wl_list_for_each_safe(c, ctmp, &s->pointer_constraints->constraints, link) {
+			struct constraint_watch *w = c->data;
+			if (w != NULL) {
+				c->data = NULL;
+				wl_list_remove(&w->destroy.link);
+				free(w);
+			}
 		}
 	}
 
@@ -2110,6 +2710,16 @@ void wl_server_destroy(wl_server *s) {
 	}
 	if (s->display != NULL) {
 		wl_display_destroy_clients(s->display);
+	}
+
+	// Drag and drop: si un drag no llego a destruirse, liberar el watch del
+	// icono (el listener drag_destroy se limpia solo en events.destroy del drag).
+	s->drag = NULL;
+	if (s->drag_icon != NULL) {
+		wl_list_remove(&s->drag_icon->commit.link);
+		wl_list_remove(&s->drag_icon->destroy.link);
+		free(s->drag_icon);
+		s->drag_icon = NULL;
 	}
 
 	// IME (K14): los text-input y el input-method normalmente ya murieron con

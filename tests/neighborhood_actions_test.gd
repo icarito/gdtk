@@ -129,6 +129,25 @@ func _init():
 		dir_local), "use_remote_input")
 	check("use_remote_input sin direccion confirmada sigue habilitada", remote.enabled)
 
+	# --- Grupo: sumar/quitar equipo (SOLO con local.group_menu) ---
+	var group_host = {"id": "h1", "hid": "h1", "label": "tengu",
+		"capabilities": {"gvd": gvd_svc}}
+	var can_add = acts.host_actions(group_host,
+		_merge(dir_local, {"group_menu": true, "group_members": {}}))
+	check("grupo: no miembro -> Añadir a mi grupo",
+		_by_id(can_add, "add_to_group") != null and _by_id(can_add, "add_to_group").enabled
+		and _by_id(can_add, "remove_from_group") == null
+		and _by_id(can_add, "add_to_group").label == "Añadir a mi grupo")
+	var can_remove = acts.host_actions(group_host,
+		_merge(dir_local, {"group_menu": true, "group_members": {"h1": true}}))
+	check("grupo: miembro -> Quitar del grupo",
+		_by_id(can_remove, "remove_from_group") != null
+		and _by_id(can_remove, "add_to_group") == null
+		and _by_id(can_remove, "remove_from_group").label == "Quitar del grupo")
+	var plain = acts.host_actions(group_host, dir_local)
+	check("sin group_menu no hay acciones de grupo",
+		_by_id(plain, "add_to_group") == null and _by_id(plain, "remove_from_group") == null)
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()
 

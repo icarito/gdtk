@@ -40,6 +40,13 @@ const MENU = [
 # Glifo corto por tipo (la insignia dibujada; no es texto visible obligatorio).
 const TYPE_GLYPHS = {"screen": "monitor", "input": "keyboard", "clipboard": "clipboard"}
 
+# --- Dockapp "Compartiendo" (G5): bloque-resumen con mini-diagrama ----------
+# Lados del diagrama, en orden de lectura N/S/E/O.
+const DIAGRAM_SIDES = ["north", "south", "east", "west"]
+# El diagrama sólo distingue pantalla y control compartido: el portapapeles
+# dejó de ser una opción visible (se asume compartido con "Controlar").
+const DIAGRAM_TYPES = ["screen", "input"]
+
 
 static func valid_type(t):
 	return TYPES.has(String(t).strip_edges())
@@ -222,6 +229,185 @@ static func menu(block):
 		rows.append({"id": String(m.id), "label": String(m.label),
 			"enabled": true, "reason": ""})
 	return rows
+
+
+# --- Dockapp "Compartiendo": bloque-resumen con mini-diagrama (G5) ----------
+# `diagram(sessions, remote_shares, windows)` arma UN bloque para la dockapp:
+#   sides: {north, south, east, west} -> [{type, peer_name, initial, state, origin}]
+#   menu:  filas {kind: "action"|"separator", id, label, enabled, reason}
+#   tooltip: texto humano de qué se comparte y con quién
+#   sessions:      como lo devuelve from_cache() (bloques {host, type, state, label}),
+#                  cada uno con `side`/`direction` (north/south/east/west) del lado
+#                  hacia el que se comparte. Es local (origin "local").
+#   remote_shares: [{peer_name, type, side, state}] recibido del otro equipo; el
+#                  lado YA viene invertido por el emisor (no se invierte acá).
+#   windows:       [{id, title, peer_name, maximized}] ventanas de pantalla extendida.
+# Sin sesiones, remotos ni ventanas devuelve {} para que el Frame no dibuje nada.
+# Puro: sin red, procesos ni disco.
+static func diagram(sessions, remote_shares, windows):
+	var entries = []
+	for s in _as_array(sessions):
+		var e = _diagram_entry(s, "local")
+		if not e.empty():
+			entries.append(e)
+	for r in _as_array(remote_shares):
+		var e2 = _diagram_entry(r, "remote")
+		if not e2.empty():
+			entries.append(e2)
+	var wlist = _diagram_windows(windows)
+	if entries.empty() and wlist.empty():
+		return {}
+	entries = _ordered_entries(entries)
+	var sides = {"north": [], "south": [], "east": [], "west": []}
+	for e in entries:
+		sides[e.side].append(_public_entry(e))
+	return {
+		"sides": sides,
+		"menu": _diagram_menu(entries, wlist),
+		"tooltip": _diagram_tooltip(entries, wlist),
+	}
+
+
+static func valid_side(s):
+	return DIAGRAM_SIDES.has(String(s).strip_edges())
+
+
+# Inicial visible del equipo (una letra, sin exponer ids opacos).
+static func peer_initial(peer):
+	var s = String(peer).strip_edges()
+	for i in range(s.length()):
+		var c = s[i]
+		var up = c.to_upper()
+		if up != c.to_lower():
+			return up
+	return "#"
+
+
+static func _as_array(v):
+	return v if typeof(v) == TYPE_ARRAY else []
+
+
+# Normaliza una sesión o un share remoto a una entrada del diagrama. Devuelve {}
+# si no es ubicable (tipo/lado inválidos, estado "stopped" o sin equipo).
+static func _diagram_entry(raw, origin):
+	if typeof(raw) != TYPE_DICTIONARY:
+		return {}
+	var t = String(raw.get("type", "")).strip_edges()
+	if not DIAGRAM_TYPES.has(t):
+		return {}
+	var side = String(raw.get("side", raw.get("direction", ""))).strip_edges()
+	if not DIAGRAM_SIDES.has(side):
+		return {}
+	var peer = String(raw.get("peer_name", raw.get("label", raw.get("host", "")))).strip_edges()
+	if peer == "":
+		return {}
+	var state = String(raw.get("state", "active")).strip_edges()
+	if state == "stopped":
+		return {}
+	if not valid_state(state):
+		state = "active"
+	# Clave estable para los ids del menú: host/id si están, si no el nombre.
+	var key = String(raw.get("host", raw.get("id", peer))).strip_edges()
+	if key == "":
+		key = peer
+	return {"type": t, "peer_name": peer, "initial": peer_initial(peer),
+		"state": state, "origin": origin, "side": side, "key": key}
+
+
+static func _public_entry(e):
+	return {"type": e.type, "peer_name": e.peer_name, "initial": e.initial,
+		"state": e.state, "origin": e.origin}
+
+
+static func _ordered_entries(entries):
+	var keys = []
+	var map = {}
+	var i = 0
+	for e in entries:
+		var si = DIAGRAM_SIDES.find(String(e.side))
+		if si < 0:
+			si = DIAGRAM_SIDES.size()
+		var k = String(int(si)).pad_zeros(2) + "\t" + String(e.peer_name) \
+			+ "\t" + String(e.type) + "\t" + String(i).pad_zeros(4)
+		keys.append(k)
+		map[k] = e
+		i += 1
+	keys.sort()
+	var out = []
+	for k in keys:
+		out.append(map[k])
+	return out
+
+
+static func _diagram_windows(windows):
+	var out = []
+	for w in _as_array(windows):
+		if typeof(w) != TYPE_DICTIONARY:
+			continue
+		var id = String(w.get("id", "")).strip_edges()
+		if id == "":
+			continue
+		var peer = String(w.get("peer_name", w.get("title", ""))).strip_edges()
+		out.append({"id": id, "peer_name": peer, "maximized": bool(w.get("maximized", false))})
+	var keys = []
+	var map = {}
+	for w in out:
+		keys.append(String(w.id))
+		map[String(w.id)] = w
+	keys.sort()
+	var sorted = []
+	for k in keys:
+		sorted.append(map[k])
+	return sorted
+
+
+static func _menu_action(id, label):
+	return {"kind": "action", "id": id, "label": label, "enabled": true, "reason": ""}
+
+
+static func _diagram_menu(entries, windows):
+	var stops = []
+	for e in entries:
+		if String(e.type) == "screen":
+			stops.append(_menu_action("stop:screen:" + String(e.key),
+				"Dejar de extender a " + String(e.peer_name)))
+		else:
+			stops.append(_menu_action("stop:input:" + String(e.key),
+				"Dejar de compartir teclado y mouse con " + String(e.peer_name)))
+	var wins = []
+	for w in windows:
+		var id = String(w.id)
+		var who = String(w.peer_name)
+		var show = "Mostrar pantalla" if who == "" else "Mostrar pantalla de " + who
+		wins.append(_menu_action("win_show:" + id, show))
+		wins.append(_menu_action("win_max:" + id, "Restaurar" if bool(w.maximized) else "Maximizar"))
+		wins.append(_menu_action("win_close:" + id, "Cerrar"))
+	var rows = []
+	if not stops.empty():
+		rows += stops
+	if not wins.empty():
+		if not rows.empty():
+			rows.append({"kind": "separator"})
+		rows += wins
+	if not rows.empty():
+		rows.append({"kind": "separator"})
+	rows.append(_menu_action("open_group", "Abrir Grupo"))
+	return rows
+
+
+static func _diagram_tooltip(entries, windows):
+	var parts = []
+	for e in entries:
+		var dir = String(MAP.DIRECTION_LABELS.get(String(e.side), String(e.side)))
+		var what = type_label(e.type)
+		if String(e.origin) == "local":
+			parts.append(what + " con " + String(e.peer_name) + " al " + dir)
+		else:
+			parts.append(String(e.peer_name) + " comparte " + what + " desde el " + dir)
+	if not windows.empty():
+		var n = windows.size()
+		parts.append(String(n) + (" ventana compartida" if n == 1 else " ventanas compartidas"))
+	return "Compartiendo: " + PoolStringArray(parts).join("; ")
 
 
 # ¿El punto cae en algún bloque del snapshot de layout? Puro respecto de rects

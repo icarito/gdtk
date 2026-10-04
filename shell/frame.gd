@@ -31,6 +31,9 @@ const HOT_MS = 250
 const SLIDE_MS = 130
 const SUPER_KEYS = [KEY_META, KEY_SUPER_L, KEY_SUPER_R]
 const PAD = 0.0          # sin separación entre bloques del Frame (pegados al borde)
+# Mínimo de celdas de la grilla regular de barra: 3 fijas (esquina/Vecindario/Inicio),
+# la celda del pin a la derecha y al menos cuatro de contenido.
+const MIN_CELLS = 8
 const TILE_PAD = 4.0     # aire entre texto/ícono y el borde del bloque (escala con la UI)
 const HOT_EDGE = 4.0     # con autohide sólo revela si el puntero empuja contra este canto
 const DRAG_PX = 8.0
@@ -47,7 +50,7 @@ const NX_FOCUS = Color(0.86, 0.89, 0.97, 1.0)
 const NX_TEXT = Color(0.93, 0.94, 0.97, 1.0)
 const NX_TEXT_DIM = Color(0.60, 0.63, 0.72, 1.0)
 const NX_SEL = Color(0.98, 0.80, 0.36, 1.0)
-const NX_CUR = Color(0.32, 0.60, 0.98, 1.0)
+const NX_CUR = Color(0.32, 0.60, 0.98, 1.0)  # fallback; ver _cur()
 const BEVEL_BASE = 2.0    # grosor base del bisel (se escala con la UI y Apariencia)
 # Sombra suave del Frame sobre el contenido, pegada al borde interior de cada barra.
 const SHADOW = 3.0
@@ -66,13 +69,10 @@ const APPLETS = [
 	{"id": "termico", "name": "Temperatura · Governor", "short": "TEMP", "span": 1},
 	{"id": "reloj", "name": "Reloj", "short": "REL"},
 	{"id": "teclado", "name": "Teclado", "short": "TEC"},
-	{"id": "ventanas", "name": "Ventanas · flotantes o mosaico", "short": "VENT"},
 ]
-const APPLET_DEFAULT = ["recursos", "termico", "reloj", "teclado", "ventanas"]
+const APPLET_DEFAULT = ["recursos", "termico", "reloj", "teclado"]
 # Look WindowMaker de los menús verticales (popups ImGui). Sólo estilo.
 const MENU_STYLE = preload("res://menu_style.gd")
-# K13a: modo de ventanas (flotante por defecto / mosaico); modelo puro.
-const WM_MODE = preload("res://wm_mode.gd")
 # K10b: modelo PURO de los bloques "Compartido" (sesiones activas con vecinos).
 const SHARED_BLOCK = preload("res://shared_block.gd")
 # Grosor de la barra de estado del bloque "Compartido".
@@ -123,6 +123,7 @@ var dragging = null
 var win_drag = null       # Super+arrastre de una ventana hacia el Frame (reordenar/tilear)
 var drag_candidate = null
 var drag_from = Vector2.ZERO
+var drag_grab = Vector2.ZERO
 var mouse_down = false
 var mouse_pos = Vector2.ZERO
 var slide_instant = false  # aparecer sin animación (Alt+Tab)
@@ -139,17 +140,44 @@ var drawn = false
 var applets_visible = []
 var applets_future = []
 var applets_raw = {}
-# K13a: modo de ventanas del shell (flotante por defecto). Persiste en el mismo
-# frame-applets.json y se aplica al shell al cargar y al alternar.
-var window_mode = "floating"
-var window_mode_saved = "floating"
 var applets_saved_bottom = []
+# Orden UNIFICADO de bloques por barra (applets y pines comparten los slots):
+# tokens "p:<app-id>" (pin) y "a:<applet-id>" (applet). Los pines (`pinned_top`/
+# `pinned_dock`) se derivan de `bar_order` con `_sync_pins()`.
+#
+# La lista de ventanas abiertas es además un DockApp más (el "Clip" de WindowMaker):
+# token "w:windows". Ocupa un slot por ventana (span dinámico) y, sin ventanas, un
+# solo bloque con el ícono de clip. Al estar en `bar_order` se puede colocar en
+# cualquier slot, entre los pines/applets, y su posición persiste con el resto.
+const WINDOW_TOKEN = "w:windows"
+var bar_order = {"top": [], "dock": []}
+var bar_order_saved = {"top": [], "dock": []}
 var pinned_top = []
 var pinned_dock = []
 var pinned_saved_top = []
 var pinned_saved_dock = []
 var applets_dirty = false
 var applets_layout = []    # rects del último dibujo de los applets
+var bar_layout = {"top": [], "dock": []}  # rects+tokens del último dibujo por barra
+var bar_cell = {"top": 0.0, "dock": 0.0}  # ancho de un slot vacío (hueco) del último dibujo
+var bar_origin = {"top": 0.0, "dock": 0.0}  # x de la celda 0 de cada barra (último dibujo)
+var bar_side = {"top": 0.0, "dock": 0.0}  # lado del bloque (alto de barra) del último dibujo
+var window_block_x = {"top": 0.0, "dock": 0.0}  # x donde se dibujan las ventanas (token w:)
+# Grilla regular vigente por barra (n/pitch/side/margin) y tramo del DockApp de
+# ventanas: celdas libres contiguas (span), rect en pantalla, y scroll horizontal.
+var bar_grid_state = {"top": null, "dock": null}
+var window_span = {"top": 0, "dock": 0}
+var window_region = {"top": Rect2(), "dock": Rect2()}
+var window_scroll = {"top": 0.0, "dock": 0.0}
+var win_scroll_press = false
+var win_scroll_from = 0.0
+var win_scroll_start = 0.0
+var _win_pick = null
+var _win_close = null
+var _win_min = null
+var win_dock_press = false   # pulsado el bloque-clip de ventanas (aún sin arrastrar)
+var win_dock_drag = false    # arrastrando el DockApp de ventanas (recolocar slot)
+var win_dock_from = Vector2.ZERO
 var applets_drawn = false
 var applets_bar_rect = Rect2()  # franja inferior del último dibujo (clic derecho: controles)
 var applet_picker_want = false
@@ -162,9 +190,10 @@ var app_press = null
 var app_drag = null
 var app_from = Vector2.ZERO
 var app_grab = Vector2.ZERO    # offset del punto de agarre dentro de la tesela de app
-var pinned_layout = []
-var pinned_prev = []           # layout de pines del frame anterior (para el drop)
 var suppress_pinned_click = ""
+# Explosiones (drop en el centro del escritorio): bloques que se quitan con una
+# animación breve, como el WindowMaker clásico. Cada una: {pos, size, since, tex}.
+var explosions = []
 # Animación de las barras (reacomodo al arrastrar): id -> {from, to, x, since}.
 # Mismo lenguaje de ease-out que el reacomodo del anillo (ver shell._ease_out).
 var bar_anim = {}
@@ -179,17 +208,8 @@ var shared_menu_want = ""
 var shared_menu_open = false
 var shared_menu_block = null
 var shared_press = ""
-# Basurero del Frame: bloque en la esquina superior derecha, visible sólo con un
-# drag activo. `trash_layout` es su rect en pantalla del último dibujo.
-var trash_layout = null
-
-
 func _ready():
 	_load_applets()
-	# K13: aplicar el modo persistido apenas el shell está disponible (frame se crea
-	# dentro de shell._ready). Default flotante si no hay archivo.
-	if shell != null and shell.has_method("set_wm_mode"):
-		shell.set_wm_mode(window_mode)
 
 
 # Los applets consultan en workers; al salir del árbol no deben quedar hilos vivos.
@@ -228,17 +248,260 @@ func _applet_width(id, side):
 	return side * float(span) + PAD * float(span - 1)
 
 
-# Carga sólo el orden visible de `bottom`; archivo ausente o corrupto -> defaults.
-# Ids desconocidos se guardan aparte y se reescriben intactos.
+# --- Orden unificado de bloques de barra (pines + applets) -----------------------
+# Token: "p:<app-id>" (pin) o "a:<applet-id>" (applet). El orden vive en
+# `bar_order[zone]`; `pinned_top`/`pinned_dock` se derivan con `_sync_pins()`.
+
+func _tok_pin(id):
+	return "p:" + String(id)
+
+
+func _tok_applet(id):
+	return "a:" + String(id)
+
+
+func _tok_kind(t):
+	return String(t).substr(0, 1)
+
+
+func _tok_id(t):
+	return String(t).substr(2)
+
+
+func _maybe_order_token(tok):
+	if typeof(tok) != TYPE_STRING:
+		return false
+	if tok == "":
+		return true  # slot vacío (hueco persistido entre bloques)
+	if String(tok).length() < 3 or String(tok)[1] != ":":
+		return false
+	var kind = _tok_kind(tok)
+	if kind == "p":
+		return _tok_id(tok) != ""
+	if kind == "w":
+		return _tok_id(tok) == "windows"
+	return kind == "a" and _applet_known(_tok_id(tok))
+
+
+# Rehace `pinned_top`/`pinned_dock` a partir de `bar_order`.
+func _sync_pins():
+	pinned_top = []
+	pinned_dock = []
+	for zone in ["top", "dock"]:
+		for tok in bar_order[zone]:
+			if _tok_kind(tok) == "p":
+				if zone == "top":
+					pinned_top.append(_tok_id(tok))
+				else:
+					pinned_dock.append(_tok_id(tok))
+
+
+func _order_remove(tok):
+	# La celda que deja queda VACÍA: los bloques de su derecha no se mueven.
+	for zone in ["top", "dock"]:
+		if bar_order[zone].has(tok):
+			var span = _token_cells(tok, bar_layout.get(zone, []), bar_cell.get(zone, 0.0))
+			bar_order[zone] = seq_vacate(bar_order[zone], tok, span)
+
+
+func _order_insert(zone, tok, index):
+	bar_order[zone] = seq_place(bar_order[zone], tok, index)
+
+
+# Coloca `tok` (con `span` celdas, o el declarado si span<0) en la celda libre más
+# cercana a `target` dentro del tope útil de la barra. `target`<0 = al final del
+# orden. NO mueve otros bloques; si no hay lugar, no toca nada y devuelve false.
+func _place_token_cell(zone, tok, target, span = -1):
+	if span < 0:
+		span = token_span(tok)
+	span = max(1, int(span))
+	var g = _grid_for(zone)
+	var max_cells = int(g.n) - 1 - bar_fixed_cells(zone)
+	# Snapshot: si no hay lugar, se restaura todo tal cual estaba (una barra llena no
+	# se lleva puesto el bloque que se intentaba mover).
+	var saved = {"top": bar_order["top"].duplicate(), "dock": bar_order["dock"].duplicate()}
+	# Un token vive una sola vez: si ya estaba (en esta barra o en la otra), su
+	# celda vieja queda vacía y los demás no se mueven.
+	_order_remove(tok)
+	var spans = {}
+	for t in bar_order[zone]:
+		if t != "":
+			spans[t] = token_span(t)
+	var cells = seq_to_cells(bar_order[zone], spans)
+	var tgt = int(target)
+	if tgt < 0:
+		tgt = cells.size()
+	var placed = place_cells(cells, tok, tgt, span, max_cells)
+	if placed == null:
+		bar_order = saved
+		return false
+	bar_order[zone] = cells_to_seq(placed)
+	_sync_pins()
+	applets_dirty = true
+	_save_applets()
+	var cell = bar_cell.get(zone, 0.0)
+	var origin = bar_origin.get(zone, 0.0)
+	if cell <= 0.0:
+		cell = float(g.pitch)
+	if origin <= 0.0:
+		origin = bar_base_origin(zone, g)
+	_bar_set(tok, slot_x(origin, placed.find(tok), cell))
+	shell.request_redraw()
+	return true
+
+
+# Igual que `_place_token_cell`, con la x de pantalla del drop.
+func _place_token(zone, tok, x, span = -1):
+	var g = _grid_for(zone)
+	var cell = bar_cell.get(zone, 0.0)
+	var origin = bar_origin.get(zone, 0.0)
+	if cell <= 0.0:
+		cell = float(g.pitch)
+	if origin <= 0.0:
+		origin = bar_base_origin(zone, g)
+	return _place_token_cell(zone, tok, cell_from_x(x, origin, cell), span)
+
+
+# --- Slots fijos (puros, ver tests/frame_slots_test.gd) ---------------------------
+# Saca `tok` dejando `span` celdas vacías en su lugar (nadie se corre). Los huecos
+# finales sobran: se recortan.
+static func seq_vacate(seq, tok, span = 1):
+	var out = []
+	for t in seq:
+		if t == tok:
+			for _i in range(max(1, span)):
+				out.append("")
+		else:
+			out.append(t)
+	while out.size() > 0 and out[out.size() - 1] == "":
+		out.remove(out.size() - 1)
+	return out
+
+
+# Pone `tok` en el índice `index`. Hueco => lo ocupa sin tocar a nadie. Ocupado =>
+# sólo el grupo de bloques contiguos desde `index` se corre UN lugar a la derecha,
+# consumiendo el primer hueco que encuentre (los que están más allá no se mueven).
+static func seq_place(seq, tok, index):
+	var out = seq.duplicate()
+	index = int(max(0, index))
+	while out.size() < index:
+		out.append("")
+	if index < out.size() and out[index] == "":
+		out[index] = tok
+		return out
+	var hole = -1
+	for j in range(index, out.size()):
+		if out[j] == "":
+			hole = j
+			break
+	if hole >= 0:
+		out.remove(hole)
+	out.insert(min(index, out.size()), tok)
+	return out
+
+
+# --- Celdas de ocupación (puros, ver tests/frame_slots_test.gd) --------------------
+# Convierte una secuencia de tokens (con huecos "") a celdas: cada token escribe su
+# string en TODAS las celdas de su span; "" es una celda libre. `spans` es un dict
+# token -> celdas (>=1); lo que no figure vale 1.
+static func seq_to_cells(seq, spans):
+	var cells = []
+	for tok in seq:
+		var t = String(tok)
+		var sp = 1
+		if t != "" and typeof(spans) == TYPE_DICTIONARY and spans.has(t):
+			sp = max(1, int(spans[t]))
+		for _i in range(sp):
+			cells.append(t)
+	return cells
+
+
+# Inversa de `seq_to_cells`: colapsa las celdas contiguas de un mismo token en un
+# token (su span) y deja una "" por celda libre. Conserva huecos intermedios y finales.
+static func cells_to_seq(cells):
+	var seq = []
+	for c in cells:
+		var t = String(c)
+		if t != "" and seq.size() > 0 and seq[seq.size() - 1] == t:
+			continue
+		seq.append(t)
+	return seq
+
+
+# Primera celda de un tramo de `span` celdas contiguas libres más cercano a `target`,
+# dentro de [0, max_cells - span]. Empate de distancia -> el de la DERECHA. -1 si no
+# hay ningún tramo libre (barra llena). Las celdas fuera del arreglo cuentan como libres.
+static func nearest_free(cells, target, span, max_cells):
+	span = max(1, int(span))
+	max_cells = max(0, int(max_cells))
+	var last = max_cells - span
+	if last < 0:
+		return -1
+	target = int(clamp(int(target), 0, last))
+	for d in range(max_cells + 1):
+		for s in [target + d, target - d]:
+			if s < 0 or s > last:
+				continue
+			var ok = true
+			for i in range(span):
+				var idx = s + i
+				if idx < cells.size() and String(cells[idx]) != "":
+					ok = false
+					break
+			if ok:
+				return s
+	return -1
+
+
+# Saca `tok` de las celdas (si estaba), lo coloca en el tramo libre de `span` celdas
+# más cercano a `target` y devuelve las celdas resultantes. Los demás tokens NO se
+# mueven. `null` si no hay lugar (barra llena): el llamador deja todo como estaba.
+static func place_cells(cells, tok, target, span, max_cells):
+	var out = []
+	for c in cells:
+		out.append("" if String(c) == String(tok) else String(c))
+	var start = nearest_free(out, target, span, max_cells)
+	if start < 0:
+		return null
+	while out.size() < start + span:
+		out.append("")
+	for i in range(span):
+		out[start + i] = String(tok)
+	return out
+
+
+# Celdas que ocupa un token según su tipo, sin depender del layout: un hueco y el
+# DockApp de ventanas valen 1; un applet, su `span` declarado. Pura y testeable.
+static func token_span(tok):
+	if typeof(tok) != TYPE_STRING:
+		return 1
+	var t = String(tok)
+	if t.begins_with("a:"):
+		var id = t.substr(2)
+		for a in APPLETS:
+			if a.id == id:
+				return max(1, int(a.get("span", 1)))
+	return 1
+
+
+# Ids de todos los pines fijados (los lee el Anillo de Inicio).
+func pinned_ids():
+	var out = []
+	for zone in ["top", "dock"]:
+		for tok in bar_order[zone]:
+			if _tok_kind(tok) == "p":
+				out.append(_tok_id(tok))
+	return out
+
+
+# Carga sólo el orden visible; ids desconocidos se guardan aparte e intactos.
 func _load_applets():
 	applets_visible = APPLET_DEFAULT.duplicate()
 	applets_future = []
 	applets_raw = {}
 	applets_saved_bottom = APPLET_DEFAULT.duplicate()
-	pinned_top = []
-	pinned_dock = []
-	pinned_saved_top = []
-	pinned_saved_dock = []
+	bar_order = {"top": [], "dock": []}
+	var legacy_pins = {"top": [], "dock": []}
 	var f = File.new()
 	if f.open(_applets_path(), File.READ) == OK:
 		var txt = f.get_as_text()
@@ -249,12 +512,9 @@ func _load_applets():
 			for zone in ["top", "dock"]:
 				var ids = applets_raw.get(zone, [])
 				if typeof(ids) == TYPE_ARRAY:
-					var target = pinned_top if zone == "top" else pinned_dock
 					for id in ids:
-						if typeof(id) == TYPE_STRING and not target.has(id):
-							target.append(id)
-	pinned_saved_top = pinned_top.duplicate()
-	pinned_saved_dock = pinned_dock.duplicate()
+						if typeof(id) == TYPE_STRING and not legacy_pins[zone].has(id):
+							legacy_pins[zone].append(id)
 	# Pin de barras (K19): default autohide (false) si el archivo no lo trae.
 	var pins = applets_raw.get("pin", {})
 	if typeof(pins) == TYPE_DICTIONARY:
@@ -283,10 +543,119 @@ func _load_applets():
 					applets_future.append(v)
 				saved.append(v)
 			applets_saved_bottom = saved
-	# K13a: modo de ventanas persistido; sin dato -> flotante (default del producto).
-	window_mode = WM_MODE.parse(applets_raw)
-	window_mode_saved = window_mode
+	# Orden unificado: se prefiere "order" si está; si no, se migra de los arrays
+	# legacy (pines por zona + applets en la barra inferior).
+	var have_order = false
+	var order = applets_raw.get("order", null)
+	if typeof(order) == TYPE_DICTIONARY:
+		for zone in ["top", "dock"]:
+			var toks = order.get(zone, [])
+			if typeof(toks) == TYPE_ARRAY and not toks.empty():
+				have_order = true
+				for tok in toks:
+					if _maybe_order_token(tok):
+						bar_order[zone].append(String(tok))
+					elif typeof(tok) == TYPE_STRING and String(tok) == "":
+						# Slot vacío persistido: conserva la posición/hueco elegidos.
+						bar_order[zone].append("")
+	if not have_order:
+		for id in legacy_pins["top"]:
+			bar_order["top"].append(_tok_pin(id))
+		for id in legacy_pins["dock"]:
+			bar_order["dock"].append(_tok_pin(id))
+		for id in applets_visible:
+			bar_order["dock"].append(_tok_applet(id))
+	# Sanidad: sin duplicados; se reponen pines/applets visibles que falten y se
+	# descartan applets ocultos que hayan quedado en el orden.
+	var present = {}
+	for zone in ["top", "dock"]:
+		var seen = {}
+		var clean = []
+		for tok in bar_order[zone]:
+			if tok != "" and seen.has(tok):
+				continue
+			seen[tok] = true
+			clean.append(tok)
+		bar_order[zone] = clean
+		for tok in clean:
+			present[tok] = true
+	for zone in ["top", "dock"]:
+		for id in legacy_pins[zone]:
+			var tok = _tok_pin(id)
+			if not present.has(tok):
+				bar_order[zone].append(tok)
+				present[tok] = true
+	for id in applets_visible:
+		var tok = _tok_applet(id)
+		if not present.has(tok):
+			bar_order["dock"].append(tok)
+			present[tok] = true
+	for zone in ["top", "dock"]:
+		var kept = []
+		for tok in bar_order[zone]:
+			if _tok_kind(tok) == "a" and not applets_visible.has(_tok_id(tok)):
+				continue
+			kept.append(tok)
+		bar_order[zone] = kept
+	# El DockApp de ventanas existe exactamente una vez, en la barra que el usuario
+	# eligió (cualquier celda). Si el archivo previo no lo traía, va al final de la
+	# barra superior. Sus teselas se dibujan en la barra donde esté el token.
+	var have_window = bar_order["top"].has(WINDOW_TOKEN) or bar_order["dock"].has(WINDOW_TOKEN)
+	if not have_window:
+		bar_order["top"].append(WINDOW_TOKEN)
+	else:
+		var kept_window = false
+		for zone in ["top", "dock"]:
+			var kept = []
+			for tok in bar_order[zone]:
+				if tok == WINDOW_TOKEN:
+					if kept_window:
+						continue
+					kept_window = true
+				kept.append(tok)
+			bar_order[zone] = kept
+	# Normaliza a celdas sin superposición: datos viejos fuera de rango se reubican en
+	# la celda libre más cercana (o se descartan si no caben).
+	for zone in ["top", "dock"]:
+		_normalize_order(zone)
+	bar_order_saved = {"top": bar_order["top"].duplicate(), "dock": bar_order["dock"].duplicate()}
+	_sync_pins()
+	pinned_saved_top = pinned_top.duplicate()
+	pinned_saved_dock = pinned_dock.duplicate()
+	# K13a: la clave "window_mode" de versiones anteriores se ignora.
 	applets_dirty = false
+
+
+# Normaliza el orden de una barra a celdas sin superposición: cada token se reubica
+# en la celda libre más cercana a su posición natural (o se descarta si no cabe en el
+# tope útil). Idempotente sobre datos ya sanos. `bar_grid_state` sin grilla => sin tope.
+func _normalize_order(zone):
+	var g = bar_grid_state.get(zone, null)
+	var max_cells = 1000000
+	if g != null and int(g.get("n", 0)) > 0:
+		max_cells = int(g.n) - 1 - bar_fixed_cells(zone)
+	var spans = {}
+	for t in bar_order[zone]:
+		if t != "":
+			spans[t] = token_span(t)
+	var cells = seq_to_cells(bar_order[zone], spans)
+	var out = []
+	for c in cells:
+		var t = String(c)
+		if t == "":
+			out.append("")
+			continue
+		if out.size() > 0 and String(out[out.size() - 1]) == t:
+			continue  # continuación del span ya colocado
+		var span = int(spans.get(t, 1))
+		var placed = nearest_free(out, out.size(), span, max_cells)
+		if placed < 0:
+			continue
+		while out.size() < placed + span:
+			out.append("")
+		for i in range(span):
+			out[placed + i] = t
+	bar_order[zone] = cells_to_seq(out)
 
 
 func _same_list(a, b):
@@ -298,25 +667,26 @@ func _same_list(a, b):
 	return true
 
 
-# Escritura atómica y sólo si el orden visible (con ids futuros) cambió. Sin cambios
-# reales no toca el archivo.
+# Escritura atómica y sólo si el orden visible (con ids futuros) cambió. Escribe el
+# orden unificado y, además, los arrays legacy para poder volver a una versión previa.
 func _save_applets():
 	var bottom = applets_visible.duplicate()
 	for id in applets_future:
 		bottom.append(id)
-	if _same_list(bottom, applets_saved_bottom) and _same_list(pinned_top, pinned_saved_top) and _same_list(pinned_dock, pinned_saved_dock) \
-			and pin_top_bar == pin_saved_top and pin_bottom_bar == pin_saved_bottom \
-			and WM_MODE.normalize(window_mode) == WM_MODE.normalize(window_mode_saved):
+	var pins_changed = not (_same_list(pinned_top, pinned_saved_top) and _same_list(pinned_dock, pinned_saved_dock))
+	var order_changed = not (_same_list(bar_order["top"], bar_order_saved["top"]) and _same_list(bar_order["dock"], bar_order_saved["dock"]))
+	if _same_list(bottom, applets_saved_bottom) and not pins_changed and not order_changed \
+			and pin_top_bar == pin_saved_top and pin_bottom_bar == pin_saved_bottom:
 		applets_dirty = false
 		return
 	var path = _applets_path()
 	var dir = Directory.new()
 	dir.make_dir_recursive(path.get_base_dir())
+	applets_raw["order"] = {"top": bar_order["top"], "dock": bar_order["dock"]}
 	applets_raw["bottom"] = bottom
 	applets_raw["top"] = pinned_top
 	applets_raw["dock"] = pinned_dock
 	applets_raw["pin"] = {"top": pin_top_bar, "bottom": pin_bottom_bar}
-	applets_raw["window_mode"] = WM_MODE.serialize(window_mode)
 	var tmp = path + ".tmp"
 	var w = File.new()
 	if w.open(tmp, File.WRITE) != OK:
@@ -328,39 +698,52 @@ func _save_applets():
 		printerr("frame: no se pudo renombrar ", tmp, " a ", path)
 		return
 	applets_saved_bottom = bottom
+	bar_order_saved = {"top": bar_order["top"].duplicate(), "dock": bar_order["dock"].duplicate()}
 	pinned_saved_top = pinned_top.duplicate()
 	pinned_saved_dock = pinned_dock.duplicate()
 	pin_saved_top = pin_top_bar
 	pin_saved_bottom = pin_bottom_bar
-	window_mode_saved = window_mode
 	applets_dirty = false
 
 
 func _applet_set_visible(id, v):
 	if v:
 		if not applets_visible.has(id):
+			# Primero se intenta colocar (celda libre más cercana al final); sólo si
+			# entra se marca visible. Barra llena: no se añade y el estado no cambia.
+			if not _place_token_cell("dock", _tok_applet(id), -1, _applet_span(id)):
+				return
 			applets_visible.append(id)
 			if id == "teclado":
 				keyboard.refresh(true)
+			applets_dirty = true
+			_save_applets()
+			shell.request_redraw()
 	elif applets_visible.has(id):
 		applets_visible.erase(id)
-	applets_dirty = true
-	_save_applets()
-	shell.request_redraw()
+		_order_remove(_tok_applet(id))
+		applets_dirty = true
+		_save_applets()
+		shell.request_redraw()
 
 
+# Ctrl+←/→: mueve el applet un lugar en el orden unificado de su barra.
 func _applet_move(id, dir):
-	var i = applets_visible.find(id)
-	if i < 0:
+	var tok = _tok_applet(id)
+	for zone in ["top", "dock"]:
+		var seq = bar_order[zone]
+		var i = seq.find(tok)
+		if i < 0:
+			continue
+		var j = i + dir
+		if j < 0 or j >= seq.size():
+			return
+		seq.remove(i)
+		seq.insert(j, tok)
+		applets_dirty = true
+		_save_applets()
+		shell.request_redraw()
 		return
-	var j = i + dir
-	if j < 0 or j >= applets_visible.size():
-		return
-	applets_visible.remove(i)
-	applets_visible.insert(j, id)
-	applets_dirty = true
-	_save_applets()
-	shell.request_redraw()
 
 
 func _pinned_app(id):
@@ -372,35 +755,314 @@ func _pinned_app(id):
 	return null
 
 
-func _pin_app(app, zone, x):
-	pinned_top.erase(app.id)
-	pinned_dock.erase(app.id)
-	var target = pinned_top if zone == "top" else pinned_dock
-	var index = int(clamp(_pin_slot(zone, x), 0, target.size()))
-	target.insert(index, app.id)
-	_save_applets()
-	shell.request_redraw()
+# Fija/mueve un pin a la barra `zone`: va a la celda libre más cercana a x.
+func _place_pin(app, zone, x):
+	var tok = _tok_pin(app.id)
+	if not _place_token(zone, tok, x):
+		shell.request_redraw()
 
 
-# Índice de inserción en la zona: cuántos pines (del frame anterior, sin el arrastrado)
-# tienen su centro a la izquierda de x. Es el mismo cálculo para preview y drop.
-func _pin_slot(zone, x):
+func _pin_in_order(id):
+	return bar_order["top"].has(_tok_pin(id)) or bar_order["dock"].has(_tok_pin(id))
+
+
+# --- Grilla pura de slots de barra ----------------------------------------------
+# Cada barra es una grilla de celdas fijas de ancho `cell`, contadas desde `origin`
+# (el borde izquierdo de la primera celda). El índice de slot NO depende de cuántos
+# bloques haya ni de sus anchos: soltar en la celda N deja el bloque en la celda N,
+# con celdas vacías (`""`) a su izquierda. Ver tests/frame_slots_test.gd.
+static func cell_from_x(x, origin, cell):
+	if cell <= 0.0:
+		return 0
+	return int(max(0.0, floor((x - origin) / cell)))
+
+
+# x del borde izquierdo de la celda `index`.
+static func slot_x(origin, index, cell):
+	return origin + float(index) * cell
+
+
+# --- Grilla regular del ancho de pantalla ----------------------------------------
+# Divide el ancho en `n` celdas de paso entero `pitch`; el bloque cuadrado mide
+# `side = pitch - pad`. Los pocos píxeles sobrantes (< n) van a un margen simétrico,
+# así la última celda queda alineada con el borde derecho. `target_side` es el lado
+# deseado (shell.frame_bar_h: ya depende del DPI/escala). Pura: tests/frame_grid_test.
+static func bar_grid(vp_w, target_side, pad):
+	var w = max(1.0, float(vp_w))
+	var span = max(1.0, float(target_side) + float(pad))
+	var n = int(max(MIN_CELLS, round(w / span)))
+	# Resto par: repartir el sobrante mitad y mitad sin dejar 1 px sin asignar. Se
+	# prefiere subir una celda (bloques algo menores, sin desbordar el alto de barra).
+	for d in [0, 1, -1, 2, -2]:
+		var c = n + d
+		if c >= MIN_CELLS and int(w) % c % 2 == 0:
+			n = c
+			break
+	var pitch = int(max(1.0, floor(w / float(n))))
+	var side = max(1.0, float(pitch) - float(pad))
+	var margin = int(floor((w - float(n) * float(pitch)) * 0.5))
+	return {"n": n, "pitch": pitch, "side": side, "margin": margin}
+
+
+# Celdas fijas antes del contenido de una barra: la superior reserva 3 (esquina,
+# Vecindario, Inicio); la inferior, 1 (esquina). La última celda es el pin.
+static func bar_fixed_cells(zone):
+	return 3 if zone == "top" else 1
+
+
+# x de la celda 0 del contenido (tras las celdas fijas) para la grilla dada.
+static func bar_base_origin(zone, grid):
+	return float(grid.margin) + float(bar_fixed_cells(zone)) * float(grid.pitch)
+
+
+# Plan del DockApp de ventanas dentro de su tramo de `free_cells` celdas libres:
+# normal (una tesela por celda), mini (hasta 4 por celda, mitad de tamaño) o scroll
+# (mismas mini con desplazamiento). La ventana enfocada siempre queda visible.
+# Pura: tests/frame_grid_test.gd.
+static func window_plan(n, free_cells, focused_index, scroll):
+	var F = int(max(1, free_cells))
+	var cap = 4 * F
+	var mode = "normal"
+	var per_cell = 1
+	if n > F:
+		mode = "mini"
+		per_cell = 4
+	if n > cap:
+		mode = "scroll"
+		per_cell = 4
+	var scroll_max = int(max(0, n - cap))
+	var sc = int(clamp(scroll, 0, scroll_max))
+	if mode == "scroll" and focused_index >= 0:
+		if focused_index < sc:
+			sc = focused_index
+		elif focused_index >= sc + cap:
+			sc = focused_index - cap + 1
+		sc = int(clamp(sc, 0, scroll_max))
+	var start = sc
+	var end = int(min(n, sc + cap))
+	return {"mode": mode, "per_cell": per_cell, "visible_range": [start, end], "scroll_max": scroll_max}
+
+
+# --- Tira de ventanas: destino del drop por escritorio/unidad ------------------
+# Zona de borde (px) centrada en el canto entre dos teselas: dentro de ella el drop
+# es "entre" dos escritorios (nuevo escritorio) o, si comparten unidad, sobre la más
+# cercana. Las teselas del strip son las ventanas agrupadas por escritorio/unidad.
+const STRIP_GAP_HIT = 14.0
+
+
+# Escritorios (unidades) presentes en la tira, en orden y sin repetir consecutivos.
+static func strip_groups(tile_units):
+	var out = []
+	var prev = null
+	for i in range(tile_units.size()):
+		if i == 0 or tile_units[i] != prev:
+			out.append(tile_units[i])
+		prev = tile_units[i]
+	return out
+
+
+# Cantidad de grupos (escritorios) entre las teselas 0..upto-1.
+static func strip_groups_before(tile_units, upto):
+	var g = 0
+	for i in range(int(min(int(upto), tile_units.size()))):
+		if i == 0 or tile_units[i] != tile_units[i - 1]:
+			g += 1
+	return g
+
+
+# Escritorio (unidad) que debe quedar a la DERECHA del nuevo escritorio insertado en
+# el índice de grupo `index`, o null si va al final. `index` va de 0 (antes del primer
+# grupo) a strip_groups(...).size() (después del último).
+static func strip_unit_at(tile_units, index):
+	var g = -1
+	var prev = null
+	for i in range(tile_units.size()):
+		if i == 0 or tile_units[i] != prev:
+			g += 1
+		prev = tile_units[i]
+		if g == index:
+			return tile_units[i]
+	return null
+
+
+# Destino del drop de una tesela de ventana dentro del strip del Frame. `tiles_rects`
+# son los rects de las teselas (izq->der) y `tile_units[i]` el escritorio/unidad de
+# cada una. Devuelve:
+#   {"kind":"new", "index":k, "x":bar_x}  -> nuevo escritorio en esa posición
+#   {"kind":"onto", "tile":i, "side":"left"|"right"} -> al escritorio de la tesela i
+#   null si no hay teselas.
+static func strip_drop_target(tiles_rects, tile_units, x):
+	var n = tiles_rects.size()
+	if n <= 0:
+		return null
+	var first = tiles_rects[0]
+	var last = tiles_rects[n - 1]
+	if x < first.position.x:
+		return {"kind": "new", "index": 0, "x": first.position.x}
+	if x > last.position.x + last.size.x:
+		return {"kind": "new", "index": strip_groups_before(tile_units, n),
+			"x": last.position.x + last.size.x}
+	var half_hit = STRIP_GAP_HIT * 0.5
+	for i in range(n - 1):
+		var a = tiles_rects[i]
+		var b = tiles_rects[i + 1]
+		var edge = (a.position.x + a.size.x + b.position.x) * 0.5
+		if abs(x - edge) > half_hit:
+			continue
+		if tile_units[i] != tile_units[i + 1]:
+			return {"kind": "new", "index": strip_groups_before(tile_units, i + 1), "x": edge}
+		var ca = a.position.x + a.size.x * 0.5
+		var cb = b.position.x + b.size.x * 0.5
+		if abs(x - ca) <= abs(x - cb):
+			return {"kind": "onto", "tile": i, "side": "right"}
+		return {"kind": "onto", "tile": i + 1, "side": "left"}
+	for i in range(n):
+		var r = tiles_rects[i]
+		if x >= r.position.x and x <= r.position.x + r.size.x:
+			var side = "left" if x < r.position.x + r.size.x * 0.5 else "right"
+			return {"kind": "onto", "tile": i, "side": side}
+	return null
+
+
+# Celdas que ocupa un token en el dibujo de referencia (`layout`): un hueco ocupa
+# una; un bloque ancho (DockApp de ventanas, applet con span) ocupa tantas como su
+# ancho real. Sin dato en el layout vale una celda.
+func _token_cells(tok, layout, cell):
+	# Un hueco y el DockApp de ventanas valen UNA celda: el tramo de ventanas se
+	# dibuja encima de los huecos siguientes sin consumirlos (si no, los bloques de
+	# su derecha se corrían según cuántas ventanas/huecos hubiera).
+	if tok == "" or tok == WINDOW_TOKEN:
+		return 1
+	for it in layout:
+		if it.tok == tok:
+			if cell > 0.0:
+				return max(1, int(round(float(it.w) / cell)))
+			break
+	return 1
+
+
+# Índice de secuencia en `bar_order[zone]` para soltar en la celda que contiene `x`.
+# `layout` es el dibujo de referencia (el actual, o el previo durante el preview).
+# `skip_tok` es el token arrastrado: no cuenta ni ocupa celdas (se reinserta).
+func _slot_index(zone, x, skip_tok, layout):
+	var cell = bar_cell.get(zone, 0.0)
+	var origin = bar_origin.get(zone, 0.0)
+	if cell <= 0.0:
+		# La barra aún no se dibujó (autohide y drop antes de revelarla): reconstruir
+		# la grilla desde la geometría para no colapsar todo al slot 0 (izquierda).
+		var g = _grid_for(zone)
+		cell = float(g.pitch)
+		origin = bar_base_origin(zone, g)
+	if cell <= 0.0:
+		return 0
+	var target = cell_from_x(x, origin, cell)
+	var cells = 0
 	var index = 0
-	for tile in pinned_prev:
-		if tile.zone != zone:
-			continue
-		if app_drag != null and tile.app.id == app_drag.id:
-			continue
-		if tile.rect.position.x + tile.rect.size.x * 0.5 < x:
-			index += 1
-	return index
+	# El arrastrado deja su celda vacía (igual que al soltar): no corre a nadie.
+	var seq = bar_order.get(zone, [])
+	if skip_tok != "" and seq.has(skip_tok):
+		seq = seq_vacate(seq, skip_tok, _token_cells(skip_tok, layout, cell))
+	for tok in seq:
+		var span = _token_cells(tok, layout, cell)
+		if cells + span > target:
+			return index
+		cells += span
+		index += 1
+	# Más allá del último bloque: se abren huecos hasta la celda elegida.
+	return index + (target - cells)
+
+
+# Grilla vigente de una barra: la del último dibujo; si no, reconstruida desde el
+# viewport. Nunca nil (fallback mínimo) para no romper cálculo de slots en tests.
+func _grid_for(zone):
+	var g = bar_grid_state.get(zone, null)
+	if g != null and int(g.get("n", 0)) > 0:
+		return g
+	if get_viewport() != null and shell != null and shell.has_method("frame_bar_h"):
+		return bar_grid(get_viewport().size.x, shell.frame_bar_h(get_viewport().size), PAD)
+	return {"n": MIN_CELLS, "pitch": 1, "side": 1.0, "margin": 0}
+
+
+# Índice de inserción en la barra para el drop real (orden actual).
+func _zone_slot(zone, x, skip_tok = ""):
+	return _slot_index(zone, x, skip_tok, bar_layout.get(zone, []))
+
+
+# Token que se está arrastrando (pin, applet o DockApp de ventanas), o "".
+func _drag_token():
+	if app_drag != null:
+		return _tok_pin(app_drag.id)
+	if applet_drag != null:
+		return _tok_applet(applet_drag)
+	if win_dock_drag:
+		return WINDOW_TOKEN
+	return ""
 
 
 func _pinned_hit(pos):
-	for tile in pinned_layout:
-		if tile.rect.has_point(pos):
-			return tile
+	for zone in ["top", "dock"]:
+		for it in bar_layout.get(zone, []):
+			if it.kind == "p" and it.rect.has_point(pos):
+				var app = _pinned_app(it.id)
+				if app != null:
+					return {"app": app, "rect": it.rect, "zone": zone}
 	return null
+
+
+# Bloque del DockApp de ventanas bajo el punto (sólo cuando NO hay ventanas: con
+# ventanas, el área la cubren sus teselas y se arrastran individualmente).
+func _window_dock_hit(pos):
+	for zone in ["top", "dock"]:
+		for it in bar_layout.get(zone, []):
+			if it.kind == "w" and it.rect.has_point(pos):
+				return it
+	return null
+
+
+# Rect en pantalla del bloque (para anclar la explosión). Fallback: bajo el cursor.
+func _block_rect(kind, id):
+	for zone in ["top", "dock"]:
+		for it in bar_layout.get(zone, []):
+			if it.kind == kind and it.id == id:
+				return it.rect
+	var s = _vh()
+	return Rect2(mouse_pos - Vector2(s, s) * 0.5, Vector2(s, s))
+
+
+# ¿La app está abierta (actividad viva)? Un pin de una app activa no se estalla:
+# vuelve a su lugar, para no matar una ventana por error.
+func _app_active(app):
+	if app == null:
+		return false
+	var i = shell._activity_named(String(app.name))
+	if i >= 0 and shell._activity_state(shell.ACTIVITIES[i]) != "closed":
+		return true
+	var want = String(app.name).to_lower()
+	if want == "":
+		return false
+	for it in running():
+		if String(it.name).to_lower() == want:
+			return true
+	return false
+
+
+# Quita un bloque del Frame con la animación de estallido (drop en el centro).
+func _explode_block(kind, id):
+	var rect = _block_rect(kind, id)
+	var tex = null
+	if kind == "p":
+		var app = _pinned_app(id)
+		if app != null:
+			tex = shell._activity_icon_of(app)
+		_order_remove(_tok_pin(id))
+		_sync_pins()
+	else:
+		_order_remove(_tok_applet(id))
+		applets_visible.erase(id)
+	explosions.append({"pos": rect.position, "size": rect.size, "since": OS.get_ticks_msec(), "tex": tex})
+	applets_dirty = true
+	_save_applets()
+	shell.request_redraw()
 
 
 # Inserta `dragged` en `slot` de la lista sin él. Si no estaba, sólo se inserta.
@@ -412,6 +1074,32 @@ func _order_with_gap(ids, dragged, slot):
 	slot = int(clamp(slot, 0, rest.size()))
 	rest.insert(slot, dragged)
 	return rest
+
+
+# Igual que `_order_with_gap` pero respeta huecos: un `slot` más allá del final deja
+# slots vacíos (`""`) intermedios. El preview de arrastre usa esto para coincidir con
+# el drop (que también puede abrir huecos, ver `_order_insert`).
+func _order_with_slots(ids, dragged, slot, span = 1):
+	return seq_place(seq_vacate(ids, dragged, span), dragged, slot)
+
+
+# Orden con el token arrastrado (preview) colocado en la celda libre más cercana a la
+# x del puntero. Usa la MISMA regla que el drop real (`_place_token`), así el hueco
+# del preview coincide exactamente con dónde caerá el bloque.
+func _seq_with_drag(zone, drag_tok, mouse_x, grid, prev, x0):
+	var cell = float(grid.pitch)
+	var max_cells = int(grid.n) - 1 - bar_fixed_cells(zone)
+	var target = cell_from_x(mouse_x, x0, cell)
+	var span = token_span(drag_tok)
+	var spans = {}
+	for t in bar_order[zone]:
+		if t != "":
+			spans[t] = token_span(t)
+	var cells = seq_to_cells(bar_order[zone], spans)
+	var placed = place_cells(cells, drag_tok, target, span, max_cells)
+	if placed == null:
+		return bar_order[zone].duplicate()
+	return cells_to_seq(placed)
 
 
 # Posición x animada de una tesela de barra (pines/applets). Retarget con ease-out;
@@ -449,47 +1137,123 @@ func _zone_at(pos):
 	return ""
 
 
-func _drag_active():
-	return app_drag != null or applet_drag != null or dragging != null or win_drag != null \
-		or (shell != null and shell.ring_drag != null)
-
-
-# Rect en pantalla del basurero (null cuando no se dibuja: sin drag activo).
-func trash_rect():
-	return trash_layout
-
-
-func is_trash(pos):
-	return trash_layout != null and trash_layout.has_point(pos)
-
-
-func _draw_pinned(ui, ids, x, side, zone):
+# Dibuja los bloques de una barra en orden unificado (pines y applets), con preview
+# de arrastre. `grid` es la grilla regular (misma para las dos barras). Devuelve la x
+# local posterior al último bloque y llena `bar_layout`.
+func _draw_bar_blocks(ui, zone, x0, y, grid, mouse):
 	var now = OS.get_ticks_msec()
-	var step = side + PAD
-	var dragged = app_drag.id if app_drag != null else null
-	# Preview: con un app arrastrado en esta zona, el resto se corre dejando el hueco.
-	var order = ids
-	if dragged != null and _zone_at(mouse_pos) == zone:
-		order = _order_with_gap(ids, dragged, _pin_slot(zone, mouse_pos.x))
-	for k in range(order.size()):
-		var id = order[k]
-		var shown = _bar_x("pin_" + id, x + k * step, now)
-		if id == dragged:
+	var prev = bar_layout.get(zone, [])
+	bar_layout[zone] = []
+	# La grilla de la barra se fija ANTES del preview: origen (celda 0) y ancho de
+	# celda no dependen de los bloques dibujados.
+	var cell = float(grid.pitch)
+	var side = float(grid.side)
+	var fixed = bar_fixed_cells(zone)
+	bar_cell[zone] = cell
+	bar_origin[zone] = x0
+	bar_side[zone] = side
+	bar_grid_state[zone] = grid
+	var drag_tok = _drag_token()
+	var seq = bar_order[zone].duplicate()
+	if drag_tok != "" and _zone_at(mouse) == zone:
+		# Preview: el bloque va a la MISMA celda libre más cercana que el drop real
+		# (nadie se corre y nunca se superpone), con la misma grilla.
+		seq = _seq_with_drag(zone, drag_tok, mouse.x, grid, prev, x0)
+	var cell_i = 0
+	var win_items = running()
+	# Celdas de contenido útiles (deja libre la celda del pin a la derecha).
+	var max_cells = max(0, int(grid.n) - 1 - fixed)
+	window_span[zone] = 0
+	var strip_end = 0   # última celda cubierta por el tramo de ventanas (para `return`)
+	for ti in range(seq.size()):
+		# Cada token arranca en su celda de la grilla (`slot_x`); un bloque ancho
+		# avanza tantas celdas como ocupa, así los huecos a su izquierda persisten.
+		# Lo que no entra en la barra no se dibuja: nunca dos bloques en una celda.
+		if cell_i >= max_cells:
+			break
+		var x = slot_x(x0, cell_i, cell)
+		var tok = seq[ti]
+		if tok == "":
+			# Slot vacío persistido: reserva el ancho de una celda y sigue.
+			bar_layout[zone].append({"kind": "g", "id": "", "tok": "",
+				"x": x, "y": y, "w": side, "h": side, "rect": Rect2(x, y, side, side)})
+			cell_i += 1
+			continue
+		var kind = _tok_kind(tok)
+		var id = _tok_id(tok)
+		if kind == "w" and tok == drag_tok:
+			# Arrastrando el DockApp: reserva UN bloque en el destino (no el tramo).
+			ui.set_cursor_pos(Vector2(x, y))
+			var dgap = ui.get_cursor_screen_pos()
+			ui.imgui_draw_rect_filled(Rect2(dgap, Vector2(side, side)), Color(1, 1, 1, 0.06), 0.0)
+			ui.imgui_draw_rect_filled(Rect2(dgap + Vector2(0.0, side - 3.0), Vector2(side, 3.0)), NX_SEL, 0.0)
+			cell_i += 1
+			continue
+		if kind == "w":
+			# Tramo del DockApp de ventanas: celdas libres contiguas desde su celda
+			# hasta el próximo bloque ocupado o el borde. No depende de cuántas
+			# ventanas haya: los bloques a su derecha NUNCA se mueven al abrir/cerrar.
+			var gaps = 0
+			var k = ti + 1
+			while k < seq.size() and seq[k] == "":
+				gaps += 1
+				k += 1
+			var cap = max_cells - cell_i
+			var F = cap if k >= seq.size() else min(1 + gaps, cap)
+			F = int(max(1, F))
+			var w = float(F) * cell - PAD
+			window_block_x[zone] = x
+			var scr = Vector2(x, y)
+			if win_items.empty():
+				scr = _draw_window_dock_empty(ui, Vector2(x, y), side, mouse).rect.position
+			else:
+				ui.set_cursor_pos(Vector2(x, y))
+				scr = ui.get_cursor_screen_pos()
+			var region = Rect2(scr, Vector2(w, side))
+			window_span[zone] = F
+			window_region[zone] = region
+			bar_layout[zone].append({"kind": "w", "id": id, "tok": tok,
+				"x": scr.x, "y": scr.y, "w": w, "h": side, "rect": region})
+			# Ocupa su celda; las siguientes siguen siendo huecos (se dibujan debajo).
+			strip_end = cell_i + F
+			cell_i += 1
+			continue
+		var w = side if kind == "p" else _applet_width(id, side)
+		var span = max(1, int(round(w / cell))) if cell > 0.0 else 1
+		if cell_i + span > max_cells:
+			break
+		if tok == drag_tok:
 			# Hueco del destino resaltado (el fantasma va pegado al cursor).
-			ui.set_cursor_pos(Vector2(shown, 0.0))
-			ui.imgui_draw_rect_filled(Rect2(ui.get_cursor_screen_pos(), Vector2(side, side)), Color(1, 1, 1, 0.06), 0.0)
-			ui.imgui_draw_rect_filled(Rect2(ui.get_cursor_screen_pos() + Vector2(0.0, side - 3.0), Vector2(side, 3.0)), NX_SEL, 0.0)
+			ui.set_cursor_pos(Vector2(x, y))
+			var gap = ui.get_cursor_screen_pos()
+			ui.imgui_draw_rect_filled(Rect2(gap, Vector2(w, side)), Color(1, 1, 1, 0.06), 0.0)
+			ui.imgui_draw_rect_filled(Rect2(gap + Vector2(0.0, side - 3.0), Vector2(w, 3.0)), NX_SEL, 0.0)
+			cell_i += span
 			continue
-		var app = _pinned_app(id)
-		if app == null:
-			continue
-		var tile = _draw_app_tile(ui, app, Vector2(shown, 0.0), side, "pin_" + zone + id, false)
-		pinned_layout.append({"app": app, "rect": tile.rect, "zone": zone})
-		if app_drag == null and tile.rect.has_point(mouse_pos):
-			ui.set_tooltip(app.name + " · arrastrar para mover o al anillo")
-		if tile.clicked and suppress_pinned_click != id:
-			shell._launch_app(app)
-	return x + order.size() * step
+		var pos = Vector2(_bar_x(tok, x, now), y)
+		if kind == "p":
+			var app = _pinned_app(id)
+			if app == null:
+				cell_i += span
+				continue
+			var tile = _draw_app_tile(ui, app, pos, side, "pin_" + id, false)
+			bar_layout[zone].append({"kind": "p", "id": id, "tok": tok,
+				"x": tile.rect.position.x, "y": tile.rect.position.y,
+				"w": side, "h": side, "rect": tile.rect})
+			if tile.clicked and suppress_pinned_click != id:
+				_frame_launch(app)
+		else:
+			ui.set_cursor_pos(pos)
+			var scr = ui.get_cursor_screen_pos()
+			var ai = applets_visible.find(id)
+			var is_sel = visible and ai >= 0 and win_items.size() + ai == sel and applet_drag == null
+			_draw_applet(ui, id, pos, scr, w, side, is_sel, mouse)
+			var rect = Rect2(scr, Vector2(w, side))
+			bar_layout[zone].append({"kind": "a", "id": id, "tok": tok,
+				"x": scr.x, "y": scr.y, "w": w, "h": side, "rect": rect})
+			applets_layout.append({"id": id, "x": scr.x, "y": scr.y, "w": w, "h": side, "zone": zone})
+		cell_i += span
+	return slot_x(x0, max(cell_i, strip_end), cell)
 
 
 func _draw_app_tile(ui, app, pos, side, id, empty = false):
@@ -509,6 +1273,31 @@ func _draw_app_tile(ui, app, pos, side, id, empty = false):
 			ui.set_cursor_pos(pos + Vector2((side - icon_side) * 0.5, iy))
 			ui.image(icon, Vector2(icon_side, icon_side))
 		_tile_title(ui, pos, side, app.name, false, lines)
+	return tile
+
+
+# Ancho de contenido del DockApp de ventanas: un slot por ventana (las de una misma
+# pantalla partida van pegadas). Sin ventanas vale un slot (el bloque-clip). Puro:
+# tiene que coincidir con el avance de `draw` para que los bloques posteriores no se
+# pisen. `items` es la lista de `running()`.
+func _window_block_width(side, items):
+	var n = items.size()
+	if n <= 0:
+		return side
+	var content = side
+	for i in range(1, n):
+		var fused = items[i].screen > 0 and items[i - 1].screen == items[i].screen
+		content += (0.0 if fused else PAD) + side
+	return content
+
+
+# Bloque-clip del DockApp de ventanas cuando no hay ninguna abierta: una tesela con
+# el ícono de clip (WindowMaker).
+func _draw_window_dock_empty(ui, pos, side, mouse):
+	var tile = _tile(ui, pos, side, "win_clip", NX_FACE)
+	var g = side * 0.5
+	_draw_shared_glyph(ui, Rect2(tile.rect.position + Vector2((side - g) * 0.5, (side - g) * 0.5),
+		Vector2(g, g)), "clipboard", NX_TEXT_DIM)
 	return tile
 
 
@@ -537,8 +1326,6 @@ static func menu_trigger(button_index, pressed):
 static func applet_menu(id):
 	if id == "teclado":
 		return "teclado"
-	if id == "ventanas":
-		return "ventanas"
 	return "picker"
 
 
@@ -555,36 +1342,16 @@ func _applet_primary(id):
 	if id == "termico":
 		applet_action_want = "gov"
 		shell.request_redraw()
-	elif id == "ventanas":
-		toggle_window_mode()
 
 
 # Menú contextual del applet (clic derecho). Mismo destino que el equivalente de
 # teclado en _frame_key (Enter/Espacio).
 func _applet_context(id):
-	if id == "ventanas":
-		applet_action_want = "ventanas"
-	elif applet_menu(id) == "teclado":
+	if applet_menu(id) == "teclado":
 		applet_action_want = "teclado"
 	else:
 		applet_picker_want = true
 	shell.request_redraw()
-
-
-# K13a — estado del modo de ventanas. Cambia el modo global del shell y lo persiste
-# (mismo frame-applets.json, escritura atómica). El bloque "Ventanas" del Frame lo usa
-# con clic izquierdo (alternar) y clic derecho (menú con las dos opciones).
-func set_window_mode(mode):
-	window_mode = WM_MODE.normalize(mode)
-	if shell != null and shell.has_method("set_wm_mode"):
-		shell.set_wm_mode(window_mode)
-	applets_dirty = true
-	_save_applets()
-	shell.request_redraw()
-
-
-func toggle_window_mode():
-	set_window_mode(WM_MODE.toggled(window_mode))
 
 
 
@@ -599,15 +1366,11 @@ func _applet_state(id):
 			return "activo"
 		"teclado":
 			return keyboard.state
-		"ventanas":
-			return "activo"
 	return "sin_dato"
 
 
 func _applet_value(id):
 	match id:
-		"ventanas":
-			return WM_MODE.label(window_mode)
 		"recursos":
 			return "CPU %s · MEM %s · SWP %s" % [
 				("%d%%" % int(round(sysmon.cpu_now()))) if sysmon.has_cpu else "sin dato",
@@ -641,16 +1404,17 @@ func _applet_pct(id):
 # dejó de ser una opción (se asume compartido con "Controlar").
 
 
-# Snapshot puro de las sesiones, a partir de los caches del shell. Sin I/O.
+# Snapshot puro del bloque "Compartiendo", a partir de los caches del shell. Sin
+# I/O: las sesiones locales (con su lado), los avisos remotos y las ventanas
+# extendidas van al modelo puro `shared_block.diagram(...)`. Devuelve {} si no hay
+# nada que mostrar (el Frame no dibuja nada).
 func _shared_snapshot():
 	if shell == null or shell.neighborhood == null or not shell.has_method("_host_session_state"):
-		return []
+		return {}
 	var hosts = shell.neighborhood.get("hosts")
 	if typeof(hosts) != TYPE_ARRAY:
-		return []
+		hosts = []
 	var host_session = {}
-	var screen = {}
-	var input = {}
 	var labels = {}
 	for h in hosts:
 		if typeof(h) != TYPE_DICTIONARY:
@@ -659,13 +1423,31 @@ func _shared_snapshot():
 		if hid == "":
 			continue
 		host_session[hid] = String(shell._host_session_state(hid))
-		screen[hid] = shell._gvd_has_session(hid) if shell.has_method("_gvd_has_session") else false
-		input[hid] = bool(shell.host_deskflow.get(hid, false))
 		labels[hid] = _shared_host_label(h, hid)
-	# Sin cache de error por equipo: no se inventa uno (el modelo soporta
-	# "errors" para cuando exista una fuente real).
 	var running = shell._service_running("Deskflow") if shell.has_method("_service_running") else false
-	return SHARED_BLOCK.from_cache(host_session, screen, input, {}, running, labels)
+	var sessions = []
+	for hid in host_session.keys():
+		var hsid = String(hid)
+		var dir = String(shell._direction_for(hsid)) if shell.has_method("_direction_for") else ""
+		if dir == "":
+			continue  # sin lado confirmado no hay dónde dibujarlo
+		var agg = String(host_session[hid])
+		var name = String(labels.get(hid, hid))
+		var screen = shell._gvd_has_session(hsid) if shell.has_method("_gvd_has_session") else false
+		var input = bool(shell.host_deskflow.get(hsid, false))
+		var input_on = input and (bool(running) or agg != "idle")
+		if screen:
+			sessions.append({"host": hsid, "peer_name": name, "type": "screen",
+				"side": dir, "state": ("starting" if agg == "starting" else "active")})
+		if input_on:
+			sessions.append({"host": hsid, "peer_name": name, "type": "input",
+				"side": dir, "state": ("active" if bool(running) else "starting")})
+		if not screen and not input_on and agg == "starting":
+			sessions.append({"host": hsid, "peer_name": name, "type": "screen",
+				"side": dir, "state": "starting"})
+	var remote = shell.remote_shares if shell.get("remote_shares") != null else []
+	var windows = shell._share_windows() if shell.has_method("_share_windows") else []
+	return SHARED_BLOCK.diagram(sessions, remote, windows)
 
 
 # Nombre visible del equipo: el que ya resuelve el Vecindario (nunca el id opaco
@@ -685,128 +1467,253 @@ func _shared_at(pos):
 	return SHARED_BLOCK.hit(pos, shared_layout)
 
 
-# Acción primaria del bloque (clic izquierdo): ver el detalle en el Vecindario.
-func _shared_primary(block):
-	if block != null:
-		_open_shared_details(block)
-
-
-# Menú contextual (clic derecho): "Detener" / "Ver detalles".
-func _shared_action(block, action_id):
-	match String(action_id):
-		"stop":
-			_stop_shared(block)
-		"details":
-			_open_shared_details(block)
-
-
-# Corta la sesión delegando en el ciclo de vida existente del shell; no crea uno
-# paralelo. El bloque desaparece solo en el próximo snapshot cacheado.
-func _stop_shared(block):
-	if block == null:
-		return
-	var hid = String(block.host)
-	match String(block.type):
-		"screen":
-			if shell.has_method("_stop_gvd_session"):
-				shell._stop_gvd_session(hid)
-		"input":
-			shell.host_deskflow[hid] = false
-			if shell.has_method("_service_running") and shell._service_running("Deskflow") \
-					and shell.has_method("_toggle_service_by_name"):
-				shell._toggle_service_by_name("Deskflow")
-	shell.request_redraw()
-
-
-# "Ver detalles": abre el Vecindario con el equipo seleccionado.
-func _open_shared_details(block):
-	if block == null:
+# Acción primaria del bloque (clic izquierdo): abre la vista Grupo.
+func _shared_primary(_block):
+	if shell == null:
 		return
 	set_visible(false)
-	if shell.has_method("_go_neighborhood"):
-		shell._go_neighborhood()
-	if shell.neighborhood_ui != null:
-		shell.neighborhood_ui.selected_host = String(block.host)
+	if shell.has_method("_go_group"):
+		shell._go_group()
 	shell.request_redraw()
 
 
-# Dibuja los bloques a la izquierda de los applets, sin pisarlos: `start_x` es el
-# fin del dock de pines y `limit_x` donde empiezan los applets. Devuelve el x final.
+# Acción de una fila del menú del diagrama (clic derecho). Reusa los ciclos de vida
+# existentes del shell; nunca crea uno paralelo.
+func _shared_action(_diagram, action_id):
+	var a = String(action_id)
+	if a == "open_group":
+		_shared_primary(null)
+		return
+	if a.begins_with("stop:"):
+		var rest = a.substr(5)
+		var sep = rest.find(":")
+		if sep > 0:
+			_stop_shared_side(rest.substr(0, sep), rest.substr(sep + 1))
+		return
+	if a.begins_with("win_show:"):
+		if shell != null and shell.has_method("_focus_tile"):
+			shell._focus_tile(int(a.substr(9)))
+		return
+	if a.begins_with("win_max:"):
+		if shell != null and shell.has_method("_toggle_maximize_window"):
+			shell._toggle_maximize_window(int(a.substr(8)))
+		return
+	if a.begins_with("win_close:"):
+		if shell != null and shell.has_method("_close_window_id"):
+			shell._close_window_id(int(a.substr(10)))
+
+
+# Corta un lado compartido: si es local, detiene la sesión de este equipo; si es un
+# aviso remoto, le pide al otro que detenga la suya (share_stop) y quita el aviso.
+func _stop_shared_side(type, key):
+	if shell == null:
+		return
+	var t = String(type)
+	var k = String(key)
+	var remote = false
+	for e in shell.remote_shares:
+		if typeof(e) == TYPE_DICTIONARY and String(e.get("host", "")) == k \
+				and String(e.get("type", "")) == t:
+			remote = true
+			break
+	if remote:
+		if shell.has_method("_peer_endpoint_for") and shell.has_method("_peer_call"):
+			var ep = shell._peer_endpoint_for(k)
+			if typeof(ep) == TYPE_DICTIONARY and bool(ep.get("ok", false)):
+				shell._peer_call(String(ep.get("peer", "")), k, "share_stop", {"type": t})
+		if shell.has_method("_peer_share_notify"):
+			shell._peer_share_notify(k, {"type": t, "state": "stopped"})
+	elif t == "screen":
+		if shell.has_method("_stop_gvd_screen"):
+			shell._stop_gvd_screen(k)
+	elif t == "input":
+		shell.host_deskflow[k] = false
+		var dkey = "deskflow:" + k
+		if shell.has_method("_has_tracked") and shell._has_tracked(dkey) \
+				and shell.has_method("_run_deskflow_server"):
+			# Parada existente del servidor por host (también avisa al otro equipo).
+			shell._run_deskflow_server(k, {})
+		elif shell.has_method("_service_running") and shell._service_running("Deskflow") \
+				and shell.has_method("_toggle_service_by_name"):
+			shell._toggle_service_by_name("Deskflow")
+	shell.request_redraw()
+
+
+# Dibuja UN bloque "Compartiendo" (mini-diagrama) a la izquierda de los applets,
+# sin pisarlos: `start_x` es el fin del dock de pines y `limit_x` donde empiezan los
+# applets. Desaparece si no hay nada compartido. Devuelve el x final.
 func _draw_shared(ui, start_x, limit_x, side, mouse):
 	shared_layout = []
 	shared_drawn = false
 	shared_menu_open = false
-	var blocks = _shared_snapshot()
+	var diagram = _shared_snapshot()
 	var cx = start_x
-	for b in blocks:
-		if cx + side > limit_x - PAD:
-			break
-		var id = String(b.id)
-		var tile = _tile(ui, Vector2(cx, 0.0), side, "shared_" + id, NX_FACE, side)
+	if not diagram.empty() and cx + side <= limit_x - PAD:
+		var tile = _tile(ui, Vector2(cx, 0.0), side, "shared_sharing", NX_FACE, side)
 		var rect = tile.rect
-		shared_layout.append({"id": id, "x": rect.position.x, "y": rect.position.y,
-			"w": rect.size.x, "h": rect.size.y, "block": b})
-		_draw_shared_face(ui, Vector2(cx, 0.0), rect, b, side)
-		if rect.has_point(mouse):
-			ui.begin_tooltip()
-			ui.text(String(b.title))
-			ui.text_disabled("estado: " + String(b.state_text))
-			if String(b.reason) != "":
-				ui.text(String(b.reason))
-			ui.end_tooltip()
+		var hovered = ui.is_item_hovered()
+		shared_layout.append({"id": "sharing", "x": rect.position.x, "y": rect.position.y,
+			"w": rect.size.x, "h": rect.size.y, "block": diagram})
+		_draw_shared_face(ui, Vector2(cx, 0.0), rect, diagram, side)
+		var tip = String(diagram.get("tooltip", ""))
+		if hovered and tip != "":
+			ui.set_tooltip(tip)
 		cx += side + PAD
 	shared_drawn = true
 	if shared_menu_want != "":
 		shared_menu_id = shared_menu_want
 		shared_menu_want = ""
 		ui.open_popup("##shared_menu")
-	if shared_menu_id != "" and SHARED_BLOCK.block_by_id(blocks, shared_menu_id) == null:
+	if shared_menu_id != "" and diagram.empty():
 		shared_menu_id = ""
 	if shared_menu_id != "":
 		MENU_STYLE.begin(ui)
 		if ui.begin_popup("##shared_menu"):
 			shared_menu_open = true
-			shared_menu_block = SHARED_BLOCK.block_by_id(blocks, shared_menu_id)
-			MENU_STYLE.chrome(ui, "Compartido")
-			if shared_menu_block != null:
-				ui.text_disabled(String(shared_menu_block.title))
-				for it in SHARED_BLOCK.menu(shared_menu_block):
-					if MENU_STYLE.item(ui, String(it.label)):
-						_shared_action(shared_menu_block, String(it.id))
+			shared_menu_block = diagram
+			MENU_STYLE.chrome(ui, "Compartiendo")
+			for it in diagram.get("menu", []):
+				if typeof(it) != TYPE_DICTIONARY:
+					continue
+				if String(it.get("kind", "")) == "separator":
+					ui.separator()
+					continue
+				if MENU_STYLE.item(ui, String(it.get("label", ""))):
+					_shared_action(diagram, String(it.get("id", "")))
 			ui.end_popup()
 		MENU_STYLE.end(ui)
 	return cx
 
 
-# Cara del bloque: ícono del equipo arriba, insignia del tipo abajo-izquierda,
-# estado textual + barra. El estado se distingue por contorno/relleno/color y
-# texto, nunca sólo por color.
-func _draw_shared_face(ui, pos, rect, b, side):
-	var type = String(b.type)
-	var state = String(b.state)
-	var line = Color(0.45, 0.80, 1.0, 1.0)
-	if state == "starting":
-		line = NX_SEL
-	elif state == "error":
-		line = Color(0.95, 0.55, 0.30, 1.0)
-	var icon = shell._sugar_icon_for("Pantalla") if shell != null else null
-	var s = min(side - 30.0, 40.0)
+# Cara del bloque: cuadro central = esta pantalla; en cada lado N/S/E/O una barra
+# llena (pantalla extendida) o una flecha (teclado y mouse), con color por estado
+# (conectando atenuado/pulso, activo acento, error rojo) e inicial del equipo.
+func _draw_shared_face(ui, pos, rect, diagram, side):
 	var bw = _bevel_w(ui)
-	if icon != null:
-		ui.set_cursor_pos(pos + Vector2((side - s) * 0.5, bw + 3.0))
-		ui.image(icon, Vector2(s, s))
-	var badge = Vector2(max(14.0, side * 0.24), max(14.0, side * 0.24))
-	var badge_pos = pos + Vector2(bw + 3.0, side - badge.y - 6.0)
-	ui.imgui_draw_rect_filled(Rect2(badge_pos, badge), Color(0.10, 0.11, 0.14, 1.0), 0.0)
-	_draw_shared_glyph(ui, Rect2(badge_pos + Vector2(2.0, 2.0), badge - Vector2(4.0, 4.0)), type, line)
-	# Texto de estado corto (el completo va en el tooltip): nunca pisa al vecino.
-	var tag = String(b.state_text)
-	if tag.length() > 6:
-		tag = tag.substr(0, 6)
-	ui.set_cursor_pos(pos + Vector2(badge_pos.x + badge.x + 4.0, side - badge.y - 3.0))
-	ui.text_colored(line, tag)
-	ui.imgui_draw_rect_filled(Rect2(rect.position + Vector2(4.0, side - SHARED_W - 1.0),
-		Vector2(side - 8.0, SHARED_W)), line, 0.0)
+	var u = float(side)
+	var cx = pos.x + u * 0.5
+	var cy = pos.y + u * 0.5
+	var center = u * 0.34
+	var crect = Rect2(cx - center * 0.5, cy - center * 0.5, center, center)
+	ui.imgui_draw_rect_filled(crect, NX_BG, 0.0)
+	var e = max(1.0, bw * 0.5)
+	ui.imgui_draw_rect_filled(Rect2(crect.position, Vector2(crect.size.x, e)), NX_LIGHT, 0.0)
+	ui.imgui_draw_rect_filled(Rect2(crect.position, Vector2(e, crect.size.y)), NX_LIGHT, 0.0)
+	ui.imgui_draw_rect_filled(Rect2(Vector2(crect.position.x, crect.end.y - e),
+		Vector2(crect.size.x, e)), NX_DARK, 0.0)
+	ui.imgui_draw_rect_filled(Rect2(Vector2(crect.end.x - e, crect.position.y),
+		Vector2(e, crect.size.y)), NX_DARK, 0.0)
+	for name in SHARED_BLOCK.DIAGRAM_SIDES:
+		var list = diagram.sides.get(name, [])
+		if typeof(list) != TYPE_ARRAY or list.empty():
+			continue
+		_draw_shared_side(ui, rect, String(name), list, u)
+
+
+# Color por estado: activo = acento, conectando = acento atenuado con pulso, error
+# = rojo. El estado también se distingue por la forma (barra/flecha) y el tooltip.
+func _shared_state_color(state):
+	var accent = shell.accent if shell != null else NX_CUR
+	match String(state):
+		"error":
+			return Color(0.95, 0.42, 0.34, 1.0)
+		"starting":
+			var pulse = 0.35 + 0.35 * (0.5 + 0.5 * sin(float(OS.get_ticks_msec()) * 0.006))
+			return Color(accent.r, accent.g, accent.b, pulse)
+	return accent
+
+
+# Un lado del diagrama: una barra (pantalla) o una flecha (teclado y mouse) por
+# cada equipo, con su inicial. Varias entradas en el mismo lado se escalonan.
+func _draw_shared_side(ui, rect, name, entries, u):
+	var bw = _bevel_w(ui)
+	var margin = bw + 3.0
+	var i = 0
+	for e in entries:
+		if typeof(e) != TYPE_DICTIONARY:
+			continue
+		var col = _shared_state_color(String(e.get("state", "active")))
+		var r = _shared_side_rect(rect, name, float(i) * (u * 0.17), u, margin)
+		if String(e.get("type", "screen")) == "input":
+			_draw_shared_arrow(ui, r, name, col)
+		else:
+			ui.imgui_draw_rect_filled(r, col, 0.0)
+		var ini = String(e.get("initial", ""))
+		if ini != "":
+			var tp = _shared_initial_pos(rect, name, r, u)
+			ui.set_cursor_pos(tp)
+			ui.text_colored(NX_TEXT, ini)
+		i += 1
+
+
+# Rectángulo de la barra/flecha de un lado (N/S horizontales; E/O verticales).
+func _shared_side_rect(rect, name, off, u, margin):
+	var thick = max(5.0, u * 0.15)
+	var long = u * 0.46
+	match name:
+		"north":
+			return Rect2(rect.position.x + (u - long) * 0.5 + off, rect.position.y + margin, long, thick)
+		"south":
+			return Rect2(rect.position.x + (u - long) * 0.5 + off, rect.end.y - margin - thick, long, thick)
+		"east":
+			return Rect2(rect.end.x - margin - thick, rect.position.y + (u - long) * 0.5 + off, thick, long)
+		"west":
+			return Rect2(rect.position.x + margin, rect.position.y + (u - long) * 0.5 + off, thick, long)
+	return Rect2(rect.position, Vector2(thick, thick))
+
+
+# Posición de la inicial del equipo, justo por dentro del lado (junto al centro).
+func _shared_initial_pos(rect, name, r, u):
+	match name:
+		"north":
+			return Vector2(rect.position.x + u * 0.5 - 3.5, r.end.y + 1.0)
+		"south":
+			return Vector2(rect.position.x + u * 0.5 - 3.5, r.position.y - 15.0)
+		"east":
+			return Vector2(r.position.x - 12.0, rect.position.y + u * 0.5 - 7.0)
+		"west":
+			return Vector2(r.end.x + 3.0, rect.position.y + u * 0.5 - 7.0)
+	return r.position
+
+
+# Flecha blocky a lo largo del lado (N/S horizontal; E/O vertical). Distingue el
+# control compartido de la pantalla extendida (barra llena), nunca sólo por color.
+func _draw_shared_arrow(ui, r, name, col):
+	if name == "north" or name == "south":
+		var sh = max(1.0, r.size.y * 0.34)
+		ui.imgui_draw_rect_filled(Rect2(r.position.x, r.position.y + (r.size.y - sh) * 0.5,
+			r.size.x * 0.62, sh), col, 0.0)
+		_shared_tri(ui, Rect2(r.position.x + r.size.x * 0.58, r.position.y,
+			r.size.x * 0.42, r.size.y), "right", col)
+	else:
+		var sw = max(1.0, r.size.x * 0.34)
+		ui.imgui_draw_rect_filled(Rect2(r.position.x + (r.size.x - sw) * 0.5, r.position.y,
+			sw, r.size.y * 0.62), col, 0.0)
+		_shared_tri(ui, Rect2(r.position.x, r.position.y + r.size.y * 0.58,
+			r.size.x, r.size.y * 0.42), "down", col)
+
+
+# Triángulo blocky de 3 escalones dentro de `area`, apuntando down/up/left/right.
+func _shared_tri(ui, area, dir, col):
+	var steps = 3
+	if dir == "down" or dir == "up":
+		var sh = area.size.y / float(steps)
+		for k in range(steps):
+			var frac = 1.0 - float(k) / float(steps)
+			var ww = area.size.x * frac
+			var yy = area.position.y + float(k) * sh if dir == "down" \
+				else area.position.y + float(steps - 1 - k) * sh
+			ui.imgui_draw_rect_filled(Rect2(area.position.x + (area.size.x - ww) * 0.5,
+				yy, ww, sh + 1.0), col, 0.0)
+	else:
+		var sw = area.size.x / float(steps)
+		for k in range(steps):
+			var frac2 = 1.0 - float(k) / float(steps)
+			var hh = area.size.y * frac2
+			var xx = area.position.x + float(k) * sw if dir == "right" \
+				else area.position.x + float(steps - 1 - k) * sw
+			ui.imgui_draw_rect_filled(Rect2(xx, area.position.y + (area.size.y - hh) * 0.5,
+				sw + 1.0, hh), col, 0.0)
 
 
 # Insignia dibujada a mano del tipo de sesión (monitor / teclado / portapapeles),
@@ -1069,6 +1976,9 @@ func set_visible(v):
 		lifted = null
 		applet_press = null
 		applet_drag = null
+		win_dock_press = false
+		win_dock_drag = false
+		win_scroll_press = false
 		shared_press = ""
 	# Desde _input (tecla tragada, ImGui no la ve) nadie más pide el frame que lo muestra.
 	shell.request_redraw()
@@ -1099,6 +2009,9 @@ func running():
 		order.append(id)
 	var screen = 0
 	for unit in shell._units():
+		# La ranura Escritorio (sin miembros tiled) no cuenta como pantalla numerada.
+		if unit.empty():
+			continue
 		screen += 1
 		for id in unit:
 			if by_id.has(id):
@@ -1125,7 +2038,26 @@ func item_rect(id):
 	return null
 
 
+# Salir del exposé desde el Frame: API pública del shell si existe (t3), si no el
+# toggle interno. Idempotente (no hace nada fuera de exposé).
+func _leave_expose():
+	if not shell.expose:
+		return
+	if shell.has_method("exit_expose"):
+		shell.exit_expose()
+	else:
+		shell._toggle_expose(false)
+
+
+# Lanzar una app desde el Frame sale de exposé: el Frame sigue visible en exposé
+# (barras forzadas), pero la app debe abrirse en el escritorio, no detrás del zoom.
+func _frame_launch(app):
+	_leave_expose()
+	shell._launch_app(app)
+
+
 func switch_to(item, keep_frame := false):
+	_leave_expose()
 	if not keep_frame:
 		set_visible(false)
 	if item.id >= 0 and shell.minimized.has(item.id):
@@ -1208,6 +2140,21 @@ func _input(event):
 			applet_drag = applet_press
 		if applet_drag != null:
 			shell.request_redraw()
+		# Arrastre horizontal sobre el tramo del DockApp de ventanas (modo scroll).
+		if mouse_down and win_scroll_press:
+			var szone = _zone_at(mouse_pos)
+			if szone != "":
+				var spitch = float(bar_cell.get(szone, 1.0))
+				var splan = window_plan(running().size(), window_span.get(szone, 0), -1, window_scroll.get(szone, 0.0))
+				var sdelta = (win_scroll_from - mouse_pos.x) / max(1.0, spitch) * max(1, splan.per_cell)
+				window_scroll[szone] = clamp(win_scroll_start + sdelta, 0.0, float(splan.scroll_max))
+			shell.request_redraw()
+		# Arrastre del DockApp de ventanas vacío (bloque-clip): reordena su slot.
+		if mouse_down and win_dock_press and not win_dock_drag \
+				and mouse_pos.distance_to(win_dock_from) > DRAG_PX:
+			win_dock_drag = true
+		if win_dock_drag:
+			shell.request_redraw()
 		if mouse_down and dragging == null and drag_candidate != null \
 				and mouse_pos.distance_to(drag_from) > DRAG_PX:
 			dragging = drag_candidate
@@ -1230,8 +2177,19 @@ func _input(event):
 				get_tree().set_input_as_handled()
 				return
 			if super_press != null:
-				shell._pan_by((-1.0 if event.button_index == BUTTON_WHEEL_UP else 1.0))
+				# En el Hogar o dentro del zoom (Grupo/Vecindario) la rueda VERTICAL
+				# aleja/acerca un nivel Sugar (el ícono central se achica/agranda).
+				# Fuera de ahí el paneo de la franja sigue igual.
+				if shell.zoom_level > 0 or shell._at_home():
+					shell._zoom_step(1 if event.button_index == BUTTON_WHEEL_UP else -1)
+				else:
+					shell._pan_by((-1.0 if event.button_index == BUTTON_WHEEL_UP else 1.0))
 				shell.request_redraw()
+				get_tree().set_input_as_handled()
+				return
+			# Rueda sobre el tramo del DockApp de ventanas: scroll horizontal de sus
+			# teselas (modo scroll); no cambia el foco de pantalla.
+			if _window_scroll_at(mouse_pos, -1 if event.button_index == BUTTON_WHEEL_UP else 1):
 				get_tree().set_input_as_handled()
 				return
 			if (visible or shell.current_activity == null) and mouse_pos.y <= _vh():
@@ -1273,13 +2231,27 @@ func _input(event):
 					app_grab = mouse_pos - hit_tile.rect.position
 					app_from = mouse_pos
 					app_drag = null
-				# Super+arrastre sobre una ventana: la mueve al Frame (reordenar/tilear).
-				if super_press != null and mouse_pos.y > _vh() and shell.focused_tile >= 0:
-					win_drag = {"id": shell.focused_tile}
-					shell.window_dragging = true
-					set_visible(true)
-					get_tree().set_input_as_handled()
-					return
+				# El Frame recibe _input antes que View._gui_input: iniciar acá evita que el
+				# primer Super+clic llegue al cliente. También en mosaico el gesto mueve la
+				# ventana real; _begin_super_drag la pasa antes a modo flotante.
+				# En FRT/SDL el keydown de Super no siempre llega antes que el botón:
+				# puede existir sólo como `event.meta`. Usar el detector del WM evita
+				# dejar vivo `app_press` y que ImGui levante su label en vez de mover
+				# la ventana con su tesela/wmIcon.
+				if shell._super_held(event) and shell.focused_tile >= 0:
+					if shell._begin_super_drag(mouse_pos, event.button_index):
+						# Super manda sobre cualquier widget del Frame. En particular, un
+						# appicon de la barra superior ya pudo armar `app_press` unas líneas
+						# antes: descartarlo evita que el motion siguiente levante su label
+						# mientras el WM mueve la ventana.
+						app_press = null
+						app_drag = null
+						applet_press = null
+						applet_drag = null
+						drag_candidate = null
+						dragging = null
+						get_tree().set_input_as_handled()
+						return
 				# Clic en un applet: selecciona y arma el posible arrastre de orden.
 				var hit_applet = _applet_at(mouse_pos)
 				if hit_applet != null and not applet_picker_open:
@@ -1301,8 +2273,39 @@ func _input(event):
 					shell.request_redraw()
 					get_tree().set_input_as_handled()
 					return
+				# Bloque del DockApp de ventanas: arma su arrastre si no hay una tesela
+				# de ventana bajo el cursor (así mover el DockApp no roba el clic de una
+				# ventana). Con el clip vacío se puede soltar en cualquier barra.
+				# Asa del tramo de ventanas: arrastra el DockApp aunque haya ventanas.
+				if _window_grip_zone(mouse_pos) != "":
+					win_dock_press = true
+					win_dock_from = mouse_pos
+					win_dock_drag = false
+					shell.request_redraw()
+					get_tree().set_input_as_handled()
+					return
+				var hit_win_dock = _window_dock_hit(mouse_pos)
+				if hit_win_dock != null and _item_at(mouse_pos) == null:
+					# En modo scroll, arrastrar el tramo lo desplaza; si no, mueve el
+					# DockApp de ventanas a otro slot.
+					if _window_scroll_mode(hit_win_dock, mouse_pos):
+						var szone = _zone_at(mouse_pos)
+						win_scroll_press = true
+						win_scroll_from = mouse_pos.x
+						win_scroll_start = window_scroll.get(szone, 0.0)
+						shell.request_redraw()
+						get_tree().set_input_as_handled()
+						return
+					win_dock_press = true
+					win_dock_from = mouse_pos
+					win_dock_drag = false
+					shell.request_redraw()
+					get_tree().set_input_as_handled()
+					return
 				drag_candidate = _item_at(mouse_pos)
 				drag_from = mouse_pos
+				if drag_candidate != null:
+					drag_grab = mouse_pos - Vector2(drag_candidate.x, drag_candidate.y)
 				dragging = null
 			else:
 				# Soltar un bloque "Compartido": primaria (ver detalle) si sigue bajo
@@ -1314,25 +2317,7 @@ func _input(event):
 					if cur_shared != null and String(cur_shared.id) == pressed:
 						_shared_primary(cur_shared.block)
 				if app_drag != null:
-					if is_trash(mouse_pos):
-						# Basurero: desfija la app (no la desinstala).
-						pinned_top.erase(app_drag.id)
-						pinned_dock.erase(app_drag.id)
-						_save_applets()
-					elif shell.is_ring_drop(mouse_pos):
-						# Frame -> Anillo: crea un favorito.
-						shell.add_ring_favorite(app_drag.id)
-					else:
-						var zone = "top" if mouse_pos.y <= _vh() else "dock" if mouse_pos.y >= get_viewport().size.y - _vh() else ""
-						if zone != "":
-							_pin_app(app_drag, zone, mouse_pos.x)
-						elif pinned_top.has(app_drag.id) or pinned_dock.has(app_drag.id):
-							pinned_top.erase(app_drag.id)
-							pinned_dock.erase(app_drag.id)
-							_save_applets()
-						# El bloque se asienta: parte de la posición del cursor.
-						if zone != "":
-							_bar_set("pin_" + app_drag.id, mouse_pos.x)
+					_finish_app_drag()
 					shell.apps.suppress_click = app_drag.id
 					suppress_pinned_click = app_drag.id
 				app_drag = null
@@ -1343,6 +2328,11 @@ func _input(event):
 					_applet_primary(applet_press)
 				applet_press = null
 				applet_drag = null
+				if win_dock_drag:
+					_finish_win_dock_drag()
+				win_dock_press = false
+				win_dock_drag = false
+				win_scroll_press = false
 				if win_drag != null:
 					_finish_win_drag()
 				elif dragging != null:
@@ -1352,6 +2342,16 @@ func _input(event):
 		_super_used()
 		if corner_since > 0:
 			corner_since = -1
+		return
+	# Pinch del touchpad: mismo zoom que Super+rueda vertical en Hogar/vistas de zoom.
+	if event is InputEventMagnifyGesture:
+		if shell.zoom_level > 0 or shell._at_home():
+			if event.factor > 1.0:
+				shell._zoom_step(1)
+			elif event.factor < 1.0:
+				shell._zoom_step(-1)
+			shell.request_redraw()
+			get_tree().set_input_as_handled()
 		return
 	if not (event is InputEventKey):
 		return
@@ -1393,6 +2393,31 @@ func _input(event):
 		shell._close_neighborhood()
 		_gulp(code)
 		return
+	# Zoom Sugar: F1 Vecindario, F2 Grupo, F3 Hogar y F4 vuelve a la última pantalla
+	# con foco (la función que sale del Hogar hacia la pantalla enfocada). Sin
+	# modificadores sólo en las vistas de zoom (en una app F2/F3 son de la app);
+	# con Super funcionan siempre. Alt/Ctrl+F4 siguen siendo de la ventana.
+	var zoom_keys = event.meta or super_press != null or shell.zoom_level > 0 or shell._at_home()
+	if event.pressed and not event.echo and not (event.alt or event.control) and zoom_keys \
+			and code in [KEY_F1, KEY_F2, KEY_F3, KEY_F4]:
+		super_press = null  # Super+Fn es combo: soltar Super no abre el exposé
+		if code == KEY_F1:
+			shell._go_neighborhood()
+			_gulp(code)
+			return
+		elif code == KEY_F2:
+			shell._go_group()
+			_gulp(code)
+			return
+		elif code == KEY_F3:
+			shell._go_home()
+			_gulp(code)
+			return
+		elif code == KEY_F4:
+			shell._set_zoom(0)
+			shell._focus_dir(-1)
+			_gulp(code)
+			return
 	if SUPER_KEYS.has(code) or SUPER_KEYS.has(event.physical_scancode):
 		if event.pressed:
 			super_press = event
@@ -1425,6 +2450,45 @@ func _input(event):
 		if code == KEY_M:
 			super_press = null
 			shell._toggle_minimize_focused()
+			shell.request_redraw()
+			_gulp(code)
+			return
+		if code == KEY_SPACE and event.shift:
+			# Super+Shift+Space: alterna flotante <-> mosaico de la ventana enfocada.
+			super_press = null
+			shell.toggle_window_mode(shell.focused_tile)
+			shell.request_redraw()
+			_gulp(code)
+			return
+		if code == KEY_F:
+			# Super+F: maximizar/restaurar (alias de Alt+F10).
+			super_press = null
+			shell._toggle_maximize_window(shell.focused_tile)
+			shell.request_redraw()
+			_gulp(code)
+			return
+		if code == KEY_UP or code == KEY_DOWN:
+			# Super+↑ maximiza; Super+↓ restaura a flotante.
+			super_press = null
+			if code == KEY_UP:
+				shell._maximize_window(shell.focused_tile)
+			else:
+				shell._restore_maximized_window(shell.focused_tile)
+			shell.request_redraw()
+			_gulp(code)
+			return
+		if code == KEY_H or code == KEY_J or code == KEY_K or code == KEY_L:
+			# Super+H/J/K/L: foco entre pantallas; con Shift, intercambia la pantalla.
+			super_press = null
+			if event.shift:
+				if code == KEY_H:
+					shell._swap_dir(-1)
+				elif code == KEY_L:
+					shell._swap_dir(1)
+			elif code == KEY_H:
+				shell._focus_dir(-1)
+			elif code == KEY_L:
+				shell._focus_dir(1)
 			shell.request_redraw()
 			_gulp(code)
 			return
@@ -1608,59 +2672,103 @@ func _applet_hit(pos):
 	return null
 
 
-# Franja inferior del último dibujo (clic derecho: abre el selector de controles).
+# Franja del Frame (superior o inferior) del último dibujo: clic derecho abre el
+# selector de controles sobre cualquiera de las dos barras.
 func _applet_bar_at(pos):
-	return applets_drawn and applets_bar_rect.size.x > 0.0 and applets_bar_rect.has_point(pos)
+	if not applets_drawn:
+		return false
+	var h = _vh()
+	return pos.y <= h or pos.y >= get_viewport().size.y - h
 
 
-# Índice de inserción entre applets: cuántos (del dibujo anterior, sin el arrastrado)
-# tienen su centro a la izquierda de x. Mismo cálculo para el preview y para soltar.
-func _applet_slot(x, layout = null):
-	var L = layout if layout != null else applets_layout
-	var idx = 0
-	for it in L:
-		if applet_drag != null and it.id == applet_drag:
-			continue
-		if it.x + it.w * 0.5 < x:
-			idx += 1
-	return idx
+# Suelta de un bloque de app (pin del Frame o icono del lanzador): a una barra se
+# fija/mueve a ese slot; al centro del escritorio se estalla —salvo que sea una app o
+# ventana top-level activa, que vuelve a su lugar—.
+func _finish_app_drag():
+	var zone = _zone_at(mouse_pos)
+	if zone != "":
+		_place_pin(app_drag, zone, mouse_pos.x)
+	elif _pin_in_order(app_drag.id):
+		if not _app_active(app_drag):
+			_explode_block("p", app_drag.id)
+	# Un icono del lanzador (no fijado) soltado al centro sólo se descarta.
 
 
+# Suelta de un applet: a una barra se mueve al slot unificado; al centro se estalla.
 func _finish_applet_drag():
 	var id = applet_drag
 	if id == null:
 		return
-	# El slot se calcula con applet_drag aún puesto (así _applet_slot salta su tesela).
-	var slot = _applet_slot(mouse_pos.x)
+	var zone = _zone_at(mouse_pos)
 	applet_drag = null
 	applet_press = null
-	# Basurero: quitar el control (equivale a Delete en el Frame).
-	if is_trash(mouse_pos):
-		_applet_set_visible(id, false)
-		_bar_set("app_" + id, mouse_pos.x)
-		shell.request_redraw()
+	if zone == "":
+		_explode_block("a", id)
 		return
-	# Fuera de la franja inferior, cancelar sin alterar la composición.
-	var h = _vh()
-	var bottom = get_viewport().size.y - h
-	if mouse_pos.y < bottom or mouse_pos.y >= bottom + h:
+	_place_token(zone, _tok_applet(id), mouse_pos.x, _applet_span(id))
+	if not bar_order[zone].has(_tok_applet(id)):
 		shell.request_redraw()
-		return
-	# El bloque se asienta en su lugar: parte de la posición del cursor y anima al slot.
-	_bar_set("app_" + id, mouse_pos.x)
-	applets_visible = _order_with_gap(applets_visible, id, slot)
-	applets_dirty = true
-	_save_applets()
-	shell.request_redraw()
 
 
-# Suelta del arrastre: sobre otra ventana tilea; fuera, la vuelve a pantalla completa.
-# Sobre el basurero, cierra la ventana (equivale a la X del bloque).
+# Suelta del DockApp de ventanas (bloque-clip): se reubica en el slot elegido de la
+# barra donde se suelte (superior o inferior). Soltarlo fuera conserva el layout.
+func _finish_win_dock_drag():
+	win_dock_drag = false
+	win_dock_press = false
+	var zone = _zone_at(mouse_pos)
+	if zone == "":
+		shell.request_redraw()
+		return
+	_move_token(zone, WINDOW_TOKEN, mouse_pos.x)
+
+
+# Reubica un token (pin, applet o el DockApp de ventanas) en la celda libre más
+# cercana a `x` de la barra `zone`, persiste y anima. Helper común de los finales de
+# arrastre: nadie más se mueve y nunca se superpone.
+func _move_token(zone, tok, x):
+	if not _place_token(zone, tok, x):
+		shell.request_redraw()
+
+
+# Barra cuyo tramo de ventanas contiene `pos` (o "" si ninguna), del último dibujo.
+func _strip_zone(pos):
+	for zone in ["top", "dock"]:
+		var r = window_region.get(zone)
+		if r != null and int(window_span.get(zone, 0)) > 0 and r.has_point(pos):
+			return zone
+	return ""
+
+
+# Teselas de ventana del strip (orden de items_layout) para decidir el drop: rects,
+# ids y el escritorio/unidad de cada una (lo resuelve el shell).
+func _strip_arrays():
+	var rects = []
+	var units = []
+	var ids = []
+	for it in items_layout:
+		if it.id < 0:
+			continue
+		rects.append(Rect2(it.x, it.y, it.w, it.h))
+		ids.append(it.id)
+		units.append(shell.frame_strip_unit(it.id))
+	return {"rects": rects, "units": units, "ids": ids}
+
+
+# Suelta del arrastre: dentro del strip de ventanas decide por escritorio/unidad
+# (nuevo escritorio en los bordes/extremos, acople o reancla sobre otra tesela); fuera
+# conserva el comportamiento clásico: sobre otra ventana tilea, si no desacopla.
 func _finish_drag():
-	if is_trash(mouse_pos):
-		close(dragging)
-		shell.request_redraw()
-		return
+	if dragging != null and _strip_zone(mouse_pos) != "":
+		var sa = _strip_arrays()
+		var t = strip_drop_target(sa.rects, sa.units, mouse_pos.x)
+		if t != null:
+			if t.kind == "new":
+				shell.frame_strip_new(dragging.id, strip_unit_at(sa.units, int(t.index)),
+					int(t.index) == 0)
+			elif t.kind == "onto" and int(t.tile) < sa.ids.size():
+				shell.frame_strip_onto(dragging.id, int(sa.ids[int(t.tile)]), String(t.side))
+			shell.request_redraw()
+			return
 	var target = _item_at(mouse_pos)
 	if target != null and target.id >= 0 and not target.minimized and target.id != dragging.id:
 		shell._tile_drop(dragging.id, target.id)
@@ -1670,16 +2778,12 @@ func _finish_drag():
 
 
 # Super+arrastre: si se suelta sobre la barra del Frame, mueve la ventana a ese lugar
-# (reordena la franja); sobre el basurero la cierra; si no, cancela.
+# (reordena la franja); si no, cancela.
 func _finish_win_drag():
 	var dragged = win_drag.id
 	win_drag = null
 	shell.window_dragging = false
-	if is_trash(mouse_pos):
-		var item = _item_by_id(dragged)
-		if item != null:
-			close(item)
-	elif mouse_pos.y <= _vh():
+	if mouse_pos.y <= _vh():
 		var t = _frame_insert_target(mouse_pos.x)
 		if t != null:
 			shell._move_window_to(dragged, t.id, t.before)
@@ -1723,12 +2827,10 @@ func _arrow_dir(code):
 # Borde inferior retráctil: bloques cuadrados U x U de applets y la celda del pin.
 # `off` es el mismo deslizamiento de la barra superior; el alto de la barra sale de
 # la rejilla.
-func _draw_applets(ui, vp, off, mouse):
-	var prev = applets_layout
-	applets_layout = []
+func _draw_applets(ui, vp, off, mouse, grid):
 	applet_picker_open = false
-	var side = shell.frame_bar_h(vp)
-	var by = vp.y - side - off
+	var side = float(grid.side)
+	var by = round(vp.y - side - off)
 	applets_bar_rect = Rect2(0.0, by, vp.x, side)
 	ui.push_style_var_vec2(ui.STYLE_VAR_WINDOW_PADDING, Vector2.ZERO)
 	ui.set_next_window_pos(Vector2(0.0, by), true)
@@ -1742,44 +2844,21 @@ func _draw_applets(ui, vp, off, mouse):
 	ui.imgui_draw_rect_filled(Rect2(Vector2(0.0, by), Vector2(vp.x, side)), NX_BG, 0.0)
 	if app_drag != null and mouse.y >= by:
 		ui.imgui_draw_rect_filled(Rect2(Vector2(0.0, by), Vector2(vp.x, 3.0)), NX_SEL, 0.0)
-	# Esquina izquierda reservada (vacía); el dock arranca después.
-	var dock_x = _draw_corner_block(ui, PAD, 0.0, side, "bottom_left")
-	var dock_end = _draw_pinned(ui, pinned_dock, dock_x, side, "dock")
-	var n = applets_visible.size()
-	# La franja reserva sólo la celda del pin (extremo derecho, sin PAD de cola).
-	var total_w = side
-	for id in applets_visible:
-		total_w += _applet_width(id, side) + PAD
-	var x = max(PAD, vp.x - PAD - total_w)
-	# K10b: sesiones activas a la izquierda de los applets, sin taparlos.
-	_draw_shared(ui, dock_end, x, side, mouse)
+	# Esquina izquierda reservada (vacía); el dock arranca después. Pines y applets
+	# comparten los slots de la barra (orden unificado); la celda del pin va al final.
+	var dock_x = bar_base_origin("dock", grid)
+	var dock_end = _draw_bar_blocks(ui, "dock", dock_x, 0.0, grid, mouse)
+	var pin_x = float(grid.margin) + float(grid.n - 1) * float(grid.pitch)
+	# K10b: sesiones activas entre los bloques y la celda del pin, sin taparlos.
+	_draw_shared(ui, dock_end, pin_x, side, mouse)
 	var y = 0.0
-	var n_items = running().size()
-	var now = OS.get_ticks_msec()
-	# Preview: con un applet arrastrado, el resto se corre dejando el hueco del destino.
-	var order = applets_visible
-	if applet_drag != null:
-		order = _order_with_gap(applets_visible, applet_drag, _applet_slot(mouse.x, prev))
-	var ax = x
-	for i in range(n):
-		var id = order[i]
-		var w = _applet_width(id, side)
-		var pos = Vector2(_bar_x("app_" + id, ax, now), y)
-		ui.set_cursor_pos(pos)
-		var o = ui.get_cursor_screen_pos()
-		applets_layout.append({"id": id, "x": o.x, "y": o.y, "w": w, "h": side})
-		if id == applet_drag:
-			ax += w + PAD
-			continue
-		_draw_applet(ui, id, pos, o, w, side, visible and (n_items + i) == sel and applet_drag == null, mouse)
-		ax += w + PAD
 	# El selector de controles del Frame (fijar/quitar applets y barras) se abre con
 	# clic derecho sobre un applet o sobre la franja; ya no hay celda "+".
 	if applet_picker_want:
 		applet_picker_want = false
 		ui.open_popup("##applets_add")
 	# Pin de la barra inferior (K19): fija la franja o vuelve al autohide.
-	if _draw_pin_toggle(ui, Vector2(ax, y), side, pin_bottom_bar, "pin_bottom"):
+	if _draw_pin_toggle(ui, Vector2(pin_x, y), side, pin_bottom_bar, "pin_bottom"):
 		toggle_pin("bottom")
 		entered = true
 	MENU_STYLE.begin(ui)
@@ -1795,6 +2874,13 @@ func _draw_applets(ui, vp, off, mouse):
 		for a in APPLETS:
 			if MENU_STYLE.item(ui, a.name, "", applets_visible.has(a.id)):
 				_applet_set_visible(a.id, not applets_visible.has(a.id))
+		# Autocierre: si el puntero sale del popup (con margen de media celda) hacia
+		# el escritorio u otra ventana, se cierra. NO se cierra mientras está sobre
+		# el popup o sobre la barra que lo abrió.
+		var pop = Rect2(ui.get_window_pos(), ui.get_window_size())
+		var margin = side * 0.5
+		if not (pop.grow(margin).has_point(mouse) or applets_bar_rect.grow(margin).has_point(mouse)):
+			ui.close_current_popup()
 		ui.end_popup()
 	MENU_STYLE.end(ui)
 	if applet_action_want != "":
@@ -1833,32 +2919,11 @@ func _draw_applets(ui, vp, off, mouse):
 					shell.request_redraw()
 		ui.end_popup()
 	MENU_STYLE.end(ui)
-	# K13a: menú del bloque "Ventanas" (clic derecho). Clic izquierdo alterna.
-	MENU_STYLE.begin(ui)
-	if ui.begin_popup("##applet_ventanas"):
-		MENU_STYLE.chrome(ui, "Ventanas")
-		if MENU_STYLE.item(ui, "Ventanas flotantes", "", WM_MODE.is_floating(window_mode)):
-			set_window_mode("floating")
-		if MENU_STYLE.item(ui, "Ventanas en mosaico", "", WM_MODE.is_tiled(window_mode)):
-			set_window_mode("tiled")
-		ui.separator()
-		if MENU_STYLE.item(ui, "Acomodar ventanas"):
-			if shell != null and shell.has_method("arrange_windows"):
-				shell.arrange_windows()
-		ui.end_popup()
-	MENU_STYLE.end(ui)
-	# Hueco del applet arrastrado, resaltado (Esc cancela; el fantasma va al cursor).
-	if applet_drag != null:
-		var gi = order.find(applet_drag)
-		if gi >= 0:
-			var gx = x
-			for j in range(gi):
-				gx += _applet_width(order[j], side) + PAD
-			var gw = _applet_width(applet_drag, side)
-			ui.set_cursor_pos(Vector2(gx, y))
-			var gscr = ui.get_cursor_screen_pos()
-			ui.imgui_draw_rect_filled(Rect2(gscr, Vector2(gw, side)), Color(1, 1, 1, 0.06), 0.0)
-			ui.imgui_draw_rect_filled(Rect2(gscr + Vector2(0.0, side - 3.0), Vector2(gw, 3.0)), NX_SEL, 0.0)
+	# Las teselas del DockApp de ventanas se dibujan donde esté su token: también
+	# en la barra inferior (antes sólo aparecían en la superior).
+	if bar_order["dock"].has(WINDOW_TOKEN) and not running().empty():
+		_draw_windows(ui, "dock", side, 0.0, by, mouse)
+		_draw_window_grip(ui, "dock", mouse)
 	_draw_inner_shadow(ui, Vector2(0.0, by), vp.x, 1.0)
 	ui.end()
 	ui.pop_style_var()
@@ -1931,21 +2996,6 @@ func _draw_applet(ui, id, pos, scr, w, side, is_sel, mouse, is_ghost = false):
 	if pct >= 0.0:
 		var bar_w = (w - 8.0) * clamp(pct, 0.0, 1.0)
 		ui.imgui_draw_rect_filled(Rect2(rect.position + Vector2(4.0, side - 6.0), Vector2(bar_w, 3.0)), line, 0.0)
-	if mouse.x >= rect.position.x and mouse.x < rect.end.x and mouse.y >= rect.position.y and mouse.y < rect.end.y:
-		ui.begin_tooltip()
-		ui.text(a.name)
-		ui.text_disabled("estado: " + state)
-		if id == "recursos":
-			ui.text(v)
-		if id == "termico":
-			ui.text(v)
-			if sysmon.has_battery:
-				ui.text("Batería: %d%% (%s)" % [int(round(sysmon.battery_pct)),
-					sysmon.battery_status if sysmon.battery_status != "" else "sin estado"])
-			ui.text_disabled("clic: elegir governor")
-		if id == "teclado":
-			ui.text(keyboard.detail)
-		ui.end_tooltip()
 
 
 # Applet de sistema: gráfica de CPU como área desde abajo, con el fondo teñido por
@@ -2121,9 +3171,16 @@ func _draw_outline(ui, rect, color):
 
 # Bloque Inicio: tesela cuadrada con el ícono Sugar de hogar y el título corto abajo.
 # Resalta cuando la vista actual es el Hogar (la ranura extra al final de la fila).
+# Color de acento del shell para el bloque actual/fijado.
+func _cur():
+	if shell != null and "accent" in shell:
+		return Color(shell.accent.r, shell.accent.g, shell.accent.b, 1.0)
+	return NX_CUR
+
+
 func _draw_home_tile(ui, pos, side):
 	var at_home = shell.current_activity == null and not shell.neighborhood_view
-	var b = _tile(ui, pos, side, "go_home", NX_CUR if at_home else NX_FACE)
+	var b = _tile(ui, pos, side, "go_home", _cur() if at_home else NX_FACE)
 	var ts = ui.get_imgui_scale()
 	var pad = TILE_PAD * ts
 	var lines = _title_lines(ui, side, "Inicio") if side >= 76.0 * ts else []
@@ -2150,7 +3207,7 @@ func _draw_home_tile(ui, pos, side):
 # resalta cuando la vista actual es el Vecindario.
 func _draw_neighborhood_tile(ui, pos, side):
 	var active = shell.neighborhood_view
-	var b = _tile(ui, pos, side, "go_neighborhood", NX_CUR if active else NX_FACE)
+	var b = _tile(ui, pos, side, "go_neighborhood", _cur() if active else NX_FACE)
 	var ts = ui.get_imgui_scale()
 	var pad = TILE_PAD * ts
 	var lines = _title_lines(ui, side, "Vecindario") if side >= 76.0 * ts else []
@@ -2208,7 +3265,7 @@ func _draw_wifi_glyph(ui, c, r, col):
 func _draw_window_tile(ui, pos, side, item, current, is_sel, is_drop, mouse):
 	var face = NX_FACE
 	if current:
-		face = NX_CUR
+		face = _cur()
 	elif is_drop:
 		face = NX_SEL
 	elif is_sel:
@@ -2306,6 +3363,242 @@ func _draw_corner_close(ui, r, corner, hot, pressed):
 	ui.imgui_draw_polyline(PoolVector2Array([Vector2(cx + g, cy - g), Vector2(cx - g, cy + g)]), gc, gw, false)
 
 
+# Mini-tesela del DockApp de ventanas (modo mini/scroll): mitad de tamaño, con el
+# ícono, una barra mínima de título/estado y un cuadradito de cerrar arriba a la
+# derecha. Hit-test y click/cerrar funcionan igual que en tamaño normal.
+func _draw_window_mini(ui, pos, side, item, current, is_sel, is_drop, mouse):
+	var face = NX_FACE
+	if current:
+		face = _cur()
+	elif is_drop:
+		face = NX_SEL
+	elif is_sel:
+		face = NX_FACE_SEL
+	elif item.minimized:
+		face = NX_FACE_DIM
+	var b = _tile(ui, pos, side, "wm" + item.key, face)
+	var ts = ui.get_imgui_scale()
+	var bw = _bevel_w(ui)
+	var inner = max(2.0, side - 2.0 * bw)
+	var icon_side = max(8.0, inner - 2.0)
+	var tex = _item_icon(item)
+	if tex != null:
+		ui.set_cursor_pos(pos + Vector2((side - icon_side) * 0.5, bw + 1.0))
+		ui.image(tex, Vector2(icon_side, icon_side))
+	else:
+		var mono = item.name.substr(0, 1).to_upper() if item.name != "" else "?"
+		ui.set_cursor_pos(pos + Vector2((side - 7.0 * ts) * 0.5, bw + 1.0))
+		ui.text_colored(NX_TEXT, mono)
+	# Barra mínima de título/estado: foco, minimizada o pantalla compartida.
+	var bar_h = max(3.0, side * 0.16)
+	var col = _cur() if current else (NX_TEXT_DIM if item.minimized else NX_LIGHT)
+	ui.imgui_draw_rect_filled(Rect2(b.rect.position + Vector2(bw, side - bar_h - bw),
+		Vector2(max(1.0, inner), bar_h)), col, 0.0)
+	var cs = max(8.0, side * 0.30)
+	var close_off = Vector2(side - cs - bw, bw)
+	var over_close = _in_rect(mouse, b.rect.position + close_off, cs)
+	if b.rect.has_point(mouse):
+		_draw_mini(ui, pos + close_off, cs, "x", over_close and mouse_down)
+		if b.clicked and over_close:
+			return {"clicked": false, "close": true}
+	return {"clicked": b.clicked, "close": false}
+
+
+# Dibuja las teselas del DockApp de ventanas dentro de su tramo (`window_span`), en
+# cualquier barra. `off` es el desplazamiento vertical en pantalla de la barra (para
+# que el hit-test de `items_layout` quede en coords absolutas).
+# Asa del tramo de ventanas: franja en su borde izquierdo (con ventanas, las teselas
+# cubren el resto del tramo y se arrastran ellas mismas).
+func _window_grip_rect(zone):
+	var region = window_region.get(zone)
+	if region == null or int(window_span.get(zone, 0)) <= 0:
+		return null
+	var gw = max(6.0, round(region.size.y * 0.14))
+	return Rect2(region.position, Vector2(gw, region.size.y))
+
+
+func _window_grip_zone(pos):
+	if running().empty():
+		return ""
+	for zone in ["top", "dock"]:
+		var r = _window_grip_rect(zone)
+		if r != null and r.has_point(pos):
+			return zone
+	return ""
+
+
+func _draw_window_grip(ui, zone, mouse):
+	var r = _window_grip_rect(zone)
+	if r == null or running().empty():
+		return
+	var region = window_region.get(zone)
+	if not (region.has_point(mouse) or win_dock_press or win_dock_drag):
+		return
+	var hot = r.has_point(mouse) or win_dock_drag
+	ui.imgui_draw_rect_filled(r, Color(NX_BG.r, NX_BG.g, NX_BG.b, 0.92 if hot else 0.75), 0.0)
+	var dot = max(2.0, round(r.size.x * 0.28))
+	var cx = r.position.x + (r.size.x - dot) * 0.5
+	var col = _cur() if hot else Color(1, 1, 1, 0.55)
+	for i in range(5):
+		var cy = r.position.y + r.size.y * (0.3 + 0.1 * i) - dot * 0.5
+		ui.imgui_draw_rect_filled(Rect2(Vector2(cx, cy), Vector2(dot, dot)), col, dot * 0.5)
+
+
+func _draw_windows(ui, zone, side, y, off, mouse):
+	var items = running()
+	var F = int(window_span.get(zone, 0))
+	if F <= 0:
+		return
+	var x0 = window_block_x.get(zone, 0.0)
+	var pitch = float(bar_cell.get(zone, side + PAD))
+	if pitch <= 0.0:
+		pitch = side + PAD
+	var focus_idx = -1
+	for i in range(items.size()):
+		if _is_current(items[i]):
+			focus_idx = i
+	var plan = window_plan(items.size(), F, focus_idx, window_scroll.get(zone, 0.0))
+	if plan.mode == "scroll":
+		window_scroll[zone] = float(plan.visible_range[0])  # auto-scroll: foco visible
+	var rng = plan.visible_range
+	# Objetivo del arrastre/levantado, para resaltarlo al dibujar.
+	var drop_id = -1
+	if dragging != null:
+		var t = _item_at(mouse)
+		if t != null and t.id >= 0 and t.id != dragging.id:
+			drop_id = t.id
+	elif lifted != null:
+		drop_id = lifted.id
+	var sub = side * 0.5
+	var entries = []
+	for vi in range(int(rng[0]), int(rng[1])):
+		var local = vi - int(rng[0])
+		var px = x0
+		var py = y
+		var sz = side
+		if plan.mode == "normal":
+			px = x0 + float(local) * pitch
+		else:
+			var celli = int(local / 4)
+			var slot = local % 4
+			var col = slot % 2
+			var row = int(slot / 2)
+			px = x0 + float(celli) * pitch + float(col) * sub
+			py = y + float(row) * sub
+			sz = sub
+		entries.append({"i": vi, "pos": Vector2(px, py), "sz": sz})
+	# Placa de fusión (sólo modo normal): grupo de ventanas de una misma pantalla.
+	if plan.mode == "normal":
+		var gi = 0
+		while gi < entries.size():
+			var it0 = items[entries[gi].i]
+			if it0.screen > 0:
+				var gj = gi
+				while gj + 1 < entries.size() and items[entries[gj + 1].i].screen == it0.screen:
+					gj += 1
+				if gj > gi:
+					var g0 = entries[gi].pos.x
+					var g1 = entries[gj].pos.x + side
+					ui.imgui_draw_rect_filled(Rect2(Vector2(g0 - 2.0, y - 2.0),
+						Vector2(g1 - g0 + 4.0, side + 4.0)), Color(0.0, 0.0, 0.0, 0.35), 0.0)
+					ui.imgui_draw_rect_filled(Rect2(Vector2(g0, y + side - 3.0),
+						Vector2(g1 - g0, 3.0)), NX_SEL, 0.0)
+				gi = gj + 1
+			else:
+				gi += 1
+	# Drop por escritorio/unidad: destino del arrastre dentro del strip (barra de
+	# inserción o media tesela). Sólo cuando el puntero está sobre el tramo.
+	var strip_t = null
+	if dragging != null and window_region.get(zone, Rect2()).has_point(mouse):
+		var srects = []
+		var sunits = []
+		for e in entries:
+			srects.append(Rect2(e.pos.x, e.pos.y, e.sz, e.sz))
+			sunits.append(shell.frame_strip_unit(items[e.i].id))
+		strip_t = strip_drop_target(srects, sunits, mouse.x)
+	for e in entries:
+		var item = items[e.i]
+		var current = _is_current(item)
+		var is_sel = visible and e.i == sel and dragging == null
+		var is_drop = (item.id >= 0 and item.id == drop_id) \
+			and not (strip_t != null and String(strip_t.kind) == "new")
+		var is_dragged = dragging != null and item.id == dragging.id
+		var res = {"clicked": false, "close": false}
+		if is_dragged:
+			ui.imgui_draw_rect_filled(Rect2(Vector2(e.pos.x, e.pos.y), Vector2(e.sz, e.sz)),
+				Color(1, 1, 1, 0.06), 0.0)
+			ui.imgui_draw_rect_filled(Rect2(Vector2(e.pos.x, e.pos.y + e.sz - 3.0),
+				Vector2(e.sz, 3.0)), NX_SEL, 0.0)
+		elif plan.mode == "normal":
+			res = _draw_window_tile(ui, e.pos, e.sz, item, current, is_sel, is_drop, mouse)
+		else:
+			res = _draw_window_mini(ui, e.pos, e.sz, item, current, is_sel, is_drop, mouse)
+		if res.close:
+			_win_close = item
+		elif res.clicked:
+			# Clic: la enfocada se minimiza; una minimizada se restaura; otra se enfoca.
+			if item.id >= 0 and current and not item.minimized:
+				_win_min = item
+			else:
+				_win_pick = item
+		items_layout.append({"title": item.title, "id": item.id, "current": current,
+			"minimized": item.minimized, "screen": item.screen,
+			"x": e.pos.x, "y": e.pos.y + off, "w": e.sz, "h": e.sz,
+			"min_x": e.pos.x, "close_x": e.pos.x + e.sz, "hit_w": e.sz})
+	_draw_window_scroll_hints(ui, items.size(), plan, Vector2(x0, y + off), float(F) * pitch, side)
+
+
+# Indicadores de scroll en los bordes del tramo cuando hay más ventanas que
+# capacidad: chevron + degradado tenue. La ventana enfocada se mantiene a la vista.
+func _draw_window_scroll_hints(ui, n, plan, origin, width, side):
+	if plan.mode != "scroll" or int(plan.scroll_max) <= 0:
+		return
+	var rng = plan.visible_range
+	if int(rng[0]) > 0:
+		_draw_chevron(ui, Rect2(origin, Vector2(side * 0.5, side)), -1.0)
+	if int(rng[1]) < n:
+		_draw_chevron(ui, Rect2(origin + Vector2(width - side * 0.5, 0.0), Vector2(side * 0.5, side)), 1.0)
+
+
+func _draw_chevron(ui, r, dir):
+	ui.imgui_draw_rect_filled(r, Color(0.0, 0.0, 0.0, 0.38), 0.0)
+	var c = r.position + r.size * 0.5
+	var h = r.size.x * 0.30
+	var w = r.size.x * 0.32
+	ui.imgui_draw_polyline(PoolVector2Array([
+		c + Vector2(dir * w, -h), c + Vector2(-dir * w, 0.0), c + Vector2(dir * w, h)]),
+		NX_TEXT, max(1.5, r.size.x * 0.12))
+
+
+# ¿Un tramo con modo scroll? (rueda/arrastre sobre el tramo desplazan las ventanas).
+func _window_scroll_mode(hit, pos):
+	if not (visible or shell.current_activity == null or pin_top_bar or pin_bottom_bar):
+		return false
+	var zone = _zone_at(pos)
+	if zone == "" or hit == null or not bar_order[zone].has(WINDOW_TOKEN):
+		return false
+	var plan = window_plan(running().size(), window_span.get(zone, 0), -1, window_scroll.get(zone, 0.0))
+	return plan.mode == "scroll"
+
+
+# Desplaza las ventanas del tramo con la rueda. Devuelve true si consumió el evento.
+func _window_scroll_at(pos, dir):
+	if not (visible or shell.current_activity == null or pin_top_bar or pin_bottom_bar):
+		return false
+	var zone = _zone_at(pos)
+	if zone == "" or not bar_order[zone].has(WINDOW_TOKEN):
+		return false
+	if not window_region.get(zone, Rect2()).has_point(pos):
+		return false
+	var plan = window_plan(running().size(), window_span.get(zone, 0), -1, window_scroll.get(zone, 0.0))
+	if plan.scroll_max <= 0:
+		return false
+	var step = int(max(1, plan.per_cell))
+	window_scroll[zone] = clamp(window_scroll.get(zone, 0.0) + float(dir * step), 0.0, float(plan.scroll_max))
+	shell.request_redraw()
+	return true
+
+
 # Llamado en cada imgui_frame del shell, después de la vista.
 func draw(ui):
 	# Otra vez tras dibujar la vista: lo que cambió en este frame (un clic que abre
@@ -2320,7 +3613,6 @@ func draw(ui):
 		applets_drawn = false
 		shared_layout = []
 		shared_drawn = false
-		trash_layout = null
 		return
 	var home = shell.current_activity == null
 	var mouse = ui.get_mouse_pos()
@@ -2367,14 +3659,13 @@ func draw(ui):
 			show_until = 0
 
 	items_layout = []
-	# Guarda el layout de pines anterior para calcular el destino del arrastre
-	# (el de este frame se rearma durante el dibujo).
-	pinned_prev = pinned_layout.duplicate()
-	pinned_layout = []
+	applets_layout = []
+	applets_drawn = false
 	# Autohide sincronizado (una señal `visible`), con pin por barra: una barra
 	# fijada queda siempre a la vista; una con autohide sigue a `visible`/Home.
-	var want_top = home or visible or pin_top_bar
-	var want_bottom = home or visible or pin_bottom_bar
+	# En exposé las barras se fuerzan visibles: son el borde del escritorio.
+	var want_top = home or visible or pin_top_bar or shell.expose
+	var want_bottom = home or visible or pin_bottom_bar or shell.expose
 	var off_top = _slide(want_top, now, "top")
 	var off_bottom = _slide(want_bottom, now, "bottom")
 	slide_instant = false
@@ -2387,23 +3678,31 @@ func draw(ui):
 		applets_drawn = false
 		shared_layout = []
 		shared_drawn = false
-		trash_layout = null
+		_draw_explosions(ui)
 		return
 	if not top_drawn:
 		# Barra superior fuera: no hay layout de ventanas en pantalla.
 		items_layout = []
-		trash_layout = null
 	if not bottom_drawn:
 		applets_layout = []
 		applets_drawn = false
 		shared_layout = []
 		shared_drawn = false
 
-	# Teselas cuadradas de lado U (alto de la barra).
-	var side = bh
+	# Grilla regular: MISMA `n`/`pitch` para las dos barras. Cada bloque es cuadrado
+	# de lado `side` (≈ alto de barra) y la última celda alineada al borde derecho.
+	var grid = bar_grid(vp.x, bh, PAD)
+	bar_grid_state["top"] = grid
+	bar_grid_state["dock"] = grid
+	var side = float(grid.side)
+	var pitch = float(grid.pitch)
+	var margin = float(grid.margin)
 	var chosen = null
 	var to_close = null
 	var to_minimize = null
+	_win_pick = null
+	_win_close = null
+	_win_min = null
 	if top_drawn:
 		ui.push_style_var_vec2(ui.STYLE_VAR_WINDOW_PADDING, Vector2.ZERO)
 		ui.set_next_window_pos(Vector2(0.0, off_top), true)
@@ -2415,19 +3714,16 @@ func draw(ui):
 			if app_drag != null and mouse.y <= bh:
 				ui.imgui_draw_rect_filled(Rect2(Vector2(0.0, off_top + bh - 3.0), Vector2(vp.x, 3.0)), NX_SEL, 0.0)
 			var y = (bh - side) * 0.5
-			var x = PAD
-			# Esquina izquierda reservada: bloque vacío, no se usa para apps.
-			x = _draw_corner_block(ui, x, y, side, "top_left")
-			# Orden: vecindario, luego inicio, luego las apps abiertas.
-			if _draw_neighborhood_tile(ui, Vector2(x, y), side):
+			# Celdas fijas: 0 esquina (vacía), 1 Vecindario, 2 Inicio. Los bloques de
+			# contenido arrancan en la celda 3 (`bar_base_origin`).
+			if _draw_neighborhood_tile(ui, Vector2(margin + pitch, y), side):
 				set_visible(false)
 				shell._go_neighborhood()
-			x += side + PAD
-			if _draw_home_tile(ui, Vector2(x, y), side):
+			if _draw_home_tile(ui, Vector2(margin + 2.0 * pitch, y), side):
 				set_visible(false)
 				shell._go_home()
-			x += side + PAD
-			x = _draw_pinned(ui, pinned_top, x, side, "top")
+			_draw_bar_blocks(ui, "top", bar_base_origin("top", grid), y, grid, mouse)
+			applets_drawn = true
 
 			var items = running()
 			# La selección recorre las ventanas y después los applets.
@@ -2439,64 +3735,15 @@ func draw(ui):
 						sel = i
 				if sel < 0:
 					sel = 0
-			# Objetivo del arrastre/levantado, para resaltarlo al dibujar.
-			var drop_id = -1
-			if dragging != null:
-				var t = _item_at(mouse_pos)
-				if t != null and t.id >= 0 and t.id != dragging.id:
-					drop_id = t.id
-			elif lifted != null:
-				drop_id = lifted.id
-
-			var index = 0
-			for item in items:
-				var current = _is_current(item)
-				var is_sel = visible and index == sel and dragging == null
-				var is_drop = (item.id >= 0 and item.id == drop_id)
-				var res = _draw_window_tile(ui, Vector2(x, y), side, item, current, is_sel, is_drop, mouse)
-				if res.close:
-					to_close = item
-				elif res.clicked:
-					# Clic en el bloque: la ventana enfocada se minimiza; una
-					# minimizada se restaura; cualquier otra sólo se enfoca.
-					if item.id >= 0 and current and not item.minimized:
-						to_minimize = item
-					else:
-						chosen = item
-				items_layout.append({"title": item.title, "id": item.id, "current": current,
-					"minimized": item.minimized, "screen": item.screen, "x": x, "y": y + off_top,
-					"w": side, "h": side, "min_x": x, "close_x": x + side, "hit_w": side})
-				x += side + PAD
-				index += 1
-
-			# Chip flotante mientras se arrastra, se levanta o se mueve una ventana con Super.
-			var ghost = dragging if dragging != null else lifted
-			var ghost_title = ghost.title if ghost != null else ""
-			if win_drag != null:
-				for it in items:
-					if it.id == win_drag.id:
-						ghost_title = it.title
-						break
-			if ghost_title != "":
-				# Mismo anclaje que el bloque: chip de arrastre pegado al cursor.
-				ui.set_next_window_pos(mouse_pos, true)
-				ui.begin_tooltip()
-				ui.text(ghost_title)
-				ui.end_tooltip()
-			# Basurero: esquina superior derecha de la barra, visible SÓLO mientras hay
-			# un drag activo (app, applet, ventana o anillo). Es zona de soltado.
-			trash_layout = null
-			# Esquina derecha reservada: el pin chico va adentro; el basurero, al
-			# arrastrar, ocupa la celda justo a su izquierda.
-			var corner_x = vp.x - side - PAD
-			if _drag_active():
-				var trash_x = corner_x - (side + PAD)
-				ui.set_cursor_pos(Vector2(trash_x, y))
-				var tr = Rect2(ui.get_cursor_screen_pos(), Vector2(side, side))
-				trash_layout = tr
-				var hot_trash = tr.has_point(mouse_pos)
-				_bevel(ui, tr, Color(0.34, 0.20, 0.22, 1.0) if hot_trash else NX_FACE, false)
-				_draw_trash_glyph(ui, tr, Color(0.98, 0.52, 0.46, 1.0) if hot_trash else NX_TEXT)
+			# Las teselas de ventana se dibujan en el tramo del DockApp "w:windows"
+			# SIEMPRE que su token viva en esta barra (no sólo si está arriba).
+			if bar_order["top"].has(WINDOW_TOKEN) and not items.empty():
+				_draw_windows(ui, "top", side, y, off_top, mouse)
+				_draw_window_grip(ui, "top", mouse)
+			# Durante el drag viaja la tesela completa, no un label/tooltip separado.
+			_draw_window_drag_tile(ui, items, side)
+			# Esquina derecha reservada para el pin chico (última celda de la grilla).
+			var corner_x = margin + float(grid.n - 1) * pitch
 			# Pin de la barra superior: fija la franja (deja de auto-ocultarse y las
 			# ventanas reservan su alto) o vuelve al autohide.
 			if _draw_pin_toggle(ui, Vector2(corner_x, y), side, pin_top_bar, "pin_top"):
@@ -2507,8 +3754,18 @@ func draw(ui):
 		ui.pop_style_var()
 
 	if bottom_drawn:
-		_draw_applets(ui, vp, off_bottom, mouse)
+		_draw_applets(ui, vp, off_bottom, mouse, grid)
+	# Lo elegido en cualquier barra (las teselas de ventana pueden vivir en la inferior).
+	if _win_close != null:
+		to_close = _win_close
+	elif _win_min != null:
+		to_minimize = _win_min
+	elif _win_pick != null:
+		chosen = _win_pick
 	_draw_drag_tile(ui, bh)
+	# El estallido va al final: su overlay (ventana ImGui sin mouse) queda por encima
+	# de las barras, no tapado por su fondo.
+	_draw_explosions(ui)
 
 	# Cerrar tiene prioridad sobre alternar/minimizar y sobre cambiar: la mini-tesela
 	# 'x' va encima del bloque cuadrado y puede compartir el clic en la esquina.
@@ -2520,23 +3777,6 @@ func draw(ui):
 	elif chosen != null:
 		switch_to(chosen)
 	suppress_pinned_click = ""
-
-
-# Glifo de basurero dibujado a mano (tapa, asa, cuerpo y costillas); reconocible
-# sin depender de un SVG del tema.
-func _draw_trash_glyph(ui, r, col):
-	var x = r.position.x
-	var y = r.position.y
-	var w = r.size.x
-	ui.imgui_draw_rect_filled(Rect2(Vector2(x + w * 0.22, y + w * 0.28), Vector2(w * 0.56, w * 0.06)), col, 0.0)
-	ui.imgui_draw_rect_filled(Rect2(Vector2(x + w * 0.40, y + w * 0.21), Vector2(w * 0.20, w * 0.05)), col, 0.0)
-	ui.imgui_draw_polyline(PoolVector2Array([
-		Vector2(x + w * 0.28, y + w * 0.36),
-		Vector2(x + w * 0.32, y + w * 0.76),
-		Vector2(x + w * 0.68, y + w * 0.76),
-		Vector2(x + w * 0.72, y + w * 0.36)]), col, 2.0, false)
-	ui.imgui_draw_polyline(PoolVector2Array([Vector2(x + w * 0.42, y + w * 0.42), Vector2(x + w * 0.44, y + w * 0.70)]), col, 1.0, false)
-	ui.imgui_draw_polyline(PoolVector2Array([Vector2(x + w * 0.58, y + w * 0.42), Vector2(x + w * 0.56, y + w * 0.70)]), col, 1.0, false)
 
 
 # Botón de pin de una barra (K19): control redondo, chico y sutil en la esquina
@@ -2559,7 +3799,7 @@ func _draw_pin_toggle(ui, pos, side, pinned, id):
 	var hover = ui.is_item_hovered()
 	ui.pop_style_color(3)
 	var c = rect.position + Vector2(r, r)
-	var face = NX_CUR if pinned else NX_FACE.linear_interpolate(NX_LIGHT, 0.12)
+	var face = _cur() if pinned else NX_FACE.linear_interpolate(NX_LIGHT, 0.12)
 	if hover and not held:
 		face = face.linear_interpolate(Color(1, 1, 1, face.a), 0.10)
 	# Relieve circular: sombra abajo-derecha, cara, aro claro arriba-izquierda.
@@ -2587,6 +3827,73 @@ func _draw_pin_glyph(ui, r, col):
 	ui.imgui_draw_polyline(PoolVector2Array([Vector2(cx, y + w * 0.56), Vector2(cx, y + w * 0.78)]), col, 2.0, false)
 
 
+# --- Estallido (drop en el centro del escritorio) --------------------------------
+# Un bloque soltado en medio del Escritorio se quita con una expansión breve, como el
+# WindowMaker clásico. La animación dura EXPLODE_MS y no captura mouse.
+const EXPLODE_MS = 420.0
+# ImGuiWindowFlags_NoMouseInputs (mismo valor que usa system_osd.gd): el overlay de
+# estallido queda por encima sin robar clics.
+const WINDOW_NO_MOUSE_INPUTS = 512
+# ImGuiWindowFlags_Tooltip (1 << 25): la ventana va a la capa de display superior
+# (como los tooltips) sin tomar foco. Sin esto el overlay de explosiones quedaba DEBAJO
+# de las ventanas del Hogar (ImGui ordena por foco) y sólo se veía sobre el Vecindario.
+const WINDOW_TOP_LAYER = 33554432
+
+
+func _draw_explosions(ui):
+	if explosions.empty():
+		return
+	var now = OS.get_ticks_msec()
+	var keep = []
+	for ex in explosions:
+		var t = clamp(float(now - int(ex.since)) / EXPLODE_MS, 0.0, 1.0)
+		if t < 1.0:
+			keep.append(ex)
+	if keep.size() != explosions.size():
+		explosions = keep
+	if keep.empty():
+		return
+	# Las primitivas `imgui_draw_*` DEBEN ir dentro de una ventana ImGui: fuera de
+	# una caen en la ventana de debug del módulo y aparecen mal ubicadas. Overlay de
+	# pantalla completa, sin fondo y sin mouse (NoMouseInputs), padding 0 para que
+	# las coordenadas absolutas coincidan (mismo patrón que system_osd.gd).
+	var vp = ui.get_viewport_rect().size
+	ui.set_next_window_pos(Vector2.ZERO, true)
+	ui.set_next_window_size(vp, true)
+	ui.set_next_window_bg_alpha(0.0)
+	ui.push_style_var_vec2(ui.STYLE_VAR_WINDOW_PADDING, Vector2.ZERO)
+	var flags = ui.WINDOW_NO_DECORATION | ui.WINDOW_NO_BACKGROUND | ui.WINDOW_NO_MOVE \
+		| ui.WINDOW_NO_RESIZE | ui.WINDOW_NO_SAVED_SETTINGS | ui.WINDOW_NO_SCROLLBAR \
+		| ui.WINDOW_NO_TITLE_BAR | ui.WINDOW_NO_COLLAPSE \
+		| ui.WINDOW_NO_BRING_TO_FRONT_ON_FOCUS | WINDOW_NO_MOUSE_INPUTS | WINDOW_TOP_LAYER
+	if ui.begin("##frame_explosions", flags):
+		for ex in keep:
+			var t = clamp(float(now - int(ex.since)) / EXPLODE_MS, 0.0, 1.0)
+			_draw_explosion(ui, ex, t)
+	ui.end()
+	ui.pop_style_var()
+	shell.last_activity = now
+	shell.request_redraw()
+
+
+func _draw_explosion(ui, ex, t):
+	var c = (ex.pos as Vector2) + (ex.size as Vector2) * 0.5
+	var base = (ex.size as Vector2).x
+	var alpha = 1.0 - t
+	var r = base * (0.35 + 0.85 * t)
+	ui.imgui_draw_circle(c, r, Color(1.0, 0.85, 0.45, 0.55 * alpha), 28, max(1.0, 2.5 * (1.0 - 0.5 * t)))
+	ui.imgui_draw_circle(c, r * 0.7, Color(1.0, 1.0, 1.0, 0.35 * alpha), 24, 1.5)
+	for i in range(6):
+		var ang = TAU * float(i) / 6.0 + 0.4
+		var d = base * (0.15 + 0.95 * t)
+		var p = c + Vector2(cos(ang), sin(ang)) * d
+		ui.imgui_draw_circle_filled(p, max(1.0, 3.0 * alpha), Color(1.0, 0.9, 0.6, 0.8 * alpha), 10)
+	if ex.get("tex") != null:
+		var side = base * (1.0 - 0.5 * t)
+		ui.set_cursor_pos(c - Vector2(side, side) * 0.5)
+		ui.image(ex.tex, Vector2(side, side))
+
+
 func _draw_drag_tile(ui, side):
 	if app_drag == null and applet_drag == null:
 		return
@@ -2603,6 +3910,34 @@ func _draw_drag_tile(ui, side):
 	else:
 		ui.set_cursor_pos(pos)
 		_draw_applet(ui, applet_drag, pos, ui.get_cursor_screen_pos(), _applet_width(applet_drag, side), side, false, Vector2(-1, -1), true)
+	ui.end_tooltip()
+	ui.pop_style_var()
+
+
+# Fantasma de una ventana de la franja superior. Reutiliza exactamente el dibujo
+# del bloque normal y conserva bajo el cursor el punto donde comenzó el gesto.
+func _draw_window_drag_tile(ui, items, side):
+	var ghost = null
+	if dragging != null:
+		for it in items:
+			if it.id == dragging.id:
+				ghost = it
+				break
+	elif lifted != null:
+		ghost = lifted
+	elif win_drag != null:
+		for it in items:
+			if it.id == win_drag.id:
+				ghost = it
+				break
+	if ghost == null:
+		return
+	var grab = drag_grab if dragging != null else Vector2(side * 0.5, side * 0.5)
+	ui.push_style_var_vec2(ui.STYLE_VAR_WINDOW_PADDING, Vector2.ZERO)
+	ui.set_next_window_pos(mouse_pos - grab, true)
+	ui.begin_tooltip()
+	_draw_window_tile(ui, Vector2.ZERO, side, ghost, _is_current(ghost), false, false,
+		Vector2(-100000.0, -100000.0))
 	ui.end_tooltip()
 	ui.pop_style_var()
 

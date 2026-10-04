@@ -1,5 +1,10 @@
 # SPEC — Modo ventanas tradicional (WindowMaker) — K13 (DISEÑO)
 
+> **Superado por `SPEC-hybrid-windows.md`**: el modo dejó de ser global y pasó a ser
+> **por ventana** (`shell/wm_hybrid.gd`), con las flotantes ancladas a su pantalla y las
+> unidades tiled con eje (`shell/wm_units.gd`). Este documento se conserva como historia
+> del diseño K13a–K13f. El modo global `wm_mode.gd` queda sólo por compatibilidad de su test.
+
 Estado: **diseño + implementación parcial**. Modelos puros y BlockApp ya
 implementados (K13a `wm_mode.gd`, K13b `window_chrome.gd`, K13c `float_layout.gd`,
 K13d `wm_drag.gd` + tests); integración del modo flotante por defecto en

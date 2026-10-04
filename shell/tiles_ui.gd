@@ -5,11 +5,19 @@ extends Control
 # mouse_filter IGNORE: no le roba input a las ventanas (una ventana ImGui a pantalla
 # completa sí lo haría). El fondo oscuro de exposé va aparte, detrás de los tiles
 # (expose_bg), para no taparlos.
+#
+# La decoración (barra de título OpenStep) de las ventanas flotantes NO vive acá:
+# cada ventana tiene su propio nodo window_deco.gd intercalado en `view`, para que
+# el z-order de las decoraciones siga al de las ventanas.
 
 var shell
 
-# Chrome WindowMaker (K13b): geometría/hit-test puros; acá sólo se dibuja.
-const WINDOW_CHROME = preload("res://window_chrome.gd")
+# Sombra "drop" de las miniaturas: misma receta que window_deco._draw_shadow
+# (StyleBoxFlat con sombra nativa, barato en GLES2). Se arma acá porque
+# draw_style_box sólo dibuja en la fase _draw() del propio nodo.
+var _thumb_shadow_sb = null
+
+const EXPOSE_FRAME_INSET = 3.0
 
 
 func _ready():
@@ -22,6 +30,12 @@ func refresh():
 	update()
 
 
+# Acento del shell con alfa a (settings_bridge → shell.accent).
+func _acc(a):
+	var c = shell.accent if shell != null and shell.accent != null else Color(0.55, 0.80, 1.0)
+	return Color(c.r, c.g, c.b, a)
+
+
 func _draw():
 	if shell == null:
 		return
@@ -29,20 +43,21 @@ func _draw():
 	if shell.expose and shell.fullscreen_id < 0:
 		_draw_expose(font)
 		return
-	# Asas de redimensión de la franja enfocada: línea tenue en el borde y asa al pasar.
+	# Asas de redimensión de la franja enfocada: línea tenue del acento en el borde y
+	# asa resaltada al pasar (todo con el accent del shell).
 	for h in (shell.handles if shell.view.visible else []):
-		draw_line(Vector2(h.x, h.y), Vector2(h.x, h.y + h.h), Color(1, 1, 1, 0.05), 1.0)
+		draw_line(Vector2(h.x, h.y), Vector2(h.x, h.y + h.h), _acc(0.12), 1.0)
 	if shell.hover_handle != null and shell.view.visible:
 		var h = shell.hover_handle
 		var cy = h.y + h.h * 0.5
-		draw_line(Vector2(h.x, h.y + h.h * 0.2), Vector2(h.x, h.y + h.h * 0.8), Color(0.26, 0.59, 0.98, 0.85), 2.0)
-		draw_rect(Rect2(h.x - 4.0, cy - 16.0, 8.0, 32.0), Color(0.26, 0.59, 0.98, 0.9))
+		draw_line(Vector2(h.x, h.y + h.h * 0.2), Vector2(h.x, h.y + h.h * 0.8), _acc(0.85), 2.0)
+		draw_rect(Rect2(h.x - 4.0, cy - 16.0, 8.0, 32.0), _acc(0.9))
 		for k in range(3):
 			draw_circle(Vector2(h.x, cy - 7.0 + float(k) * 7.0), 1.3, Color(1, 1, 1, 0.95))
-	# K13: barra de título y botones de las ventanas flotantes (WindowMaker). Se
-	# dibuja encima del contenido del cliente en el marco exterior.
-	if shell.is_floating() and shell.view.visible and shell.fullscreen_id < 0:
-		_draw_chrome(font)
+	# Resize diferido: mientras se arrastra un borde sólo se ve este fantasma (la
+	# ventana real no se redimensiona hasta soltar). Sin input: tiles_ui es IGNORE.
+	if shell.drag_overlay != null:
+		_draw_drag_overlay(shell.drag_overlay)
 	# Placeholder de las ventanas que todavía no tienen textura: rect + spinner + título,
 	# en el rect animado de la entrada (escala desde el ícono).
 	for id in shell.tile_intro.keys():
@@ -61,14 +76,14 @@ func _draw():
 		for i in range(17):
 			var a = a0 + TAU * 0.72 * float(i) / 16.0
 			pts.append(c + Vector2(cos(a), sin(a)) * rad)
-		draw_polyline(pts, Color(0.4, 0.7, 1.0, 0.95), 2.0)
+		draw_polyline(pts, _acc(0.95), 2.0)
 		if font != null:
 			var title = shell.compositor.get_title(id)
 			if title == "":
 				title = shell._activity_for_window(id)
 			if title != "":
 				var w = font.get_string_size(title).x
-				draw_string(font, c + Vector2(-w * 0.5, rad + 20.0), title, Color(1, 1, 1, 0.85))
+				draw_string(font, c + Vector2(-w * 0.5, rad + 20.0 + font.get_ascent()), title, Color(1, 1, 1, 0.85))
 
 
 # Exposé como "zoom out": un marco por workspace con su número (índice/total), el
@@ -77,17 +92,40 @@ func _draw():
 # y aclarando un poco la ventana (ver _update_tile). Todos los workspaces están en
 # pantalla a la vez.
 func _draw_expose(font):
-	var units = shell._units()
+	var units = shell.expose_units if shell.expose_units != null else []
 	var n = units.size()
 	var sel_id = -1
 	if shell.expose_sel >= 0 and shell.expose_sel < shell.tiles.size():
 		sel_id = shell.tiles[shell.expose_sel]
+	# Sombra de las miniaturas TILED (las flotantes ya llevan la suya por su nodo
+	# window_deco). Se dibuja antes de bordes y feedback de destino.
+	for id in shell.expose_cards.keys():
+		if shell.is_floating(id):
+			continue
+		var sr = shell.expose_cards.get(id)
+		if sr != null:
+			_draw_thumb_shadow(sr, id == sel_id)
+	# Ranura destino del arrastre entre escritorios: relleno y borde con el acento
+	# (no se marca el escritorio de origen).
+	if shell.expose_drag != null and shell.expose_drag_target >= 0 \
+			and shell.expose_drag_target < shell.expose_unit_cards.size() \
+			and shell.expose_drag_target != shell._expose_index_of_window(shell.expose_drag.id):
+		var tf = shell.expose_unit_cards[shell.expose_drag_target].grow(-EXPOSE_FRAME_INSET)
+		draw_rect(tf, _acc(0.16))
+		draw_rect(tf, _acc(0.92), false, 2.0)
+	# Hueco de inserción bajo el cursor: barra vertical con el acento. Al soltar se crea
+	# un escritorio NUEVO en esa posición con la miniatura arrastrada.
+	if shell.expose_drag != null and shell.expose_drag_gap >= 0:
+		var bar = shell._expose_gap_bar_rect(shell.expose_drag_gap)
+		if bar != null:
+			draw_rect(bar.grow(2.0), _acc(0.35))
+			draw_rect(bar, _acc(0.95))
+	# Todas las unidades visibles tienen contenido (no hay ranura vacía): numerado 1..n.
 	for i in range(n):
 		if i >= shell.expose_unit_cards.size():
 			break
 		var frame = shell.expose_unit_cards[i]
 		var on = units[i].has(sel_id)
-		draw_rect(frame, Color(1, 1, 1, 0.22 if on else 0.12), false, 1.5 if on else 1.0)
 		for id in units[i]:
 			var r = shell.expose_cards.get(id)
 			if r == null:
@@ -99,7 +137,15 @@ func _draw_expose(font):
 			var col = Color(1, 1, 1, 0.55) if on else Color(1, 1, 1, 0.30)
 			var lw = font.get_string_size(label).x
 			draw_string(font, Vector2(frame.position.x + frame.size.x * 0.5 - lw * 0.5,
-				frame.position.y + frame.size.y + 16.0), label, col)
+				frame.position.y + frame.size.y + 16.0 + font.get_ascent()), label, col)
+	# Miniatura arrastrada: sigue al puntero con su forma actual y sombra propia.
+	if shell.expose_drag != null and sel_id >= 0:
+		var card = shell.expose_cards.get(sel_id)
+		if card != null:
+			var gr = Rect2(shell.expose_drag.pos - shell.expose_drag.grab, card.size)
+			_draw_thumb_shadow(gr, true)
+			draw_rect(gr, Color(1, 1, 1, 0.10))
+			draw_rect(gr, _acc(0.95), false, 2.0)
 	# Botón de cerrar: en la ventana seleccionada y en la que está bajo el puntero.
 	for id in [sel_id, shell.expose_hover]:
 		if id < 0:
@@ -107,6 +153,22 @@ func _draw_expose(font):
 		var cr = shell._expose_close_rect(id)
 		if cr != null:
 			_draw_close_glyph(cr)
+
+
+# Sombra "drop" de una miniatura (window_deco._draw_shadow no puede dibujar fuera de
+# su propio _draw, así que se repite la receta acá). No pinta el centro.
+func _draw_thumb_shadow(r, focused):
+	if r.size.x < 6.0 or r.size.y < 6.0:
+		return
+	if _thumb_shadow_sb == null:
+		_thumb_shadow_sb = StyleBoxFlat.new()
+		_thumb_shadow_sb.draw_center = false
+		_thumb_shadow_sb.bg_color = Color(0, 0, 0, 0)
+	_thumb_shadow_sb.set_corner_radius_all(7)
+	_thumb_shadow_sb.shadow_size = 16 if focused else 10
+	_thumb_shadow_sb.shadow_color = Color(0.0, 0.0, 0.0, 0.26 if focused else 0.16)
+	_thumb_shadow_sb.shadow_offset = Vector2(0.0, 4.0 if focused else 2.5)
+	draw_style_box(_thumb_shadow_sb, r)
 
 
 func _draw_close_glyph(cr):
@@ -119,88 +181,50 @@ func _draw_close_glyph(cr):
 	draw_line(Vector2(q.x, p.y), Vector2(p.x, q.y), col, 1.6)
 
 
-# --- K13b: chrome WindowMaker de las ventanas flotantes ----------------------
-
-func _draw_chrome(font):
-	var ids = shell.float_layout.ids_z()
-	for id in shell.tiles:
-		if not ids.has(id):
-			ids.append(id)
-	var th = shell._chrome_title_h()
-	var bd = shell._chrome_border()
-	var mouse = get_local_mouse_position()
-	for id in ids:
-		if id == shell.fullscreen_id or not shell.tiles.has(id):
-			continue
-		# Con la entrada/zoom (escala) el marco se desalinearía; se dibuja al asentar.
-		if shell.tile_intro.has(id) or shell.view_anim.has(id):
-			continue
-		var node = shell.tile_nodes.get(id)
-		if node == null or not is_instance_valid(node) or not node.visible:
-			continue
-		var content = Rect2(node.rect_position, node.rect_size)
-		if content.size.x < 6.0 or content.size.y < 6.0:
-			continue
-		# El marco exterior va del contenido real (en animación incluida) hacia arriba.
-		var fr = Rect2(content.position - Vector2(bd, th), content.size + Vector2(2.0 * bd, th + bd))
-		_draw_window_frame(font, fr, id, id == shell.focused_tile, mouse, th, bd)
-
-
-func _draw_window_frame(font, fr, id, active, mouse, th, bd):
-	var face = Color(0.72, 0.72, 0.75)
-	var light = Color(0.96, 0.96, 0.96)
-	var dark = Color(0.32, 0.32, 0.35)
-	var title_col = Color(0.24, 0.32, 0.62) if active else Color(0.42, 0.42, 0.55)
-	_bevel(fr, face, light, dark, bd)
-	var p = WINDOW_CHROME.parts(fr, th, bd)
-	_bevel(p.title, title_col, light, dark, max(1.0, bd * 0.5))
-	if font != null:
-		var label = shell.compositor.get_title(id)
-		if label == "":
-			label = shell._activity_for_window(id)
-		_draw_title_text(font, p.title, String(label))
-	_draw_button_glyph(p.min_btn, "min", mouse)
-	_draw_button_glyph(p.close_btn, "close", mouse)
-	if active:
-		draw_rect(fr, Color(0.55, 0.80, 1.0, 0.9), false, 1.0)
-
-
-func _draw_title_text(font, bar, label):
-	if label == "":
+# Fantasma del resize diferido: relleno tenue + borde y una franja de título, para
+# ver la geometría objetivo sin que la app reasigne buffer en cada motion.
+# K13f — cuando kind="snap" es la propuesta de snap flotante: la franja del hueco
+# (mitad o completo) con el acento del shell y una etiqueta de destino.
+func _draw_drag_overlay(info):
+	var r = info.get("rect")
+	if r == null:
 		return
-	var btn = WINDOW_CHROME.BTN * shell.get_imgui_scale()
-	var avail = max(bar.size.x - 2.0 * btn - 12.0, 8.0)
-	var text = label
-	while text.length() > 1 and font.get_string_size(text).x > avail:
-		text = text.substr(0, text.length() - 1)
-	if text.length() < label.length() and text.length() > 1:
-		text = text.substr(0, text.length() - 1) + "…"
-	var tw = font.get_string_size(text).x
-	var tp = Vector2(bar.position.x + (bar.size.x - tw) * 0.5,
-		bar.position.y + (bar.size.y - font.get_height()) * 0.5)
-	draw_string(font, tp, text, Color(0.97, 0.97, 1.0))
-
-
-func _draw_button_glyph(rect, kind, mouse):
-	var hover = rect.has_point(mouse)
-	_bevel(rect, Color(0.78, 0.79, 0.84) if hover else Color(0.72, 0.72, 0.75),
-		Color(0.96, 0.96, 0.96), Color(0.32, 0.32, 0.35), 1.0)
-	var col = Color(0.06, 0.06, 0.08)
-	if kind == "close":
-		var a = rect.position + rect.size * 0.28
-		var b = rect.end - rect.size * 0.28
-		draw_line(a, b, col, 1.6)
-		draw_line(Vector2(b.x, a.y), Vector2(a.x, b.y), col, 1.6)
-	else:
-		var y = rect.position.y + rect.size.y * 0.5
-		draw_line(Vector2(rect.position.x + rect.size.x * 0.25, y),
-			Vector2(rect.end.x - rect.size.x * 0.25, y), col, 1.6)
-
-
-func _bevel(r, face, light, dark, b):
-	draw_rect(r, face)
-	draw_rect(Rect2(r.position, Vector2(r.size.x, b)), light)
-	draw_rect(Rect2(r.position, Vector2(b, r.size.y)), light)
-	draw_rect(Rect2(Vector2(r.position.x, r.end.y - b), Vector2(r.size.x, b)), dark)
-	draw_rect(Rect2(Vector2(r.end.x - b, r.position.y), Vector2(b, r.size.y)), dark)
-
+	var rr = Rect2(r)
+	if rr.size.x < 2.0 or rr.size.y < 2.0:
+		return
+	if String(info.get("kind", "resize")) == "snap":
+		var accent = shell.accent if shell.accent != null else Color(0.55, 0.80, 1.0)
+		var fill = Color(accent.r, accent.g, accent.b, 0.16)
+		var line = Color(accent.r, accent.g, accent.b, 0.92)
+		draw_rect(rr, fill)
+		draw_rect(rr, line, false, 2.0)
+		var font = get_font("font", "Label")
+		if font != null:
+			var zone = String(info.get("zone", ""))
+			var target = String(info.get("target", "float-half"))
+			var label = ""
+			if zone == "max" or target == "maximize":
+				label = "Maximizar"
+			elif target == "tile-half":
+				label = "Mosaico · mitad izquierda" if zone == "left" else "Mosaico · mitad derecha"
+			else:
+				label = "Mitad izquierda" if zone == "left" else "Mitad derecha"
+			if label != "":
+				var lw = font.get_string_size(label).x
+				draw_string(font, Vector2(rr.position.x + (rr.size.x - lw) * 0.5,
+					rr.position.y + rr.size.y * 0.5 + font.get_ascent()),
+					label, Color(0.94, 0.97, 1.0, 0.95))
+		return
+	draw_rect(rr, _acc(0.14))
+	draw_rect(rr, _acc(0.95), false, 2.0)
+	var th = shell._chrome_title_h()
+	if rr.size.y > th + 4.0:
+		draw_rect(Rect2(rr.position + Vector2(2, 2), Vector2(rr.size.x - 4.0, th)),
+			_acc(0.22))
+	var font = get_font("font", "Label")
+	if font != null:
+		var label = "%d × %d" % [int(round(rr.size.x)), int(round(rr.size.y))]
+		var lw = font.get_string_size(label).x
+		draw_string(font, Vector2(rr.position.x + (rr.size.x - lw) * 0.5,
+			rr.position.y + rr.size.y * 0.5 + font.get_ascent()),
+			label, Color(0.92, 0.96, 1.0, 0.95))

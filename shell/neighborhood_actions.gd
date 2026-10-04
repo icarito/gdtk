@@ -217,7 +217,31 @@ static func host_actions(host, local = {}):
 			a.state = "no confiable"
 			if a.reason == "":
 				a.reason = "host degradado: sin hid confirmado"
+	# Grupo (SPEC-sugar-group §G4): en la vista Grupo se ofrece sumar o quitar el
+	# equipo. Sólo con `local.group_menu` (la vista Vecindario no cambia de menú).
+	if bool(local.get("group_menu", false)):
+		if _in_group(host, local):
+			out.append({"id": "remove_from_group", "label": "Quitar del grupo",
+				"enabled": true, "state": "disponible", "reason": "", "plan": null})
+		else:
+			out.append({"id": "add_to_group", "label": "Añadir a mi grupo",
+				"enabled": true, "state": "disponible", "reason": "", "plan": null})
 	return out
+
+
+# ¿El host ya es miembro del Grupo? El caller pasa `local.group_members` como
+# Dictionary con los ids/hid/nombres ya presentes (sin tokens ni secretos).
+static func _in_group(host, local):
+	var members = local.get("group_members", null)
+	if typeof(members) != TYPE_DICTIONARY:
+		return false
+	var cands = [String(host.get("id", "")), String(host.get("hid", "")),
+		String(host.get("label", ""))]
+	for c in cands:
+		var v = String(c).strip_edges()
+		if v != "" and (members.has(v) or members.has(v.to_lower())):
+			return true
+	return false
 
 
 static func _screen_action(gvd, local, id, label):

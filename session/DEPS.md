@@ -37,6 +37,26 @@ manual, `status`, y `auto` sigue `net.hadess.SensorProxy.AccelerometerOrientatio
 sólo si hay acelerómetro. Si la orientación sale invertida, ajustar la matriz
 `ACCEL_MOUNT_MATRIX` en `/etc/udev/hwdb.d/60-sensor.hwdb`.
 
+## Compartir pantalla (Meet/Zoom) y pantallazos
+
+`session/portal.sh` instala el routing (`~/.config/xdg-desktop-portal/gdtk-portals.conf`)
+y la config del backend wlroots (`~/.config/xdg-desktop-portal-wlr/config`).
+`session/sway.conf` publica `WAYLAND_DISPLAY` a los servicios D-Bus/systemd: sin eso
+`xdg-desktop-portal-wlr` (xdpw) vería el compositor anidado de gdtk o un valor viejo,
+no el sway donde corre el shell fullscreen.
+
+| Pieza | Paquete | Notas |
+| --- | --- | --- |
+| Frontend de portales | `xdg-desktop-portal` | Necesario para todo portal. |
+| Backend ScreenCast/Screenshot | `xdg-desktop-portal-wlr` | Habla `wlr-screencopy` / `ext-image-copy-capture` con sway. `ScreenCast=wlr` y `Screenshot=wlr` en `gdtk-portals.conf`. |
+| Servidor multimedia | `pipewire` (+ `pipewire-pulse`) | El ScreenCast viaja por PipeWire. Debe estar corriendo. |
+| Gestor de sesión PipeWire | `wireplumber` | Necesario para los nodos de PipeWire. |
+| Captura CLI | `grim` (≥1.5) | `session/gdtk-screenshot` lo usa (ext-image-copy-capture con fallback a wlr-screencopy) y si falla cae al RPC `screenshot` del shell. |
+| Selector de archivos | `xdg-desktop-portal-gtk` | Ya usado (`FileChooser=gtk`). |
+
+PrintScreen lo atiende el shell (no depende del portal): guarda el viewport compuesto
+(todo el escritorio, apps anidadas incluidas) en `<Imágenes>/Pantallazos/`.
+
 ## Notas
 
 - **Autologin y llavero**: con autologin el keyring **no** se desbloquea por PAM; la

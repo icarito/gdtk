@@ -52,9 +52,11 @@ var volume = 0.5
 var muted = false
 var brightness = 0.7        # < 0 = desconocido
 var _last_pub = -1
-var osd_kind = ""           # "" | "volume" | "mute" | "brightness"
+var osd_kind = ""           # "" | "volume" | "mute" | "brightness" | "message"
 var osd_pct = 0
 var osd_muted = false
+var osd_text = ""           # etiqueta y ícono cuando osd_kind == "message"
+var osd_icon = ""
 var osd_started = 0
 var _osd_active = false
 
@@ -179,6 +181,18 @@ func is_active():
 	return _osd_active
 
 
+# Mensaje breve con ícono (p. ej. "Pantallazo guardado"): reusa la placa y el
+# desvanecido del OSD, sin barra de progreso. No pasa por el worker ni bloquea.
+func show_message(text, icon_name):
+	osd_kind = "message"
+	osd_text = str(text)
+	osd_icon = str(icon_name)
+	osd_started = OS.get_ticks_msec()
+	_osd_active = true
+	if _shell != null:
+		_shell.request_redraw()
+
+
 # --- OSD --------------------------------------------------------------------
 
 
@@ -218,6 +232,8 @@ func _label():
 			return "Silencio" if osd_muted else "Con sonido"
 		"brightness":
 			return "Brillo %d%%" % osd_pct
+		"message":
+			return osd_text
 		_:
 			return "Volumen %d%%" % osd_pct
 
@@ -228,6 +244,8 @@ func _icon_name():
 			return "audio-volume-muted" if osd_muted else "audio-volume-high"
 		"brightness":
 			return "display-brightness"
+		"message":
+			return osd_icon if osd_icon != "" else "computer-xo"
 		_:
 			return "audio-volume-high"
 
@@ -284,20 +302,21 @@ func _draw_plate(shell, rect, s, alpha):
 	shell.set_cursor_pos(Vector2(tx, rect.position.y + pad * 0.75))
 	shell.text_colored(Color(0.92, 0.93, 0.97, alpha), _label())
 
-	var bar_h = 9.0 * s
-	var bar_y = rect.end.y - pad - bar_h
-	shell.imgui_draw_rect_filled(Rect2(tx, bar_y, tw, bar_h),
-		Color(1.0, 1.0, 1.0, 0.16 * alpha), bar_h * 0.5)
-	var frac = clamp(float(osd_pct) / 100.0, 0.0, 1.0)
-	var fill = Color(0.55, 0.80, 1.0, alpha) if not osd_muted else Color(0.70, 0.72, 0.78, alpha)
-	if not osd_muted and osd_kind == "brightness":
-		fill = Color(0.98, 0.82, 0.42, alpha)
-	if osd_muted:
-		shell.imgui_draw_rect_filled(Rect2(tx, bar_y, tw, bar_h), fill, bar_h * 0.5)
-		shell.imgui_draw_line(Vector2(tx + 2.0, bar_y + bar_h - 2.0),
-			Vector2(tx + tw - 2.0, bar_y + 2.0), Color(1, 1, 1, 0.55 * alpha), 1.5 * s)
-	elif tw * frac > 0.5:
-		shell.imgui_draw_rect_filled(Rect2(tx, bar_y, tw * frac, bar_h), fill, bar_h * 0.5)
+	if osd_kind != "message":
+		var bar_h = 9.0 * s
+		var bar_y = rect.end.y - pad - bar_h
+		shell.imgui_draw_rect_filled(Rect2(tx, bar_y, tw, bar_h),
+			Color(1.0, 1.0, 1.0, 0.16 * alpha), bar_h * 0.5)
+		var frac = clamp(float(osd_pct) / 100.0, 0.0, 1.0)
+		var fill = Color(0.55, 0.80, 1.0, alpha) if not osd_muted else Color(0.70, 0.72, 0.78, alpha)
+		if not osd_muted and osd_kind == "brightness":
+			fill = Color(0.98, 0.82, 0.42, alpha)
+		if osd_muted:
+			shell.imgui_draw_rect_filled(Rect2(tx, bar_y, tw, bar_h), fill, bar_h * 0.5)
+			shell.imgui_draw_line(Vector2(tx + 2.0, bar_y + bar_h - 2.0),
+				Vector2(tx + tw - 2.0, bar_y + 2.0), Color(1, 1, 1, 0.55 * alpha), 1.5 * s)
+		elif tw * frac > 0.5:
+			shell.imgui_draw_rect_filled(Rect2(tx, bar_y, tw * frac, bar_h), fill, bar_h * 0.5)
 
 
 # --- worker -----------------------------------------------------------------

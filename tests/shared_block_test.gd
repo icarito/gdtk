@@ -158,5 +158,81 @@ func _init():
 	check("al cortar desaparece",
 		SB.from_cache({"h1": "idle"}, {}, {}, {}, false, {"h1": "Tengu"}).empty())
 
+	# --- diagram(): bloque-resumen de la dockapp "Compartiendo" (G5) ---------
+	var none = SB.diagram([], [], [])
+	check("diagram sin nada vacío", none.empty())
+
+	var d = SB.diagram(
+		[{"host": "tengu", "peer_name": "tengu", "type": "screen",
+			"side": "south", "state": "active"}],
+		[{"peer_name": "ivan", "type": "input", "side": "west", "state": "active"}],
+		[])
+	check("diagram no vacío", not d.empty())
+	check("lado sur con la sesión local", d.sides.south.size() == 1
+		and String(d.sides.south[0].origin) == "local"
+		and String(d.sides.south[0].type) == "screen")
+	check("lado oeste con la remota", d.sides.west.size() == 1
+		and String(d.sides.west[0].origin) == "remote"
+		and String(d.sides.west[0].type) == "input")
+	check("entrada con claves esperadas", d.sides.south[0].has("type")
+		and d.sides.south[0].has("peer_name") and d.sides.south[0].has("initial")
+		and d.sides.south[0].has("state") and d.sides.south[0].has("origin"))
+	check("inicial del equipo", String(d.sides.south[0].initial) == "T")
+	check("norte y este vacíos", d.sides.north.empty() and d.sides.east.empty())
+
+	var d_ids = []
+	var d_labels = []
+	for m in d.menu:
+		if String(m.get("kind", "")) == "separator":
+			continue
+		d_ids.append(String(m.get("id", "")))
+		d_labels.append(String(m.get("label", "")))
+	check("menú contiene stop:screen:tengu", d_ids.has("stop:screen:tengu"))
+	check("menú contiene stop:input:ivan", d_ids.has("stop:input:ivan"))
+	check("menú termina con open_group",
+		not d.menu.empty() and String(d.menu[d.menu.size() - 1].id) == "open_group"
+		and String(d.menu[d.menu.size() - 1].label) == "Abrir Grupo")
+	check("menú tiene separador antes de Abrir Grupo",
+		d.menu.size() >= 2 and String(d.menu[d.menu.size() - 2].kind) == "separator")
+
+	# Ventanas extendidas: alimentan el menú aunque no haya sesiones.
+	var dw = SB.diagram([], [], [
+		{"id": "w1", "title": "Pantalla compartida", "peer_name": "tengu", "maximized": false},
+		{"id": "w2", "title": "Pantalla compartida", "peer_name": "ivan", "maximized": true},
+	])
+	check("diagram con ventanas no vacío", not dw.empty())
+	var w_ids = []
+	var w_by_id = {}
+	for m in dw.menu:
+		if String(m.get("kind", "")) == "separator":
+			continue
+		w_ids.append(String(m.get("id", "")))
+		w_by_id[String(m.get("id", ""))] = String(m.get("label", ""))
+	check("menú ventana mostrar", w_ids.has("win_show:w1")
+		and String(w_by_id["win_show:w1"]).find("tengu") >= 0)
+	check("menú ventana maximizar/restaurar", w_ids.has("win_max:w1")
+		and w_ids.has("win_max:w2")
+		and String(w_by_id["win_max:w1"]) == "Maximizar"
+		and String(w_by_id["win_max:w2"]) == "Restaurar")
+	check("menú ventana cerrar", w_ids.has("win_close:w1") and w_ids.has("win_close:w2"))
+	check("sides vacíos sin sesiones", dw.sides.north.empty() and dw.sides.south.empty()
+		and dw.sides.east.empty() and dw.sides.west.empty())
+
+	# Una entrada sin lado ubicable no se cuela en el diagrama.
+	check("sesión sin lado no se dibuja",
+		SB.diagram([{"peer_name": "x", "type": "screen", "state": "active"}], [], []).empty())
+
+	# Vocabulario: ningún texto visible del diagrama filtra nombres internos.
+	var d_visible = [String(d.tooltip), String(dw.tooltip)]
+	d_visible += d_labels
+	for m in dw.menu:
+		if String(m.get("kind", "")) != "separator":
+			d_visible.append(String(m.get("label", "")))
+	var d_clean = true
+	for s in d_visible:
+		if SB.MAP.has_internal_terms(s):
+			d_clean = false
+	check("diagram sin vocabulario interno", d_clean)
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

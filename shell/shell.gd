@@ -27,6 +27,7 @@ const SHOT_MAX_FRAMES = 900
 # Modelo puro de la brújula de dirección (Kilo A): sólo normaliza/serializa y
 # detecta conflictos; sin I/O. El shell lo cablea a la vista y a la persistencia.
 const DIRECTIONS_MODEL = preload("res://neighborhood_directions.gd")
+const RING_LAYOUT = preload("res://ring_layout.gd")
 # Generadores puros del layout Deskflow (K5): links desde la brujula y el formato
 # real de servidor; el shell sólo los consume al aplicar.
 const LAYOUT_MODEL = preload("res://deskflow_layout.gd")
@@ -43,6 +44,9 @@ const GVD_LAUNCH = preload("res://gvd_launch.gd")
 const PEER_CALL = preload("res://peer_call.gd")
 const MENU_STYLE = preload("res://menu_style.gd")
 const HOST_DISPATCH = preload("res://host_dispatch.gd")
+# Modelo puro del Grupo (G4a): el shell sólo lo usa para sumar/quitar miembros
+# (la vista y el resto del ciclo los maneja neighborhood_ui).
+const GROUP_MODEL = preload("res://group_model.gd")
 # Publisher mDNS del Vecindario: modelo puro + plan puro de anuncios; el shell
 # resuelve avahi una vez y lanza cada anuncio sin bloquear el frame (§2/§14).
 const PUBLISH_MODEL = preload("res://neighborhood_publish.gd")
@@ -65,11 +69,22 @@ const FOCUS_FOLLOW = preload("res://focus_follow.gd")
 const EXPOSE_LAYOUT = preload("res://expose_layout.gd")
 # Volumen/mute/brillo + OSD (teclas multimedia del motor; ver system_osd.gd).
 const SYSTEM_OSD = preload("res://system_osd.gd")
-# K13 — Modo ventanas: flotante (default, WindowMaker) vs mosaico. Modelos puros.
-const WM_MODE = preload("res://wm_mode.gd")
+# K13 — Modelos puros: chrome, layout flotante, decisiones de arrastre, unidades
+# tiled con eje y estado híbrido por ventana. El viejo modo global (wm_mode.gd)
+# queda sólo por compatibilidad de su test; el shell ya no lo usa.
 const WINDOW_CHROME = preload("res://window_chrome.gd")
 const FLOAT_LAYOUT = preload("res://float_layout.gd")
 const WM_DRAG = preload("res://wm_drag.gd")
+# K13h: unidades tiled con eje + estado híbrido por ventana (flotante/mosaico).
+const WM_UNITS = preload("res://wm_units.gd")
+const WM_HYBRID = preload("res://wm_hybrid.gd")
+const CAPTURE_INPUT = preload("res://capture_input.gd")
+# Mapeo puro rueda/gesto -> eje del compositor (ver scroll_gesture.gd).
+const SCROLL_GESTURE = preload("res://scroll_gesture.gd")
+# Matemática pura del icono de drag (rect/hotspot/tamaño; ver drag_icon.gd).
+const DRAG_ICON = preload("res://drag_icon.gd")
+# G1: zoom Sugar de 3 niveles (Hogar/Grupo/Vecindario) y escala del ícono central.
+const ZOOM = preload("res://zoom_model.gd")
 
 onready var compositor = Host.compositor
 var view = null          # Control que dibuja las ventanas (se crea en _ready)
@@ -81,6 +96,7 @@ var activity_instance = null
 # ventana (el Frame las lista); sólo cerrarlas desde el Frame las descarta.
 var script_instances = {}
 var frame = null
+var capture_input = null  # reenvía a EIS mientras ImGuiCanvas deja de recibir input
 var activity_error = ""
 var last_launch_pid = -1
 
@@ -98,6 +114,9 @@ var premult_material = null
 
 var frame_count = 0
 var screenshot_path = ""
+# PrintScreen: guarda el viewport (todo el escritorio compuesto) en Imágenes/Pantallazos.
+# La codificación PNG corre en un Thread para no bloquear el render (ver §14 del SPEC).
+var _shot_thread = null
 var open_on_start = ""
 var recovery = Host.sc("res://recovery.gd").new()
 var type_text = ""
@@ -113,6 +132,9 @@ var dialogs = []
 var focused_dialog = 0
 var dialog_view = null
 var dialog_boxes = {}
+# Tamaño que ya se le pidió a cada diálogo para que quepa en el hueco central (se pide
+# una vez por tamaño, sin pelear con la app si su mínimo es mayor).
+var dialog_fit_req = {}
 # Toplevels sin padre y sin launch pendiente: esperan app_id/titulo para crear
 # la actividad dinamica (en `added` todavia no se conocen).
 var unmanaged = []
@@ -129,11 +151,9 @@ var apps_view = false
 # Íconos XDG del anillo: rasterizar uno o dos por frame (el SVG bloquea el frame).
 var home_icon_loads = 0
 
-# Favoritos del anillo (SPEC-sugar-home-visual): ids de app fijados por la persona,
-# persistidos en $XDG_CONFIG_HOME/gdtk/ring-favorites.json. El anillo = ACTIVITIES
-# (sin duplicar) + estos favoritos resueltos por `apps`.
-var ring_favorites = []
-var ring_saved = []
+# Anillo del Hogar (SPEC-sugar-home-visual): sólo lectura. Sus entradas son las
+# actividades abiertas más los atajos fijados en el Frame (ver frame.pinned_ids), así
+# que no se edita directamente.
 # Orden de último uso (MRU) del anillo: nombres de actividad, el más reciente al
 # final. El anillo lista primero lo que está abierto/activo, ordenado por esto.
 var activity_mru = []
@@ -142,13 +162,7 @@ var activity_mru = []
 var ring_pos = {}
 var ring_anim = {}
 var ring_intro = {}
-var ring_layout = []      # rects del último dibujo (para el drag con ratón)
-var ring_press = null     # entrada pulsada aún sin arrastrar
-var ring_drag = null      # entrada que se está arrastrando
-var ring_from = Vector2.ZERO
-var ring_grab = Vector2.ZERO
-var ring_suppress = ""     # nombre cuya activación se ignora tras un drag
-var ring_drop = null       # entrada destino resaltada mientras se arrastra
+var ring_layout = []      # rects del último dibujo
 
 # Rotación de pantalla (menú del anillo): cache de presencia de acelerómetro.
 var _rotate_sensor = null
@@ -156,11 +170,12 @@ var _rotate_sensor = null
 # Vecindario: modelo de Wi-Fi y vista nativa bajo el Frame ImGui.
 var neighborhood = null
 var neighborhood_ui = null
+# Zoom Sugar de 3 niveles: Hogar(0) -> Grupo(1) -> Vecindario(2). `zoom_level` es el
+# objetivo (int) y `zoom_f` el nivel animado (float) con ZOOM_MS. `neighborhood_view`
+# se conserva por compatibilidad: es true mientras la vista de zoom está activa.
+var zoom_level = 0
+var zoom_f = 0.0
 var neighborhood_view = false
-# Transición Hogar <-> Vecindario con metáfora de zoom del ícono central:
-# 0 = Hogar, 1 = Vecindario. El Vecindario escala/aparece desde el centro.
-var nb_zoom = 0.0
-var nb_zoom_target = 0.0
 const ZOOM_MS = 220.0
 var nb_version = -1
 # Dirección por host (brújula): hid -> entry normalizado de DIRECTIONS_MODEL.
@@ -208,9 +223,24 @@ var _deskflow_input_capture = false  # server Wayland: portal InputCapture dispo
 var _plan_write_threads = []
 var _plan_write_states = []   # {"done": bool, "then_toggle": String, "then_launch": Dictionary, "path": String}
 var _plan_mutex = Mutex.new()
+# swaymsg rápido (ajustes de entrada en vivo) fuera del frame: Thread one-shot con
+# OS.execute bloqueante adentro; el reap vive en _process (_sway_exec_poll). Antes
+# era OS.execute(..., false): Godot no reaparece y quedaban [swaymsg] <defunct>.
+var _sway_exec_threads = []
+var _sway_exec_states = []    # {"done": bool}
+var _sway_exec_mutex = Mutex.new()
+# Lo mismo para los one-shot de gdtk-rotate (rotate/hold policy): Thread + reap.
+var _rotate_threads = []
+var _rotate_states = []       # {"done": bool}
+var _rotate_exec_mutex = Mutex.new()
 # Deskflow por host: intención en memoria, nunca implícita ni automática. El
 # portapapeles dejó de ser una opción (se asume compartido con "Controlar").
 var host_deskflow = {}        # host_id -> bool (intención; la actividad es global)
+# Avisos de lados compartidos recibidos del otro equipo (G5): cada entrada es
+# {host, peer_name, type, side, state}. `side` YA viene invertido por el emisor
+# (neighborhood_directions.inverse); alimenta la dockapp "Compartiendo" de ambos
+# equipos. Sólo memoria: se puebla con el canal peer, nunca por frame.
+var remote_shares = []
 var _deskflow_settings_key = ""
 var _deskflow_auto_key = ""
 var _deskflow_role = "client"
@@ -249,6 +279,18 @@ var input_last_key = {}
 # compositor queda clavado en el borde y `event.relative` se vuelve ~0. Con capturado,
 # sway manda movimiento relativo crudo y el cursor remoto sí avanza (ver RemoteInput).
 var mouse_locked = false
+# Pointer lock pedido por un cliente alojado (zwp_locked_pointer_v1: SDL relativo de
+# emuladores/juegos). A diferencia de Deskflow, el foco del cliente se conserva y el
+# shell le manda `event.relative` por compositor.pointer_motion_relative.
+var client_pointer_locked = false
+# Cursor oculto pedido por el cliente con foco (wl_pointer.set_cursor con surface
+# NULL; ver compositor.client_cursor_hidden). El shell debe ocultar su cursor
+# dibujado mientras dure, aunque no haya pointer lock.
+var client_cursor_hidden = false
+# Log temporal [ptr-lock] del camino de movimiento relativo: primeras 20 muestras
+# y despues 1 de cada 100. Para quitarlo: borrar _ptr_log_motion/estas vars y las
+# llamadas que buscan "[ptr-lock]" en _set_client_pointer_lock y _forward_client_pointer.
+var _ptr_log_samples = 0
 var last_key_target = -1  # última ventana que recibió teclas (para reenviar sueltas)
 
 # --- Pantallas ---
@@ -260,15 +302,20 @@ var last_key_target = -1  # última ventana que recibió teclas (para reenviar s
 # `minimized` son ventanas ocultas (siguen vivas; se restauran desde el Frame).
 # Alt+Tab cambia de app (ventana), Ctrl+Alt+←/→ cambia de pantalla en la fila.
 var tiles = []           # orden de las ventanas visibles (una por entrada, sin minimizadas)
-var groups = []          # Array de Array de ids: pantallas partidas (2+ ventanas)
+# K13h: registro de unidades tiled (pantallas partidas) con eje. Reemplaza el par
+# `groups` + `split_weight`: cada registro es
+# {"id": leader, "members": [ids], "axis": "x"|"y", "weights": {id: float}}.
+# El acceso de compatibilidad es _group_of()/_weight(); la fila se arma en _units().
+var wm_units = []
 var minimized = {}       # id -> true
 var unit_focus = {}      # id-líder de la pantalla -> último miembro enfocado
 var focused_tile = -1
 var tile_mode = false
 var tile_nodes = {}      # id -> Control (contenedor de capas de la ventana)
+var deco_nodes = {}      # id -> Control (decoración OpenStep; intercalada sobre la ventana)
 var tile_rects = {}      # id -> Rect2 en coords de la vista
 var tile_fit = {}        # id -> {"scale", "offset"}: transform del contenido (para input)
-var tile_anim = {}       # id -> {"from": Vector2, "since": int}
+var tile_anim = {}       # id -> {"from": Rect2 footprint visible, "since": int}
 var tile_fade = {}       # id -> ms en que apareció (fade-in)
 var tile_intro = {}      # id -> true: falta su primera textura para animar la entrada
 var expose = false
@@ -276,12 +323,21 @@ var expose_sel = 0
 var expose_cards = {}    # id -> Rect2 de la ventana en exposé (coords de vista)
 var expose_unit_cards = []  # Rect2 de cada workspace (pantalla) en exposé
 var expose_hover = -1    # id de la ventana bajo el puntero en exposé (-1 = ninguna)
+var expose_units = []    # unidades mostradas en exposé (sólo con contenido, sin ranuras vacías)
+var expose_unit_src = [] # índice en _units() de cada ranura de expose_units
+var expose_drag = null   # miniatura arrastrada: {"id", "from", "grab", "pos", "moved"}
+var expose_drag_target = -1  # ranura destino del arrastre (-1 = ninguna)
+var expose_drag_gap = -1  # hueco de inserción bajo el cursor durante el arrastre (-1 = ninguno)
 var ghosts = []          # cierres/minimizados animados: {"node", "from", "to", "since"}
 var ghost_layer = null   # capa por encima de apps y Home para el fantasma de cierre
 # Rect (coords de vista) del ícono que lanzó la próxima ventana: ancla la animación de
 # entrada (escala desde el ícono). Se consume en _add_tile; expira a los pocos segundos.
 var pending_origin = null
 var pending_origin_since = 0
+# Origen por actividad/app (match con timeout): permite escalar cada ventana nueva
+# DESDE SU ícono aunque haya varios lanzamientos en vuelo y lleguen desordenados.
+var launch_origins = {}   # name -> {"rect": Rect2, "since": ms}
+const LAUNCH_ORIGIN_MS = 4000
 # Notificación de arranque: nombre de actividad -> ms en que se pidió lanzarla.
 # Mientras siga acá y la actividad no tenga ventana/estado abierto, su ítem pulsa.
 var starting = {}
@@ -294,12 +350,12 @@ var slug_vectors = {}
 var ui_font_px = -1.0
 # El daemon de auto-rotación se arranca una sola vez (ver _maybe_start_rotate).
 var rotate_autostarted = false
-# Animación de transformación (entrar/salir de exposé): id -> {"from_pos", "from_scale", "since"}.
+# Animación de transformación (entrar/salir de exposé, reacomodo): id -> {"from": Rect2 footprint visible, "since"}.
 var view_anim = {}
 # Pantalla completa (Alt+F11): la ventana enfocada ocupa todo y se esconde el Frame.
 var fullscreen_id = -1
-# Proporción de reparto de una franja partida: id -> peso (default 1). Asa de borde.
-var split_weight = {}
+# El reparto por pesos vive en cada registro de `wm_units` (ver _weight/_resize_to).
+const SHELL_CHROME_APPS = ["transmission"]  # fragmentos de app_id que siempre llevan chrome del shell
 # Ventana maximizada en su workspace: id -> {"members": [ids], "weights": {id: w}}.
 # Recuerda la franja partida previa para poder restaurarla (boton max/desmax de la app,
 # Alt+F10 o comando remoto). Ver _maximize_window / _restore_maximized_window.
@@ -307,14 +363,46 @@ var maximize_state = {}
 var handles = []         # asas de la franja enfocada: {"x", "y", "h", "i", "left", "right"}
 var hover_handle = null
 var resize_handle = null
-# K13 — Modo ventanas: flotante por defecto (ventanas libres con chrome) o mosaico.
-var wm_mode = WM_MODE.default_mode()
+# K13 — Estado híbrido: modo por ventana (flotante/mosaico), ancla a su pantalla y
+# rect flotante recordado. El "modo global" ya no existe; cada ventana decide.
+var hybrid = WM_HYBRID.new()
 var float_layout = FLOAT_LAYOUT.new()
-var window_rects = {}        # id -> Rect2 exterior (marco+barra) en modo flotante
-var wm_maximized = {}        # id -> true: maximizada dentro del modo flotante
+var window_rects = {}        # id -> Rect2 exterior (marco+barra) en coords de pantalla
+var wm_maximized = {}        # id -> true: maximizada estando en flotante
+var csd_hover_id = -1         # ventana CSD con el puntero encima (muestra su asa de mover)
+var csd_grip_show_id = -1     # ventana cuyo asa de mover se dibuja (o se está replegando)
+var csd_grip_reveal = 0.0     # 0 = oculta detrás de la ventana, 1 = asomada del todo
+var csd_grip_dir = 0          # 1 asomando, -1 replegándose, 0 quieta
+var csd_grip_from = 0.0       # reveal al empezar la animación actual
+var csd_grip_since = -1
+var _max_sent = {}            # id -> último estado xdg "maximized" enviado al cliente
 var chrome_drag = null       # {id, kind, edge, grab, start, from} del arrastre de chrome
+var drag_overlay = null      # {id, kind, rect} geometría fantasma mientras se redimensiona
+var float_memory = {}        # id -> Rect2 exterior recordado (al volver a flotante se restaura)
+var wm_anim = {}             # id -> {"from": Rect2, "since": ms} transición tiled<->flotante
+var wm_switch_until = -1     # ms hasta cuándo iniciar transiciones de modo (-1: inactivo)
+var last_pointer_pos = null  # Vector2 del último motion: ancla el arrastre pedido por el cliente
+# Drag and drop nativo (wl_data_device). El icono lo compone el compositor y se
+# dibuja como TextureRect en una CanvasLayer alta, pegado al puntero. Si el
+# cliente no manda textura (dmabuf no legible) se dibuja un placeholder, para que
+# SIEMPRE haya feedback visual. `client_drag_active` permite seguir reenviando
+# botón/foco aunque el cursor salga de toda ventana.
+var drag_icon_tex = null
+var drag_icon_node = null
+var drag_layer = null        # CanvasLayer alto: el icono va encima de todo
+var drag_placeholder_tex = null
+var drag_icon_samples = 0    # logging [drag-icon] de las primeras muestras
+var client_drag_active = false
+# Modificadores cuya PULSACIÓN se reenvió a la app y cuya suelta todavía no. Si la
+# suelta se pierde (la consume ImGui/Frame, p. ej. Alt+Tab), la app queda con el
+# modificador pegado y las letras llegan como atajos: "no se puede escribir".
+var fwd_mods = {}
+var key_drop_logs = 0
 var wm_box = Rect2()         # caja de contenido del último layout flotante (para encajar)
 var _wm_last_title_click = {"id": -1, "at": 0}
+# Menú contextual de la barra de título (botón derecho): id de la ventana y disparo.
+var wm_menu_id = -1
+var wm_menu_want = false
 var expose_scroll = 0.0  # exposé: reservado (todo entra en pantalla; la rueda navega)
 var pan = 0.0            # scroll suave entre workspaces (Super+rueda): offset continuo
 var pan_active = false   # true mientras se panea; cae al más cercano al soltar Super
@@ -330,9 +418,12 @@ var tiles_ui = null
 var expose_bg = null     # fondo oscuro de exposé, detrás de los tiles
 const TILE_GAP = 3.0
 const TILE_ANIM_MS = 320
+# Transición tiled<->flotante (K13): misma familia de ease que el resto.
+const WM_SWITCH_MS = 320
 const TILE_FADE_MS = 440
 const GHOST_MS = 380
 const INTRO_MS = 480
+const CSD_GRIP_MS = 170      # deslizamiento del asa de mover CSD desde detrás de la ventana
 const EXPOSE_MS = 430
 const FOCUS_FLASH_MS = 260
 const HANDLE_HIT = 7.0
@@ -348,6 +439,8 @@ const EXPOSE_CARD_INSET = 4.0
 # Selección en exposé (sin borde): la ventana elegida se agranda y se aclara un poco.
 const EXPOSE_SEL_SCALE = 1.03
 const EXPOSE_SEL_BRIGHT = 1.13
+# Umbral para distinguir un clic (elegir) de un arrastre de miniatura (mover de escritorio).
+const EXPOSE_DRAG_PX = 6.0
 const MOD_KEYS = [KEY_CONTROL, KEY_SHIFT, KEY_ALT, KEY_META, KEY_SUPER_L, KEY_SUPER_R]
 
 # Hogar: fila(s) de favoritos centradas (SPEC-sugar-home-visual). Pareja XO para la
@@ -384,9 +477,6 @@ const LAYOUT_MS = 220
 const RING_INTRO_MS = 260
 const DRAG_PX = 8.0
 # Distribución del anillo en espiral de ángulo áureo, con jitter determinista.
-const GOLDEN_ANGLE = 2.399963229728653  # PI * (3 - sqrt(5))
-const RING_JITTER_A = 0.18
-const RING_JITTER_R = 0.05
 # Hasta esta cantidad, un solo círculo ordenado; más, espiral (bubbles).
 const RING_CIRCLE_MAX = 7
 
@@ -485,8 +575,10 @@ func _text_w(s):
 # unidad (sin bajar de 64, el ícono más chico antes del caso extremo).
 func frame_bar_h(vp):
 	var u = grid_unit(vp)
+	# Entero: una altura fraccionaria deja el borde pegado a la pantalla con
+	# antialiasing parcial y se filtra 1 px de la app que está debajo.
 	if vp.y >= 3.0 * u:
-		return u
+		return ceil(u)
 	return max(64.0, floor(u * 0.5))
 
 
@@ -515,41 +607,94 @@ func _content_rect(vp):
 	return CONTENT_LAYOUT.dialog_area(vp, frame_bar_h(vp))
 
 
-# --- K13: modo ventanas (flotante por defecto / mosaico) ---------------------
+# --- K13: modo híbrido por ventana (flotante / mosaico) ----------------------
+#
+# Ya no hay modo global: cada ventana es "floating" (con chrome) o "tiled"
+# (miembro de una unidad del mosaico). Default: flotante. Las flotantes viven en
+# `float_layout` y quedan ancladas a su pantalla (`hybrid.anchor`).
 
-func is_floating():
-	return wm_mode == WM_MODE.FLOATING
+# Modo de una ventana (sin id: la enfocada). Default flotante.
+func is_floating(id = -1):
+	if id < 0:
+		id = focused_tile
+	if id < 0:
+		return true
+	return hybrid.is_floating(id)
+
+
+func is_tiled_window(id):
+	return not hybrid.is_floating(id)
 
 
 func wm_mode_label():
-	return WM_MODE.label(wm_mode)
+	return "Flotante" if is_floating() else "Mosaico"
 
 
-# Cambia el modo global. Conserva identidad, foco y minimizadas: al pasar a flotante
-# materializa las unidades en cascada; al volver a mosaico, la fila se rearma sola.
-func set_wm_mode(mode):
-	var m = WM_MODE.normalize(mode)
-	wm_mode = m
-	pan = 0.0
-	pan_active = false
-	home_slide_since = -1
-	if is_floating():
-		float_layout.from_units(_units(), _tile_rect(get_viewport_rect().size), focused_tile)
+# Cambia el modo de UNA ventana. Al pasar a mosaico la deja como unidad propia (o la
+# une a su ancla); al volver a flotante recuerda su rect previo (float_memory).
+func set_window_mode(id, mode, anchor = null):
+	if id < 0 or not tiles.has(id):
+		return
+	var m = WM_HYBRID.normalize_mode(mode)
+	if m == WM_HYBRID.FLOATING:
+		if hybrid.is_tiled(id):
+			_remember_float_geometry()
+			WM_UNITS.remove(wm_units, id)
+			wm_maximized.erase(id)
+		# Al volver a flotante ningún flag de maximizado debe sobrevivir: si no, la
+		# ventana queda "maximizada" stale (sin sombra, sin handles, restore roto).
+		maximize_state.erase(id)
+		var a = int(anchor) if anchor != null else hybrid.anchor(id, WM_HYBRID.ESCRITORIO)
+		hybrid.set_floating(id, a, float_memory.get(id, null))
 	else:
-		float_layout.reset()
-		wm_maximized.clear()
+		if hybrid.is_floating(id):
+			_remember_float_geometry()
+		hybrid.set_tiled(id, hybrid.anchor(id, WM_HYBRID.ESCRITORIO))
+		if not WM_UNITS.has(wm_units, id):
+			WM_UNITS.solo(wm_units, id, -1, _default_axis())
+		wm_maximized.erase(id)
+	_focus_tile(id)
+	wm_anim.clear()
+	wm_switch_until = OS.get_ticks_msec() + WM_SWITCH_MS
+	_reset_cursor()
 	request_redraw()
 
 
+func toggle_window_mode(id = -1):
+	if id < 0:
+		id = focused_tile
+	if id < 0 or not tiles.has(id):
+		return
+	set_window_mode(id, WM_HYBRID.FLOATING if hybrid.is_tiled(id) else WM_HYBRID.TILED)
+
+
+# Compatibilidad (Frame/atajos viejos): aplica el modo a todas las ventanas.
+func set_wm_mode(mode):
+	for id in tiles.duplicate():
+		set_window_mode(id, mode)
+
+
 func cycle_wm_mode():
-	set_wm_mode(WM_MODE.toggled(wm_mode))
+	toggle_window_mode()
 
 
-# "Acomodar ventanas" (menú del bloque): re-cascada en flotante, re-fila en mosaico.
+func _default_axis():
+	return WM_UNITS.default_axis(_tile_rect(get_viewport_rect().size))
+
+
+# Guarda la geometría flotante actual para restaurarla al volver a flotante. No
+# pisa el rect de ventanas minimizadas (que ya no están en float_layout).
+func _remember_float_geometry():
+	for id in float_layout.rects.keys():
+		float_memory[id] = float_layout.rects[id]
+
+
+# "Acomodar ventanas": re-cascada de las flotantes; el mosaico conserva su reparto.
 func arrange_windows():
-	if is_floating():
-		float_layout.from_units(_units(), _tile_rect(get_viewport_rect().size), focused_tile)
-		wm_maximized.clear()
+	float_layout.reset()
+	wm_maximized.clear()
+	wm_anim.clear()
+	wm_switch_until = OS.get_ticks_msec() + WM_SWITCH_MS
 	request_redraw()
 
 
@@ -562,47 +707,211 @@ func _chrome_border():
 	return WINDOW_CHROME.BORDER * get_imgui_scale()
 
 
-# Materializa la colocación flotante del frame actual: sincroniza float_layout con
-# `tiles`, deriva el rect de contenido (tile_rects, lo que ve el cliente) y ordena
-# los nodos del view según el z-order para que el solape siga al foco.
-func _compute_float_layout(cr):
+func _chrome_resize_h():
+	return WINDOW_CHROME.RESIZE_H * get_imgui_scale()
+
+
+# ¿La ventana se dibuja su propia decoración (CSD: GTK4, etc.)? En ese caso el shell
+# no dibuja chrome ni reserva barra, y el arrastre llega por request_move/resize o
+# por Super+clic.
+func _is_csd(id):
+	if compositor == null:
+		return false
+	# Clientes (GTK3, etc.) que nunca negocian xdg-decoration quedan como CSD por defecto
+	# en wl_server.c y sin chrome; esta lista les fuerza el del shell por app_id.
+	var app_id = String(compositor.get_app_id(id)).to_lower()
+	for tok in SHELL_CHROME_APPS:
+		if app_id.find(tok) >= 0:
+			return false
+	return compositor.is_csd(id)
+
+
+# Nodo de decoración OpenStep de una ventana (window_deco.gd). Vive en `view`,
+# intercalado sobre el contenido de su ventana (ver _compute_float_layout).
+func _deco_node(id):
+	var d = deco_nodes.get(id)
+	if d != null and is_instance_valid(d):
+		return d
+	var script = Host.sc("res://window_deco.gd")
+	if script == null:
+		return null
+	d = Control.new()
+	d.name = "Deco" + str(id)
+	d.set_script(script)
+	d.shell = self
+	d.id = id
+	d.visible = false
+	view.add_child(d)
+	deco_nodes[id] = d
+	return d
+
+
+func _free_deco(id):
+	_max_sent.erase(id)
+	if csd_grip_show_id == id:
+		csd_grip_show_id = -1
+		csd_grip_reveal = 0.0
+		csd_grip_dir = 0
+	if csd_hover_id == id:
+		csd_hover_id = -1
+	var d = deco_nodes.get(id)
+	if d != null and is_instance_valid(d):
+		d.queue_free()
+	deco_nodes.erase(id)
+
+
+# Materializa la colocación FLOTANTE del frame actual: sincroniza float_layout con
+# las ventanas flotantes, las desplaza a la pantalla de su ancla y deriva el rect de
+# contenido (tile_rects, lo que ve el cliente). `float_layout` guarda rects LOCALES
+# (los de la pantalla centrada); el offset por ancla los lleva a coords de pantalla.
+# `units`/`s` se reaprovechan del layout de fila para no recomputarlos.
+func _compute_float_layout(cr, units = null, s = 0.0):
 	wm_box = cr
+	if units == null:
+		units = _units()
+		s = _row_s(units)
+	var vp = get_viewport_rect().size
 	for id in float_layout.ids_z():
-		if not tiles.has(id):
+		if not tiles.has(id) or not hybrid.is_floating(id):
 			float_layout.remove(id)
-	for id in tiles:
-		if minimized.has(id):
-			continue
-		if not float_layout.has(id):
-			float_layout.place_new(id, cr)
-		else:
-			float_layout.move_to(id, float_layout.rect(id).position, cr)
-	if float_layout.has(focused_tile):
-		float_layout.raise(focused_tile)
 	var th = _chrome_title_h()
 	var bd = _chrome_border()
-	window_rects = {}
+	var rh = _chrome_resize_h()
 	for id in tiles:
-		if minimized.has(id):
+		if minimized.has(id) or not hybrid.is_floating(id):
 			continue
-		var fr = cr if (maximize_state.has(id) or wm_maximized.has(id)) else float_layout.rect(id)
-		if fr == null:
-			fr = cr
+		if not float_layout.has(id):
+			# Restaura el lugar previo si lo recordamos; si no, cascada nueva.
+			if float_memory.has(id) and float_memory[id] != null:
+				float_layout.restore_one(id, float_memory[id], cr)
+			else:
+				float_layout.place_new(id, cr)
+		else:
+			float_layout.drag_to(id, float_layout.rect(id).position, cr)
+		var local = float_layout.rect(id)
+		if local == null:
+			local = cr
+		# Memoria por ventana: guarda el rect local (no el maximizado).
+		float_memory[id] = local
+		var ai = _anchor_index(units, id)
+		var off = Vector2((float(ai) - s) * vp.x, 0.0)
+		var fr = Rect2(local.position + off, local.size)
+		if wm_maximized.has(id):
+			fr = Rect2(cr.position.x + off.x, cr.position.y, cr.size.x, cr.size.y)
 		window_rects[id] = fr
-		tile_rects[id] = WINDOW_CHROME.content_rect(fr, th, bd)
-	var i = 0
+		# Con decoración del cliente (CSD: GTK4, etc.) no reservamos barra: el cliente
+		# dibuja su propia barra dentro del rect; el shell sólo gestiona geometría.
+		if _is_csd(id):
+			tile_rects[id] = fr
+		else:
+			tile_rects[id] = WINDOW_CHROME.content_rect(fr, th, bd, rh)
+		_deco_node(id)
+		_sync_client_maximized(id, wm_maximized.has(id))
+	# Las flotantes van POR ENCIMA de las tiled: se reubican al final del `view` en
+	# z-order (de abajo hacia arriba), con su decoración justo encima del contenido.
 	for id in float_layout.ids_z():
 		var n = tile_nodes.get(id)
 		if n != null and is_instance_valid(n):
-			view.move_child(n, i)
-			i += 1
+			view.move_child(n, view.get_child_count() - 1)
+			var d = deco_nodes.get(id)
+			if d != null and is_instance_valid(d):
+				d.visible = true
+				view.move_child(d, view.get_child_count() - 1)
 
 
-# Orden de hit-test de las ventanas: de arriba hacia abajo (z-order) en flotante;
-# el orden de `tiles` en mosaico. Las que aún no están en el layout van al final.
+# Índice de la unidad (en `_units()`) a la que está anclada una ventana flotante.
+# El ancla se guarda como id-líder de la unidad (0 = Escritorio), así sobrevive a
+# reordenamientos de la fila.
+func _anchor_index(units, id):
+	var a = int(hybrid.anchor(id, WM_HYBRID.ESCRITORIO))
+	if a <= 0:
+		return 0
+	for i in range(1, units.size()):
+		if units[i].has(a):
+			return i
+	return 0
+
+
+# Estado xdg "maximized" del cliente (bordes/sombra y ícono restaurar). Sólo se
+# envía si cambia; requiere WaylandCompositor.set_maximized(id, bool), que un binario
+# anterior no expone (entonces no hace nada).
+func _sync_client_maximized(id, maximized):
+	if _max_sent.get(id, null) == maximized:
+		return
+	if not ClassDB.class_has_method("WaylandCompositor", "set_maximized"):
+		return
+	_max_sent[id] = maximized
+	compositor.call("set_maximized", id, maximized)
+
+
+# Hover de las ventanas CSD: la de más arriba bajo el puntero (o cerca de su borde
+# superior) muestra el asa de mover. Durante un arrastre se queda en esa ventana.
+func _update_csd_hover(pos):
+	var h = -1
+	if chrome_drag != null:
+		h = int(chrome_drag.get("id", -1)) if _is_csd(int(chrome_drag.get("id", -1))) else -1
+	else:
+		var scale = get_imgui_scale()
+		var gin = grid_unit(get_viewport_rect().size)
+		for id in _hit_order_ids():
+			if id == fullscreen_id or minimized.has(id) or not tiles.has(id):
+				continue
+			# Una maximizada no muestra asa: la ventana llena el hueco, no hay dónde moverla.
+			if wm_maximized.has(id) or maximize_state.has(id):
+				continue
+			var fr = window_rects.get(id, null)
+			if fr == null:
+				continue
+			if WINDOW_CHROME.move_grip_hover(pos, fr, scale, gin):
+				h = id if _is_csd(id) else -1
+				break
+	if h != csd_hover_id:
+		csd_hover_id = h
+		request_redraw()
+	_update_csd_grip(h)
+
+
+# Estado del asa de mover CSD: al apuntar una ventana se desliza desde detrás de su
+# borde superior; al salir se repliega. Un solo asa visible a la vez (la de más arriba).
+func _update_csd_grip(h):
+	var now = OS.get_ticks_msec()
+	if h >= 0:
+		if h != csd_grip_show_id:
+			csd_grip_show_id = h
+			csd_grip_reveal = 0.0
+			csd_grip_dir = 1
+			csd_grip_from = 0.0
+			csd_grip_since = now
+			request_redraw()
+		elif csd_grip_dir != 1:
+			csd_grip_dir = 1
+			csd_grip_from = csd_grip_reveal
+			csd_grip_since = now
+	elif csd_grip_show_id >= 0 and csd_grip_dir != -1:
+		csd_grip_dir = -1
+		csd_grip_from = csd_grip_reveal
+		csd_grip_since = now
+
+
+# Tick por frame del asa CSD (ver _process): sube/baja con ease-out.
+func _tick_csd_grip(now):
+	if csd_grip_dir == 0:
+		return
+	var to = 1.0 if csd_grip_dir > 0 else 0.0
+	var k = clamp(float(now - csd_grip_since) / float(CSD_GRIP_MS), 0.0, 1.0)
+	var e = 1.0 - pow(1.0 - k, 3.0)
+	csd_grip_reveal = lerp(csd_grip_from, to, e)
+	if k >= 1.0:
+		csd_grip_reveal = to
+		csd_grip_dir = 0
+		if to <= 0.0:
+			csd_grip_show_id = -1
+	request_redraw()
+
+
+# Orden de hit-test de las ventanas: flotantes de arriba hacia abajo (z-order),
+# luego las tiled en el orden de `tiles`. Las que aún no están en el layout van al final.
 func _hit_order_ids():
-	if not is_floating():
-		return tiles
 	var out = float_layout.ids_z()
 	out.invert()
 	for id in tiles:
@@ -614,20 +923,30 @@ func _hit_order_ids():
 # Zona de chrome bajo el punto: la ventana flotante más arriba cuyo marco la
 # contenga (excepto si el punto cae en el contenido, que va al cliente).
 func _chrome_pick(pos):
-	if not is_floating():
-		return null
 	var th = _chrome_title_h()
 	var bd = _chrome_border()
 	var scale = get_imgui_scale()
 	var btn = WINDOW_CHROME.BTN * scale
 	var bhit = WINDOW_CHROME.BORDER_HIT * scale
+	var rh = _chrome_resize_h()
 	for id in _hit_order_ids():
-		if id == fullscreen_id or minimized.has(id) or not tiles.has(id):
+		if id == fullscreen_id or minimized.has(id) or not tiles.has(id) or not hybrid.is_floating(id):
 			continue
 		var fr = window_rects.get(id, null)
 		if fr == null:
 			continue
-		var part = WINDOW_CHROME.hit(pos, fr, th, bd, btn, bhit)
+		# CSD: el cliente dibuja su barra; su rect es contenido salvo el pill de mover
+		# y la franja inferior de redimensión del shell (no si está maximizada).
+		if _is_csd(id):
+			var cpart = ""
+			if not (wm_maximized.has(id) or maximize_state.has(id)):
+				cpart = WINDOW_CHROME.csd_hit(pos, fr, scale, grid_unit(get_viewport_rect().size))
+			if cpart != "":
+				return {"id": id, "part": cpart}
+			if Rect2(fr).has_point(pos):
+				return null
+			continue
+		var part = WINDOW_CHROME.hit(pos, fr, th, bd, btn, bhit, rh)
 		if part == "":
 			continue
 		# La ventana de arriba que contiene el punto manda: su contenido va al cliente
@@ -713,6 +1032,22 @@ func _ready():
 	compositor.connect("toplevel_minimize", self, "_on_toplevel_minimize")
 	compositor.connect("toplevel_maximize", self, "_on_toplevel_maximize")
 	compositor.connect("toplevel_fullscreen", self, "_on_toplevel_fullscreen")
+	compositor.connect("toplevel_move", self, "_on_toplevel_move")
+	compositor.connect("toplevel_resize", self, "_on_toplevel_resize")
+	# Lock de puntero pedido por un cliente (SDL relativo). has_signal mantiene la
+	# compatibilidad con binarios viejos (sin el módulo recompilado).
+	if compositor.has_signal("pointer_lock"):
+		compositor.connect("pointer_lock", self, "_on_client_pointer_lock")
+	# Cursor pedido por el cliente (surface NULL = oculto). has_signal mantiene la
+	# compatibilidad con binarios viejos (sin el módulo recompilado).
+	if compositor.has_signal("client_cursor_hidden"):
+		compositor.connect("client_cursor_hidden", self, "_on_client_cursor_hidden")
+	# Drag and drop nativo: el compositor avisa del icono y del estado del drag.
+	# has_signal mantiene la compatibilidad con binarios viejos (sin recompilar).
+	if compositor.has_signal("drag_icon_changed"):
+		compositor.connect("drag_icon_changed", self, "_on_drag_icon_changed")
+	if compositor.has_signal("drag_state_changed"):
+		compositor.connect("drag_state_changed", self, "_on_drag_state_changed")
 	# Cambios de ventanas: rearmar la UI (el Frame las lista, recovery espera la suya).
 	compositor.connect("toplevel_added", self, "_redraw_on_signal")
 	compositor.connect("toplevel_removed", self, "_redraw_on_signal")
@@ -744,7 +1079,6 @@ func _ready():
 		return
 	frame.name = "Frame"
 	add_child(frame)
-	_load_ring()
 	# Vecindario: parser/estado del Wi-Fi. El hilo arranca al abrir la vista; este
 	# nodo sigue dueño del resultado en memoria hasta que el shell se recarga.
 	neighborhood = Host.sc("res://neighborhood.gd").new()
@@ -807,13 +1141,16 @@ func _ready():
 	tiles_ui.shell = self
 	view_layer.add_child(tiles_ui)
 
-	# Fondo de exposé: detrás de los tiles (View) para no tapar las miniaturas.
-	expose_bg = ColorRect.new()
-	expose_bg.color = Color(0.05, 0.06, 0.08, 0.92)
-	expose_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	expose_bg.visible = false
-	view_layer.add_child(expose_bg)
-	view_layer.move_child(expose_bg, 0)
+	# Fondo de exposé: el mismo fondo del Hogar (degradado, sólido o imagen) en vez
+	# del velo oscuro, detrás de los tiles (View) para no tapar las miniaturas.
+	# Ver expose_bg.gd.
+	var expose_script = Host.sc("res://expose_bg.gd")
+	if expose_script != null:
+		expose_bg = expose_script.new()
+		expose_bg.shell = self
+		expose_bg.visible = false
+		view_layer.add_child(expose_bg)
+		view_layer.move_child(expose_bg, 0)
 
 	for arg in OS.get_cmdline_args():
 		if arg.begins_with("--screenshot="):
@@ -825,6 +1162,12 @@ func _ready():
 
 	remote_input = Host.remote_input
 	remote_input.connect("access_requested", self, "_on_input_access")
+	# Nodo hermano de la entrada de ImGui: permanece activo cuando `_set_capture_cursor`
+	# apaga el _input de este canvas para que los clics no entren al Frame/Hogar.
+	capture_input = CAPTURE_INPUT.new()
+	capture_input.name = "CaptureInput"
+	capture_input.shell = self
+	add_child(capture_input)
 	eis_cursor = _make_eis_cursor()
 	# Volumen/brillo: el worker resuelve backends y lee el estado inicial; el OSD se
 	# dibuja al final de _imgui_frame.
@@ -859,15 +1202,30 @@ func _ready():
 		_open_by_name(open_on_start)
 
 
-# Guarda el layout (orden/grupos/pesos/foco/fullscreen/minimizadas) para restaurarlo
-# tras una recarga en caliente (ver main.reload_shell).
+# Guarda el layout (orden/unidades híbridas/foco/fullscreen/minimizadas) para
+# restaurarlo tras una recarga en caliente (ver main.reload_shell).
 func _save_layout():
-	var gs = []
-	for g in groups:
-		gs.append(g.duplicate())
-	Host.layout = {"tiles": tiles.duplicate(), "groups": gs, "weights": split_weight.duplicate(),
+	Host.layout = {"tiles": tiles.duplicate(),
+		"units": WM_UNITS.serialize(wm_units),
+		"hybrid": hybrid.serialize(),
 		"minimized": minimized.keys(), "focused": focused_tile, "fullscreen": fullscreen_id,
 		"maximize": maximize_state.duplicate(true)}
+
+
+# Quita de `wm_units` los ids que ya no están vivos (p. ej. minimizadas), dejando
+# registros con 2+ miembros. Los que quedan sueltos pasan a flotante/solas.
+func _prune_units():
+	for i in range(wm_units.size() - 1, -1, -1):
+		var rec = wm_units[i]
+		var members = []
+		for m in rec["members"]:
+			if tiles.has(m):
+				members.append(m)
+		if members.size() < 2:
+			wm_units.remove(i)
+			continue
+		rec["members"] = members
+		rec["id"] = members[0]
 
 
 # Al recargar el shell, las apps siguen vivas en el compositor del Host: se rearma el
@@ -903,17 +1261,24 @@ func _adopt_windows():
 			if tiles.has(id):
 				minimized[id] = true
 				tiles.erase(id)
-		groups = []
-		for g in lay.get("groups", []):
-			var gg = []
-			for id in g:
-				if tiles.has(id):
-					gg.append(id)
-			if gg.size() >= 2:
-				groups.append(gg)
-		split_weight = {}
-		for k in lay.get("weights", {}):
-			split_weight[int(k)] = lay["weights"][k]
+		wm_units = []
+		if lay.has("units"):
+			wm_units = WM_UNITS.parse(lay.get("units", []), _tile_rect(get_viewport_rect().size))
+		else:
+			# Migración del layout viejo {groups, weights}: mismo eje por orientación.
+			wm_units = WM_UNITS.from_legacy(tiles, lay.get("groups", []), lay.get("weights", {}),
+				_tile_rect(get_viewport_rect().size))
+		_prune_units()
+		hybrid = WM_HYBRID.new()
+		if lay.has("hybrid"):
+			hybrid.parse(lay.get("hybrid", {}))
+		for id in tiles:
+			if minimized.has(id):
+				continue
+			hybrid.ensure(id)
+		for rec in wm_units:
+			for m in rec["members"]:
+				hybrid.set_tiled(m, hybrid.anchor(m))
 		maximize_state = {}
 		for k in lay.get("maximize", {}):
 			maximize_state[int(k)] = lay["maximize"][k]
@@ -952,6 +1317,30 @@ func geom_state():
 	return out
 
 
+# Al ganar o perder el foco de teclado (cambio de VT, captura, otra ventana de sway) las
+# sueltas que ocurran afuera nunca llegan a Godot: un Super "apretado" para siempre hace
+# que cada clic sea Super+arrastre y la app no recibe clics. Se sueltan en Godot los
+# modificadores que figuran apretados, y también en la app.
+func _notification(what):
+	if what == MainLoop.NOTIFICATION_WM_FOCUS_IN or what == MainLoop.NOTIFICATION_WM_FOCUS_OUT:
+		_clear_stuck_mods()
+
+
+func _clear_stuck_mods():
+	var any = false
+	for sc in MOD_KEYS:
+		if Input.is_key_pressed(sc):
+			any = true
+			var ev = InputEventKey.new()
+			ev.scancode = sc
+			ev.physical_scancode = sc
+			ev.pressed = false
+			Input.parse_input_event(ev)
+	if any:
+		print("[key-sync] modificadores soltados al cambiar el foco de teclado")
+		release_modifiers()
+
+
 # Recupera modificadores pegados: reenvía sueltas de Ctrl/Shift/Alt/Super a la app y
 # limpia el estado del shell (paneo/Super).
 func release_modifiers():
@@ -965,6 +1354,7 @@ func release_modifiers():
 			ev.physical_scancode = sc
 			ev.pressed = false
 			compositor.key(ev)
+	fwd_mods.clear()
 	pan = 0.0
 	pan_active = false
 	if frame != null:
@@ -978,32 +1368,42 @@ var last_commits = 0
 const IDLE_MS = 3000
 const SLEEP_ACTIVE = 16000
 const SLEEP_IDLE = 250000
+# Un commit de una app (p. ej. htop que redibuja cada 1-2 s) sólo mantiene el bucle
+# activo este rato; antes renovaba `last_activity` y el shell no entraba nunca en
+# reposo (60 vueltas/s sin dibujar casi nada: ~15% de CPU en equipos chicos).
+const COMMIT_ACTIVE_MS = 500
 var last_activity = 0
+var last_commit_ms = 0
 
 
 # Un commit Wayland puede traer capas/texturas nuevas (y con dmabuf el VisualServer
 # no se entera de que cambió el contenido): se rearma el frame siguiente.
 func _process(_delta):
 	var now = OS.get_ticks_msec()
-	# Transición de zoom Hogar <-> Vecindario (metáfora del ícono central). El
-	# objetivo sigue SIEMPRE a `neighborhood_view`: cualquier salida (abrir una app,
-	# la grilla de Apps, _go_home) vuelve a 0 y el Vecindario se retira.
-	nb_zoom_target = 1.0 if neighborhood_view else 0.0
-	if abs(nb_zoom - nb_zoom_target) > 0.001:
-		var step = (_delta * 1000.0) / ZOOM_MS
-		if step <= 0.0:
-			step = 0.15
-		if nb_zoom < nb_zoom_target:
-			nb_zoom = min(nb_zoom_target, nb_zoom + step)
+	_sync_capture_cursor()
+	# Asa de mover CSD: deslizamiento de entrada/salida (pide frames mientras anima).
+	_tick_csd_grip(now)
+	# Transición de zoom Hogar <-> Grupo <-> Vecindario (metáfora del ícono central).
+	# `zoom_f` sigue al objetivo `zoom_level` con ZOOM_MS; el dibujo interpola el
+	# ícono central y la escala/alfa de cada capa. `neighborhood_view` queda true en
+	# todo el recorrido para que cualquier salida siga tratando la vista como zoom.
+	if abs(zoom_f - float(zoom_level)) > 0.001:
+		var zstep = (_delta * 1000.0) / ZOOM_MS
+		if zstep <= 0.0:
+			zstep = 0.15
+		if zoom_f < float(zoom_level):
+			zoom_f = min(float(zoom_level), zoom_f + zstep)
 		else:
-			nb_zoom = max(nb_zoom_target, nb_zoom - step)
+			zoom_f = max(float(zoom_level), zoom_f - zstep)
+		neighborhood_view = zoom_level > 0 or zoom_f > 0.001
 		request_redraw()
-	elif nb_zoom != nb_zoom_target:
-		nb_zoom = nb_zoom_target
+	elif zoom_f != float(zoom_level):
+		zoom_f = float(zoom_level)
+		neighborhood_view = zoom_level > 0
 		request_redraw()
 	if compositor.commit_count != last_commits:
 		last_commits = compositor.commit_count
-		last_activity = now
+		last_commit_ms = now
 		request_redraw()
 	if activity_instance != null and activity_instance.get("animate"):
 		last_activity = now
@@ -1029,12 +1429,17 @@ func _process(_delta):
 	_plan_poll()
 	# Configuración: reapa el Thread de lectura y aplica acento/fondo del snapshot.
 	settings_poll()
+	# swaymsg de ajustes de entrada: reap de Threads one-shot (bloqueó a lo sumo su
+	# propio Thread, no el frame).
+	_sway_exec_poll()
+	_reap_rotate()
 	# Volumen/brillo: copia el estado del worker y mantiene vivo el OSD mientras se
 	# desvanece (mismo patrón que el resto de los workers).
 	if system_osd != null and system_osd.poll():
 		request_redraw()
 	if screenshot_path == "":
-		var sleep = SLEEP_IDLE if now - last_activity > IDLE_MS else SLEEP_ACTIVE
+		var busy = now - last_activity <= IDLE_MS or now - last_commit_ms <= COMMIT_ACTIVE_MS
+		var sleep = SLEEP_ACTIVE if busy else SLEEP_IDLE
 		if OS.low_processor_usage_mode_sleep_usec != sleep:
 			OS.low_processor_usage_mode_sleep_usec = sleep
 
@@ -1078,14 +1483,11 @@ func _imgui_frame():
 	# del escritorio van en la capa de abajo y el fondo oscuro las enmarca.
 	if not expose:
 		if current_activity == null:
-			# Durante el zoom Hogar -> Vecindario se sigue dibujando el Hogar detrás,
-			# para que el Vecindario aparezca escalando sobre él (no sobre negro).
-			if neighborhood_view and nb_zoom >= 0.999:
+			# El Hogar se dibuja siempre; con zoom activo _draw_home sólo pinta el
+			# ícono central (ancla continua), y la capa Grupo/Vecindario entra encima.
+			_draw_home(_home_x(_units()))
+			if zoom_level > 0 or zoom_f > 0.001:
 				neighborhood_ui.refresh()
-			else:
-				_draw_home(_home_x(_units()))
-				if neighborhood_view:
-					neighborhood_ui.refresh()
 		else:
 			_draw_activity()
 			# Paneo/animación hacia el Hogar: se dibuja deslizándose junto a las ventanas.
@@ -1107,16 +1509,17 @@ func _imgui_frame():
 	if expose and not tiles.empty():
 		row = true
 	view.visible = row
-	# Vecindario con zoom: visible también mientras cierra/anima (nb_zoom > 0).
+	# Zoom (Grupo/Vecindario): la capa neighborhood_ui se usa para ambos niveles y se
+	# transforma según su nivel (escala/alfa de capa), visible también al cerrar.
 	var nb_vp = get_viewport_rect().size
-	neighborhood_ui.visible = current_activity == null and not expose and (neighborhood_view or nb_zoom > 0.01)
+	neighborhood_ui.visible = current_activity == null and not expose and (zoom_level > 0 or zoom_f > 0.001)
 	if neighborhood_ui.visible:
-		var zk = lerp(0.72, 1.0, _ease_out(nb_zoom))
+		var lt = ZOOM.layer_transform(zoom_level, zoom_f)
 		neighborhood_ui.rect_pivot_offset = nb_vp * 0.5
-		neighborhood_ui.rect_scale = Vector2(zk, zk)
-		neighborhood_ui.modulate = Color(1, 1, 1, clamp(nb_zoom, 0.0, 1.0))
+		neighborhood_ui.rect_scale = Vector2(float(lt.scale), float(lt.scale))
+		neighborhood_ui.modulate = Color(1, 1, 1, clamp(float(lt.alpha), 0.0, 1.0))
 		# Al cerrar sigue visible para animar, pero no debe capturar el mouse.
-		neighborhood_ui.mouse_filter = Control.MOUSE_FILTER_STOP if neighborhood_view else Control.MOUSE_FILTER_IGNORE
+		neighborhood_ui.mouse_filter = Control.MOUSE_FILTER_STOP if zoom_level > 0 else Control.MOUSE_FILTER_IGNORE
 	if row:
 		_update_tiles()
 	instant_switch = false  # ya se reubicaron sin animación en este frame
@@ -1125,13 +1528,21 @@ func _imgui_frame():
 	if tiles_ui != null:
 		tiles_ui.rect_size = get_viewport_rect().size
 		tiles_ui.refresh()
+	# Decoración por ventana (OpenStep): se redibuja con el tamaño de la vista.
+	for did in deco_nodes.keys():
+		var dnode = deco_nodes.get(did)
+		if dnode != null and is_instance_valid(dnode):
+			dnode.refresh(view.rect_size)
 	if expose_bg != null:
 		expose_bg.rect_size = get_viewport_rect().size
 		expose_bg.visible = expose
-	# En exposé no se dibujan las barras del Frame: taparían las miniaturas (el fondo
-	# oscuro y los marcos las resaltan).
+		if expose:
+			expose_bg.refresh()
+	# El Frame (sus barras) sigue a la vista en exposé: es el borde del escritorio al
+	# que se vuelve. El menú de ventana no aplica (las miniaturas no lo usan).
+	frame.draw(self)
 	if not expose:
-		frame.draw(self)
+		_draw_window_menu()
 	_update_ghosts(OS.get_ticks_msec())
 
 	_draw_input_requests()
@@ -1147,11 +1558,19 @@ func _imgui_frame():
 
 # --- Pantallas: una fila horizontal; cada pantalla puede tener varias apps ---
 
+# Registro de unidad que contiene `id` (o null).
+func _record_of(id):
+	for rec in wm_units:
+		if rec["members"].has(id):
+			return rec
+	return null
+
+
 # El grupo (franja con varias apps) que contiene la ventana, o null si va suelta.
 func _group_of(id):
-	for g in groups:
-		if g.has(id):
-			return g
+	var rec = _record_of(id)
+	if rec != null and rec["members"].size() >= 2:
+		return rec["members"]
 	return null
 
 
@@ -1161,28 +1580,40 @@ func _unit_members(id):
 	return g if g != null else [id]
 
 
-# Unidades en orden de `tiles`: cada grupo una vez (en la posición de su primer miembro).
+# Unidades en orden de `tiles`: la ranura Escritorio (índice 0, sin miembros tiled)
+# y luego cada grupo una vez (en la posición de su primer miembro).
 func _units():
-	var out = []
+	var out = [[]]  # Escritorio: ranura virtual que aloja flotantes, sin mosaico
 	var seen = {}
 	for id in tiles:
 		if seen.has(id):
 			continue
-		var g = _group_of(id)
-		if g != null:
-			out.append(g)
-			for m in g:
-				seen[m] = true
+		if hybrid.is_floating(id):
+			seen[id] = true  # las flotantes no forman unidad: se dibujan ancladas
+			continue
+		var rec = _record_of(id)
+		if rec != null:
+			var members = []
+			for m in rec["members"]:
+				if tiles.has(m) and not seen.has(m):
+					members.append(m)
+					seen[m] = true
+			if not members.empty():
+				out.append(members)
 		else:
 			out.append([id])
 			seen[id] = true
 	return out
 
 
+# Índice de la unidad enfocada. Si la ventana enfocada es flotante, manda su ancla.
 func _focused_unit_index(units):
-	for u in range(units.size()):
-		if units[u].has(focused_tile):
-			return u
+	if focused_tile >= 0:
+		for i in range(units.size()):
+			if units[i].has(focused_tile):
+				return i
+		if hybrid.is_floating(focused_tile):
+			return _anchor_index(units, focused_tile)
 	return 0
 
 
@@ -1222,9 +1653,10 @@ func _home_x(units):
 	return (float(units.size()) - _row_s(units)) * vp.x
 
 
-# Toda la fila a tamaño completo: la pantalla enfocada (o el Hogar) en (0,0) y el resto
-# a ±ancho, para que cambiar de pantalla deslice de costado. La fila incluye el Hogar
-# como ranura extra al final (índice units.size()).
+# La fila completa: la pantalla enfocada (o el Hogar) en (0,0) y el resto a ±ancho.
+# Index 0 es la ranura Escritorio (aloja flotantes). Las unidades tiled reparten su
+# área por eje; las flotantes se dibujan ancladas a su pantalla (float_layout local
+# + offset por ancla). El Hogar es la ranura extra al final (índice units.size()).
 func _compute_slide_layout():
 	tile_rects.clear()
 	var units = _units()
@@ -1236,61 +1668,79 @@ func _compute_slide_layout():
 		window_rects.clear()
 		return
 	var cr = _tile_rect(vp)
-	# K13: en flotante no hay fila; las ventanas se colocan libres dentro del hueco
-	# central (cascada, arrastre y z-order los lleva float_layout).
-	if is_floating():
-		_compute_float_layout(cr)
-		return
 	window_rects.clear()
 	var s = _row_s(units)
-	# Cada pantalla (top-level) vive bajo la barra superior con alto completo; la
-	# fila desliza con el ancho del viewport (consistente con pan/_home_x), así los
-	# vecinos quedan a ±ancho. Sólo los diálogos se limitan al hueco de dos barras.
+	# Mosaico: cada unidad tiled reparte su área (una sola ocupa todo).
 	for u in range(units.size()):
-		var area = Rect2(cr.position.x + (float(u) - s) * vp.x, cr.position.y, cr.size.x, cr.size.y)
 		var members = units[u]
+		if members.empty():
+			continue
+		var area = Rect2(cr.position.x + (float(u) - s) * vp.x, cr.position.y, cr.size.x, cr.size.y)
 		if members.size() == 1:
 			tile_rects[members[0]] = area
 		else:
 			_split_rects(members, area)
+		for m in members:
+			_sync_client_maximized(m, maximize_state.has(m))
+	# Flotantes: encima de su pantalla ancla.
+	_compute_float_layout(cr, units, s)
+	# El chrome de las tiled no se dibuja: sólo las flotantes llevan decoración.
+	for id in tiles:
+		if minimized.has(id) or hybrid.is_floating(id):
+			continue
+		var d = deco_nodes.get(id)
+		if d != null and is_instance_valid(d):
+			d.visible = false
 
 
 # Peso de reparto de una ventana dentro de su franja (default 1: partes iguales).
 func _weight(id):
-	return float(split_weight.get(id, 1.0))
+	return WM_UNITS.weight_of(wm_units, id, 1.0)
 
 
-# Las apps de una franja van en UNA fila, sin tope; el ancho se reparte por pesos
-# (el asa de borde ajusta los pesos de las dos ventanas vecinas).
-func _split_rects(members, area):
-	var n = members.size()
-	if n == 0:
-		return
-	var gap = TILE_GAP
-	var total = 0.0
+# Registro filtrado a `members` con el eje/pesos guardados (o default X/1).
+func _rect_record(members):
+	var weights = {}
 	for m in members:
-		total += max(_weight(m), 0.001)
-	var avail = area.size.x - gap * float(n + 1)
-	var x = area.position.x + gap
-	for i in range(n):
-		var w = avail * max(_weight(members[i]), 0.001) / total
-		tile_rects[members[i]] = Rect2(x, area.position.y, w, area.size.y)
-		x += w + gap
+		weights[m] = _weight(m)
+	var rec = _record_of(members[0]) if not members.empty() else null
+	var axis = String(rec["axis"]) if rec != null else WM_UNITS.AXIS_X
+	return {"members": members, "axis": axis, "weights": weights}
 
 
-# Asas de la franja enfocada (sólo si tiene varias apps): coordenada x del borde
-# entre cada par, para dibujar/arrastrar la redimensión.
+# Las apps de una franja se reparten según el eje de su unidad: X = columnas
+# (ancho), Y = filas (alto). El asa de borde ajusta los pesos (sólo eje X).
+func _split_rects(members, area):
+	if members.empty():
+		return
+	var rects = WM_UNITS.member_rects(_rect_record(members), area, TILE_GAP)
+	for id in rects.keys():
+		tile_rects[id] = rects[id]
+
+
+# Asas de la franja enfocada (sólo si tiene varias apps y su eje es X): coordenada x
+# del borde entre cada par, para dibujar/arrastrar la redimensión.
 func _compute_handles():
 	handles = []
-	if expose or fullscreen_id >= 0 or _at_home() or _home_anim_active() or is_floating():
+	if expose or fullscreen_id >= 0 or _at_home() or _home_anim_active():
 		hover_handle = null
 		resize_handle = null
 		return
 	var units = _units()
 	if units.empty():
 		return
-	var u = units[_focused_unit_index(units)]
+	var fi = _focused_unit_index(units)
+	if fi <= 0 or fi >= units.size():
+		hover_handle = null
+		resize_handle = null
+		return
+	var u = units[fi]
 	if u.size() < 2:
+		return
+	var rec = _record_of(u[0])
+	if rec != null and String(rec.get("axis", WM_UNITS.AXIS_X)) == WM_UNITS.AXIS_Y:
+		hover_handle = null
+		resize_handle = null
 		return
 	var vp = get_viewport_rect().size
 	for i in range(u.size() - 1):
@@ -1338,18 +1788,21 @@ func _resize_to(h, mouse_x):
 	var rr = tile_rects.get(h.right)
 	if rl == null or rr == null:
 		return
+	var rec = _record_of(h.left)
+	if rec == null:
+		return
 	var left = rl.position.x
 	var right = rr.position.x + rr.size.x
 	var frac = clamp((mouse_x - left) / max(right - left, 1.0), 0.12, 0.88)
 	var wsum = _weight(h.left) + _weight(h.right)
-	split_weight[h.left] = wsum * frac
-	split_weight[h.right] = wsum * (1.0 - frac)
+	rec["weights"][h.left] = wsum * frac
+	rec["weights"][h.right] = wsum * (1.0 - frac)
 
 
 # Rects de las ventanas de UNA pantalla en coordenadas locales del workspace (origen
 # (0,0), tamaño del viewport), sin depender del estado de paneo. Misma partición que
-# _split_rects: una ventana ocupa el área de contenido; una franja partida reparte por
-# pesos con TILE_GAP. Lo usa el exposé para escalar cada ventana a su lugar real.
+# _split_rects: una ventana ocupa el área de contenido; una franja partida reparte
+# según su eje con TILE_GAP. Lo usa el exposé para escalar cada ventana a su lugar real.
 func _unit_local_layout(members):
 	var out = {}
 	var vp = get_viewport_rect().size
@@ -1359,37 +1812,57 @@ func _unit_local_layout(members):
 		return out
 	if members.empty():
 		return out
-	var gap = TILE_GAP
-	var total = 0.0
-	for m in members:
-		total += max(_weight(m), 0.001)
-	var avail = area.size.x - gap * float(members.size() + 1)
-	var x = area.position.x + gap
-	for i in range(members.size()):
-		var w = avail * max(_weight(members[i]), 0.001) / total
-		out[members[i]] = Rect2(x, area.position.y, w, area.size.y)
-		x += w + gap
-	return out
+	return WM_UNITS.member_rects(_rect_record(members), area, TILE_GAP)
 
 
 # Exposé = "zoom out" del escritorio: cada workspace (pantalla) se dibuja como una
-# miniatura completa del viewport, con sus ventanas en la posición y proporción reales,
-# y TODOS los workspaces van en una fila en su orden espacial (el mismo del paneo),
-# escalados para entrar a la vista. La lógica de escalado/proporción vive en
-# expose_layout.gd (pura y testeable).
+# miniatura completa del viewport y sus ventanas se reparten DENTRO del marco en una
+# grilla sin solapes (las grandes arriba; ver expose_layout.arrange). TODOS los
+# workspaces van en una fila en su orden espacial (el mismo del paneo), escalados para
+# entrar a la vista. La lógica de escalado/grilla vive en expose_layout.gd (pura).
 func _compute_expose_layout():
 	expose_cards.clear()
 	expose_unit_cards = []
-	var units = _units()
+	var all_units = _units()
+	# Sólo las unidades con contenido: los escritorios vacíos no se muestran (tampoco
+	# la vieja ranura final "Nuevo escritorio"; el destino de arrastre es el hueco).
+	var flags = []
+	for i in range(all_units.size()):
+		flags.append(_unit_has_windows(all_units, i))
+	var units = []
+	var src = []
+	for s in EXPOSE_LAYOUT.visible_slots(flags):
+		units.append(all_units[s])
+		src.append(s)
+	expose_units = units
+	expose_unit_src = src
 	var n = units.size()
 	if n == 0:
 		expose_sel = 0
 		return
 	expose_sel = int(clamp(expose_sel, 0, max(tiles.size() - 1, 0)))
 	var vp = get_viewport_rect().size
+	var box = _tile_rect(vp)
 	var local = []
-	for u in units:
-		local.append(_unit_local_layout(u))
+	for u in range(n):
+		var l = _unit_local_layout(units[u])
+		# Las flotantes de esta pantalla también entran en la miniatura, en su
+		# posición local real (dentro de su unidad).
+		if src[u] >= 0:
+			for id in tiles:
+				if minimized.has(id) or not hybrid.is_floating(id):
+					continue
+				if _anchor_index(all_units, id) != src[u]:
+					continue
+				if not float_layout.has(id):
+					if float_memory.has(id) and float_memory[id] != null:
+						float_layout.restore_one(id, float_memory[id], box)
+					else:
+						float_layout.place_new(id, box)
+				var lr = float_layout.rect(id)
+				if lr != null:
+					l[id] = lr
+		local.append(l)
 	var plan = EXPOSE_LAYOUT.plan(vp, local, EXPOSE_PAD, EXPOSE_GAP, EXPOSE_MAX_SCALE)
 	expose_unit_cards = plan["units"]
 	expose_cards = plan["cards"]
@@ -1399,9 +1872,189 @@ func _compute_expose_layout():
 		expose_cards[id] = expose_cards[id].grow(-EXPOSE_CARD_INSET)
 	# tile_rects queda con la geometría REAL local de cada ventana: la necesita
 	# _update_tile para reescalar la miniatura sin distorsionar el contenido.
-	for u in range(units.size()):
+	for u in range(n):
 		for id in local[u].keys():
 			tile_rects[id] = local[u][id]
+
+
+# ¿La unidad i tiene ventanas? Cuenta las tiled de la unidad y las flotantes ancladas
+# a ella: una ranura sin nada no se muestra en exposé.
+func _unit_has_windows(units, i):
+	if not units[i].empty():
+		return true
+	for id in tiles:
+		if minimized.has(id) or not hybrid.is_floating(id):
+			continue
+		if _anchor_index(units, id) == i:
+			return true
+	return false
+
+
+# Índice de la ranura de exposé que contiene a `id` (-1 si no está).
+func _expose_index_of_window(id):
+	for i in range(expose_units.size()):
+		if expose_units[i].has(id):
+			return i
+	var all_units = _units()
+	var ai = _anchor_index(all_units, id)
+	for i in range(expose_unit_src.size()):
+		if expose_unit_src[i] == ai:
+			return i
+	return -1
+
+
+# Ranura de exposé bajo el punto (-1 si ninguna).
+func _expose_unit_at(pos):
+	for i in range(expose_unit_cards.size()):
+		if expose_unit_cards[i].has_point(pos):
+			return i
+	return -1
+
+
+# Hueco de inserción de exposé bajo el punto (-1 si cae sobre una tarjeta). Los huecos
+# son los espacios entre marcos (y los márgenes extremos): ahí se crea un escritorio
+# nuevo al soltar.
+func _expose_gap_at(pos):
+	return EXPOSE_LAYOUT.gap_at(expose_unit_cards, pos.x)
+
+
+# Rect (coords de vista) de la barra vertical de inserción del hueco `gap` (null si no
+# es válido). Se extiende a lo alto de la fila de marcos.
+func _expose_gap_bar_rect(gap):
+	if gap < 0 or expose_unit_cards.empty():
+		return null
+	var x = EXPOSE_LAYOUT.gap_x(expose_unit_cards, gap)
+	if is_nan(x):
+		return null
+	var y0 = INF
+	var y1 = -INF
+	for r in expose_unit_cards:
+		y0 = min(y0, r.position.y)
+		y1 = max(y1, r.end.y)
+	var w = 4.0
+	return Rect2(x - w * 0.5, y0 - 6.0, w, (y1 - y0) + 12.0)
+
+
+# ¿`id` es una unidad tiled con un solo miembro? (Se usa para no reordenar al soltar
+# en el hueco que es su propia posición.) Una flotante no pertenece a ninguna unidad:
+# soltarla en un hueco sí debe crear un escritorio.
+func _unit_is_solo(id):
+	if hybrid.is_floating(id) or not WM_UNITS.has(wm_units, id):
+		return false
+	return WM_UNITS.members_of(wm_units, id).size() <= 1
+
+
+# Suelta la miniatura `id` en el hueco `gap` (0..n): crea un escritorio NUEVO en esa
+# posición del orden de unidades, con esa ventana. Tiled: la saca de su unidad como
+# unidad sola y la inserta en ese índice. Flotante: la vuelve tiled, unidad sola, en la
+# misma posición. Soltar en el hueco pegado a su propia tarjeta no reordena nada.
+func _expose_insert(id, gap):
+	var n = expose_unit_cards.size()
+	if id < 0 or gap < 0 or gap > n or not tiles.has(id):
+		return
+	var cur = _expose_index_of_window(id)
+	if _unit_is_solo(id) and (gap == cur or gap == cur + 1):
+		# Es su propia posición: no hay nada que mover (y evita saltar al final).
+		request_redraw()
+		return
+	# La unidad que debe quedar a la derecha del nuevo escritorio, si la hay. Se toma
+	# un miembro distinto de `id` para que el ancla sobreviva a su extracción.
+	var all_units = _units()
+	var anchor_id = -1
+	if gap < expose_unit_src.size():
+		var r = int(expose_unit_src[gap])
+		if r >= 1 and r < all_units.size():
+			for m in all_units[r]:
+				if m != id:
+					anchor_id = m
+					break
+	var axis = _default_axis()
+	if hybrid.is_floating(id):
+		_remember_float_geometry()
+		float_layout.remove(id)
+		hybrid.set_tiled(id, id)
+	if anchor_id >= 0:
+		WM_UNITS.solo_before(wm_units, id, anchor_id, axis)
+	elif gap == 0:
+		# Extremo izquierdo: lo más a la izquierda posible (tras el Escritorio virtual).
+		WM_UNITS.solo(wm_units, id, 0, axis)
+	else:
+		WM_UNITS.solo(wm_units, id, -1, axis)
+	hybrid.set_tiled(id, id)
+	wm_maximized.erase(id)
+	maximize_state.erase(id)
+	_rebuild_tiles_preserving_floats()
+	_focus_tile(id)
+	expose_sel = max(tiles.find(id), 0)
+	expose_drag = null
+	expose_drag_target = -1
+	expose_drag_gap = -1
+	# Invalida el layout cacheado: las posiciones/tamaños de las tarjetas cambian.
+	_compute_expose_layout()
+	request_redraw()
+
+
+# Rearma `tiles` con las tiled en orden de unidad (miembros contiguos) y conserva las
+# flotantes/minimizadas restantes. `_rebuild_tiles(_units())` las descartaría porque
+# `_units()` no incluye flotantes.
+func _rebuild_tiles_preserving_floats():
+	var out = []
+	var placed = {}
+	for u in wm_units:
+		for m in u["members"]:
+			if tiles.has(m) and not placed.has(m):
+				out.append(m)
+				placed[m] = true
+	for id in tiles:
+		if not placed.has(id):
+			out.append(id)
+			placed[id] = true
+	tiles = out
+	request_redraw()
+
+
+# Suelta la miniatura `id` en la ranura `target`: reancla la flotante (o une/reubica
+# la tiled) al escritorio destino y deja el exposé abierto.
+func _expose_drop(id, target):
+	if id < 0 or target < 0 or target >= expose_units.size():
+		return
+	if _expose_index_of_window(id) == target:
+		return
+	var tid = -1
+	if expose_unit_src[target] <= 0:
+		tid = WM_HYBRID.ESCRITORIO
+	elif not expose_units[target].empty():
+		tid = expose_units[target][0]
+	if tid < 0:
+		return
+	if hybrid.is_floating(id):
+		hybrid.reanchor(id, tid)
+		# Coloca la flotante dentro del área del destino (todos los escritorios
+		# comparten la caja local): encaja sin deformar y la sube al tope.
+		var box = _tile_rect(get_viewport_rect().size)
+		var lr = float_layout.rect(id)
+		if lr != null:
+			float_layout.restore_one(id, lr, box)
+	else:
+		if tid == WM_HYBRID.ESCRITORIO:
+			WM_UNITS.solo(wm_units, id, -1, _default_axis())
+		else:
+			WM_UNITS.join(wm_units, id, tid, "right")
+		hybrid.set_tiled(id, tid)
+		_rebuild_tiles_preserving_floats()
+	expose_sel = max(tiles.find(id), 0)
+	expose_drag = null
+	expose_drag_target = -1
+	expose_drag_gap = -1
+	# Invalida el layout cacheado: las posiciones/tamaños de las tarjetas cambian.
+	_compute_expose_layout()
+	request_redraw()
+
+
+# Salida pública del exposé (la usa el Frame): delega en el toggle existente.
+func exit_expose():
+	if expose:
+		_toggle_expose(false)
 
 
 # Rueda en exposé: como todo entra en pantalla, navega la selección (no hace scroll).
@@ -1498,6 +2151,7 @@ func _update_tiles():
 		if not tiles.has(id):
 			var node = tile_nodes[id]
 			tile_nodes.erase(id)
+			_free_deco(id)
 			tile_rects.erase(id)
 			expose_cards.erase(id)
 			if expose_hover == id:
@@ -1528,58 +2182,78 @@ func _update_tile(id, now):
 	_fill_nodes(node, layers, fit.scale, fit.offset)
 	tile_fit[id] = fit
 
+	# Transición de modo tiled<->flotante (K13): interpola desde el rect visual
+	# previo hacia `rect`. Se deja para después de exposé/intro/zoom.
+	var wm_on = false
+	var wm_from = rect
+	var wm_e = 1.0
+	if not expose and not view_anim.has(id) and not tile_intro.has(id):
+		var t = _wm_transition(id, rect, node, now)
+		wm_on = bool(t.active)
+		wm_from = t.from
+		wm_e = float(t.e)
+
 	if expose:
 		# Miniatura: se escala el nodo entero (la app conserva su tamaño de tile) y se
-		# centra, animando desde su transform de pantalla (ver _toggle_expose). El
-		# tamaño real por ventana está en tile_rects (lo dejó _compute_expose_layout).
+		# centra en su tarjeta. La escala NO se topea en 1.0: también CRECE cuando la
+		# tarjeta es mayor que el tamaño real (p. ej. una flotante chica); si no, la
+		# miniatura quedaba en su tamaño real y no se redimensionaba al cambiar de
+		# escritorio ni al entrar al exposé.
 		var card = expose_cards.get(id, Rect2(Vector2.ZERO, view.rect_size))
-		node.rect_size = rect.size
-		var s = min(min(card.size.x / max(rect.size.x, 1.0), card.size.y / max(rect.size.y, 1.0)), 1.0)
 		# Selección sin borde: la elegida se agranda un poco y se aclara (ver _draw_expose).
 		var sel = expose_sel >= 0 and expose_sel < tiles.size() and tiles[expose_sel] == id
 		var bright = EXPOSE_SEL_BRIGHT if sel else 1.0
+		var s = EXPOSE_LAYOUT.thumb_scale(card, rect)
 		if sel:
 			s *= EXPOSE_SEL_SCALE
-		var tpos = card.position + (card.size - rect.size * s) * 0.5
+		var fp = Rect2(card.position + (card.size - rect.size * s) * 0.5, rect.size * s)
+		node.rect_size = rect.size
 		var a = view_anim.get(id)
+		if a == null:
+			# Reacomodo (drop/inserción, cambio de selección, layout nuevo): parte de
+			# la transformación VISIBLE actual y anima suavemente a la tarjeta nueva.
+			var cur = _node_footprint(node)
+			if not _footprint_near(cur, fp):
+				a = {"from": cur, "since": now}
+				view_anim[id] = a
 		if a != null:
 			var e = _ease(float(now - a.since) / EXPOSE_MS)
-			node.rect_position = a.from_pos.linear_interpolate(tpos, e)
-			var sc = lerp(float(a.from_scale), s, e)
-			node.rect_scale = Vector2(sc, sc)
+			var f = EXPOSE_LAYOUT.lerp_rect(a.from, fp, e)
+			node.rect_position = f.position
+			node.rect_scale = _scale_for(f, rect.size)
 			if float(now - a.since) >= EXPOSE_MS:
 				view_anim.erase(id)
 			else:
 				request_redraw()
 		else:
-			node.rect_scale = Vector2(s, s)
-			node.rect_position = tpos
+			node.rect_position = fp.position
+			node.rect_scale = _scale_for(fp, rect.size)
 		node.modulate = Color(bright, bright, bright, 1.0)
 		node.visible = true
 		return
 
-	# Vuelta de exposé: se interpola desde la tarjeta hasta su rect de pantalla.
+	# Vuelta de exposé: se interpola desde la tarjeta (footprint visible) hasta su rect
+	# de pantalla; el set_size real se pide recién al terminar, no en cada frame.
 	if view_anim.has(id):
 		var a = view_anim[id]
 		var e = _ease(float(now - a.since) / EXPOSE_MS)
-		node.rect_position = a.from_pos.linear_interpolate(rect.position, e)
-		var sc = lerp(float(a.from_scale), 1.0, e)
-		node.rect_scale = Vector2(sc, sc)
+		var f = EXPOSE_LAYOUT.lerp_rect(a.from, rect, e)
+		node.rect_position = f.position
+		node.rect_scale = _scale_for(f, rect.size)
 		node.rect_size = rect.size
 		node.visible = true
 		node.modulate = Color(1, 1, 1, 1)
-		if geo.size != Vector2.ZERO and requested_sizes.get(id) != rect.size:
-			requested_sizes[id] = rect.size
-			compositor.set_size(id, rect.size)
 		if float(now - a.since) >= EXPOSE_MS:
 			view_anim.erase(id)
+			_request_client_size(id, rect, geo)
 		else:
 			request_redraw()
 		return
 
-	# Entrada: escala y se traslada desde el ícono que la lanzó (o desde el borde
-	# derecho, mismo tamaño). El placeholder con spinner lo dibuja tiles_ui hasta que
-	# llega la primera textura. El tamaño del cliente queda en el destino (1:1).
+	# Entrada: escala y se traslada desde el ícono que la lanzó; si no se conoce el
+	# ícono, genie desde el centro del rect final (0.2 -> 1 con fade). El placeholder
+	# con spinner lo dibuja tiles_ui hasta que llega la primera textura. El set_size
+	# real del cliente se pide al terminar (nada de re-render durante la animación).
 	if tile_intro.has(id):
 		var info = tile_intro[id]
 		if layers.size() > 0 and layers[0].texture != null:
@@ -1593,23 +2267,19 @@ func _update_tile(id, now):
 				var s0 = 0.78
 				from = Rect2(rect.position + rect.size * (0.5 - 0.5 * s0), rect.size * s0)
 			else:
-				from = Rect2(Vector2(view.rect_size.x, rect.position.y), rect.size)
-		var s = lerp(_intro_scale(from, rect), 1.0, e)
-		var center = (from.position + from.size * 0.5).linear_interpolate(rect.position + rect.size * 0.5, e)
-		var pos = center - rect.size * s * 0.5
-		node.rect_scale = Vector2(s, s)
-		node.rect_position = pos
+				from = EXPOSE_LAYOUT.intro_from(rect, null, now, 0, 0, 0.2)
+		var f = EXPOSE_LAYOUT.lerp_rect(from, rect, e)
 		node.rect_size = rect.size
+		node.rect_position = f.position
+		node.rect_scale = _scale_for(f, rect.size)
 		node.visible = true
 		node.modulate = Color(1, 1, 1, min(e, 1.0))
-		info["rect"] = Rect2(pos, rect.size * s)
-		if geo.size != Vector2.ZERO and requested_sizes.get(id) != rect.size:
-			requested_sizes[id] = rect.size
-			compositor.set_size(id, rect.size)
+		info["rect"] = f
 		if k >= 1.0:
 			tile_intro.erase(id)
 			node.rect_scale = Vector2.ONE
 			node.rect_position = rect.position
+			_request_client_size(id, rect, geo)
 		else:
 			request_redraw()
 		return
@@ -1617,23 +2287,65 @@ func _update_tile(id, now):
 	# Desliza desde donde estaba a su celda nueva (reacomodar, cambiar de pantalla).
 	# Durante el paneo (Super+rueda) se posiciona directo, sin animación, para que el
 	# movimiento continuo no pelee con el easing.
+	if wm_on:
+		# Animación de modo: se escala el contenido (sin realloc) mientras la ventana
+		# viaja del rect previo al nuevo. El set_size real se hace al terminar (abajo,
+		# en la siguiente actualización), así no hay tearing por frame.
+		tile_anim.erase(id)
+		var sc = Vector2(wm_from.size.x / max(rect.size.x, 1.0),
+			wm_from.size.y / max(rect.size.y, 1.0)).linear_interpolate(Vector2.ONE, wm_e)
+		var fc = wm_from.position + wm_from.size * 0.5
+		var tc = rect.position + rect.size * 0.5
+		var c = fc.linear_interpolate(tc, wm_e)
+		node.rect_scale = sc
+		node.rect_position = c - rect.size * sc * 0.5
+		node.rect_size = rect.size
+		node.visible = true
+		node.modulate = Color(1, 1, 1, 1)
+		# El chrome sigue a la ventana (window_deco usa rect_scale) y aparece/desaparece
+		# con un fade: al entrar a flotante se funde in; al salir, out.
+		var wd = deco_nodes.get(id)
+		if wd != null and is_instance_valid(wd):
+			wd.visible = true
+			wd.modulate = Color(1, 1, 1, wm_e if hybrid.is_floating(id) else (1.0 - wm_e))
+		request_redraw()
+		return
 	var pos = rect.position
+	var animating = false
 	if pan_active or instant_switch or home_slide_since >= 0:
 		tile_anim.erase(id)
 	elif tile_anim.has(id):
 		var a = tile_anim[id]
 		var k = clamp(float(now - a.since) / TILE_ANIM_MS, 0.0, 1.0)
-		pos = a.from.linear_interpolate(rect.position, _ease(k))
+		var f = EXPOSE_LAYOUT.lerp_rect(a.from, rect, _ease(k))
+		node.rect_size = rect.size
+		node.rect_scale = _scale_for(f, rect.size)
+		node.rect_position = f.position
+		pos = f.position
 		if k >= 1.0:
 			tile_anim.erase(id)
 		else:
+			animating = true
 			request_redraw()
-	elif node.rect_position.distance_to(rect.position) > 0.5:
-		tile_anim[id] = {"from": node.rect_position, "since": now}
-		request_redraw()
-	node.rect_scale = Vector2.ONE
-	node.rect_position = pos
-	node.rect_size = rect.size
+	else:
+		var cur = _node_footprint(node)
+		if not _footprint_near(cur, rect):
+			# Reacomodo (tile/untile, maximizar, cambio de pantalla): interpola
+			# posición Y tamaño desde lo visible, sin set_size hasta terminar.
+			tile_anim[id] = {"from": cur, "since": now}
+			animating = true
+			node.rect_size = rect.size
+			node.rect_scale = _scale_for(cur, rect.size)
+			node.rect_position = cur.position
+			request_redraw()
+		else:
+			node.rect_scale = Vector2.ONE
+			node.rect_position = rect.position
+			node.rect_size = rect.size
+	# Al terminar la transición de modo, el chrome queda a opacidad plena.
+	var wd = deco_nodes.get(id)
+	if wd != null and is_instance_valid(wd) and wd.modulate.a != 1.0:
+		wd.modulate = Color(1, 1, 1, 1)
 	# Sólo se dibuja la pantalla que asoma: las demás quedan fuera (±ancho/±alto).
 	var vp = view.rect_size
 	node.visible = pos.x + rect.size.x > 0.0 and pos.x < vp.x and pos.y + rect.size.y > 0.0 and pos.y < vp.y
@@ -1641,15 +2353,41 @@ func _update_tile(id, now):
 
 	# Ajuste 1:1: se le pide al cliente el tamaño del slot (texto nítido). Se reafirma
 	# cuando el cliente se achica solo (p. ej. al cambiar la fuente) y no molesta si el
-	# cliente no acepta (sólo se reintenta cuando su tamaño cambia).
-	if rect.size.x > 0.0 and rect.size.y > 0.0:
-		var drifted = geo.size != Vector2.ZERO and geo.size != rect.size and last_geo.get(id) != geo.size
-		if requested_sizes.get(id) != rect.size or drifted:
-			requested_sizes[id] = rect.size
-			compositor.set_size(id, rect.size)
-		last_geo[id] = geo.size
+	# cliente no acepta (sólo se reintenta cuando su tamaño cambia). No se pide mientras
+	# la animación está en curso: eso re-renderiza y produce tearing.
+	if not animating:
+		_request_client_size(id, rect, geo)
 	if tex_ready_frame < 0 and id == focused_tile and layers.size() > 0 and layers[0].texture != null:
 		tex_ready_frame = frame_count
+
+
+# Pide al cliente el tamaño del slot una sola vez (cuando cambió o derivó). Durante
+# las animaciones no se llama: recién al terminar.
+func _request_client_size(id, rect, geo):
+	if rect.size.x <= 0.0 or rect.size.y <= 0.0:
+		return
+	var drifted = geo.size != Vector2.ZERO and geo.size != rect.size and last_geo.get(id) != geo.size
+	if requested_sizes.get(id) != rect.size or drifted:
+		requested_sizes[id] = rect.size
+		compositor.set_size(id, rect.size)
+	last_geo[id] = geo.size
+
+
+# Rect VISIBLE actual de una ventana (posición + tamaño ya escalado). Es el punto de
+# partida de toda animación: se arranca desde lo que se ve, no desde el destino.
+func _node_footprint(node):
+	return Rect2(node.rect_position, node.rect_size * node.rect_scale)
+
+
+func _footprint_near(a, b):
+	return a.position.distance_to(b.position) <= 0.5 \
+		and abs(a.size.x - b.size.x) <= 0.5 and abs(a.size.y - b.size.y) <= 0.5
+
+
+# Escala del nodo para que su footprint (contenido ya encajado en `slot`) mida `fp`.
+# Compensa que el tamaño local del slot cambie a mitad de camino, sin saltos.
+func _scale_for(fp, slot):
+	return Vector2(fp.size.x / max(slot.x, 1.0), fp.size.y / max(slot.y, 1.0))
 
 
 # Easing con rebote leve (ease-out-back): arranca rápido, se pasa un poco del destino
@@ -1661,11 +2399,31 @@ func _ease(k):
 	return 1.0 + c3 * pow(k - 1.0, 3.0) + c1 * pow(k - 1.0, 2.0)
 
 
-# Escala inicial para la entrada: la ventana nace del tamaño del ícono (nunca > 1).
-func _intro_scale(from, target):
-	if target.size.x <= 0.0 or target.size.y <= 0.0:
-		return 1.0
-	return min(min(from.size.x / target.size.x, from.size.y / target.size.y), 1.0)
+# Avanza la transición tiled<->flotante de una ventana. Devuelve
+# {"active", "from": Rect2 visual de origen, "e": ease}. Al empezar toma el rect
+# visual actual del nodo (incluyendo un scale en curso); al terminar limpia y deja
+# que _update_tile aplique la geometría final y el único set_size.
+func _wm_transition(id, rect, node, now):
+	if wm_switch_until <= 0:
+		return {"active": false, "from": rect, "e": 1.0}
+	var a = wm_anim.get(id)
+	if a == null:
+		if now > wm_switch_until:
+			wm_switch_until = -1
+			return {"active": false, "from": rect, "e": 1.0}
+		var from = Rect2(node.rect_position, node.rect_size * node.rect_scale)
+		if from.size.x <= 0.0 or from.size.y <= 0.0:
+			return {"active": false, "from": rect, "e": 1.0}
+		a = {"from": from, "since": now}
+		wm_anim[id] = a
+	var k = clamp(float(now - a.since) / float(WM_SWITCH_MS), 0.0, 1.0)
+	if k >= 1.0:
+		wm_anim.erase(id)
+		if wm_anim.empty():
+			wm_switch_until = -1
+		return {"active": false, "from": rect, "e": 1.0}
+	request_redraw()
+	return {"active": true, "from": a.from, "e": _ease(k)}
 
 
 # Rect del ítem de la ventana en el Frame (si está dibujado); si no, un punto arriba.
@@ -1739,7 +2497,24 @@ func _update_ghosts(now):
 			request_redraw()
 
 
-func _focus_tile(id):
+# Un binario anterior al parámetro `raise` expone focus(id): llamarlo con dos
+# argumentos falla y el cliente nunca recibe el foco de teclado (todo modo).
+var _focus_has_raise = null
+
+
+func _compositor_focus(id, raise_window):
+	if _focus_has_raise == null:
+		_focus_has_raise = false
+		for m in ClassDB.class_get_method_list("WaylandCompositor", true):
+			if m.name == "focus":
+				_focus_has_raise = m.args.size() >= 2
+	if _focus_has_raise:
+		compositor.focus(id, raise_window)
+	else:
+		compositor.focus(id)
+
+
+func _focus_tile(id, raise_window = true):
 	if id < 0 or not _id_alive(id):
 		return
 	# Enfocar a mano cancela cualquier deslizamiento/hogar en curso y cierra la
@@ -1760,6 +2535,10 @@ func _focus_tile(id):
 	if fullscreen_id >= 0 and fullscreen_id != id:
 		fullscreen_id = -1
 	focused_tile = id
+	# En flotante, elevar es una consecuencia del foco explícito (clic, selector,
+	# atajo), no del mero cambio de foco. Lazy focus pasa false para conservar Z.
+	if raise_window and hybrid.is_floating(id) and float_layout.has(id):
+		float_layout.raise(id)
 	focus_flash = OS.get_ticks_msec()
 	# Memoriza el miembro enfocado de la pantalla (para volver a él desde otra).
 	for u in _units():
@@ -1770,7 +2549,7 @@ func _focus_tile(id):
 	var i = _activity_named(name)
 	if i >= 0:
 		current_activity = ACTIVITIES[i]
-	compositor.focus(id)
+	_compositor_focus(id, raise_window)
 	request_redraw()
 
 
@@ -1844,8 +2623,6 @@ func _tick_home_slide():
 func _pan_by(amount):
 	if _home_anim_active():
 		return
-	if is_floating():
-		return
 	var units = _units()
 	var n = units.size()
 	if n == 0:
@@ -1882,68 +2659,218 @@ func _snap_pan():
 	request_redraw()
 
 
-# Super+←/→: deja la ventana enfocada en modo tiled ocupando la mitad izquierda/derecha
-# (junto a otra). Maximizar (Alt+F10) es lo mismo pero ocupando todo el workspace.
+# Super+←/→: tilea la ventana enfocada contra una pantalla vecina (mitad
+# izquierda/derecha); si ya está en una franja la reordena. Sin vecina, deja la
+# flotante a media pantalla (snap contextual). Maximizar es Alt+F10 / Super+F.
 func _snap_tile(dir):
 	if not tile_mode or focused_tile < 0:
 		return
-	if is_floating():
-		return
 	var units = _units()
 	var ui = _focused_unit_index(units)
-	var members = units[ui]
-	if members.size() >= 2:
+	if ui > 0 and units[ui].has(focused_tile) and units[ui].size() >= 2:
 		# Ya está en una franja: la reordena para quedar a la izquierda/derecha.
+		var members = units[ui]
 		var i = members.find(focused_tile)
 		if i < 0:
 			return
 		var j = 0 if dir < 0 else members.size() - 1
-		if i != j:
-			members.remove(i)
-			members.insert(j, focused_tile)
-			_rebuild_tiles(units)
+		var rec = _record_of(focused_tile)
+		if rec != null and i != j:
+			rec["members"].remove(i)
+			rec["members"].insert(j, focused_tile)
+			rec["id"] = rec["members"][0]
+			_rebuild_tiles(_units())
 		for m in members:
-			split_weight[m] = 1.0
+			WM_UNITS.set_weight(wm_units, m, 1.0)
 		_focus_tile(focused_tile)
 		return
-	# Suelta: la tilea con otra pantalla vecina.
+	# Suelta: la tilea con otra pantalla vecina (crea la primera unidad).
 	var other = -1
 	for k in range(units.size()):
-		if k == ui:
+		if k == ui or units[k].empty():
 			continue
 		other = units[k][0]
 		break
 	if other < 0:
+		_float_half(focused_tile, dir)
 		return
 	if dir < 0:
 		_tile_drop(other, focused_tile)  # enfocada primero = izquierda
 	else:
 		_tile_drop(focused_tile, other)  # enfocada segunda = derecha
-	split_weight[other] = 1.0
-	split_weight[focused_tile] = 1.0
 
 
-# Reordena la franja moviendo la pantalla de `dragged` al lugar de la de `anchor`.
+# Deja una ventana flotante a media pantalla (mitad izq/der) dentro del hueco.
+func _float_half(id, dir):
+	if id < 0 or not tiles.has(id):
+		return
+	if hybrid.is_tiled(id):
+		set_window_mode(id, WM_HYBRID.FLOATING)
+	var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(get_viewport_rect().size)
+	if not float_layout.has(id):
+		if float_memory.has(id) and float_memory[id] != null:
+			float_layout.restore_one(id, float_memory[id], box)
+		else:
+			float_layout.place_new(id, box)
+	var rect = WM_DRAG.snap_rect("left" if dir < 0 else "right", box)
+	if rect.size.x > 0.0:
+		float_layout.resize_to(id, rect, box)
+	wm_maximized.erase(id)
+	_focus_tile(id)
+	_maybe_fuse_snapped_floats(id)
+	request_redraw()
+
+
+# ¿La pantalla centrada tiene miembros tiled? Decide el snap contextual: con
+# mosaico inserta; sin mosaico redimensiona la flotante.
+func _centered_unit_has_tiled():
+	var units = _units()
+	var fi = _focused_unit_index(units)
+	if fi <= 0 or fi >= units.size():
+		return false
+	return not units[fi].empty()
+
+
+# Snap de mitad contra la pantalla centrada: suma `id` a su unidad tiled en el lado
+# `dir` ("left"/"right"). Si no hay unidad, cae a media pantalla flotante.
+func _snap_tile_to(id, dir):
+	var units = _units()
+	var fi = _focused_unit_index(units)
+	if fi <= 0 or fi >= units.size() or units[fi].empty():
+		_float_half(id, dir if dir == "right" else -1)
+		return
+	var target = units[fi][0]
+	WM_UNITS.join(wm_units, id, target, dir)
+	var rec = _record_of(target)
+	var anchor = int(rec["id"]) if rec != null else target
+	if rec != null:
+		for m in rec["members"]:
+			hybrid.set_tiled(m, anchor)
+	hybrid.set_tiled(id, anchor)
+	wm_maximized.erase(id)
+	_rebuild_tiles(_units())
+	_focus_tile(id)
+	request_redraw()
+
+
+# Si al snapear una flotante queda otra flotante de la MISMA pantalla ocupando el
+# lado complementario (mismo alto, lado a lado), se fusionan en una unidad tiled
+# conservando la proporción del snap. Con una sola ventana no hace nada.
+func _maybe_fuse_snapped_floats(id):
+	if id < 0 or not tiles.has(id) or not hybrid.is_floating(id):
+		return false
+	var r = float_layout.rect(id)
+	if r == null:
+		return false
+	var units = _units()
+	var ai = _anchor_index(units, id)
+	for oid in tiles:
+		if oid == id or minimized.has(oid) or not hybrid.is_floating(oid):
+			continue
+		if _anchor_index(units, oid) != ai:
+			continue
+		var orr = float_layout.rect(oid)
+		if orr == null:
+			continue
+		# Cubren el mismo alto (snap a media pantalla) y están lado a lado.
+		var v = min(r.end.y, orr.end.y) - max(r.position.y, orr.position.y)
+		if v < min(r.size.y, orr.size.y) * 0.6:
+			continue
+		if r.end.x <= orr.position.x + 4.0 or orr.end.x <= r.position.x + 4.0:
+			return _fuse_floats(id, oid)
+	return false
+
+
+# Fusiona dos flotantes lado a lado en una unidad tiled (eje X) con pesos por ancho,
+# así la vista pasa a mosaico y aparece el asa de frontera en vez del chrome flotante.
+func _fuse_floats(a, b):
+	var ra = float_layout.rect(a)
+	var rb = float_layout.rect(b)
+	if ra == null or rb == null:
+		return false
+	var snapped = a
+	var left = a
+	var right = b
+	if ra.position.x > rb.position.x:
+		left = b
+		right = a
+		var t = ra
+		ra = rb
+		rb = t
+	_remember_float_geometry()
+	WM_UNITS.remove(wm_units, left)
+	WM_UNITS.remove(wm_units, right)
+	WM_UNITS.join(wm_units, right, left, "right")
+	var rec = _record_of(left)
+	var anchor = int(rec["id"]) if rec != null else left
+	hybrid.set_tiled(left, anchor)
+	hybrid.set_tiled(right, anchor)
+	if rec != null:
+		rec["weights"][left] = max(ra.size.x, 1.0)
+		rec["weights"][right] = max(rb.size.x, 1.0)
+	float_layout.remove(left)
+	float_layout.remove(right)
+	wm_maximized.erase(left)
+	wm_maximized.erase(right)
+	_rebuild_tiles(_units())
+	_focus_tile(snapped)
+	request_redraw()
+	return true
+
+
 func _move_window_to(dragged, anchor, before):
 	if dragged < 0 or anchor < 0 or dragged == anchor:
 		return
 	if not tiles.has(dragged) or not tiles.has(anchor):
 		return
-	var units = _units()
-	var du = _focused_unit_index_of(units, dragged)
-	var au = _focused_unit_index_of(units, anchor)
-	if du < 0 or au < 0 or du == au:
+	if not WM_UNITS.has(wm_units, dragged) or not WM_UNITS.has(wm_units, anchor):
 		return
-	var moved = units[du]
-	units.remove(du)
-	var target = _focused_unit_index_of(units, anchor)
-	if target < 0:
-		target = units.size() - 1
-	if not before:
-		target += 1
-	units.insert(int(clamp(target, 0, units.size())), moved)
-	_rebuild_tiles(units)
+	WM_UNITS.move_unit(wm_units, dragged, anchor, before)
+	_rebuild_tiles(_units())
 	_focus_tile(dragged)
+
+
+# Gesto de touchpad reenviado por sway (bindgesture → session/gdtk-gesture → RPC).
+# Swipe de 3 dedos: izquierda/derecha navegan pantallas (mismo camino que Super+←/→);
+# arriba/abajo entran/salen del exposé. Idempotente: repetir el gesto no rompe estado.
+func gesture(kind, direction, fingers = 3):
+	if String(kind) != "swipe":
+		return false
+	match String(direction):
+		"left":
+			_focus_dir(1)
+		"right":
+			_focus_dir(-1)
+		"up":
+			if not expose:
+				_toggle_expose(true)
+		"down":
+			if expose:
+				_toggle_expose(false)
+		_:
+			return false
+	request_redraw()
+	return true
+
+
+# Pinch del touchpad reenviado por sway (bindgesture pinch:2 → gdtk-gesture → RPC).
+# Arma un ciclo begin→update→end para el cliente con foco del compositor embebido
+# (protocolo zwp_pointer_gesture_pinch_v1: Firefox/Nautilus lo usan para zoom).
+func gesture_pinch(phase, scale = 1.0, fingers = 2):
+	if compositor == null or not compositor.has_method("gesture_pinch"):
+		return false
+	match String(phase):
+		"begin":
+			compositor.gesture_pinch(0, fingers, 1.0)
+		"update":
+			compositor.gesture_pinch(1, fingers, scale)
+		"end":
+			compositor.gesture_pinch(2, fingers, 1.0)
+		"cancel":
+			compositor.gesture_pinch(3, fingers, 1.0)
+		_:
+			return false
+	return true
 
 
 func _focused_unit_index_of(units, id):
@@ -1953,18 +2880,30 @@ func _focused_unit_index_of(units, id):
 	return -1
 
 
-# Enfoca la pantalla u (recordando su último miembro enfocado).
+# Enfoca la pantalla u (recordando su último miembro enfocado). El Escritorio (u=0)
+# no tiene miembros tiled: enfoca la flotante más arriba anclada ahí (o suelta el foco).
 func _focus_unit(units, u):
 	if u < 0 or u >= units.size():
 		return
 	var members = units[u]
+	if members.empty():
+		var fid = -1
+		for id in float_layout.ids_z():
+			if hybrid.is_floating(id) and _anchor_index(units, id) == u:
+				fid = id
+		if fid >= 0:
+			_focus_tile(fid)
+		else:
+			focused_tile = -1
+			request_redraw()
+		return
 	var want = unit_focus.get(members[0], members[0])
 	if not members.has(want):
 		want = members[0]
 	_focus_tile(want)
 
 
-# Intercambia pantallas en la fila (←/→). ↑/↓ sin efecto con una sola fila.
+# Intercambia pantallas en la fila (←/→). El Escritorio (índice 0) queda fijo.
 func _swap_dir(dir):
 	if _at_home() or _home_anim_active():
 		return
@@ -1974,11 +2913,13 @@ func _swap_dir(dir):
 		return
 	var units = _units()
 	var ui = _focused_unit_index(units)
+	if ui <= 0 or ui + dir <= 0:
+		return
 	_swap_units(units, ui, ui + dir)
 
 
 func _swap_units(units, a, b):
-	if a < 0 or b < 0 or a >= units.size() or b >= units.size() or a == b:
+	if a <= 0 or b <= 0 or a >= units.size() or b >= units.size() or a == b:
 		return
 	var tmp = units[a]
 	units[a] = units[b]
@@ -1997,7 +2938,17 @@ func _rebuild_tiles(units):
 func _toggle_expose(on):
 	expose = on
 	expose_hover = -1
+	expose_drag = null
+	expose_drag_target = -1
+	expose_drag_gap = -1
+	_reset_cursor()
 	if on:
+		# Ningún cliente (pointer lock) ni captura remota debe quedarse con el mouse:
+		# en exposé todo el mouse va al shell, o el arrastre entre escritorios se pierde.
+		if client_pointer_locked:
+			_set_client_pointer_lock(false)
+		if mouse_locked:
+			_set_capture_cursor(false)
 		expose_sel = max(tiles.find(focused_tile), 0)
 		release_modifiers()  # no dejar Ctrl/Shift pegados en la app al entrar
 	# El pasaje se anima: cada ventana arranca desde su transform actual (pantalla o tarjeta).
@@ -2005,7 +2956,7 @@ func _toggle_expose(on):
 	for id in tiles:
 		var node = tile_nodes.get(id)
 		if node != null and is_instance_valid(node):
-			view_anim[id] = {"from_pos": node.rect_position, "from_scale": node.rect_scale.x, "since": now}
+			view_anim[id] = {"from": _node_footprint(node), "since": now}
 	request_redraw()
 
 
@@ -2026,50 +2977,45 @@ func _expose_commit():
 	request_redraw()
 
 
-# --- Grupos (pantallas partidas) y minimizar ---
+# --- Unidades (pantallas partidas) y minimizar ---
 
+# Saca `id` de su unidad: si la unidad queda con un solo miembro, ese vuelve a ser
+# una unidad suelta (sigue tiled).
 func _remove_from_group(id):
-	split_weight.erase(id)
-	for i in range(groups.size() - 1, -1, -1):
-		var g = groups[i]
-		var k = g.find(id)
-		if k >= 0:
-			g.remove(k)
-			if g.size() < 2:
-				groups.remove(i)
-			break
+	WM_UNITS.remove(wm_units, id)
 	request_redraw()
 
 
-# Pantalla partida: `a` se suma a la pantalla de `b` (drag en el Frame, o teclado).
+# Pantalla partida: `a` se suma a la pantalla de `b` (drag en el Frame, o teclado) y
+# pasa a mosaico anclada a esa unidad. Quedan contiguas (orden de fila b, a).
 func _tile_drop(a, b):
 	if a < 0 or b < 0 or a == b:
 		return
 	if not tiles.has(a) or not tiles.has(b):
 		return
-	_remove_from_group(a)
-	var g = _group_of(b)
-	if g == null:
-		g = [b, a]
-		groups.append(g)
-		split_weight[b] = 1.0
-		split_weight[a] = 1.0
-	else:
-		g.append(a)
-		split_weight.erase(a)
+	WM_UNITS.join(wm_units, a, b, "right")
+	var rec = _record_of(b)
+	var anchor = int(rec["id"]) if rec != null else b
+	if rec != null:
+		for m in rec["members"]:
+			hybrid.set_tiled(m, anchor)
+	hybrid.set_tiled(a, anchor)
+	hybrid.set_tiled(b, anchor)
 	# Quedan contiguas (la pantalla sale en orden b, a).
 	tiles.erase(a)
 	var at = tiles.find(b)
 	tiles.insert((at + 1) if at >= 0 else tiles.size(), a)
 	unit_focus[b] = a
+	wm_maximized.erase(a)
 	_focus_tile(a)
 
 
-# Saca la ventana de su grupo: vuelve a pantalla completa.
+# Saca la ventana de su grupo y la devuelve a flotante (conserva su geometría).
 func _untile_window(id):
-	if id < 0 or not tiles.has(id) or _group_of(id) == null:
+	if id < 0 or not tiles.has(id) or not WM_UNITS.has(wm_units, id):
 		return
 	_remove_from_group(id)
+	set_window_mode(id, WM_HYBRID.FLOATING)
 	_focus_tile(id)
 
 
@@ -2085,11 +3031,16 @@ func _minimize_window(id):
 	_remove_from_group(id)
 	maximize_state.erase(id)
 	wm_maximized.erase(id)
+	if chrome_drag != null and int(chrome_drag.id) == id:
+		chrome_drag = null
+		drag_overlay = null
+		window_dragging = false
 	minimized[id] = true
 	tiles.erase(id)
 	tile_fade.erase(id)
 	tile_intro.erase(id)
 	tile_anim.erase(id)
+	wm_anim.erase(id)
 	view_anim.erase(id)
 	# Se libera ya el nodo: si `tiles` queda vacío no habrá _update_tiles() que lo
 	# limpie y podría quedar un cuadro fantasma de la ventana minimizada.
@@ -2097,6 +3048,7 @@ func _minimize_window(id):
 	if node != null and is_instance_valid(node):
 		node.queue_free()
 	tile_nodes.erase(id)
+	_free_deco(id)
 	tile_rects.erase(id)
 	tile_fit.erase(id)
 	expose_cards.erase(id)
@@ -2164,9 +3116,9 @@ func _maximize_window(id):
 	if id < 0 or not tiles.has(id):
 		return
 	fullscreen_id = -1
-	# K13: en flotante maximizar es ocupar todo el hueco central conservando la
-	# geometría flotante recordada (se restaura con _restore_maximized_window).
-	if is_floating():
+	# En flotante, maximizar es ocupar todo el hueco central conservando la geometría
+	# flotante recordada (se restaura con _restore_maximized_window).
+	if hybrid.is_floating(id):
 		wm_maximized[id] = true
 		_focus_tile(id)
 		request_redraw()
@@ -2178,6 +3130,10 @@ func _maximize_window(id):
 			weights[m] = _weight(m)
 		maximize_state[id] = {"members": g.duplicate(), "weights": weights}
 		_remove_from_group(id)
+	else:
+		# Ya sola en su pantalla: maximizar no cambia nada visible, pero se marca para
+		# que desmaximizar (-> flotante) tenga a qué responder.
+		maximize_state[id] = {"members": [id], "weights": {}}
 	_focus_tile(id)
 	request_redraw()
 
@@ -2187,8 +3143,7 @@ func _maximize_window(id):
 func _restore_maximized_window(id):
 	if id < 0:
 		return
-	# K13: en flotante basta con soltar la marca; float_layout conserva el rect previo.
-	if is_floating():
+	if hybrid.is_floating(id):
 		wm_maximized.erase(id)
 		_focus_tile(id)
 		request_redraw()
@@ -2202,33 +3157,29 @@ func _restore_maximized_window(id):
 	for m in st.get("members", []):
 		if tiles.has(m):
 			members.append(m)
-	if members.size() < 2:
-		_focus_tile(id)
-		request_redraw()
-		return
-	# Por si el usuario retileó a mano mientras estaba maximizada: se saca a cada
-	# miembro de su grupo actual antes de rearmar la franja guardada.
-	for m in members:
-		_remove_from_group(m)
-	for m in members:
-		split_weight[m] = float(weights.get(m, 1.0))
-	groups.append(members)
+	if members.size() >= 2:
+		# Por si el usuario retileó a mano mientras estaba maximizada: se saca a cada
+		# miembro de su grupo actual antes de rearmar la franja guardada.
+		for m in members:
+			_remove_from_group(m)
+		for m in range(1, members.size()):
+			WM_UNITS.join(wm_units, members[m], members[0], "right")
+		for m in members:
+			WM_UNITS.set_weight(wm_units, m, float(weights.get(m, 1.0)))
+		_rebuild_tiles(_units())
+	else:
+		# Desmaximizar en mosaico deja la ventana en modo flotante (mismo cambio que el
+		# Super+arrastre); el rect flotante lo restaura float_memory o la cascada.
+		set_window_mode(id, WM_HYBRID.FLOATING)
 	_focus_tile(id)
 	request_redraw()
 
 
-# Alt+F10 / botón de la app: alterna maximizar y desmaximizar en modo tiled (workspace
-# entero <-> solo una parte).
+# Alt+F10 / botón de la app: alterna maximizar y desmaximizar.
 func _toggle_maximize_window(id):
 	if id < 0 or not tiles.has(id):
 		return
-	if is_floating():
-		if wm_maximized.has(id):
-			_restore_maximized_window(id)
-		else:
-			_maximize_window(id)
-		return
-	if maximize_state.has(id):
+	if wm_maximized.has(id) or maximize_state.has(id):
 		_restore_maximized_window(id)
 	else:
 		_maximize_window(id)
@@ -2297,6 +3248,7 @@ func _update_dialogs(root_id):
 		if not _id_alive(d):
 			var box = dialog_boxes[d]
 			dialog_boxes.erase(d)
+			dialog_fit_req.erase(d)
 			if box != null and is_instance_valid(box):
 				box.queue_free()
 
@@ -2327,6 +3279,7 @@ func _new_dialog_box(d):
 func _layout_dialog(box, d):
 	_ensure_premult_material()
 	var geo = _dialog_geo(d)
+	_fit_dialog(d, geo)
 	var layers = compositor.get_layers(d)
 	# `_dialog_rect` devuelve coords de pantalla; la caja se posiciona local a la
 	# capa de diálogos (que ahora está recortada al hueco central de K12).
@@ -2352,6 +3305,22 @@ func _layout_dialog(box, d):
 		node.visible = layer.texture != null
 	for i in range(layers.size(), box.get_child_count()):
 		box.get_child(i).visible = false
+
+
+# Un diálogo más grande que el hueco central (p. ej. el selector de archivos de GTK,
+# que recuerda su último tamaño) quedaba recortado por la capa. Se le pide a la app
+# un tamaño que quepa; GTK lo respeta hasta su mínimo. Una vez por tamaño pedido.
+func _fit_dialog(d, geo):
+	if geo.size.x <= 0.0 or geo.size.y <= 0.0:
+		return
+	var cr = _content_rect(view.rect_size)
+	var want = CONTENT_LAYOUT.fit_size(geo.size, cr.size)
+	if want == geo.size:
+		return
+	if dialog_fit_req.get(d) == want:
+		return
+	dialog_fit_req[d] = want
+	compositor.set_size(d, want)
 
 
 func _dialog_geo(d):
@@ -2417,7 +3386,9 @@ func _draw_home_bevel(r, face, pressed):
 func _draw_home(offset = 0.0):
 	var now = OS.get_ticks_msec()
 	_tick_starting(now)
-	if is_key_pressed(KEY_TAB):
+	# Tab solo alterna Anillo/Grilla en el Hogar. Ctrl+Tab NO es un atajo del shell:
+	# las apps lo usan para cambiar de pestaña, así que la tecla debe llegarles.
+	if is_key_pressed(KEY_TAB) and not Input.is_key_pressed(KEY_CONTROL):
 		apps_view = not apps_view
 	if apps_view:
 		_draw_apps(offset)
@@ -2429,8 +3400,10 @@ func _draw_home(offset = 0.0):
 	# Sin padding el fondo y las posiciones absolutas coinciden con la vista.
 	push_style_var_vec2(STYLE_VAR_WINDOW_PADDING, Vector2.ZERO)
 	if begin("##home", flags):
-		# Fondo: degradado sobrio, color sólido o imagen configurada (K11a).
-		_draw_home_background(vp)
+		# Fondo: degradado sobrio, color sólido o imagen configurada (K11a). Con zoom
+		# activo no se pinta: lo aporta la capa Grupo/Vecindario.
+		if zoom_f <= 0.001:
+			_draw_home_background(vp)
 
 		home_icon_loads = 8
 		var u = grid_unit(vp)
@@ -2440,11 +3413,12 @@ func _draw_home(offset = 0.0):
 		var layout = _orbit_layout(vp, entries.size(), entries)
 		_ring_prune(entries)
 
-		# El equipo propio ocupa el centro de la órbita; las apps quedan alrededor.
 		# El ícono central (figura XO/monitor) ya no es decorativo: abre el menú de
 		# sesión (Salir/Recargar), porque 'Salir' dejó de ser actividad del anillo.
 		var cc = vp * 0.5
-		var monitor = Rect2(cc - Vector2(u * 0.45, u * 0.45), Vector2(u * 0.90, u * 0.90))
+		# Escala continua según el zoom: es el ancla visible del Hogar <-> Grupo <->
+		# Vecindario (Hogar 1.0 -> Grupo 0.6 -> Vecindario 0.35).
+		var monitor = ZOOM.center_icon_rect(zoom_f, vp, u * 0.90)
 		set_cursor_pos(monitor.position)
 		push_style_color(COL_BUTTON, Color(0, 0, 0, 0))
 		push_style_color(COL_BUTTON_HOVERED, Color(0, 0, 0, 0))
@@ -2495,14 +3469,22 @@ func _draw_home(offset = 0.0):
 			if MENU_STYLE.item(self, "Salir"):
 				recovery.quit(self)
 			if MENU_STYLE.item(self, "Recargar el shell"):
-				recovery.restart(self)
+				# Recarga GDScript conservando Host/compositor y todas las ventanas.
+				# recovery.restart reinicia el proceso y desconecta VS Code/Codex.
+				Host.call_deferred("reload_shell")
 			end_popup()
 		MENU_STYLE.end(self)
 
-		# Anillo: ACTIVITIES + favoritos, con reacomodo animado al entrar/salir ítems.
+		# Con zoom activo el Hogar aporta sólo su ícono central (ya dibujado arriba,
+		# una sola vez): el anillo y los bloques los reemplaza la capa Grupo/Vecindario.
+		if zoom_f > 0.001:
+			end()
+			pop_style_var()
+			return
+
+		# Anillo de sólo lectura: actividades abiertas + atajos del Frame, con
+		# reacomodo animado al entrar/salir ítems.
 		ring_layout = []
-		ring_drop = null
-		var mouse = get_mouse_pos()
 		var slide = Vector2(offset, 0.0)
 		for i in range(entries.size()):
 			var e = entries[i]
@@ -2514,19 +3496,8 @@ func _draw_home(offset = 0.0):
 			var clicked = _draw_ring_item(pos, btn_size, _ring_tex(e), label,
 				_ring_state(e), e.id, starting.get(e.name, -1), _ring_appear(e.name, now))
 			ring_layout.append({"entry": e, "screen": screen, "size": btn_size})
-			if ring_drag != null and e.kind == "favorite" and e.name != ring_drag.name:
-				var d = (mouse - (screen + btn_size * 0.5)).length()
-				if d < btn_size.x * 1.6 and (ring_drop == null or d < ring_drop.dist):
-					ring_drop = {"screen": screen, "size": btn_size, "dist": d, "entry": e}
-			if clicked and ring_suppress != e.name:
+			if clicked:
 				_ring_activate(e, pos, btn_size)
-		ring_suppress = ""
-
-		# Fantasma del ítem arrastrado, anclado al punto de agarre (no centrado).
-		if ring_drag != null:
-			_draw_ring_ghost(ring_drag, mouse - ring_grab, btn_size)
-			if ring_drop != null:
-				imgui_draw_circle(ring_drop.screen + ring_drop.size * 0.5, ring_drop.size.x * 0.5 + 3.0, accent, 0, 2.5)
 
 		# Bloque Apps: tesela U x U con bisel, como los bloques del Frame.
 		var apps_side = u
@@ -2581,8 +3552,38 @@ func _rotate_script():
 
 func _rotate_run(args):
 	var exe = _rotate_script()
-	if File.new().file_exists(exe):
+	if not File.new().file_exists(exe):
+		return
+	_reap_rotate()
+	if args.size() > 0 and String(args[0]) == "auto":
+		# Daemon de instancia única y larga vida: tiene que quedar desacoplado del
+		# shell (bloqueante lo colgaría para siempre). El resto son one-shot: van
+		# por Thread con execute bloqueante para no dejar hijos sin reap.
 		OS.execute(exe, args, false)
+		return
+	var state = {"done": false}
+	var th = Thread.new()
+	_rotate_threads.append(th)
+	_rotate_states.append(state)
+	th.start(self, "_rotate_run_work", {"exe": exe, "args": args, "state": state})
+
+
+func _rotate_run_work(userdata):
+	OS.execute(String(userdata.get("exe", "")), userdata.get("args", []), true)
+	_rotate_exec_mutex.lock()
+	userdata.get("state", {}).done = true
+	_rotate_exec_mutex.unlock()
+
+
+func _reap_rotate():
+	for i in range(_rotate_threads.size() - 1, -1, -1):
+		_rotate_exec_mutex.lock()
+		var done = _rotate_states[i].get("done", false)
+		_rotate_exec_mutex.unlock()
+		if done:
+			_rotate_threads[i].wait_to_finish()
+			_rotate_threads.remove(i)
+			_rotate_states.remove(i)
 
 
 # ¿Hay acelerómetro? Se consulta una vez y se cachea. No se lee el sysfs con File:
@@ -2637,63 +3638,7 @@ func _x11_follow_screen():
 		OS.window_position = Vector2.ZERO
 
 
-# --- Anillo: entradas, favoritos y layout animado --------------------------------
-
-# Ruta del archivo de favoritos: $XDG_CONFIG_HOME/gdtk/ring-favorites.json
-# (~/.config/gdtk/ring-favorites.json por defecto), mismo patrón que frame-applets.json.
-func _ring_path():
-	var base = OS.get_environment("XDG_CONFIG_HOME")
-	if base == "":
-		base = OS.get_environment("HOME") + "/.config"
-	return base + "/gdtk/ring-favorites.json"
-
-
-func _load_ring():
-	ring_favorites = []
-	ring_saved = []
-	var f = File.new()
-	if f.open(_ring_path(), File.READ) == OK:
-		var txt = f.get_as_text()
-		f.close()
-		var res = JSON.parse(txt)
-		if res.error == OK:
-			var data = res.result
-			var arr = data.get("favorites", []) if typeof(data) == TYPE_DICTIONARY else data
-			if typeof(arr) == TYPE_ARRAY:
-				for v in arr:
-					if typeof(v) == TYPE_STRING and not ring_favorites.has(v):
-						ring_favorites.append(v)
-	ring_saved = ring_favorites.duplicate()
-
-
-# Escritura atómica (tmp + rename); sin cambios reales no toca el archivo.
-func _save_ring():
-	if ring_saved == ring_favorites:
-		return
-	var path = _ring_path()
-	Directory.new().make_dir_recursive(path.get_base_dir())
-	var tmp = path + ".tmp"
-	var w = File.new()
-	if w.open(tmp, File.WRITE) != OK:
-		printerr("shell: no se pudo escribir ", tmp)
-		return
-	w.store_string(JSON.print({"favorites": ring_favorites}))
-	w.close()
-	if Directory.new().rename(tmp, path) != OK:
-		printerr("shell: no se pudo renombrar ", tmp, " a ", path)
-		return
-	ring_saved = ring_favorites.duplicate()
-
-
-# Añade un favorito al anillo (Frame -> Anillo). Sin duplicar por id; el dedup por
-# nombre contra ACTIVITIES se resuelve al armar las entradas.
-func add_ring_favorite(app_id):
-	if app_id == "" or ring_favorites.has(app_id):
-		return
-	ring_favorites.append(app_id)
-	_save_ring()
-	request_redraw()
-
+# --- Anillo: entradas y layout animado -------------------------------------------
 
 func _app_by_id(id):
 	if not apps.scanned:
@@ -2728,12 +3673,10 @@ func _favorite_entry(id):
 	}
 
 
-# Entradas del anillo: primeras las actividades de ACTIVITIES (orden fijo), después
-# los favoritos resueltos por `apps`. Sin duplicar por nombre (una app abierta ya
-# figura como actividad dinámica).
-# Entradas del anillo, DINÁMICAS: sólo lo que está abierto/activo (sin Launcher ni
-# demos del catálogo), ordenado por último uso, más los favoritos de la persona en
-# su orden guardado. "Configuración" vive en el submenú del ícono central.
+# Entradas del anillo, DINÁMICAS y de SOLO LECTURA: actividades abiertas ahora
+# (ordenadas por último uso) más los atajos fijados en el Frame (pines de las dos
+# barras). No se edita directamente: para cambiar el anillo se fijan/quitan bloques
+# en el Frame. "Configuración" vive en el submenú del ícono central.
 func _ring_entries():
 	var out = []
 	var seen = {}
@@ -2754,12 +3697,13 @@ func _ring_entries():
 		out.append({"kind": "activity", "id": act.name, "name": act.name, "activity": act, "app": null})
 	if not apps.scanned:
 		apps.scan()
-	for id in ring_favorites:
-		var app = _favorite_entry(id)
-		if seen.has(app.name):
-			continue
-		seen[app.name] = true
-		out.append({"kind": "favorite", "id": app.id, "name": app.name, "activity": null, "app": app})
+	if frame != null:
+		for id in frame.pinned_ids():
+			var app = _favorite_entry(id)
+			if seen.has(app.name):
+				continue
+			seen[app.name] = true
+			out.append({"kind": "favorite", "id": app.id, "name": app.name, "activity": null, "app": app})
 	return out
 
 
@@ -2851,124 +3795,18 @@ func _ring_activate(e, pos, size):
 			# comando para lanzar; se intenta por nombre y si no, queda el aviso.
 			_open_by_name(e.name)
 			return
-		_launch_app(e.app)
+		_launch_app(e.app, Rect2(pos, size))
 		return
 	var i = _activity_named(e.name)
 	if i < 0:
 		return
 	var act = ACTIVITIES[i]
 	if act.has("wayland") and _activity_state(act) == "closed":
+		_remember_origin(act.name, Rect2(pos, size))
 		pending_origin = Rect2(pos, size)
 		pending_origin_since = OS.get_ticks_msec()
 		starting[act.name] = OS.get_ticks_msec()
 	_activate(i)
-
-
-# Fantasma del arrastre del anillo: placa circular con el ícono, anclado al agarre.
-func _draw_ring_ghost(entry, pos, size):
-	var c = pos + size * 0.5
-	var radius = size.x * 0.5 - 2.0
-	imgui_draw_circle_filled(c + Vector2(2.0, 3.0), radius, Color(0, 0, 0, 0.35), 0)
-	imgui_draw_circle_filled(c, radius, RING_PLATE, 0)
-	imgui_draw_circle(c, radius, accent, 0, 2.5)
-	var tex = _ring_tex(entry)
-	if tex != null:
-		var side = clamp(size.x * 0.56, 64.0, 72.0)
-		set_cursor_pos(c - Vector2(side, side) * 0.5)
-		image(tex, Vector2(side, side))
-	else:
-		var cw = 7.0 * get_imgui_scale()
-		set_cursor_pos(c - Vector2(cw * 0.5, 6.5 * get_imgui_scale()))
-		text_colored(Color(0.95, 0.85, 0.95, 1.0), entry.name.substr(0, 1))
-
-
-# ¿El punto cae en la zona del anillo (Hogar a la vista)? El Frame lo consulta al
-# soltar un app arrastrado para crear un favorito (Frame -> Anillo).
-func is_ring_drop(pos):
-	if current_activity != null or neighborhood_view:
-		return false
-	var vp = get_viewport_rect().size
-	var top = frame_bar_h(vp)
-	return pos.y > top and pos.y < vp.y - top
-
-
-# Entrada del anillo cuyo rect (en pantalla) contiene el punto.
-func _ring_hit(pos):
-	for it in ring_layout:
-		if pos.x >= it.screen.x and pos.x < it.screen.x + it.size.x \
-				and pos.y >= it.screen.y and pos.y < it.screen.y + it.size.y:
-			return it
-	return null
-
-
-# Id del favorito mostrado más cercano al punto (dentro del radio de una tesela),
-# o "" si no hay ninguno cerca. `exclude_id` es el favorito arrastrado, que se salta
-# para que soltarlo sobre sí mismo no lo mande al final. Un favorito arrastrado toma
-# el lugar del más cercano.
-func _favorite_target_near(pos, exclude_id = ""):
-	var best = ""
-	var bd = 1e9
-	var bs = 0.0
-	for it in ring_layout:
-		var e = it.entry
-		if e.kind != "favorite" or e.app.id == exclude_id:
-			continue
-		var d = (pos - (it.screen + it.size * 0.5)).length()
-		if d < bd:
-			bd = d
-			best = e.app.id
-			bs = it.size.x
-	if best != "" and bd > bs * 1.6:
-		return ""
-	return best
-
-
-# Inicio/reanudación del drag del anillo desde _input (el clic normal lo maneja ImGui).
-func _ring_mouse(pressed, pos):
-	if current_activity != null or apps_view or neighborhood_view:
-		ring_press = null
-		ring_drag = null
-		ring_drop = null
-		return
-	if pressed:
-		var hit = _ring_hit(pos)
-		if hit != null:
-			ring_press = hit.entry
-			ring_from = pos
-			ring_grab = pos - hit.screen
-			ring_drag = null
-	else:
-		if ring_drag != null:
-			_finish_ring_drag(pos)
-			ring_suppress = ring_drag.name
-		ring_press = null
-		ring_drag = null
-		ring_drop = null
-		request_redraw()
-
-
-func _finish_ring_drag(pos):
-	var e = ring_drag
-	if e == null:
-		return
-	# Ring -> basurero: borra el favorito (una actividad no se borra).
-	if frame != null and frame.is_trash(pos):
-		if e.kind == "favorite":
-			ring_favorites.erase(e.app.id)
-			_save_ring()
-			request_redraw()
-		return
-	# Reordenar favoritos: el que se suelta sobre otro toma su lugar.
-	if e.kind == "favorite":
-		var target = _favorite_target_near(pos, e.app.id)
-		if target != "":
-			ring_favorites.erase(e.app.id)
-			var at = ring_favorites.find(target)
-			if at < 0:
-				at = ring_favorites.size()
-			ring_favorites.insert(at, e.app.id)
-			_save_ring()
-			request_redraw()
 
 
 # Posiciones de las actividades en órbitas alrededor de la computadora.
@@ -2980,50 +3818,7 @@ func _home_layout(vp):
 # muchas → espiral de ángulo áureo con dispersión orgánica (burbujas). El orden es
 # el de `entries` (ya viene por último uso). Limita cada posición al lienzo.
 func _orbit_layout(vp, n, entries = []):
-	var out = []
-	if n <= 0:
-		return out
-	var u = grid_unit(vp)
-	var btn = u * 1.25
-	var top = frame_bar_h(vp)
-	var cx = vp.x * 0.5
-	var cy = vp.y * 0.5
-	var avail_x = min(cx, vp.x - cx)
-	var avail_y = min(cy - (top + 2.0), (vp.y - top - 18.0) - cy)
-	if n <= RING_CIRCLE_MAX:
-		# Círculo: orden y simetría. El radio deja libre el equipo central y el borde.
-		var rad = max(btn * 1.15, min(avail_x, avail_y) - btn * 0.5)
-		rad = min(rad, min(avail_x, avail_y) * 0.92)
-		for i in range(n):
-			var a = -PI * 0.5 + TAU * float(i) / float(n)
-			var center = Vector2(cx + cos(a) * rad, cy + sin(a) * rad)
-			out.append(_ring_clamp(center, btn, vp, top))
-		return out
-	var margin = 10.0
-	var rx = max(btn * 1.4, (vp.x - btn) * 0.5 - margin)
-	var ry = max(btn * 1.4, (vp.y - 2.0 * top - btn) * 0.5 - margin)
-	var f_in = clamp(max(u * 0.62, btn * 0.85) / max(rx, ry), 0.12, 0.60)
-	for i in range(n):
-		var t = (float(i) + 0.5) / float(n)
-		var f = lerp(f_in, 1.0, sqrt(t))
-		var a = -PI * 0.5 + GOLDEN_ANGLE * float(i)
-		var jr = 0.0
-		var ja = 0.0
-		if i < entries.size() and typeof(entries[i]) == TYPE_DICTIONARY:
-			var h = abs(String(entries[i].get("name", "")).hash())
-			ja = (float(h % 1000) / 1000.0 - 0.5) * RING_JITTER_A
-			jr = (float(int(h / 1000) % 1000) / 1000.0 - 0.5) * RING_JITTER_R
-		var ff = clamp(f + jr, f_in, 1.0)
-		var aa = a + ja
-		var center = Vector2(cx + cos(aa) * rx * ff, cy + sin(aa) * ry * ff)
-		out.append(_ring_clamp(center, btn, vp, top))
-	return out
-
-
-# Pasa un centro de ítem (lado `btn`) a la esquina, dentro del lienzo.
-func _ring_clamp(center, btn, vp, top):
-	return Vector2(clamp(center.x - btn * 0.5, 2.0, vp.x - btn - 2.0),
-		clamp(center.y - btn * 0.5, top + 2.0, vp.y - top - btn - 18.0))
+	return RING_LAYOUT.orbit_layout(vp, n, entries, grid_unit(vp), frame_bar_h(vp), RING_CIRCLE_MAX)
 
 
 # Insignia de identidad del Frame: figura XO + nombre de usuario, cacheada como
@@ -3289,26 +4084,13 @@ func _activity_tex(activity):
 	var prog = ""
 	if activity.has("wayland") and activity.wayland.size() > 0:
 		prog = activity.wayland[0]
-	# El app_id de Wayland suele traer otra capitalización que el binario del .desktop
-	# (p. ej. "Alacritty" vs "alacritty"): se compara plegado o Terminal no encontraba
-	# su ícono y caía al genérico.
-	var want_prog = apps.fold(prog)
-	if want_prog != "":
-		# El app_id de Wayland puede ser reverse-DNS (org.gnome.Nautilus) o llevar
-		# sufijo; el binario del .desktop suele ser el último segmento (nautilus).
-		# También se compara contra StartupWMClass, que es el mapeo canónico.
-		var tail = want_prog
-		var dot = want_prog.find(".")
-		if dot > 0:
-			tail = want_prog.substr(dot + 1)
-		for a in apps.apps:
-			var wm = apps.fold(a.get("wm_class", ""))
-			if (wm == want_prog or (wm != "" and wm == tail)) and _activity_icon_of(a) != null:
-				return a.tex
-		for a in apps.apps:
-			var p = apps.fold(apps._program(a.exec))
-			if (p == want_prog or p == tail) and _activity_icon_of(a) != null:
-				return a.tex
+	# El app_id de Wayland puede variar en capitalización ("Alacritty" vs
+	# "alacritty"), ser reverse-DNS (org.gnome.Nautilus) o llevar sufijo.
+	# apps.match_window_apps pliega y prueba StartupWMClass, el id del .desktop y el
+	# binario del Exec usando el ÚLTIMO segmento (no tras el primer punto).
+	for a in apps.match_window_apps(prog):
+		if _activity_icon_of(a) != null:
+			return a.tex
 	# Sólo apps reales buscan por nombre; las internas usan monograma.
 	if activity.has("wayland"):
 		var want = apps.fold(activity.name)
@@ -3367,13 +4149,13 @@ func _draw_apps(offset = 0.0):
 		if activity_error != "":
 			text(activity_error)
 		if app != null:
-			_launch_app(app)
+			_launch_app(app, apps.chosen_rect)
 	end()
 
 
 # Una app de la grilla se abre como actividad wayland dinámica: sale en el
 # anillo mientras viva su ventana (ver _on_toplevel_removed).
-func _launch_app(app):
+func _launch_app(app, origin = null):
 	apps.query = ""
 	var i = _activity_named(app.name)
 	if i < 0:
@@ -3381,11 +4163,16 @@ func _launch_app(app):
 		i = ACTIVITIES.size() - 1
 	var act = ACTIVITIES[i]
 	# Igual que el anillo: si la actividad está cerrada se registra el pulso de
-	# arranque; la ventana entra animada desde el ícono de la grilla cuando llegue.
+	# arranque; la ventana entra animada desde el ícono que la lanzó cuando llegue.
 	if act.has("wayland") and _activity_state(act) == "closed":
 		act["match"] = [apps._program(app.exec), app.name]
-		if apps.chosen_rect != null:
-			pending_origin = apps.chosen_rect
+		# Origen explícito (grilla, anillo); si no vino, el del pin/ítem del Frame.
+		var from = origin
+		if from == null:
+			from = _frame_origin_for_app(app)
+		if from != null:
+			_remember_origin(app.name, from)
+			pending_origin = from
 			pending_origin_since = OS.get_ticks_msec()
 	_activate(i)
 	# La grilla vuelve al anillo de Hogar: ahí se ve el pulso de arranque del ícono
@@ -3395,6 +4182,25 @@ func _launch_app(app):
 	# Si no se pudo lanzar, no queda colgada en el anillo.
 	if not _pending_has(app.name) and not wayland_ids.has(app.name) and ACTIVITIES[i].get("dynamic", false):
 		ACTIVITIES.remove(i)
+
+
+# Rect (coords de vista) del ícono de `app` en el Frame: pin de barra o ítem del strip
+# de ventanas. Lee frame.bar_layout/items_layout sin tocar frame.gd; null si no está.
+func _frame_origin_for_app(app):
+	if frame == null or not is_instance_valid(frame):
+		return null
+	for zone in ["top", "dock"]:
+		for e in frame.bar_layout.get(zone, []):
+			if String(e.get("kind", "")) == "p" and String(e.get("id", "")) == String(app.id):
+				var r = e.get("rect", null)
+				if r != null:
+					return Rect2(r)
+	for it in frame.items_layout:
+		if String(it.get("name", "")) == String(app.name):
+			var sz = Vector2(float(it.get("w", 0.0)), float(it.get("h", 0.0)))
+			if sz.x > 0.0 and sz.y > 0.0:
+				return Rect2(Vector2(float(it.get("x", 0.0)), float(it.get("y", 0.0))), sz)
+	return null
 
 
 func _draw_activity():
@@ -3966,7 +4772,7 @@ func _go_home():
 	release_modifiers()  # no dejar modificadores pegados en la app que sale de foco
 	home_slide_since = -1
 	apps_view = false  # el Hogar muestra siempre la fila de favoritos, no la grilla
-	neighborhood_view = false
+	_set_zoom(0)
 	neighborhood_ui.selected = ""
 	_release_activity()
 	current_activity = null
@@ -4016,13 +4822,54 @@ func _apply_input_settings():
 	var nat = settings_bridge.model.nat_scroll(
 		settings_bridge.settings.get("natural_scroll", null))
 	for cmd in settings_bridge.model.natural_scroll_cmds(nat):
-		OS.execute("swaymsg", cmd, false)
+		_sway_exec_async(cmd)
+
+
+# swaymsg fuera del frame (ajustes de entrada en vivo): un Thread one-shot por
+# tandita con OS.execute bloqueante adentro; el reap corre en _process. No bloquear
+# el frame, no dejar hijos sin recolectar.
+func _sway_exec_async(argv):
+	if typeof(argv) != TYPE_ARRAY or argv.empty():
+		return
+	var state = {"done": false}
+	var th = Thread.new()
+	_sway_exec_threads.append(th)
+	_sway_exec_states.append(state)
+	th.start(self, "_sway_exec_work", {"argv": argv, "state": state})
+
+
+func _sway_exec_work(userdata):
+	var argv = userdata.get("argv", [])
+	if argv.size() > 0:
+		# Bloqueante dentro del Thread: Godot recolecta al terminar (wait_to_finish
+		# en _sway_exec_poll); nada queda como hijo sin reap del shell.
+		OS.execute("swaymsg", argv, true)
+	_sway_exec_mutex.lock()
+	userdata.state.done = true
+	_sway_exec_mutex.unlock()
+
+
+func _sway_exec_poll():
+	for i in range(_sway_exec_threads.size() - 1, -1, -1):
+		var state = _sway_exec_states[i]
+		_sway_exec_mutex.lock()
+		var done = state.done
+		_sway_exec_mutex.unlock()
+		if done:
+			_sway_exec_threads[i].wait_to_finish()
+			_sway_exec_threads.remove(i)
+			_sway_exec_states.remove(i)
 
 
 func _apply_deskflow_settings():
 	if settings_bridge == null or settings_bridge.model == null:
 		return
 	var cfg = settings_bridge.model.deskflow(settings_bridge.settings.get("deskflow", {}))
+	# Portal InputCapture: publica los rangos parciales por borde (ver
+	# eis_server.c::barrier_crossed). El binario sin este método se ignora por
+	# has_method; el rango por defecto (0..100) queda inerte.
+	if Host.remote_input != null and Host.remote_input.has_method("set_capture_ranges"):
+		Host.remote_input.set_capture_ranges(_deskflow_capture_ranges())
 	var mode = String(cfg.get("mode", "off"))
 	var effective_mode = mode
 	# El gate se pregunta en cada aplicación de settings, pero el resultado se cachea
@@ -4193,6 +5040,23 @@ func _settings_deskflow_links():
 	return out
 
 
+# Rangos porcentuales por borde donde el portal InputCapture puede activarse, para
+# que Deskflow (que arma barreras de borde COMPLETO aunque el layout use tramos
+# parciales como down(0,67)) no capture fuera del tramo con vecino: sin esto el
+# puntero queda clavado/oculto y el cursor de Deskflow hace hover/clicks en la
+# pantalla equivocada. Orden:
+# [left_lo,left_hi, right_lo,right_hi, top_lo,top_hi, bottom_lo,bottom_hi].
+func _deskflow_capture_ranges():
+	# Las direcciones con gvd extendido quedan deshabilitadas: el input no cruza
+	# (SPEC-screen-share-compass §4/§7), así Deskflow no rapta el teclado en ese borde.
+	var disabled = []
+	for hid in _gvd_link_suspended.keys():
+		var d = String(_gvd_link_suspended[hid]).strip_edges()
+		if d != "" and d != "none":
+			disabled.append(d)
+	return GVD_LAUNCH.capture_ranges(_settings_deskflow_links(), disabled)
+
+
 # Conf del server con la topología COMPLETA del layout de Pantallas: todas las
 # adyacencias entre pantallas (no sólo desde la local), con rangos %. La local usa
 # `local_name`; los vecinos su campo `peer`.
@@ -4230,6 +5094,12 @@ func settings_poll():
 
 # Fondo del Hogar: degradado por defecto, color sólido o imagen estirada por modo.
 # La imagen la carga el puente en un Thread; acá sólo se dibuja el snapshot cacheado.
+# Colores del degradado del Hogar, para que el fondo del exposé (CanvasItem, no
+# ImGui) use exactamente el mismo par que _draw_home_background.
+func home_bg_colors():
+	return [HOME_BG_TOP, HOME_BG_BOTTOM]
+
+
 func _draw_home_background(vp):
 	var mode = "gradient"
 	if settings_bridge != null:
@@ -4248,15 +5118,45 @@ func _draw_home_background(vp):
 	imgui_draw_rect_filled_multicolor(Rect2(Vector2.ZERO, vp), HOME_BG_TOP, HOME_BG_TOP, HOME_BG_BOTTOM, HOME_BG_BOTTOM)
 
 
-# --- Vecindario --------------------------------------------------------------
+# --- Zoom Sugar (Hogar / Grupo / Vecindario) ---------------------------------
 
-# Abrir la vista Vecindario desde el bloque del Frame (sin actividad abierta).
+# Fija el nivel de zoom objetivo (Hogar 0, Grupo 1, Vecindario 2). Ajusta la capa
+# neighborhood_ui al modo correcto (otro agente le agrega set_mode/draw_center) y
+# delega el ícono central al shell. La animación la interpola _process con ZOOM_MS.
+func _set_zoom(level):
+	zoom_level = int(clamp(float(level), 0.0, 2.0))
+	neighborhood_view = zoom_level > 0
+	if zoom_level > 0:
+		expose = false
+	if neighborhood_ui != null:
+		if zoom_level > 0 and neighborhood_ui.has_method("set_mode"):
+			neighborhood_ui.set_mode("group" if zoom_level == 1 else "neighborhood")
+		# El centro lo dibuja el shell una sola vez (con zoom_model.center_icon_rect).
+		if "draw_center" in neighborhood_ui:
+			neighborhood_ui.set("draw_center", false)
+	request_redraw()
+
+
+# Rueda vertical / pinch: acerca (+1) o aleja (-1) un nivel, con tope 0..2.
+func _zoom_step(delta):
+	_set_zoom(ZOOM.step(zoom_level, delta))
+
+
+# Abrir la vista Vecindario (nivel 2) desde el bloque del Frame o con F1.
 func _go_neighborhood():
+	_enter_zoom(2)
+
+
+# Abrir la vista Grupo (nivel 1) con F2.
+func _go_group():
+	_enter_zoom(1)
+
+
+# Entrar a un nivel de zoom desde cualquier estado (cierra actividad/grilla primero).
+func _enter_zoom(level):
 	if current_activity != null or apps_view:
 		_go_home()
-	neighborhood_view = true
-	nb_zoom_target = 1.0
-	expose = false
+	_set_zoom(level)
 	if neighborhood != null:
 		neighborhood.poll()
 	_refresh_direction_views()
@@ -4264,10 +5164,9 @@ func _go_neighborhood():
 	request_redraw()
 
 
-# Volver al Hogar desde el Vecindario (Esc, el bloque Inicio o el mismo bloque).
+# Volver al Hogar desde el Vecindario/Grupo (Esc, el bloque Inicio o el mismo bloque).
 func _close_neighborhood():
-	neighborhood_view = false
-	nb_zoom_target = 0.0
+	_set_zoom(0)
 	neighborhood_ui.selected = ""
 	neighborhood_ui.selected_host = ""
 	request_redraw()
@@ -4287,6 +5186,10 @@ func _exit_tree():
 	_stop_publishers()
 	# Buzón del handshake: detiene el worker y espera los envíos ssh en curso.
 	_stop_inbox()
+	# Pantallazo pendiente: espera a que termine de codificar/guardar.
+	if _shot_thread != null:
+		_shot_thread.wait_to_finish()
+		_shot_thread = null
 	# No perder la última escritura de direcciones: ambas son cortas y locales.
 	for th in _dir_write_threads:
 		th.wait_to_finish()
@@ -4702,6 +5605,17 @@ func _run_host_plan(host_id, action):
 	if not bool(action.get("enabled", false)):
 		return
 	var id = String(host_id)
+	# Grupo (G4b): sumar/quitar del grupo no lleva plan de proceso; se resuelve con
+	# el modelo puro + persistencia y (al quitar) limpieza de tokens y pantalla.
+	var aid = String(action.get("id", ""))
+	if aid == "add_to_group":
+		_group_add(id)
+		request_redraw()
+		return
+	if aid == "remove_from_group":
+		_group_remove(id)
+		request_redraw()
+		return
 	var plan = action.get("plan", null)
 	var d = HOST_DISPATCH.dispatch_of(plan, String(action.get("id", "")))
 	match String(d.mechanism):
@@ -4759,6 +5673,7 @@ func _run_deskflow_server(host_id, plan):
 	var key = HOST_DISPATCH.deskflow_session_key(id)
 	if _has_tracked(key):
 		_stop_tracked(key)
+		_share_notify(id, "input", "stopped")
 		return
 	if typeof(plan) != TYPE_DICTIONARY:
 		return
@@ -4775,9 +5690,11 @@ func _run_deskflow_server(host_id, plan):
 	if String(plan.get("layout_path", "")) != "" and String(plan.get("layout_text", "")) != "":
 		writes.append({"path": String(plan.layout_path), "text": String(plan.layout_text)})
 	if not writes.empty():
+		_share_notify(id, "input", "starting")
 		_write_texts_async(writes, "", then_launch)
 		return
 	_launch_tracked(key, String(launch.cmd), launch.args)
+	_share_notify(id, "input", "starting")
 
 
 # --- Aplicar layout de Deskflow (K5) -----------------------------------------
@@ -5100,6 +6017,7 @@ func _stop_gvd_screen(host_id):
 		_stop_tracked(k)
 	_close_pantalla_window()
 	_restore_deskflow_link(id)
+	_share_notify(id, "screen", "stopped")
 
 
 func _close_pantalla_window():
@@ -5287,6 +6205,211 @@ func _peer_gvd_send(_port, _target):
 	return false
 
 
+# --- Dockapp "Compartiendo": avisos de lado compartido (G5) --------------------
+# Avisa al otro equipo qué lado quedó compartido y en qué estado, por el canal peer
+# ya existente (token cli:, TOFU). Sin canal/token se ignora en silencio (sólo log
+# con GDTK_DEBUG), igual que las demás acciones on-demand.
+func _share_notify(host_id, type, state):
+	var id = String(host_id)
+	var d = _direction_for(id)
+	if d == "":
+		return
+	var target = _peer_endpoint_for(id)
+	if not bool(target.get("ok", false)):
+		if OS.get_environment("GDTK_DEBUG") == "1":
+			print("compartir: sin canal hacia ", id, " (", String(target.get("error", "")), ")")
+		return
+	var side = DIRECTIONS_MODEL.inverse(d)
+	_peer_call(String(target.get("peer", "")), id, "share_notify",
+		{"type": String(type), "side": side, "state": String(state)})
+
+
+# Nombre visible del equipo por hid, sin exponer el id opaco ni jerga.
+func _peer_name_for(hid):
+	var host = _neighborhood_host(String(hid))
+	if host != null:
+		var label = String(host.get("label", "")).strip_edges()
+		if label != "":
+			return label
+	return String(hid)
+
+
+# Handler del método peer `share_notify`: guarda/actualiza el lado que el otro
+# equipo comparte hacia este (el `side` ya viene invertido por el emisor) o lo
+# borra al recibir "stopped". Upsert por (hid, tipo).
+func _peer_share_notify(hid, params):
+	var id = String(hid).strip_edges()
+	if id == "" or typeof(params) != TYPE_DICTIONARY:
+		return false
+	var type = String(params.get("type", "")).strip_edges()
+	if type != "screen" and type != "input":
+		return false
+	var state = String(params.get("state", "active")).strip_edges()
+	if state == "stopped":
+		for i in range(remote_shares.size() - 1, -1, -1):
+			var old = remote_shares[i]
+			if typeof(old) == TYPE_DICTIONARY and String(old.get("host", "")) == id \
+					and String(old.get("type", "")) == type:
+				remote_shares.remove(i)
+		request_redraw()
+		return true
+	var side = String(params.get("side", "")).strip_edges()
+	if not DIRECTIONS_MODEL.valid_direction(side) or side == "none":
+		return false
+	if state != "starting" and state != "active" and state != "error":
+		state = "active"
+	var entry = {"host": id, "peer_name": _peer_name_for(id), "type": type,
+		"side": side, "state": state}
+	var found = false
+	for i in range(remote_shares.size()):
+		var old2 = remote_shares[i]
+		if typeof(old2) == TYPE_DICTIONARY and String(old2.get("host", "")) == id \
+				and String(old2.get("type", "")) == type:
+			remote_shares[i] = entry
+			found = true
+			break
+	if not found:
+		remote_shares.append(entry)
+	request_redraw()
+	return true
+
+
+# Handler del método peer `share_stop`: detiene la sesión LOCAL de ese tipo hacia
+# hid (pantalla: receptor/emisor rastreado; teclado y mouse: servidor del host).
+func _peer_share_stop(hid, params):
+	var id = String(hid).strip_edges()
+	if id == "":
+		return false
+	var type = String(params.get("type", "")).strip_edges() if typeof(params) == TYPE_DICTIONARY else ""
+	if type == "screen":
+		_stop_gvd_screen(id)
+		return true
+	if type == "input":
+		host_deskflow[id] = false
+		var key = HOST_DISPATCH.deskflow_session_key(id)
+		if _has_tracked(key):
+			_stop_tracked(key)
+		request_redraw()
+		return true
+	return false
+
+
+# Ventanas de pantalla extendida para el diagrama: [{id, title, peer_name, maximized}].
+# Sólo lee caches/consultas baratas del compositor, sin procesos.
+func _share_windows():
+	var out = []
+	var peer = ""
+	for hid in host_directions.keys():
+		if _gvd_has_session(String(hid)):
+			peer = _peer_name_for(String(hid))
+			break
+	for id in _pantalla_window_ids():
+		var wid = int(id)
+		out.append({
+			"id": str(wid),
+			"title": String(compositor.get_title(wid)),
+			"peer_name": peer,
+			"maximized": bool(maximize_state.has(wid) or wm_maximized.has(wid)),
+		})
+	return out
+
+
+# hids con token peer (cli: o srv:) en peer-tokens.json, sin copiar los valores.
+func _peer_token_hids():
+	var out = []
+	var d = _peer_tokens_load()
+	for k in d.keys():
+		var key = String(k)
+		if not (key.begins_with("cli:") or key.begins_with("srv:")):
+			continue
+		var hid = key.substr(4).strip_edges()
+		if hid != "" and not out.has(hid):
+			out.append(hid)
+	out.sort()
+	return out
+
+
+# Suma host_id al Grupo (entrada sin ubicar) y persiste. Si ya existe un vínculo de
+# dirección para ese equipo, se reenvía la propuesta del handshake de pareo actual
+# (sin bloquear: el envío va a un Thread del buzón).
+func _group_add(host_id):
+	var id = String(host_id).strip_edges()
+	if id == "":
+		return
+	host_directions = GROUP_MODEL.add_member(host_directions, id)
+	_refresh_direction_views()
+	_persist_directions()
+	var entry = host_directions.get(id, {})
+	if typeof(entry) == TYPE_DICTIONARY:
+		var d = String(entry.get("direction", "")).strip_edges()
+		if DIRECTIONS_MODEL.valid_direction(d) and d != "none":
+			propose_direction(id, d)
+	request_redraw()
+
+
+# Quita host_id del Grupo: borra su dirección, sus tokens peer (cli: y srv:, en
+# memoria y en disco) y su pantalla de settings["screens"]. Nunca bloquea el render.
+func _group_remove(host_id):
+	var id = String(host_id).strip_edges()
+	if id == "":
+		return
+	var name = _peer_name_for(id)
+	var _plan = GROUP_MODEL.removal_plan(id, name)
+	host_directions = GROUP_MODEL.remove_member(host_directions, id)
+	_refresh_direction_views()
+	_persist_directions()
+	_peer_token_forget(id)
+	_screen_forget(id, name)
+	request_redraw()
+
+
+# Olvida los tokens peer del hid en memoria (peer_control) y en disco. Si el canal
+# peer no está vivo, escribe el archivo directamente con lo que ya había.
+func _peer_token_forget(hid):
+	var id = String(hid)
+	var pc = Host.peer_control
+	if pc != null and pc is Object:
+		pc.tokens.erase("cli:" + id)
+		pc.tokens.erase("srv:" + id)
+		if pc.has_method("_save_tokens"):
+			pc._save_tokens()
+		return
+	var d = _peer_tokens_load()
+	d.erase("cli:" + id)
+	d.erase("srv:" + id)
+	var f = File.new()
+	if f.open(_peer_tokens_path(), File.WRITE) == OK:
+		f.store_string(JSON.print(d))
+		f.close()
+
+
+# Quita la pantalla configurada del equipo (por id o nombre) de settings["screens"],
+# con la misma escritura atómica que usa la app de Configuración.
+func _screen_forget(id, name):
+	if settings_bridge == null or settings_bridge.model == null:
+		return
+	var raw = settings_bridge.settings.get("screens", {})
+	if typeof(raw) != TYPE_DICTIONARY or raw.empty():
+		return
+	var lay = SCREEN_LAYOUT.normalize_layout(raw)
+	var kept = []
+	var removed = false
+	for sc in lay.screens:
+		var sid = String(sc.get("id", "")).strip_edges()
+		var label = String(sc.get("label", "")).strip_edges()
+		var peer = String(sc.get("peer", "")).strip_edges()
+		if sid == id or label == name or peer == name:
+			removed = true
+			continue
+		kept.append(sc)
+	if not removed:
+		return
+	lay.screens = kept
+	settings_bridge.settings["screens"] = lay
+	settings_bridge.write_atomic(settings_bridge.settings_path(),
+		settings_bridge.model.to_json(settings_bridge.settings))
+
+
 func _direction_for(host_id):
 	var entry = host_directions.get(String(host_id), {})
 	if typeof(entry) != TYPE_DICTIONARY:
@@ -5352,6 +6475,7 @@ func _start_gvd_screen(host_id, action):
 		_queue_gvd_peer_launch(id, peer_host, int(target.get("port", 0)),
 			"gvd_recv", {"port": port, "from": _local_hostname()},
 			String(sp.get("cmd", "")), sp.get("args", []), direction)
+		_share_notify(id, "screen", "starting")
 	else:
 		_open_pantalla_window(gvd_path, _has_sway_socket(), GVD_LAUNCH.port_of_plan(plan))
 		if bool(target.get("ok", false)):
@@ -5362,6 +6486,8 @@ func _start_gvd_screen(host_id, action):
 			if not bool(sent.ok):
 				_close_pantalla_window()
 				activity_error = "pantalla: el vecino no pudo emitir (" + String(sent.error) + ")"
+			else:
+				_share_notify(id, "screen", "starting")
 		else:
 			_close_pantalla_window()
 			activity_error = "pantalla: " + String(target.get("error", "sin canal peer"))
@@ -5375,6 +6501,9 @@ func _start_gvd_screen(host_id, action):
 func _suspend_deskflow_link(host_id, direction):
 	var id = String(host_id)
 	_gvd_link_suspended[id] = String(direction)
+	# El borde extendido deja de capturar input de inmediato (portal InputCapture),
+	# sin tocar los demás vecinos ni reiniciar el servicio Deskflow.
+	_apply_capture_ranges()
 	var key = HOST_DISPATCH.deskflow_session_key(id)
 	if _has_tracked(key):
 		_stop_tracked(key)
@@ -5385,6 +6514,7 @@ func _suspend_deskflow_link(host_id, direction):
 func _restore_deskflow_link(host_id):
 	var id = String(host_id)
 	_gvd_link_suspended.erase(id)
+	_apply_capture_ranges()
 	if not bool(_gvd_link_restore.get(id, false)):
 		return
 	_gvd_link_restore.erase(id)
@@ -5395,6 +6525,13 @@ func _restore_deskflow_link(host_id):
 	if cmd == "":
 		return
 	_launch_tracked(HOST_DISPATCH.deskflow_session_key(id), cmd, saved.get("args", []))
+
+
+# Publica los rangos del portal InputCapture al RemoteInput del compositor (barato,
+# sin I/O): refleja altas/bajas de la suspensión por extensión de pantalla.
+func _apply_capture_ranges():
+	if Host.remote_input != null and Host.remote_input.has_method("set_capture_ranges"):
+		Host.remote_input.set_capture_ranges(_deskflow_capture_ranges())
 
 
 func _queue_gvd_peer_launch(host_id, peer_host, ctl_port, method, params, cmd, args, direction):
@@ -5725,7 +6862,7 @@ func _on_toplevel_added(id):
 			# (la instancia se conserva); recién acá se cambia de vista, no al lanzar.
 			_release_activity()
 			activity_instance = null
-			_add_tile(id)
+			_add_tile(id, name)
 			_focus_tile(id)
 			return
 	# Sin actividad (o sin coincidencia con app_id/título): se creara una dinamica.
@@ -5756,6 +6893,9 @@ func _on_toplevel_minimize(id):
 # La app pide maximizar/desmaximizar desde su decoración (CSD): se alterna el workspace
 # entero con su franja partida. Sólo aplica a ventanas gestionadas (raíz en `tiles`).
 func _on_toplevel_maximize(id, maximized):
+	# El compositor ya le confirmó ese estado al cliente: la caché debe saberlo, o al
+	# pasar a flotante (Super+arrastre) no se le mandaría el "desmaximizar".
+	_max_sent[id] = maximized != 0
 	var root = _root_of(id)
 	if not tiles.has(root):
 		return
@@ -5784,6 +6924,139 @@ func _on_toplevel_fullscreen(id, fullscreen):
 	if frame != null:
 		frame.set_visible(false)
 	request_redraw()
+
+
+# El cliente pide mover su ventana (arrastre de su barra CSD, p. ej. GTK4): el shell
+# hace el arrastre interactivo, igual que con nuestra barra de título.
+func _on_toplevel_move(id):
+	_begin_client_drag(_root_of(id), "move", "")
+
+
+# El cliente pide redimensionar por un borde (CSD): se traduce el bitfield WLR_EDGE_*
+# a una zona del chrome y se inicia el arrastre de redimensión.
+func _on_toplevel_resize(id, edges):
+	_begin_client_drag(_root_of(id), "resize", WM_DRAG.edges_zone(edges))
+
+
+# Arrastre pedido por el cliente (o por Super+clic): mover o redimensionar la ventana
+# `id` en flotante, reutilizando el mismo chrome_drag que el arrastre de la barra.
+func _begin_client_drag(id, kind, edge):
+	if chrome_drag != null or expose or not hybrid.is_floating(id):
+		return
+	if not tiles.has(id) or minimized.has(id) or id == fullscreen_id:
+		return
+	var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(get_viewport_rect().size)
+	var was_max = wm_maximized.has(id) or maximize_state.has(id)
+	if was_max:
+		# Un arrastre pedido por el cliente sobre una maximizada la desmaximiza.
+		wm_maximized.erase(id)
+		maximize_state.erase(id)
+	if not float_layout.has(id):
+		if float_memory.has(id) and float_memory[id] != null:
+			float_layout.restore_one(id, float_memory[id], box)
+		else:
+			float_layout.place_new(id, box)
+	_focus_tile(id)
+	var big = window_rects.get(id, box)
+	var fr = float_layout.rect(id) if was_max else big
+	if fr == null:
+		fr = box
+	var m = last_pointer_pos if last_pointer_pos != null else fr.position + fr.size * 0.5
+	if kind == "move":
+		var grab = Vector2(m) - fr.position
+		if was_max:
+			grab = WM_DRAG.proportional_grab(Vector2(m) - big.position, big.size, fr.size)
+		chrome_drag = {"id": id, "kind": "move", "grab": grab,
+			"was_maximized": false, "client": true}
+		_apply_cursor(Input.CURSOR_MOVE)
+	else:
+		chrome_drag = {"id": id, "kind": "resize", "edge": edge,
+			"start": fr, "from": Vector2(m), "was_maximized": false, "client": true}
+		_apply_cursor(_cursor_for_part(edge))
+	window_dragging = true
+	request_redraw()
+
+
+# id de la ventana flotante más arriba que contiene `pos` (chrome o contenido).
+func _window_at(pos):
+	for id in _hit_order_ids():
+		if id == fullscreen_id or minimized.has(id) or not tiles.has(id):
+			continue
+		if not hybrid.is_floating(id):
+			continue
+		var fr = window_rects.get(id, null)
+		if fr != null and Rect2(fr).has_point(pos):
+			return id
+	return -1
+
+
+# Super+clic: mover (izquierdo) o redimensionar (derecho, desde la esquina más cercana)
+# la ventana bajo el puntero, sin reenviar el clic a la app. Una tiled pasa a flotante
+# y sigue al puntero desde el primer motion.
+func _begin_super_drag(pos, button):
+	var hit = _view_hit_test(pos)
+	var probe = int(hit.id)
+	var was_tiled = probe >= 0 and tiles.has(probe) and hybrid.is_tiled(probe)
+	var id = -1
+	var old_rect = null
+	if was_tiled:
+		if button != BUTTON_LEFT:
+			return false
+		id = probe
+		old_rect = tile_rects.get(id, null)
+	else:
+		id = _window_at(pos)
+	if id < 0:
+		return false
+	# Estado maximizado (flotante wm_maximized o tiled maximize_state): al comenzar
+	# el arrastre se desmaximiza. Ningún flag puede quedar stale.
+	var was_max = wm_maximized.has(id) or maximize_state.has(id)
+	# El drag es del shell: que frame.gd no interprete la suelta de Super como un
+	# toque (abriría exposé) ni mande Super a la app al soltar el botón.
+	if frame != null:
+		frame.super_press = null
+	if was_tiled:
+		# La ventana agarrada pasa a flotante y debe seguir al puntero desde el primer
+		# motion: sin transición global.
+		set_window_mode(id, WM_HYBRID.FLOATING)
+		wm_anim.clear()
+		wm_switch_until = -1
+	elif was_max:
+		wm_maximized.erase(id)
+		maximize_state.erase(id)
+	var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(get_viewport_rect().size)
+	if not float_layout.has(id):
+		# Restaura el rect previo si lo recordamos (tamaño anterior, no una cascada);
+		# si no, cascada nueva (~74% del área).
+		if float_memory.has(id) and float_memory[id] != null:
+			float_layout.restore_one(id, float_memory[id], box)
+		else:
+			float_layout.place_new(id, box)
+	_focus_tile(id)
+	# Tras desprender del mosaico (o desmaximizar) window_rects aún describe el
+	# frame anterior; la geometría autoritativa ya está materializada en float_layout.
+	var fr = float_layout.rect(id) if (was_tiled or was_max) else window_rects.get(id, box)
+	if fr == null:
+		fr = box
+	if button == BUTTON_LEFT:
+		var grab = pos - fr.position
+		if was_tiled or was_max:
+			# Puntero proporcional: la fracción bajo el cursor en el rect grande
+			# (maximizado/celda) se conserva en el rect restaurado más chico.
+			var src = Rect2(old_rect) if old_rect != null else Rect2(window_rects.get(id, box))
+			grab = WM_DRAG.proportional_grab(pos - src.position, src.size, fr.size)
+			float_layout.drag_to(id, pos - grab, box)
+		chrome_drag = {"id": id, "kind": "move", "grab": grab,
+			"was_maximized": false, "super": true, "button": button}
+		_apply_cursor(Input.CURSOR_MOVE)
+	else:
+		var zone = WM_DRAG.quadrant_zone(pos, fr)
+		chrome_drag = {"id": id, "kind": "resize", "edge": zone, "start": fr, "from": pos,
+			"was_maximized": false, "super": true, "button": button}
+		_apply_cursor(_cursor_for_part(zone))
+	window_dragging = true
+	request_redraw()
+	return true
 
 
 func _add_dialog(id):
@@ -5849,21 +7122,72 @@ func _open_unmanaged_window(id):
 	print("actividad dinamica ", name, " para toplevel ", id)
 
 
-func _add_tile(id):
+# Ancla flotante del escritorio virtual actual: el líder de la pantalla centrada
+# (o el Escritorio si estamos en el Hogar / no hay mosaico). Así una ventana nueva
+# nace en la pantalla actual en vez de en una nueva.
+func _current_float_anchor():
+	if _at_home():
+		return WM_HYBRID.ESCRITORIO
+	var units = _units()
+	var i = _focused_unit_index(units)
+	if i <= 0 or i >= units.size():
+		return WM_HYBRID.ESCRITORIO
+	var members = units[i]
+	return int(members[0]) if not members.empty() else WM_HYBRID.ESCRITORIO
+
+
+func _add_tile(id, origin_name = ""):
 	if not tiles.has(id):
+		# La nueva flotante se ancla al escritorio virtual en pantalla.
+		if hybrid.is_floating(id):
+			hybrid.set_floating(id, _current_float_anchor())
 		tiles.append(id)
-		tile_intro[id] = _new_intro()
+		tile_intro[id] = _new_intro(false, origin_name)
 	request_redraw()
 
 
-# Entrada animada: si hay un ícono de origen reciente, escala desde él; si no, desde el
-# borde derecho (mismo tamaño). `ready` pasa a true con la primera textura.
-# `scale_in`: crece en su lugar (desminimizar), sin traslación desde el borde.
-func _new_intro(scale_in = false):
+# Guarda el rect (coords de vista) del ícono que lanzó la actividad `name`. Se usa al
+# mapear su ventana para la entrada genie; expira a los pocos segundos.
+func _remember_origin(name, rect):
+	if String(name) == "" or rect == null:
+		return
+	launch_origins[String(name)] = {"rect": Rect2(rect), "since": OS.get_ticks_msec()}
+	for k in launch_origins.keys():
+		if OS.get_ticks_msec() - int(launch_origins[k].since) > LAUNCH_ORIGIN_MS:
+			launch_origins.erase(k)
+
+
+# Origen recordado para `name` (lo consume), o null si no hay o venció.
+func _take_origin(name):
+	var key = String(name)
+	var o = launch_origins.get(key, null)
+	launch_origins.erase(key)
+	if o != null and OS.get_ticks_msec() - int(o.since) <= LAUNCH_ORIGIN_MS:
+		return o.rect
+	return null
+
+
+# Origen pendiente global (fallback cuando la ventana no se pudo mapear a un nombre).
+func _consume_pending_origin():
 	var from = null
-	if not scale_in and pending_origin != null and OS.get_ticks_msec() - pending_origin_since < 4000:
+	if pending_origin != null and OS.get_ticks_msec() - pending_origin_since < LAUNCH_ORIGIN_MS:
 		from = pending_origin
 	pending_origin = null
+	return from
+
+
+# Entrada animada: si hay un ícono de origen reciente (el de su actividad mapada o el
+# último pendiente) escala desde él; si no, genie desde el centro del rect final con
+# fade (ver EXPOSE_LAYOUT.intro_from). `ready` pasa a true con la primera textura.
+# `scale_in`: crece en su lugar (desminimizar), sin traslación.
+func _new_intro(scale_in = false, origin_name = ""):
+	var from = null
+	if not scale_in:
+		from = _take_origin(origin_name)
+		if from != null:
+			pending_origin = null  # el pendiente global ya se usó (match por nombre)
+		else:
+			from = _consume_pending_origin()
 	return {"from": from, "since": OS.get_ticks_msec(), "ready": false, "rect": Rect2(), "scale_in": scale_in}
 
 
@@ -5945,6 +7269,14 @@ func _on_toplevel_removed(id):
 	_remove_from_group(id)
 	maximize_state.erase(id)
 	wm_maximized.erase(id)
+	if chrome_drag != null and int(chrome_drag.id) == id:
+		chrome_drag = null
+		drag_overlay = null
+		window_dragging = false
+	float_memory.erase(id)
+	hybrid.forget(id)
+	float_layout.remove(id)
+	wm_anim.erase(id)
 	minimized.erase(id)
 	unit_focus.erase(id)
 	tiles.erase(id)
@@ -5979,25 +7311,33 @@ func _refocus_dialog():
 		compositor.focus(root)
 
 
-func _on_view_input(event):
-	if _capture_remote_input_event(event):
-		return
-	# K13: en modo flotante, la barra de título y los botones de la ventana se
-	# resuelven antes que el contenido del cliente (y antes del arrastre al Frame).
-	if not expose and is_floating() and _on_chrome_input(event):
-		return
-	if window_dragging:
-		return
-	if expose:
-		# Zoom out del escritorio: hover para mostrar el botón de cerrar, clic para
-		# elegir una ventana (cambia a su pantalla y la enfoca) o cerrarla.
-		if event is InputEventMouseMotion:
-			var over = _expose_hit(event.position)
-			if over != expose_hover:
-				expose_hover = over
-				request_redraw()
+# Entrada del exposé (mouse): hover del botón cerrar, press para levantar la
+# miniatura, motion para el fantasma y el resaltado del destino, release para
+# moverla de escritorio (o seleccionar/salir si no hubo movimiento). Nunca
+# reenvía a la app: el exposé es dueño total del mouse.
+func _on_expose_input(event):
+	# Zoom out del escritorio: hover para el botón de cerrar; arrastrar una
+	# miniatura entre escritorios; clic para elegirla; clic en la X para cerrar.
+	if event is InputEventMouseMotion:
+		if expose_drag != null:
+			var d = expose_drag
+			d["pos"] = event.position
+			if not d.moved and event.position.distance_to(d.from) > EXPOSE_DRAG_PX:
+				d["moved"] = true
+			if d.moved:
+				# El hueco (barra de inserción) gana sobre la tarjeta: son zonas
+				# excluyentes, pero el hueco puede invadir unos px si el gap es chico.
+				expose_drag_gap = _expose_gap_at(event.position)
+				expose_drag_target = -1 if expose_drag_gap >= 0 else _expose_unit_at(event.position)
+			request_redraw()
 			return
-		if event is InputEventMouseButton and event.pressed:
+		var over = _expose_hit(event.position)
+		if over != expose_hover:
+			expose_hover = over
+			request_redraw()
+		return
+	if event is InputEventMouseButton and event.button_index == BUTTON_LEFT:
+		if event.pressed:
 			var cid = _expose_close_hit(event.position)
 			if cid >= 0:
 				_close_window_id(cid)
@@ -6006,10 +7346,58 @@ func _on_view_input(event):
 			var hit = _expose_hit(event.position)
 			if hit >= 0:
 				expose_sel = tiles.find(hit)
+				var card = expose_cards.get(hit)
+				expose_drag = {"id": hit, "from": event.position,
+					"grab": event.position - card.position if card != null else Vector2.ZERO,
+					"pos": event.position, "moved": false}
+				expose_drag_target = -1
+				expose_drag_gap = -1
+				request_redraw()
+			return
+		if expose_drag != null:
+			var d = expose_drag
+			expose_drag = null
+			expose_drag_target = -1
+			expose_drag_gap = -1
+			if d.moved:
+				var gap = _expose_gap_at(event.position)
+				if gap >= 0:
+					_expose_insert(int(d.id), gap)
+				else:
+					var target = _expose_unit_at(event.position)
+					if target >= 0:
+						_expose_drop(int(d.id), target)
+					else:
+						request_redraw()
+			else:
 				_expose_commit()
 			return
+	return
+
+
+func _on_view_input(event):
+	# El exposé se atiende ANTES de los guards de pointer-lock y captura remota: si
+	# un cliente quedó con lock (o Deskflow captura), esos caminos se tragaban el
+	# press/motion/drop y el arrastre entre escritorios nunca arrancaba.
+	if expose:
+		_on_expose_input(event)
+		return
+	if client_pointer_locked:
+		# El lock del cliente ya consume el mouse en _input (CaptureInput).
+		return
+	if _capture_remote_input_event(event):
+		return
+	# K13: en modo flotante, la barra de título y los botones de la ventana se
+	# resuelven antes que el contenido del cliente (y antes del arrastre al Frame).
+	if _on_chrome_input(event):
+		return
+	if window_dragging:
 		return
 	if event is InputEventMouseMotion:
+		last_pointer_pos = event.position
+		_sync_drag_icon()
+		# Fuera del chrome (mosaico, o flotante con el puntero en la app): flecha.
+		_reset_cursor()
 		# Asa de redimensión de la franja: primero la arrastra, después sólo la insinúa.
 		if resize_handle != null:
 			_resize_to(resize_handle, event.position.x)
@@ -6021,13 +7409,28 @@ func _on_view_input(event):
 			return
 		var hit = _view_hit_test(event.position)
 		if hit.id < 0:
+			# Drag nativo sobre el escritorio: limpiar el foco para que el drop no
+			# caiga en la última ventana; el botón que cierre el drag llega abajo.
+			if client_drag_active:
+				compositor.pointer_clear_focus()
 			return
 		_focus_follow(hit)
 		compositor.pointer_motion(hit.id, hit.pos)
 	elif event is InputEventMouseButton:
+		# Super+clic: mover (izquierdo) o redimensionar (derecho) la ventana bajo el
+		# puntero, sin reenviar el clic a la app. Sirve también para CSD.
+		if (event.button_index == BUTTON_LEFT or event.button_index == BUTTON_RIGHT):
+			if event.pressed:
+				if _super_held(event) and chrome_drag == null and not expose:
+					if _begin_super_drag(event.position, event.button_index):
+						return
+			elif chrome_drag != null and bool(chrome_drag.get("super", false)):
+				# Commit aunque Super ya se haya soltado: si no, el drag quedaría colgado.
+				_commit_chrome_drag()
+				return
 		# Con Super la rueda es para el shell (cambiar de workspace), no para la app.
 		if (event.button_index == BUTTON_WHEEL_UP or event.button_index == BUTTON_WHEEL_DOWN) \
-				and Input.is_key_pressed(KEY_META):
+				and _super_held(event):
 			return
 		if event.pressed and event.button_index == BUTTON_LEFT:
 			var h = _handle_at(event.position)
@@ -6042,6 +7445,10 @@ func _on_view_input(event):
 			return
 		var hit = _view_hit_test(event.position)
 		if hit.id < 0:
+			# Soltar el botón sobre el escritorio termina/cancela el drag nativo
+			# aunque no haya ventana bajo el puntero.
+			if client_drag_active:
+				compositor.pointer_button(event.button_index, event.pressed)
 			return
 		compositor.pointer_motion(hit.id, hit.pos)
 		compositor.pointer_button(event.button_index, event.pressed)
@@ -6052,9 +7459,57 @@ func _on_view_input(event):
 			else:
 				focused_dialog = 0
 				_focus_tile(hit.id)
+	elif event is InputEventPanGesture:
+		# Pan continuo (touchpad): sólo si el puntero está sobre una ventana cliente.
+		# El backend FRT/SDL hoy manda BUTTON_WHEEL_LEFT/RIGHT (wheel.x) en lugar de
+		# este evento, pero si el motor pasa a emitir gestures hay que reenviarlo como
+		# axis (el evento queda marcado como manejado por el Viewport si no lo hacemos).
+		if event.delta == Vector2.ZERO:
+			return
+		var pan_hit = _view_hit_test(event.position)
+		if pan_hit.id < 0:
+			return
+		var pan_axis = SCROLL_GESTURE.pan_axis(event.delta)
+		if compositor.has_method("pointer_axis_h"):
+			compositor.pointer_axis_h(pan_axis.x)
+		compositor.pointer_axis(pan_axis.y)
+		return
 
 
 # --- K13: input del chrome flotante ------------------------------------------
+
+# Menú contextual de la ventana (clic derecho en su barra de título): cambiar entre
+# Flotante/Mosaico, maximizar/restaurar y cerrar. El modo se cambia por ventana.
+func _draw_window_menu():
+	if wm_menu_want:
+		open_popup("##wm_menu")
+		wm_menu_want = false
+	if wm_menu_id < 0:
+		return
+	MENU_STYLE.begin(self)
+	if begin_popup("##wm_menu"):
+		var id = wm_menu_id
+		if not tiles.has(id):
+			end_popup()
+		else:
+			MENU_STYLE.chrome(self, "Ventana")
+			var fl = hybrid.is_floating(id)
+			var chosen = ""
+			if MENU_STYLE.item(self, "Flotante", "", fl):
+				chosen = WM_HYBRID.FLOATING
+			if MENU_STYLE.item(self, "Mosaico", "", not fl):
+				chosen = WM_HYBRID.TILED
+			separator()
+			if MENU_STYLE.item(self, "Restaurar" if (wm_maximized.has(id) or maximize_state.has(id)) else "Maximizar"):
+				_toggle_maximize_window(id)
+			if MENU_STYLE.item(self, "Cerrar"):
+				_close_window_id(id)
+			end_popup()
+			if chosen != "":
+				set_window_mode(id, chosen)
+				wm_menu_id = -1
+	MENU_STYLE.end(self)
+
 
 # Resuelve la barra de título/botones/bordes de las ventanas flotantes. Devuelve
 # true si el evento se consumió (no debe llegar al cliente).
@@ -6063,15 +7518,26 @@ func _on_chrome_input(event):
 		if chrome_drag != null:
 			_chrome_drag_motion(event.position)
 			return true
-		return _chrome_pick(event.position) != null
+		_update_csd_hover(event.position)
+		var pick = _chrome_pick(event.position)
+		_apply_cursor(_cursor_for_part(pick.part if pick != null else ""))
+		return pick != null
+	if event is InputEventMouseButton and event.button_index == BUTTON_RIGHT and event.pressed:
+		# Menú contextual de la barra de título (cambio de modo, maximizar, cerrar).
+		var rpick = _chrome_pick(event.position)
+		if rpick != null and (String(rpick.part) == "title" or String(rpick.part) == "grip"):
+			_focus_tile(int(rpick.id))
+			wm_menu_id = int(rpick.id)
+			wm_menu_want = true
+			request_redraw()
+			return true
+		return false
 	if not (event is InputEventMouseButton) or event.button_index != BUTTON_LEFT:
 		return false
 	if not event.pressed:
 		var was_dragging = chrome_drag != null
-		chrome_drag = null
 		if was_dragging:
-			window_dragging = false
-			request_redraw()
+			_commit_chrome_drag()
 		return was_dragging
 	var pick = _chrome_pick(event.position)
 	if pick == null:
@@ -6087,23 +7553,26 @@ func _on_chrome_input(event):
 		_close_window_id(id)
 		return true
 	var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(get_viewport_rect().size)
-	if part == "title":
-		# Doble clic en la barra: maximizar/restaurar. Un clic simple levanta y arrastra.
+	if part == "title" or part == "grip":
+		# Doble clic en la barra: maximizar/restaurar. Un clic simple enfoca y prepara
+		# el arrastre; NO desmaximiza por sí solo (eso destrozaba la geometría y hacía
+		# que el doble clic de restaurar no tuviera efecto). Desmaximizar sucede recién
+		# cuando el arrastre mueve la ventana (ver _chrome_drag_motion).
 		var now = OS.get_ticks_msec()
-		var dbl = int(_wm_last_title_click.id) == id and now - int(_wm_last_title_click.at) < 350
+		var dbl = part == "title" and int(_wm_last_title_click.id) == id and now - int(_wm_last_title_click.at) < 350
 		_wm_last_title_click = {"id": id, "at": now}
 		if dbl:
+			_wm_last_title_click = {"id": -1, "at": 0}
 			_toggle_maximize_window(id)
 			return true
-		if wm_maximized.has(id):
-			wm_maximized.erase(id)
-			float_layout.set_rect(id, window_rects.get(id, box))
 		if not float_layout.has(id):
 			float_layout.place_new(id, box)
 		_focus_tile(id)
 		var fr = window_rects.get(id, box)
-		chrome_drag = {"id": id, "kind": "move", "grab": event.position - fr.position}
+		chrome_drag = {"id": id, "kind": "move", "grab": event.position - fr.position,
+			"was_maximized": wm_maximized.has(id) or maximize_state.has(id)}
 		window_dragging = true
+		_apply_cursor(Input.CURSOR_MOVE)
 		request_redraw()
 		return true
 	if WINDOW_CHROME.is_edge(part):
@@ -6113,9 +7582,92 @@ func _on_chrome_input(event):
 		chrome_drag = {"id": id, "kind": "resize", "edge": part,
 			"start": window_rects.get(id, box), "from": event.position}
 		window_dragging = true
+		_apply_cursor(_cursor_for_part(part))
 		request_redraw()
 		return true
 	return false
+
+
+# Forma del cursor según la zona del chrome (esquinas y bordes redimensionan).
+func _cursor_for_part(part):
+	match String(part):
+		"left", "right":
+			return Input.CURSOR_HSIZE
+		"top", "bottom":
+			return Input.CURSOR_VSIZE
+		"tl", "br":
+			return Input.CURSOR_FDIAGSIZE
+		"tr", "bl":
+			return Input.CURSOR_BDIAGSIZE
+		"title", "grip":
+			return Input.CURSOR_MOVE
+		_:
+			return Input.CURSOR_ARROW
+
+
+# Aplica la forma del cursor. Además del default global, hay que fijarla en el
+# Control que está bajo el puntero (`view`): el Viewport resuelve la forma desde el
+# Control hovereado, así que `Input.set_default_cursor_shape` solo no alcanza.
+func _apply_cursor(shape):
+	Input.set_default_cursor_shape(shape)
+	if view != null and is_instance_valid(view):
+		view.mouse_default_cursor_shape = shape
+
+
+# Cursor por defecto según lo que haya bajo `pos` (o flecha si no hay chrome).
+func _reset_cursor(pos = null):
+	if pos != null:
+		var pick = _chrome_pick(pos)
+		_apply_cursor(_cursor_for_part(pick.part if pick != null else ""))
+	else:
+		_apply_cursor(Input.CURSOR_ARROW)
+
+
+# ¿Está Super (Meta) apretado? En Linux el evento llega como KEY_META, pero el
+# estado físico puede reportarse como KEY_SUPER_L/R según el backend: se chequean
+# los tres (frame.gd usa el mismo conjunto en SUPER_KEYS).
+func _super_held(event = null):
+	var event_meta = event != null and bool(event.meta)
+	return WM_DRAG.super_active(event_meta, Input.is_key_pressed(KEY_META),
+		Input.is_key_pressed(KEY_SUPER_L), Input.is_key_pressed(KEY_SUPER_R))
+
+
+# Cierra un arrastre de chrome/cliente. El resize no tocó la ventana real durante
+# el motion (sólo dibujó drag_overlay): recién ahora se aplica la geometría, un
+# único set_size. El move ya fue en vivo (mover no reasigna buffer del cliente).
+func _commit_chrome_drag():
+	if chrome_drag == null:
+		return
+	var id = int(chrome_drag.id)
+	if String(chrome_drag.kind) == "resize" and drag_overlay != null and tiles.has(id):
+		var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(get_viewport_rect().size)
+		float_layout.resize_to(id, drag_overlay.rect, box)
+	# K13f — Snap flotante: si el drop quedó en una franja del borde, la ventana toma
+	# esa mitad o se maximiza arriba. Un único set de geometría al soltar (igual que
+	# el resize diferido), reusando el convenio de maximizar de flotante.
+	elif String(chrome_drag.kind) == "move" and drag_overlay != null \
+			and String(drag_overlay.get("kind", "")) == "snap" and tiles.has(id):
+		var zone = String(drag_overlay.get("zone", ""))
+		var target = String(drag_overlay.get("target", "float-half"))
+		if zone == "max" or target == "maximize":
+			_maximize_window(id)
+		elif target == "tile-half":
+			_snap_tile_to(id, zone)
+		elif zone == "left" or zone == "right":
+			var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(get_viewport_rect().size)
+			wm_maximized.erase(id)
+			if not float_layout.has(id):
+				float_layout.place_new(id, box)
+			float_layout.resize_to(id, drag_overlay.rect, box)
+			float_layout.raise(id)
+			_focus_tile(id)
+			_maybe_fuse_snapped_floats(id)
+	chrome_drag = null
+	drag_overlay = null
+	window_dragging = false
+	instant_switch = true
+	_reset_cursor()
+	request_redraw()
 
 
 func _chrome_drag_motion(pos):
@@ -6124,6 +7676,7 @@ func _chrome_drag_motion(pos):
 	var id = int(chrome_drag.id)
 	if not tiles.has(id):
 		chrome_drag = null
+		drag_overlay = null
 		window_dragging = false
 		return
 	var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(get_viewport_rect().size)
@@ -6131,14 +7684,71 @@ func _chrome_drag_motion(pos):
 	if kind != "move" and kind != "resize":
 		return
 	if kind == "move":
-		float_layout.move_to(id, pos - chrome_drag.grab, box)
+		if bool(chrome_drag.get("was_maximized", false)):
+			# Desmaximizar al arrastrar: la ventana vuelve a su rect flotante
+			# recordado (float_layout lo conservó) y sigue al puntero con la misma
+			# fracción (x e y) bajo el cursor. Se limpian ambos flags.
+			wm_maximized.erase(id)
+			maximize_state.erase(id)
+			chrome_drag["was_maximized"] = false
+			var big = Rect2(window_rects.get(id, box))
+			var restored = float_layout.rect(id)
+			if restored != null:
+				chrome_drag["grab"] = WM_DRAG.proportional_grab(
+					Vector2(chrome_drag.grab), big.size, restored.size)
+		float_layout.drag_to(id, pos - chrome_drag.grab, box)
+		# Reflejar el modelo en el nodo visible en este mismo evento. Si esperamos al
+		# siguiente ciclo de layout, la decoración/título alcanza a viajar sola antes
+		# que la textura de la ventana y el gesto se percibe como un label flotante.
+		_apply_live_float_move(id, float_layout.rect(id))
+		# K13f/K13i — Snap contextual con histéresis: cerca del borde del hueco se
+		# ofrece una mitad (izquierda/derecha) o maximizar (franja superior). Si la
+		# pantalla centrada ya tiene mosaico, la mitad inserta en mosaico; si no,
+		# redimensiona la flotante. La aplicación sucede al soltar (_commit_chrome_drag).
+		var thr = WM_DRAG.EDGE_SNAP * get_imgui_scale()
+		var zone = WM_DRAG.zone_hold(String(chrome_drag.get("zone", "")), pos, box, thr)
+		chrome_drag["zone"] = zone
+		if zone == "":
+			if drag_overlay != null and String(drag_overlay.get("kind", "")) == "snap":
+				drag_overlay = null
+		else:
+			var target = "maximize" if zone == "max" else ("tile-half" if _centered_unit_has_tiled() else "float-half")
+			drag_overlay = {"id": id, "kind": "snap", "zone": zone, "target": target,
+				"rect": box if zone == "max" else WM_DRAG.snap_rect(zone, box)}
 	else:
+		# Resize diferido: NO se redimensiona la ventana real en cada motion (eso
+		# dispara un set_size/buffer nuevo por frame y se siente el lag). Se guarda
+		# la geometría objetivo y se dibuja un overlay; se aplica al soltar.
 		var nr = WINDOW_CHROME.resized(chrome_drag.start, String(chrome_drag.edge), pos - chrome_drag.from)
-		float_layout.resize_to(id, nr, box)
+		drag_overlay = {"id": id, "kind": "resize", "rect": float_layout.clamp_rect(box, nr)}
+		_apply_cursor(_cursor_for_part(String(chrome_drag.edge)))
 	# Durante el arrastre la ventana debe seguir al puntero 1:1, sin la animación
 	# de reacomodo (que haría un efecto elástico).
 	instant_switch = true
 	request_redraw()
+
+
+# Aplica sólo la traslación de una ventana flotante; nunca cambia el tamaño del
+# surface ni solicita un buffer al cliente. El layout normal reafirma estos rects
+# en el siguiente frame, pero el motion queda visualmente sincronizado 1:1.
+func _apply_live_float_move(id, frame_rect):
+	if frame_rect == null:
+		return
+	var fr = Rect2(frame_rect)
+	window_rects[id] = fr
+	var content = fr
+	if not _is_csd(id):
+		content = WINDOW_CHROME.content_rect(fr, _chrome_title_h(), _chrome_border(),
+			_chrome_resize_h())
+	tile_rects[id] = content
+	var node = tile_nodes.get(id)
+	if node != null and is_instance_valid(node):
+		tile_anim.erase(id)
+		node.rect_position = content.position
+		node.rect_scale = Vector2.ONE
+	var deco = deco_nodes.get(id)
+	if deco != null and is_instance_valid(deco):
+		deco.update()
 
 
 # Lazy focus follows mouse: al mover el puntero sobre otra ventana (o su diálogo)
@@ -6151,11 +7761,106 @@ func _focus_follow(hit):
 		return
 	if int(d.dialog) > 0:
 		focused_dialog = int(d.dialog)
-		compositor.focus(int(d.dialog))
+		_compositor_focus(int(d.dialog), false)
 		request_redraw()
 	else:
 		focused_dialog = 0
-		_focus_tile(int(d.target))
+		_focus_tile(int(d.target), false)
+
+
+# --- Drag and drop nativo (wl_data_device) ---
+# El icono lo compone el compositor. Se dibuja como TextureRect en una CanvasLayer
+# alta (no hijo de `view`: así queda encima de tiles, decoración, exposé e ImGui y
+# no lo oculta view.visible). Si el cliente no manda textura legible (p.ej. dmabuf)
+# se muestra un placeholder para no perder el feedback. El cursor real lo dibuja
+# el compositor anfitrión.
+const DRAG_ICON_MAX = 160.0
+
+
+func _on_drag_icon_changed():
+	if compositor == null or not compositor.has_method("get_drag_icon_texture"):
+		return
+	drag_icon_tex = compositor.get_drag_icon_texture()
+	if drag_icon_tex != null:
+		print("[drag-icon] textura ", drag_icon_tex.get_size())
+	else:
+		print("[drag-icon] sin textura (placeholder)")
+	_sync_drag_icon()
+	request_redraw()
+
+
+func _on_drag_state_changed(active):
+	client_drag_active = active
+	if not active:
+		drag_icon_tex = null
+	drag_icon_samples = 0
+	print("[drag-icon] drag ", "activo" if active else "terminado")
+	_sync_drag_icon()
+	request_redraw()
+
+
+# Placeholder opaco con borde de acento: un buffer dmabuf/GL no se puede leer
+# desde CPU, así que al menos se muestra algo siguiendo al puntero.
+func _drag_placeholder_texture():
+	if drag_placeholder_tex != null:
+		return drag_placeholder_tex
+	var s = 24
+	var img = Image.new()
+	img.create(s, s, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0.12, 0.16, 0.22, 0.94))
+	var edge = Color(0.55, 0.80, 1.0, 0.98)
+	img.lock()
+	for i in range(s):
+		img.set_pixel(i, 0, edge)
+		img.set_pixel(i, s - 1, edge)
+		img.set_pixel(0, i, edge)
+		img.set_pixel(s - 1, i, edge)
+	img.unlock()
+	var t = ImageTexture.new()
+	t.create_from_image(img, 0)
+	drag_placeholder_tex = t
+	return t
+
+
+func _sync_drag_icon():
+	if not client_drag_active:
+		if drag_icon_node != null and is_instance_valid(drag_icon_node):
+			drag_icon_node.visible = false
+		return
+	var pos = last_pointer_pos
+	if pos == null:
+		pos = get_viewport().get_mouse_position()
+	if pos == null:
+		return
+	if drag_icon_node == null or not is_instance_valid(drag_icon_node):
+		drag_icon_node = TextureRect.new()
+		drag_icon_node.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		drag_icon_node.expand = true
+		drag_icon_node.stretch_mode = TextureRect.STRETCH_SCALE
+		_ensure_premult_material()
+		drag_icon_node.material = premult_material
+		drag_icon_node.visible = false
+		if drag_layer == null or not is_instance_valid(drag_layer):
+			drag_layer = CanvasLayer.new()
+			drag_layer.layer = 100
+			add_child(drag_layer)
+		drag_layer.add_child(drag_icon_node)
+	var tex = drag_icon_tex
+	if tex == null:
+		tex = _drag_placeholder_texture()
+	var off = Vector2.ZERO
+	if compositor != null and compositor.has_method("get_drag_icon_offset"):
+		off = compositor.get_drag_icon_offset()
+	var r = DRAG_ICON.icon_rect(pos, DRAG_ICON.clamp_size(tex.get_size(), DRAG_ICON_MAX), off)
+	drag_icon_node.texture = tex
+	drag_icon_node.rect_size = r.size
+	drag_icon_node.rect_position = r.position
+	drag_icon_node.visible = true
+	if drag_icon_samples < 20:
+		drag_icon_samples += 1
+		print("[drag-icon] muestra ", drag_icon_samples, " pos=", r.position,
+			" size=", r.size, " tex=", ("icono" if drag_icon_tex != null else "placeholder"),
+			" view=", (view.visible if view != null else false))
 
 
 # Hit-test de arriba hacia abajo: el dialogo mas reciente que contenga el puntero; si no,
@@ -6196,7 +7901,182 @@ func _view_hit_test(pos):
 # Teclear en el Home lleva a la búsqueda de apps.
 # En _input (Godot 3 lo llama también en ImGuiCanvas): con el puntero sobre el
 # home ImGui marca todo como manejado y a _unhandled_input no llega nada.
+func _set_capture_cursor(active):
+	var entering = active and not mouse_locked
+	# ImGuiCanvas encola botones directamente en su _input nativo; marcar el evento
+	# como handled no los retira. Durante la captura lo apagamos por completo. El
+	# hijo CaptureInput sigue recibiendo y reenviando el hardware a EIS.
+	set_process_input(not active)
+	# Defensa final: durante InputCapture ninguna ruta de GUI puede reenviar el
+	# hardware físico a un cliente Wayland local. El módulo también limpia el foco
+	# al deshabilitar; has_method conserva compatibilidad con binarios anteriores.
+	if compositor != null and compositor.has_method("set_local_pointer_enabled"):
+		compositor.set_local_pointer_enabled(not active)
+	# MOUSE_MODE_CAPTURED oculta/centra el cursor de Godot, pero no manda
+	# wl_pointer.leave al cliente Wayland que estaba debajo. Soltar ese foco al
+	# cruzar evita que la app local conserve hover y reciba clics "fantasma".
+	if entering and compositor != null and compositor.has_method("pointer_clear_focus"):
+		compositor.pointer_clear_focus()
+	# Ocultar también el fallback dibujado: los eventos consumidos no llegan a
+	# _move_eis_cursor y podían dejarlo visible mientras el puntero está afuera.
+	if active and eis_cursor != null and eis_cursor.visible:
+		eis_cursor.visible = false
+		request_redraw()
+	# Leer el modo real permite recuperar el lock tras una recarga del shell.
+	var mode = Input.MOUSE_MODE_CAPTURED if active else Input.MOUSE_MODE_VISIBLE
+	if (active or mouse_locked or Input.get_mouse_mode() == Input.MOUSE_MODE_CAPTURED) and Input.get_mouse_mode() != mode:
+		Input.set_mouse_mode(mode)
+	mouse_locked = active
+
+
+# Teclas multimedia que llegan por el RPC `media` (sway intercepta el brillo y llama a
+# session/gdtk-media): con la captura de Deskflow activa van al equipo remoto, como
+# cualquier otra tecla, en vez de cambiar el brillo/volumen de este.
+func _forward_media_to_capture(action):
+	var keys = {"up": KEY_VOLUMEUP, "down": KEY_VOLUMEDOWN, "mute": KEY_VOLUMEMUTE,
+		"brightness_up": KEY_BRIGHTNESSUP, "brightness_down": KEY_BRIGHTNESSDOWN}
+	if not mouse_locked or remote_input == null or not keys.has(action):
+		return false
+	if remote_input.has_method("is_capturing") and not remote_input.is_capturing():
+		return false
+	var sc = keys[action]
+	var now = OS.get_ticks_msec()
+	var ok = remote_input.capture_key(sc, true, now)
+	remote_input.capture_key(sc, false, now)
+	return ok
+
+
+func _sync_capture_cursor():
+	# Release/Disable/Close y desconexiones llegan por D-Bus/EIS, aun sin mouse
+	# físico. No esperar otro evento local para devolver el cursor.
+	if client_pointer_locked:
+		# Lock de un cliente alojado: el modo lo gobierna _set_client_pointer_lock.
+		return
+	if remote_input != null and remote_input.has_method("is_capturing"):
+		_set_capture_cursor(remote_input.is_capturing())
+	elif mouse_locked:
+		# Sin módulo de captura (binario sin RemoteInput, recarga viva) y el lock
+		# puesto: soltarlo ya, si no el mouse local nunca vuelve.
+		_set_capture_cursor(false)
+	# Si el cliente con foco pidió ocultar el cursor y no hay captura, no dejarlo
+	# visible: _set_capture_cursor(false) acaba de forzar MOUSE_MODE_VISIBLE.
+	if client_cursor_hidden and not mouse_locked:
+		_apply_client_cursor_state()
+
+
+# --- Pointer lock de un cliente alojado (SDL relativo: emuladores/juegos) ------
+
+func _on_client_pointer_lock(id, locked):
+	_set_client_pointer_lock(locked)
+	if locked and id > 0 and focused_tile != id and _id_alive(id):
+		_focus_tile(id)
+
+
+# Cursor pedido por el cliente con foco (surface NULL). No toca el lock: sólo
+# oculta/restaura el cursor dibujado por el shell.
+func _on_client_cursor_hidden(hidden):
+	if client_cursor_hidden == hidden:
+		return
+	client_cursor_hidden = hidden
+	_apply_client_cursor_state()
+
+
+func _set_client_pointer_lock(active):
+	if client_pointer_locked == active:
+		return
+	client_pointer_locked = active
+	print("[ptr-lock] lock active=%s mode=%d hidden=%s has_rel=%s has_pfocus=%s" % [
+		str(active), Input.get_mouse_mode(), str(client_cursor_hidden),
+		str(compositor != null and compositor.has_method("pointer_motion_relative")),
+		str(compositor != null and compositor.has_method("pointer_has_focus"))])
+	if active:
+		# SI hay una captura remota activa, cederla: el lock local manda.
+		if mouse_locked:
+			_set_capture_cursor(false)
+		# Mismo mecanismo que Deskflow: apagar el _input de ImGuiCanvas; el hijo
+		# CaptureInput sigue recibiendo y reenvía el relativo al cliente.
+		set_process_input(false)
+		Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+	else:
+		set_process_input(true)
+		# No forzar VISIBLE si el cliente pidió ocultar el cursor (set_cursor
+		# surface NULL): _apply_client_cursor_state deja el modo que corresponda.
+		if Input.get_mouse_mode() == Input.MOUSE_MODE_CAPTURED:
+			Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
+	_apply_client_cursor_state()
+
+
+# Oculta el cursor dibujado por el shell mientras haya pointer lock o el cliente
+# con foco haya pedido cursor oculto. Al soltar y no pedir oculto, lo restaura.
+func _apply_client_cursor_state():
+	if eis_cursor != null and (client_pointer_locked or client_cursor_hidden):
+		if eis_cursor.visible:
+			eis_cursor.visible = false
+			request_redraw()
+	# La captura remota gobierna su propio modo de cursor (MOUSE_MODE_CAPTURED).
+	if mouse_locked:
+		return
+	# El lock del cliente ya puso MOUSE_MODE_CAPTURED (y oculta el de Godot).
+	if client_pointer_locked:
+		return
+	if client_cursor_hidden:
+		if Input.get_mouse_mode() != Input.MOUSE_MODE_HIDDEN:
+			print("[cursor] oculto: la app enfocada (", focused_tile, ") pidió cursor vacío")
+			Input.set_mouse_mode(Input.MOUSE_MODE_HIDDEN)
+	elif Input.get_mouse_mode() == Input.MOUSE_MODE_HIDDEN:
+		print("[cursor] visible otra vez")
+		Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
+		_reset_cursor()
+
+
+# Reenvía hardware al cliente con lock (lo llama CaptureInput). Sólo consume mouse:
+# las teclas siguen por _unhandled_input hasta compositor.key.
+func _forward_client_pointer(event):
+	if not client_pointer_locked:
+		return false
+	last_activity = OS.get_ticks_msec()
+	if event is InputEventMouseMotion:
+		if compositor != null and compositor.has_method("pointer_motion_relative"):
+			compositor.pointer_motion_relative(event.relative)
+		_ptr_log_motion(event.relative)
+		get_tree().set_input_as_handled()
+		return true
+	if event is InputEventMouseButton:
+		if compositor != null:
+			compositor.pointer_button(event.button_index, event.pressed)
+		get_tree().set_input_as_handled()
+		return true
+	if event is InputEventPanGesture:
+		# Scroll de dos dedos con el puntero capturado por un cliente: mismo axis que
+		# el camino sin lock (_on_view_input), en vez de descartar el gesto.
+		if compositor != null and event.delta != Vector2.ZERO:
+			var pan_axis = SCROLL_GESTURE.pan_axis(event.delta)
+			if compositor.has_method("pointer_axis_h"):
+				compositor.pointer_axis_h(pan_axis.x)
+			compositor.pointer_axis(pan_axis.y)
+		get_tree().set_input_as_handled()
+		return true
+	return false
+
+
+# Log temporal [ptr-lock]: primeras 20 muestras y luego 1 de cada 100. Quitar
+# junto con las vars _ptr_log_samples y este helper (ver cabecera de la var).
+func _ptr_log_motion(rel):
+	_ptr_log_samples += 1
+	if _ptr_log_samples > 20 and _ptr_log_samples % 100 != 0:
+		return
+	var has_rel = compositor != null and compositor.has_method("pointer_motion_relative")
+	var has_pf = compositor != null and compositor.has_method("pointer_has_focus")
+	var pfocus = has_pf and compositor.pointer_has_focus()
+	print("[ptr-lock] motion #%d rel=%s has_rel=%s has_pfocus=%s pfocus=%s mode=%d" % [
+		_ptr_log_samples, rel, has_rel, has_pf, pfocus, Input.get_mouse_mode()])
+
+
 func _capture_remote_input_event(event):
+	# En exposé el mouse es del shell: no reenviar a RemoteInput/Deskflow, o el
+	# `set_input_as_handled` del capture mataría el arrastre entre escritorios.
+	if expose:
+		return false
 	# InputCapture toma exclusivamente el hardware local. Los eventos EIS que entran
 	# desde otro equipo tienen DEVICE_ID y nunca deben volver a Deskflow.
 	if remote_input == null or event.device == RemoteInput.DEVICE_ID:
@@ -6216,27 +8096,41 @@ func _capture_remote_input_event(event):
 			captured = remote_input.capture_scroll(1.0, 0.0, now)
 		else:
 			captured = remote_input.capture_button(event.button_index, event.pressed, now)
+	elif event is InputEventPanGesture:
+		# Pan de dos dedos durante InputCapture: antes se descartaba y el vecino no
+		# recibía scroll horizontal (ni vertical) continuo. Delta ya viene en la
+		# convención positivo=derecha/abajo que espera capture_scroll.
+		captured = remote_input.capture_scroll(event.delta.x, event.delta.y, now)
 	elif event is InputEventKey:
 		var physical = event.physical_scancode if event.physical_scancode != 0 else event.scancode
 		captured = remote_input.capture_key(physical, event.pressed, now)
+	# Un gesto de touchpad/touch u otro evento no reenviado no es un Release.
+	# Antes `captured=false` quitaba el lock y los siguientes motions/clics volvían
+	# al escritorio local mientras Deskflow seguía controlando al vecino.
+	var active = captured
+	if remote_input.has_method("is_capturing"):
+		active = remote_input.is_capturing()
+	_set_capture_cursor(active)
+	if active:
+		captured = true
 	if captured:
-		# Captura activa: pointer lock para recibir deltas crudos del compositor
-		# (sway clava el puntero en el borde y sin esto `relative` es ~0).
-		if not mouse_locked:
-			Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
-			mouse_locked = true
 		get_tree().set_input_as_handled()
 		return true
-	if mouse_locked:
-		# Deskflow soltó el control: devolver puntero y cursor al escritorio local.
-		Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
-		mouse_locked = false
 	return false
 
 
 func _input(event):
 	last_activity = OS.get_ticks_msec()
 	if _capture_remote_input_event(event):
+		return
+	# Pantallazo rápido (PrintScreen). El shell compone la pantalla completa (UI Sugar +
+	# ventanas del compositor anidado), así que el viewport es el escritorio entero.
+	# Se atiende acá, antes de reenviar la tecla a la app, para que funcione con cualquier
+	# ventana enfocada. El guardado real corre en un Thread.
+	if event is InputEventKey and event.pressed and not event.echo \
+			and (int(event.scancode) == KEY_PRINT or int(event.physical_scancode) == KEY_PRINT):
+		_take_screenshot()
+		get_tree().set_input_as_handled()
 		return
 	# Teclas multimedia (volumen/brillo): el shell las consume y muestra el OSD; no
 	# van a la app. En _input (no en _unhandled_input) para que también las vea con
@@ -6247,18 +8141,15 @@ func _input(event):
 		return
 	if event is InputEventMouseMotion:
 		input_motion_count += 1
-		# Drag del anillo (Hogar): el clic normal lo resuelve ImGui; acá sólo se
-		# detecta el arrastre una vez superado el umbral.
-		if ring_press != null and ring_drag == null and event.position.distance_to(ring_from) > DRAG_PX:
-			ring_drag = ring_press
-			request_redraw()
-		elif ring_drag != null:
-			request_redraw()
 	elif event is InputEventMouseButton:
+		# Cualquier suelta del botón que inició un Super+drag lo cierra. El Frame consume
+		# la pulsación en su _input, así que el View no tiene mouse_focus y Godot nunca
+		# le entrega la suelta: hay que cerrarlo acá, sin depender de Super ni del View.
+		if not event.pressed and chrome_drag != null and bool(chrome_drag.get("super", false)) \
+				and int(chrome_drag.get("button", BUTTON_LEFT)) == event.button_index:
+			_commit_chrome_drag()
 		input_button_count += 1
 		input_last_button = {"button": event.button_index, "pressed": event.pressed, "device": event.device, "pos": [event.position.x, event.position.y]}
-		if event.button_index == BUTTON_LEFT:
-			_ring_mouse(event.pressed, event.position)
 	elif event is InputEventScreenTouch:
 		input_touch_count += 1
 	if event is InputEventKey:
@@ -6273,6 +8164,14 @@ func _input(event):
 		apps.type(char(event.unicode))
 
 
+# ¿Hay una ventana flotante enfocada, viva y a la vista? Vale como destino de
+# teclado aunque la actividad del anillo no coincida (estado desincronizado).
+func _float_key_focus_alive():
+	return view != null and view.visible and focused_tile >= 0 \
+		and hybrid.is_floating(focused_tile) and _id_alive(focused_tile) \
+		and not minimized.has(focused_tile)
+
+
 func _unhandled_input(event):
 	if not (event is InputEventKey):
 		return
@@ -6282,14 +8181,51 @@ func _unhandled_input(event):
 	if id < 0:
 		return
 	if event.pressed:
-		# Las pulsaciones sólo van a la app con una actividad wayland activa y sin exposé.
-		if current_activity == null or not current_activity.has("wayland") or expose:
+		# Las pulsaciones no van a la app con un overlay del shell delante (exposé,
+		# Hogar/Apps, Vecindario). Antes se exigía además `current_activity` wayland:
+		# en flotante el foco de ventana y la actividad pueden desincronizarse y la
+		# app quedaba muda de teclado (mouse vivo, teclado muerto). Con foco real
+		# (`_float_key_focus_alive`) se reenvía igual.
+		if expose or apps_view or neighborhood_view:
+			return
+		if not (current_activity != null and current_activity.has("wayland")) \
+				and not _float_key_focus_alive():
+			_log_key_drop(event, "sin actividad wayland (focused=%d)" % focused_tile)
 			return
 		last_key_target = id
+		if not MOD_KEYS.has(event.scancode):
+			_resync_modifiers()
+	if MOD_KEYS.has(event.scancode):
+		if event.pressed:
+			fwd_mods[event.scancode] = true
+		else:
+			fwd_mods.erase(event.scancode)
 	# Las SUELTAS se reenvían siempre (aunque estemos en exposé o en Home): si no, un
 	# modificador apretado antes de abrir exposé/Home queda pegado en la app.
 	compositor.key(event)
 	get_tree().set_input_as_handled()
+
+
+# Antes de reenviar una tecla común: todo modificador que la app cree apretado pero
+# que el teclado real ya soltó recibe su suelta (la original se perdió en el camino).
+func _resync_modifiers():
+	for sc in fwd_mods.keys():
+		if not Input.is_key_pressed(sc):
+			var ev = InputEventKey.new()
+			ev.scancode = sc
+			ev.physical_scancode = sc
+			ev.pressed = false
+			compositor.key(ev)
+			fwd_mods.erase(sc)
+			print("[key-sync] modificador pegado soltado: ", OS.get_scancode_string(sc))
+
+
+# Diagnóstico acotado: por qué una pulsación no llegó a la app.
+func _log_key_drop(event, reason):
+	if key_drop_logs >= 20 or event.echo:
+		return
+	key_drop_logs += 1
+	print("[key-drop] ", OS.get_scancode_string(event.scancode), ": ", reason)
 
 
 func _run_test_logic():
@@ -6372,6 +8308,75 @@ func _capture(path):
 	print("commit_count=", compositor.commit_count, " dmabuf_commits=", compositor.dmabuf_commits, " shm_commits=", compositor.shm_commits)
 	print("dmabuf: ", compositor.dmabuf_state)
 	get_tree().quit()
+
+
+# --- Pantallazo rápido (PrintScreen) ----------------------------------------
+
+# Directorio destino: $XDG_PICTURES_DIR/Pantallazos (según ~/.config/user-dirs.dirs),
+# con respaldo a ~/Imágenes, ~/Pictures o el HOME. Sólo lectura de disco local, barata.
+func _screenshot_dir():
+	var home = OS.get_environment("HOME")
+	if home == "":
+		home = "."
+	return _xdg_pictures_dir(home).plus_file("Pantallazos")
+
+
+func _xdg_pictures_dir(home):
+	var f = File.new()
+	if f.open(home.plus_file(".config/user-dirs.dirs"), File.READ) == OK:
+		while not f.eof_reached():
+			var line = f.get_line().strip_edges()
+			if line.begins_with("XDG_PICTURES_DIR="):
+				var v = line.substr("XDG_PICTURES_DIR=".length()).strip_edges()
+				v = v.trim_prefix("\"").trim_suffix("\"")
+				v = v.replace("$HOME", home)
+				f.close()
+				if v != "":
+					return v
+		f.close()
+	var d = Directory.new()
+	if d.dir_exists(home.plus_file("Imágenes")):
+		return home.plus_file("Imágenes")
+	if d.dir_exists(home.plus_file("Pictures")):
+		return home.plus_file("Pictures")
+	return home
+
+
+func _screenshot_stamp():
+	var t = OS.get_datetime()
+	return "%04d-%02d-%02d_%02d-%02d-%02d" % [int(t.year), int(t.month), int(t.day),
+		int(t.hour), int(t.minute), int(t.second)]
+
+
+# Toma el viewport y lo manda a codificar/guardar en un Thread (no bloquea el frame).
+func _take_screenshot():
+	# Un solo guardado en vuelo: si el anterior sigue activo, se descarta este.
+	if _shot_thread != null:
+		if _shot_thread.is_active():
+			return
+		_shot_thread.wait_to_finish()
+		_shot_thread = null
+	var image = get_viewport().get_texture().get_data()
+	image.flip_y()
+	var dir = _screenshot_dir()
+	var err = Directory.new().make_dir_recursive(dir)
+	if err != OK:
+		printerr("pantallazo: no se pudo crear ", dir, " (error ", err, ")")
+		return
+	var path = dir.plus_file("Pantallazo-" + _screenshot_stamp() + ".png")
+	if system_osd != null:
+		system_osd.show_message("Pantallazo guardado", "computer-xo")
+	_shot_thread = Thread.new()
+	_shot_thread.start(self, "_write_screenshot", {"image": image, "path": path})
+
+
+func _write_screenshot(data):
+	var err = data["image"].save_png(data["path"])
+	if err != OK:
+		printerr("pantallazo: no se pudo guardar ", data["path"], " (error ", err, ")")
+	else:
+		print("pantallazo: ", data["path"])
+	return null
 
 
 # --- Input remoto (libei) ---
@@ -6471,10 +8476,15 @@ func _make_eis_cursor():
 	return cursor
 
 
-# Sólo con un host que no exponga wlr_virtual_pointer: en X11 se mueve el puntero real
-# (warp) y en Wayland el módulo usa el cursor nativo del host (remote_pointer.c), así que
-# este cursor dibujado queda como último recurso y casi nunca se ve.
+# En X11 se mueve el puntero real (warp). En Wayland/gdtk el módulo usa el cursor
+# nativo del host (remote_pointer.c); no dibujar fallback para evitar un cursor
+# fantasma encima del cursor real.
 func _move_eis_cursor(event):
+	if eis_cursor == null:
+		return
+	if mouse_locked:
+		eis_cursor.visible = false
+		return
 	if event.device != RemoteInput.DEVICE_ID:
 		if event is InputEventMouseMotion:
 			eis_cursor.visible = false
@@ -6482,5 +8492,4 @@ func _move_eis_cursor(event):
 	if OS.get_environment("GDTK_SESSION") == "x11":
 		Input.warp_mouse_position(event.position)
 		return
-	eis_cursor.position = event.position
-	eis_cursor.visible = true
+	eis_cursor.visible = false

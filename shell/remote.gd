@@ -34,23 +34,30 @@ func _ready():
 	token_path = runtime_dir.plus_file("gdtk-control.token")
 	if env_port != "":
 		token_path = runtime_dir.plus_file("gdtk-control-%d.token" % port)
-	var file = File.new()
-	var err = file.open(token_path, File.WRITE)
-	if err != OK:
-		printerr("Remote: no se pudo escribir el token en ", token_path, " (error ", err, ")")
-		token = ""
-		return
-	file.store_string(token)
-	file.close()
-	_start_watchdog()
 
+	# Escuchar ANTES de escribir el token: si otra instancia de Remote (p. ej. tras
+	# una recarga) ya tiene el puerto, esta no debe pisar ni borrar su token. El
+	# orden viejo escribía el token y, al fallar el listen, lo borraba: dejaba al
+	# shell vivo sin token y rompía a todos los clientes del RPC (gestos, MCP).
 	server = TCP_Server.new()
 	var lerr = server.listen(port, "127.0.0.1")
 	if lerr != OK:
 		printerr("Remote: no se pudo escuchar en 127.0.0.1:", port, " (error ", lerr, ")")
 		server = null
-		_remove_token()
+		token = ""
 		return
+
+	var file = File.new()
+	var err = file.open(token_path, File.WRITE)
+	if err != OK:
+		printerr("Remote: no se pudo escribir el token en ", token_path, " (error ", err, ")")
+		server.stop()
+		server = null
+		token = ""
+		return
+	file.store_string(token)
+	file.close()
+	_start_watchdog()
 
 	print("Remote: escuchando en 127.0.0.1:", port)
 	set_process(true)
@@ -217,7 +224,10 @@ func _handle_line(conn, line):
 			# Gancho de prueba/automatización del OSD de volumen/brillo: mismas
 			# acciones que las teclas multimedia ({"action":"up"|"down"|"mute"|
 			# "brightness_up"|"brightness_down"}).
-			if shell.system_osd != null:
+			if shell.has_method("_forward_media_to_capture") \
+					and shell._forward_media_to_capture(str(params.get("action", ""))):
+				_reply(conn, id, true)  # viajó al equipo remoto (Deskflow)
+			elif shell.system_osd != null:
 				_reply(conn, id, shell.system_osd.rpc_action(params))
 			else:
 				_fail(conn, id, -32003, "sin system_osd")
@@ -236,6 +246,16 @@ func _handle_line(conn, line):
 		"expose":
 			shell._toggle_expose(bool(params.get("on", true)))
 			_reply(conn, id, true)
+		"gesture":
+			# Gesto de touchpad reenviado por sway (bindgesture → session/gdtk-gesture).
+			# swipe {direction}: left/right/up/down; pinch {phase}: begin/update/end.
+			var kind = str(params.get("kind", "swipe"))
+			if kind == "pinch":
+				_reply(conn, id, shell.gesture_pinch(str(params.get("phase", "")),
+					float(params.get("scale", 1.0)), int(params.get("fingers", 2))))
+			else:
+				_reply(conn, id, shell.gesture(kind,
+					str(params.get("direction", "")), int(params.get("fingers", 3))))
 		"tile_drop":
 			shell._tile_drop(int(params.get("a", -1)), int(params.get("b", -1)))
 			_reply(conn, id, true)
@@ -265,6 +285,32 @@ func _handle_line(conn, line):
 			_reply(conn, id, true)
 		"move_window":
 			shell._move_window_to(int(params.get("a", -1)), int(params.get("anchor", -1)), bool(params.get("before", true)))
+			_reply(conn, id, true)
+		"wm":
+			# Capa de comandos estable del modelo híbrido: {action, id?, dir?}.
+			var action = str(params.get("action", ""))
+			var wid = int(params.get("id", shell.focused_tile))
+			var dir = params.get("dir", null)
+			match action:
+				"toggle":
+					shell.toggle_window_mode(wid)
+				"float":
+					shell.set_window_mode(wid, "floating")
+				"tile":
+					shell.set_window_mode(wid, "tiled")
+				"maximize":
+					shell._toggle_maximize_window(wid)
+				"arrange":
+					shell.arrange_windows()
+				"focus":
+					shell._focus_dir(int(dir) if dir != null else 0)
+				"move":
+					shell._swap_dir(int(dir) if dir != null else 0)
+				"anchor":
+					shell.hybrid.reanchor(wid, int(dir) if dir != null else 0)
+					shell.request_redraw()
+				_:
+					pass
 			_reply(conn, id, true)
 		"release_mods":
 			shell.release_modifiers()
@@ -325,6 +371,8 @@ func _state():
 			"title": shell.compositor.get_title(window_id),
 			"activity": activity,
 			"parent": shell.compositor.get_parent_id(window_id),
+			"mode": shell.hybrid.mode(window_id),
+			"anchor": shell.hybrid.anchor(window_id),
 		})
 
 	var activities = []
@@ -342,7 +390,8 @@ func _state():
 		"tiles": shell.tiles,
 		"focused_tile": shell.focused_tile,
 		"screens": shell._units(),
-		"groups": shell.groups,
+		"units": shell.wm_units,
+		"modes": shell.hybrid.serialize(),
 		"minimized": shell.minimized.keys(),
 		"expose": shell.expose,
 		"expose_sel": shell.expose_sel,
@@ -363,6 +412,12 @@ func _state():
 		"input": {"motion": shell.input_motion_count, "buttons": shell.input_button_count,
 			"touch": shell.input_touch_count, "last_button": shell.input_last_button,
 			"last_key": shell.input_last_key},
+		# Diagnóstico del cursor (¿por qué no se ve?): modo de Godot, cursor oculto pedido
+		# por la app enfocada, pointer lock, captura Deskflow y cursor dibujado del shell.
+		"cursor": {"mode": Input.get_mouse_mode(), "client_hidden": shell.client_cursor_hidden,
+			"client_locked": shell.client_pointer_locked, "capture": shell.mouse_locked,
+			"eis_cursor": shell.eis_cursor != null and shell.eis_cursor.visible,
+			"pos": [shell.get_viewport().get_mouse_position().x, shell.get_viewport().get_mouse_position().y]},
 	}
 
 
@@ -481,11 +536,25 @@ func _scroll(params):
 	var x = float(params.get("x", 0.0))
 	var y = float(params.get("y", 0.0))
 	var dy = float(params.get("dy", 0.0))
+	# Scroll horizontal del touchpad de dos dedos: el shell/compositor lo reenvia
+	# como BUTTON_WHEEL_LEFT/RIGHT (=> wl_pointer axis HORIZONTAL_SCROLL). Sin dx el
+	# RPC solo podia pedir scroll vertical.
+	var dx = float(params.get("dx", 0.0))
 	event_queue.push_back(_event_mouse_motion(x, y))
-	var steps = int(abs(dy))
+	if dy != 0.0:
+		_wheel_steps(x, y, dy, BUTTON_WHEEL_DOWN, BUTTON_WHEEL_UP)
+	if dx != 0.0:
+		_wheel_steps(x, y, dx, BUTTON_WHEEL_RIGHT, BUTTON_WHEEL_LEFT)
+	if dy == 0.0 and dx == 0.0:
+		# Compatibilidad: sin eje pedido se manda un paso vertical (contrato viejo).
+		_wheel_steps(x, y, 1.0, BUTTON_WHEEL_DOWN, BUTTON_WHEEL_UP)
+
+
+func _wheel_steps(x, y, amount, positive, negative):
+	var steps = int(abs(amount))
 	if steps < 1:
 		steps = 1
-	var button = BUTTON_WHEEL_DOWN if dy > 0.0 else BUTTON_WHEEL_UP
+	var button = positive if amount > 0.0 else negative
 	for i in range(steps):
 		event_queue.push_back(_event_mouse_button(x, y, button, true, false))
 		event_queue.push_back(_event_mouse_button(x, y, button, false, false))

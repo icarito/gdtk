@@ -146,8 +146,13 @@ auto_loop() {
 			_dead=0
 			_o="$(orientation)"
 			_t="$(orientation_transform "$_o")"
-			if [ -n "$_t" ] && [ "$_t" != "$_last" ] && ! held; then
-				[ "$(current_transform)" = "$_t" ] || set_transform "$_t"
+			# Se compara con la rotación REAL, no con la última que aplicó este daemon:
+			# un giro desde otro lado (atajo de sway, otra herramienta) dejaba la pantalla
+			# desfasada del sensor hasta mover el equipo. Un giro manual que deba quedarse
+			# pone `hold` (menú del anillo y atajo de sway).
+			if [ -n "$_t" ] && ! held && [ "$(current_transform)" != "$_t" ]; then
+				set_transform "$_t"
+				[ "$_t" != "$_last" ] && echo "gdtk-rotate: $_o -> $_t" >&2
 				_last="$_t"
 			fi
 		fi

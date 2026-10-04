@@ -13,10 +13,31 @@ extends Reference
 
 const VERSION = 1
 # Métodos permitidos en el canal peer (lista blanca: el canal NO expone el control
-# remoto completo, sólo lo necesario para pantalla).
-const METHODS = ["ping", "gvd_recv", "gvd_stop", "gvd_send", "gvd_status"]
+# remoto completo, sólo lo necesario para pantalla y el aviso de lados compartidos).
+const METHODS = ["ping", "gvd_recv", "gvd_stop", "gvd_send", "gvd_status",
+	"share_notify", "share_stop"]
+
+# Parámetros válidos de los avisos de lados compartidos (G5). El `side` llega YA
+# invertido por el emisor: acá sólo se valida el vocabulario, no se transforma.
+const SHARE_TYPES = ["screen", "input"]
+const SHARE_SIDES = ["north", "south", "east", "west"]
+const SHARE_STATES = ["starting", "active", "stopped", "error"]
 
 const _HID_OK = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+
+
+# Valida los params de los avisos de lados compartidos. Para cualquier otro
+# método no impone restricciones (cada handler valida lo suyo). Puro.
+static func valid_share_params(method, params):
+	var p = params if typeof(params) == TYPE_DICTIONARY else {}
+	match String(method):
+		"share_notify":
+			return SHARE_TYPES.has(String(p.get("type", "")).strip_edges()) \
+				and SHARE_SIDES.has(String(p.get("side", "")).strip_edges()) \
+				and SHARE_STATES.has(String(p.get("state", "")).strip_edges())
+		"share_stop":
+			return SHARE_TYPES.has(String(p.get("type", "")).strip_edges())
+	return true
 
 
 static func valid_hid(hid):
@@ -100,4 +121,11 @@ static func selftest():
 	var bad = parse_response(encode_response(false, "unpaired"))
 	ok = ok and not bool(bad.ok) and String(bad.error) == "unpaired"
 	ok = ok and new_token().length() == 48
+	ok = ok and valid_method("share_notify") and valid_method("share_stop")
+	ok = ok and valid_share_params("share_notify",
+		{"type": "screen", "side": "north", "state": "active"})
+	ok = ok and not valid_share_params("share_notify",
+		{"type": "screen", "side": "up", "state": "active"})
+	ok = ok and valid_share_params("share_stop", {"type": "input"})
+	ok = ok and not valid_share_params("share_stop", {})
 	return ok

@@ -61,6 +61,12 @@ static func clamp_inside(outer, pos, size):
 	return p
 
 
+# Tamaño que cabe en `area` sin agrandar nada: cada eje se acota al del área (en
+# píxeles enteros). Para pedirle a un diálogo demasiado grande que se achique.
+static func fit_size(size, area):
+	return Vector2(floor(min(size.x, area.x)), floor(min(size.y, area.y)))
+
+
 # Conjunto canónico de lados ocupados: acepta dict lado->bool o array de lados, con
 # alias arriba/abajo y cardinales (north/south/east/west) para el mismo vocabulario.
 static func frame_edge_set(frame_edges):
@@ -124,6 +130,9 @@ static func selftest():
 	# Diálogos: viewport menos un bloque por cada lado, sin importar el Frame.
 	assert(dialog_area(Vector2(1280, 800), 80.0) == Rect2(80, 80, 1120, 640), "área de diálogos")
 	assert(dialog_area(Vector2(1280, 800), 0.0) == Rect2(0, 0, 1280, 800), "área de diálogos sin bloque")
+	assert(fit_size(Vector2(1100, 900), Vector2(1280, 640)) == Vector2(1100, 640), "diálogo alto se acota")
+	assert(fit_size(Vector2(300, 200), Vector2(1280, 640)) == Vector2(300, 200), "diálogo chico no cambia")
+	assert(fit_size(Vector2(2000, 2000), Vector2(1120.5, 639.7)) == Vector2(1120, 639), "enteros")
 	return true
 
 

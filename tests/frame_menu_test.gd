@@ -25,8 +25,9 @@ func _init():
 		F.menu_trigger(BUTTON_RIGHT, false) == "" and F.menu_trigger(BUTTON_LEFT, false) == "")
 
 	# Applet de teclado -> su menú; el resto -> selector de controles del Frame.
+	# (El bloque "Ventanas" se retiró: ahora el modo es por ventana.)
 	check("applet_menu teclado", F.applet_menu("teclado") == "teclado")
-	check("applet_menu ventanas", F.applet_menu("ventanas") == "ventanas")
+	check("applet_menu ventanas retirado", F.applet_menu("ventanas") == "picker")
 	check("applet_menu otros", F.applet_menu("recursos") == "picker" and F.applet_menu("reloj") == "picker")
 
 	# Sombra del Frame: ahora son filas dibujadas dentro de las ventanas reales, no

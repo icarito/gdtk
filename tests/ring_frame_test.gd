@@ -1,8 +1,8 @@
 extends SceneTree
 
 # Autoprueba de la lógica nueva del Hogar/anillo y del Frame que no necesita
-# compositor: favoritos del anillo (persistencia, entradas), layout animado,
-# inserción con hueco de applets/pines y helpers de basurero/zona del anillo.
+# compositor: entradas del anillo (sólo lectura: activas + pines del Frame), layout
+# animado, orden unificado de bloques de barra y animación de asentado.
 # Correr:
 #   godot --no-window --path shell -s $PWD/tests/ring_frame_test.gd
 
@@ -16,11 +16,10 @@ func check(name, ok):
 
 
 func _init():
-	# XDG_CONFIG_HOME temporal para no tocar los favoritos reales del usuario.
+	# XDG_CONFIG_HOME temporal para no tocar los archivos reales del usuario.
 	var base = OS.get_user_data_dir() + "/ringframe_test"
 	Directory.new().make_dir_recursive(base)
 	OS.set_environment("XDG_CONFIG_HOME", base)
-	Directory.new().remove(base + "/gdtk/ring-favorites.json")
 
 	var shell = load("res://shell.gd").new()
 	var frame = load("res://frame.gd").new()
@@ -43,8 +42,8 @@ func _init():
 	check("posiciones dentro del lienzo", in_bounds)
 	check("_home_layout coincide con ACTIVITIES", shell._home_layout(Vector2(1024, 600)).size() == shell.ACTIVITIES.size())
 
-	# 3) Entradas del anillo DINÁMICAS: las cerradas no aparecen; sólo las activas
-	# (más favoritos resueltos). "Configuración" vive en el submenú del centro.
+	# 3) Entradas del anillo DINÁMICAS y de sólo lectura: las cerradas no aparecen;
+	# las activas sí; los pines del Frame se resuelven como favoritos.
 	var closed = shell._ring_entries()
 	var closed_names = []
 	for e in closed:
@@ -62,33 +61,114 @@ func _init():
 	check("MRU ordena la más reciente primero", shell._mru_before({"name": "Prueba"}, {"name": "Terminal"}))
 	shell.script_instances.erase("Prueba")
 	shell.ACTIVITIES.pop_back()
-	# Favorito sin app resuelta: igual aparece en el anillo (monograma, sin lanzar).
-	shell.ring_favorites = ["zzz-noexiste.desktop"]
+	# Un pin del Frame (sin app resuelta) igual aparece en el anillo, sin poder editarse.
+	frame.bar_order = {"top": [], "dock": ["p:zzz-noexiste.desktop"]}
+	frame._sync_pins()
 	var fe = shell._ring_entries()
-	var has_fav = false
+	var has_pin = false
 	for e in fe:
-		if e.kind == "favorite":
-			has_fav = true
-	check("favorito sin resolver igual aparece", has_fav)
-	shell.ring_favorites = []
+		if e.kind == "favorite" and e.id == "zzz-noexiste.desktop":
+			has_pin = true
+	check("pin del Frame aparece en el anillo", has_pin)
+	check("pinned_ids devuelve el pin", frame.pinned_ids() == ["zzz-noexiste.desktop"])
 
-	# 4) Persistencia de favoritos (tmp + rename) y recarga.
-	shell.ring_favorites = ["zzz-a.desktop", "zzz-b.desktop"]
-	shell._save_ring()
-	var f = File.new()
-	var wrote = f.open(shell._ring_path(), File.READ) == OK
-	var body = f.get_as_text() if wrote else ""
-	if wrote:
-		f.close()
-	check("ring-favorites.json escrito", wrote and body.find("zzz-a.desktop") >= 0)
-	shell.ring_favorites = []
-	shell._load_ring()
-	check("recarga conserva el orden", shell.ring_favorites == ["zzz-a.desktop", "zzz-b.desktop"])
-	var saved = shell.ring_saved.duplicate()
-	shell._save_ring()
-	check("_save_ring no-op sin cambios", shell.ring_saved == saved)
+	# 4) Tokens y orden unificado: tokens pin/applet, sync de pines y mover/quitar.
+	check("token pin", frame._tok_pin("x.desktop") == "p:x.desktop")
+	check("token applet", frame._tok_applet("reloj") == "a:reloj")
+	check("_tok_kind / _tok_id", frame._tok_kind("p:x") == "p" and frame._tok_id("p:x") == "x")
+	check("token válido", frame._maybe_order_token("a:reloj") and not frame._maybe_order_token("z:reloj"))
+	frame.bar_order = {"top": ["p:a.desktop", "a:reloj"], "dock": ["p:b.desktop", "a:recursos"]}
+	frame._sync_pins()
+	check("_sync_pins top", frame.pinned_top == ["a.desktop"])
+	check("_sync_pins dock", frame.pinned_dock == ["b.desktop"])
+	frame._order_remove("a:reloj")
+	check("_order_remove saca el applet", not frame.bar_order["top"].has("a:reloj"))
+	frame._order_insert("dock", "a:reloj", 1)
+	check("_order_insert intercala", frame.bar_order["dock"] == ["p:b.desktop", "a:reloj", "a:recursos"])
 
-	# 5) Animación del layout del anillo: ease-out y retarget.
+	# 5) Inserción con hueco (applets y pines comparten el mismo helper).
+	check("order gap slot 0", frame._order_with_gap(["a", "b", "c"], "a", 0) == ["a", "b", "c"])
+	check("order gap slot 1", frame._order_with_gap(["a", "b", "c"], "a", 1) == ["b", "a", "c"])
+	check("order gap slot fin", frame._order_with_gap(["a", "b", "c"], "a", 3) == ["b", "c", "a"])
+	check("order gap item externo", frame._order_with_gap(["a", "b"], "z", 1) == ["a", "z", "b"])
+
+	# 6) Slot de la barra: grilla de celdas fijas (origen + ancho), saltando el
+	# arrastrado. Pines y applets comparten el mismo cálculo (orden unificado).
+	frame.bar_order = {"top": ["p:p1", "p:p2", "a:reloj"], "dock": []}
+	frame.bar_cell = {"top": 90.0, "dock": 0.0}
+	frame.bar_origin = {"top": 100.0, "dock": 0.0}
+	frame.bar_layout = {"top": [
+		{"kind": "p", "id": "p1", "tok": "p:p1", "x": 100, "y": 0, "w": 80, "h": 80, "rect": Rect2(100, 0, 80, 80)},
+		{"kind": "p", "id": "p2", "tok": "p:p2", "x": 190, "y": 0, "w": 80, "h": 80, "rect": Rect2(190, 0, 80, 80)},
+		{"kind": "a", "id": "reloj", "tok": "a:reloj", "x": 280, "y": 0, "w": 120, "h": 80, "rect": Rect2(280, 0, 120, 80)}],
+		"dock": []}
+	check("_zone_slot top celda 0", frame._zone_slot("top", 100, "p:p1") == 0)
+	check("_zone_slot top celda 1", frame._zone_slot("top", 250, "p:p1") == 1)
+	check("_zone_slot top celda 2 (cuenta pin y applet)", frame._zone_slot("top", 320, "") == 2)
+	check("_slot_index coincide con _zone_slot",
+		frame._slot_index("top", 250, "p:p1", frame.bar_layout["top"]) == 1)
+
+	# 6b) DockApp de ventanas ("w:windows"): token válido, span dinámico según n y
+	# bloque de clip cuando no hay ninguna. Es un bloque más: los pines se pueden
+	# colocar antes O después de él (cualquier slot), no sólo a su izquierda.
+	check("token ventanas válido", frame._maybe_order_token("w:windows"))
+	check("token ventanas ajeno se descarta", not frame._maybe_order_token("w:otro"))
+	check("DockApp vacío = un slot", frame._window_block_width(80.0, []) == 80.0)
+	check("DockApp con 3 ventanas = 3 slots",
+		frame._window_block_width(80.0, [{"screen": 0}, {"screen": 0}, {"screen": 0}]) == 240.0)
+	check("DockApp fusionado pega las ventanas",
+		frame._window_block_width(80.0, [{"screen": 2}, {"screen": 2}]) == 160.0)
+	frame.bar_order = {"top": ["p:a.desktop", "w:windows", "a:reloj"], "dock": []}
+	frame._sync_pins()
+	check("_sync_pins ignora el DockApp de ventanas", frame.pinned_top == ["a.desktop"])
+	frame._order_remove("w:windows")
+	check("_order_remove saca el DockApp de ventanas", not frame.bar_order["top"].has("w:windows"))
+	frame.bar_order = {"top": ["p:p1", "w:windows"], "dock": []}
+	frame.bar_cell = {"top": 80.0, "dock": 0.0}
+	frame.bar_origin = {"top": 0.0, "dock": 0.0}
+	frame.bar_layout = {"top": [
+		{"kind": "p", "id": "p1", "tok": "p:p1", "x": 0, "y": 0, "w": 80, "h": 80, "rect": Rect2(0, 0, 80, 80)},
+		{"kind": "w", "id": "windows", "tok": "w:windows", "x": 80, "y": 0, "w": 160, "h": 80, "rect": Rect2(80, 0, 160, 80)}],
+		"dock": []}
+	# El DockApp vale UNA celda (su tramo se dibuja sobre los huecos siguientes).
+	check("celda libre bajo el tramo del DockApp queda a su derecha", frame._zone_slot("top", 170, "p:p1") == 2)
+	# Slots fijos: p1 deja su celda 0 vacía; el DockApp sigue en la celda 1.
+	check("soltar en su propia celda (vacía) la conserva", frame._zone_slot("top", 40, "p:p1") == 0)
+	check("soltar sobre el DockApp cae en su celda (lo corre)", frame._zone_slot("top", 100, "p:p1") == 1)
+	check("slot detrás del pin y del DockApp", frame._zone_slot("top", 300, "") == 3)
+	# Cargar (sin archivo o con archivo previo) deja exactamente un token de ventanas
+	# en la barra superior; así las ventanas nunca desaparecen del Frame.
+	frame._load_applets()
+	check("_load_applets garantiza el DockApp de ventanas",
+		frame.bar_order["top"].count("w:windows") == 1)
+
+	# 6c) Huecos: soltar lejos deja slots vacíos ("") persistidos, así el bloque
+	# respeta la posición elegida y no se compacta a la izquierda.
+	check("_order_with_slots abre huecos", frame._order_with_slots(["a", "b"], "a", 3) == ["", "b", "", "a"])
+	check("_order_with_slots ocupa hueco existente", frame._order_with_slots(["a", "", "c"], "a", 1) == ["", "a", "c"])
+	frame.bar_order = {"top": ["p:a"], "dock": []}
+	frame._order_insert("top", "p:b", 3)
+	check("_order_insert abre huecos", frame.bar_order["top"] == ["p:a", "", "", "p:b"])
+	var cfg = File.new()
+	Directory.new().make_dir_recursive(frame._applets_path().get_base_dir())
+	cfg.open(frame._applets_path(), File.WRITE)
+	cfg.store_string(JSON.print({"order": {"top": ["p:x.desktop", "", "w:windows"], "dock": []}}))
+	cfg.close()
+	frame._load_applets()
+	check("_load_applets conserva los huecos",
+		frame.bar_order["top"] == ["p:x.desktop", "", "w:windows"])
+
+	# 7) Animación de la barra: arranca en el destino, retarget con ease-out y asienta.
+	check("_bar_x primera vez = destino", frame._bar_x("t", 100.0, 1000) == 100.0)
+	frame._bar_x("t", 200.0, 1000)  # arranca el retarget
+	var bx = frame._bar_x("t", 200.0, 1000 + shell.LAYOUT_MS / 2)
+	check("_bar_x interpola hacia el destino", bx > 100.0 and bx < 200.0)
+	check("_bar_x al final = destino", frame._bar_x("t", 200.0, 1000 + shell.LAYOUT_MS + 1) == 200.0)
+	frame._bar_set("t", 50.0)
+	check("_bar_x arranca desde el cursor", frame._bar_x("t", 200.0, 5000) == 50.0)
+	check("_bar_x asienta en el destino", frame._bar_x("t", 200.0, 5000 + shell.LAYOUT_MS + 1) == 200.0)
+
+	# 8) Animación del layout del anillo: ease-out y retarget.
 	shell.ring_pos = {}
 	shell.ring_anim = {}
 	shell.ring_intro = {}
@@ -104,85 +184,6 @@ func _init():
 	check("ease_out acota 0..1", shell._ease_out(-1.0) == 0.0 and shell._ease_out(2.0) == 1.0)
 	shell._ring_prune([])
 	check("_ring_prune limpia estado", shell.ring_pos.empty() and shell.ring_intro.empty())
-
-	# 6) Inserción con hueco (applets y pines comparten el mismo helper).
-	check("order gap slot 0", frame._order_with_gap(["a", "b", "c"], "a", 0) == ["a", "b", "c"])
-	check("order gap slot 1", frame._order_with_gap(["a", "b", "c"], "a", 1) == ["b", "a", "c"])
-	check("order gap slot fin", frame._order_with_gap(["a", "b", "c"], "a", 3) == ["b", "c", "a"])
-	check("order gap item externo", frame._order_with_gap(["a", "b"], "z", 1) == ["a", "z", "b"])
-
-	# 7) Slot de applets: cuenta centros a la izquierda, saltando el arrastrado.
-	frame.applets_layout = [
-		{"id": "a", "x": 0, "y": 0, "w": 80},
-		{"id": "b", "x": 80, "y": 0, "w": 80},
-		{"id": "c", "x": 160, "y": 0, "w": 80}]
-	frame.applet_drag = "b"
-	check("_applet_slot x=50 -> 1", frame._applet_slot(50) == 1)
-	check("_applet_slot x=10 -> 0", frame._applet_slot(10) == 0)
-	check("_applet_slot x=200 -> 1 (sin b, borde)", frame._applet_slot(200) == 1)
-	check("_applet_slot x=240 -> 2 (sin b)", frame._applet_slot(240) == 2)
-	frame.applet_drag = null
-
-	# 8) Slot de pines por zona, saltando el arrastrado.
-	frame.pinned_prev = [
-		{"app": {"id": "p1"}, "rect": Rect2(100, 0, 80, 80), "zone": "top"},
-		{"app": {"id": "p2"}, "rect": Rect2(190, 0, 80, 80), "zone": "top"},
-		{"app": {"id": "d1"}, "rect": Rect2(6, 0, 80, 80), "zone": "dock"}]
-	frame.app_drag = {"id": "p1"}
-	check("_pin_slot top x=150 -> 0 (p1 se salta)", frame._pin_slot("top", 150) == 0)
-	check("_pin_slot top x=250 -> 1 (sin p1)", frame._pin_slot("top", 250) == 1)
-	check("_pin_slot dock no mezcla top", frame._pin_slot("dock", 90) == 1)
-	frame.app_drag = null
-
-	# 9) Basurero y estado de drag.
-	check("is_trash falso sin layout", not frame.is_trash(Vector2(10, 10)))
-	frame.trash_layout = Rect2(900, 0, 80, 80)
-	check("is_trash verdadero dentro", frame.is_trash(Vector2(950, 40)))
-	check("is_trash falso fuera", not frame.is_trash(Vector2(10, 40)))
-	check("_drag_active falso en reposo", not frame._drag_active())
-	frame.app_drag = {"id": "x"}
-	check("_drag_active con drag", frame._drag_active())
-	frame.app_drag = null
-
-	# 10) Reorden de favoritos: el arrastrado toma el lugar del más cercano.
-	shell.ring_favorites = ["a", "b", "c"]
-	shell.ring_layout = [
-		{"entry": {"kind": "favorite", "app": {"id": "a"}, "name": "A"}, "screen": Vector2(600, 600), "size": Vector2(80, 80)},
-		{"entry": {"kind": "favorite", "app": {"id": "b"}, "name": "B"}, "screen": Vector2(100, 100), "size": Vector2(80, 80)},
-		{"entry": {"kind": "favorite", "app": {"id": "c"}, "name": "C"}, "screen": Vector2(300, 300), "size": Vector2(80, 80)}]
-	shell.ring_drag = {"kind": "favorite", "app": {"id": "a"}, "name": "A"}
-	check("target cerca de C (salta A)", shell._favorite_target_near(Vector2(330, 330), "a") == "c")
-	check("target sobre sí mismo -> sin reorden", shell._favorite_target_near(Vector2(620, 620), "a") == "")
-	check("target lejos -> sin reorden", shell._favorite_target_near(Vector2(800, 800), "a") == "")
-	shell._finish_ring_drag(Vector2(330, 330))
-	check("A toma el lugar de C: [b, a, c]", shell.ring_favorites == ["b", "a", "c"])
-	# Soltarlo sobre sí mismo no lo manda al final.
-	shell.ring_favorites = ["a", "b", "c"]
-	shell._finish_ring_drag(Vector2(620, 620))
-	check("A sobre sí mismo conserva el orden", shell.ring_favorites == ["a", "b", "c"])
-	shell.ring_drag = null
-
-	# 11) Ring -> basurero borra el favorito (una actividad no).
-	frame.trash_layout = Rect2(900, 0, 80, 80)
-	shell.ring_favorites = ["a", "b"]
-	shell.ring_drag = {"kind": "favorite", "app": {"id": "a"}, "name": "A"}
-	shell._finish_ring_drag(Vector2(950, 40))
-	check("basurero borra el favorito", shell.ring_favorites == ["b"])
-	shell.ring_drag = {"kind": "activity", "app": null, "name": "Terminal"}
-	shell._finish_ring_drag(Vector2(950, 40))
-	check("basurero no borra una actividad", shell.ring_favorites == ["b"])
-	shell.ring_drag = null
-	frame.trash_layout = null
-
-	# 12) Animación de la barra: arranca en el destino, retarget con ease-out y asienta.
-	check("_bar_x primera vez = destino", frame._bar_x("t", 100.0, 1000) == 100.0)
-	frame._bar_x("t", 200.0, 1000)  # arranca el retarget
-	var bx = frame._bar_x("t", 200.0, 1000 + shell.LAYOUT_MS / 2)
-	check("_bar_x interpola hacia el destino", bx > 100.0 and bx < 200.0)
-	check("_bar_x al final = destino", frame._bar_x("t", 200.0, 1000 + shell.LAYOUT_MS + 1) == 200.0)
-	frame._bar_set("t", 50.0)
-	check("_bar_x arranca desde el cursor", frame._bar_x("t", 200.0, 5000) == 50.0)
-	check("_bar_x asienta en el destino", frame._bar_x("t", 200.0, 5000 + shell.LAYOUT_MS + 1) == 200.0)
 
 	frame.free()
 	shell.free()

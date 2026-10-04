@@ -4,7 +4,7 @@
 # atomicos current/last_good. La capa estable (este script, gdtk-supervisor y
 # gdtk-preflight) nunca se versiona: si un snapshot rompe el arranque, el
 # supervisor puede volver a last_good.
-# Uso: gdtk-version <snapshot|list|current|where|use|tag|good|rollback|gc>
+# Uso: gdtk-version <status|snapshot|list|current|where|use|tag|good|rollback|gc|autogood>
 set -eu
 
 STORE="${GDTK_STORE:-${XDG_DATA_HOME:-$HOME/.local/share}/gdtk}"
@@ -183,6 +183,42 @@ cmd_gc() {
 	done
 }
 
+# ¿El arbol vivo ($BASE) difiere de la copia $1? (rsync en seco; sale 0 si difiere)
+live_differs() {
+	for a in $APPS; do
+		[ -d "$BASE/$a" ] || continue
+		out="$(rsync -rcn --delete --itemize-changes --exclude '.import' --exclude '*crash*' \
+			--exclude '__pycache__' --exclude '.git' "$BASE/$a" "$1/" 2>/dev/null | head -1)"
+		[ -z "$out" ] || return 0
+	done
+	return 1
+}
+
+# Lo llama el supervisor cuando el arbol vivo lleva PROMOTE_AFTER s sano: lo guarda como
+# last_good si cambio desde el ultimo guardado. Mantiene pocas copias (gc 3).
+cmd_autogood() {
+	lg="$(readlink -f "$LAST_GOOD" 2>/dev/null || true)"
+	if [ -n "$lg" ] && [ -d "$lg/shell" ] && ! live_differs "$lg"; then
+		say "last_good ya coincide con el arbol vivo"; return 0
+	fi
+	cmd_snapshot --from "$BASE" --no-check --note "auto: arbol vivo sano"
+	cmd_good "$(ls -t "$CONTENT" | head -1)"
+	cmd_gc 3 >/dev/null
+}
+
+# Que esta corriendo y que haria la red de seguridad.
+cmd_status() {
+	say "corriendo : $(cat "${XDG_STATE_HOME:-$HOME/.local/state}/gdtk/running-version" 2>/dev/null || echo desconocido)"
+	lg="$(readlink -f "$LAST_GOOD" 2>/dev/null || true)"
+	if [ -n "$lg" ] && [ -d "$lg/shell" ]; then
+		if live_differs "$lg"; then d="el arbol vivo tiene cambios sin guardar aun"; else d="igual al arbol vivo"; fi
+		say "last_good : $(basename "$lg") ($d)"
+	else
+		say "last_good : ninguno todavia (se crea solo tras $PROMOTE_AFTER s de shell sano)"
+	fi
+	say "(el supervisor siempre arranca el arbol vivo $BASE; las copias solo cubren caidas repetidas)"
+}
+
 action="${1:-}"; [ "$#" -gt 0 ] && shift || true
 case "$action" in
 	snapshot) cmd_snapshot "$@";;
@@ -194,5 +230,7 @@ case "$action" in
 	good) cmd_good "$@";;
 	rollback) cmd_rollback;;
 	gc) cmd_gc "$@";;
-	*) say "uso: gdtk-version <snapshot|list|current|where|use|tag|good|rollback|gc>"; exit 2;;
+	autogood) cmd_autogood;;
+	status) cmd_status;;
+	*) say "uso: gdtk-version <status|snapshot|list|current|where|use|tag|good|rollback|gc|autogood>"; exit 2;;
 esac

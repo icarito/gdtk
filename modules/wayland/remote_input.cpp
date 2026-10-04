@@ -191,6 +191,14 @@ void RemoteInput::_cb_key(void *p_ud, uint32_t p_key, int p_pressed) {
 	Input::get_singleton()->parse_input_event(ev);
 }
 
+// Deskflow deja de emular al salir el cursor de esta pantalla: soltar todo lo que el
+// cliente dejó apretado (si no, un Super apretado al cruzar quedaba pegado en Godot y
+// cada clic local se volvía Super+arrastre hasta tocar Super de nuevo).
+void RemoteInput::_cb_stop_emulating(void *p_ud) {
+	RemoteInput *self = static_cast<RemoteInput *>(p_ud);
+	self->_release_all();
+}
+
 void RemoteInput::_cb_request(void *p_ud, int p_id, int p_pid, const char *p_app_id) {
 	RemoteInput *self = static_cast<RemoteInput *>(p_ud);
 	self->emit_signal("access_requested", p_id, p_pid, String::utf8(p_app_id ? p_app_id : ""));
@@ -229,6 +237,7 @@ void RemoteInput::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_pending", "id"), &RemoteInput::is_pending);
 	ClassDB::bind_method(D_METHOD("get_client_count"), &RemoteInput::get_client_count);
 	ClassDB::bind_method(D_METHOD("has_input_capture"), &RemoteInput::has_input_capture);
+	ClassDB::bind_method(D_METHOD("is_capturing"), &RemoteInput::is_capturing);
 	ClassDB::bind_method(D_METHOD("set_capture_ranges", "ranges"), &RemoteInput::set_capture_ranges);
 	ClassDB::bind_method(D_METHOD("capture_motion", "position", "relative", "time"), &RemoteInput::capture_motion);
 	ClassDB::bind_method(D_METHOD("capture_button", "button", "pressed", "time"), &RemoteInput::capture_button);
@@ -285,6 +294,7 @@ String RemoteInput::start() {
 	cb.button = &RemoteInput::_cb_button;
 	cb.scroll = &RemoteInput::_cb_scroll;
 	cb.key = &RemoteInput::_cb_key;
+	cb.stop_emulating = &RemoteInput::_cb_stop_emulating;
 	cb.request = &RemoteInput::_cb_request;
 	Size2 size = OS::get_singleton()->get_window_size();
 	// GDTK_EIS_SOCKET: socket EIS sin permiso, sólo para pruebas (LIBEI_SOCKET del cliente).
@@ -317,6 +327,10 @@ int RemoteInput::get_client_count() const {
 
 bool RemoteInput::has_input_capture() const {
 	return server != NULL && eis_server_has_input_capture(server);
+}
+
+bool RemoteInput::is_capturing() const {
+	return eis_server_is_capturing(server);
 }
 
 bool RemoteInput::set_capture_ranges(const PoolRealArray &p_ranges) {

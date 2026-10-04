@@ -26,6 +26,8 @@ class FakePeer:
 class StubShell:
 	extends Reference
 	var opened = []
+	var shares = []
+	var stops = []
 	func _peer_is_confirmed(hid):
 		return String(hid) == "aaaa" or String(hid) == "bbbb"
 	func _peer_gvd_open(port, from):
@@ -37,6 +39,18 @@ class StubShell:
 		return not opened.empty()
 	func _peer_gvd_send(_p, _t):
 		return true
+	func _peer_share_notify(hid, params):
+		shares.append([String(hid), params.duplicate(true)])
+		return true
+	func _peer_share_stop(hid, params):
+		stops.append([String(hid), params.duplicate(true)])
+		return true
+
+
+class StubBare:
+	extends Reference
+	func _peer_is_confirmed(hid):
+		return String(hid) == "dddd"
 
 
 func _resp(pc, peer, line):
@@ -84,6 +98,46 @@ func _init():
 	# ping ya emparejado
 	r = _resp(pc, peer, LINK.encode_request("aaaa", "", "ping"))
 	check("ping emparejado", bool(r.get("ok", false)) and bool(r.get("paired", false)))
+
+	# --- Avisos de lados compartidos (G5) ------------------------------------
+	# share_notify válido: se valida y se delega al shell con el hid y los params.
+	r = _resp(pc, peer, LINK.encode_request("aaaa", tok, "share_notify",
+		{"type": "screen", "side": "south", "state": "active"}))
+	check("share_notify válido ok", bool(r.get("ok", false)))
+	check("share_notify delegado al shell", pc.shell.shares.size() == 1
+		and String(pc.shell.shares[0][0]) == "aaaa"
+		and String(pc.shell.shares[0][1].side) == "south"
+		and String(pc.shell.shares[0][1].type) == "screen")
+
+	# lado inválido: error y NO delega.
+	r = _resp(pc, peer, LINK.encode_request("aaaa", tok, "share_notify",
+		{"type": "screen", "side": "up", "state": "active"}))
+	check("share_notify lado inválido rechazado",
+		not bool(r.get("ok", false)) and pc.shell.shares.size() == 1)
+
+	# estado inválido: error.
+	r = _resp(pc, peer, LINK.encode_request("aaaa", tok, "share_notify",
+		{"type": "input", "side": "west", "state": "idle"}))
+	check("share_notify estado inválido rechazado",
+		not bool(r.get("ok", false)) and pc.shell.shares.size() == 1)
+
+	# share_stop válido.
+	r = _resp(pc, peer, LINK.encode_request("aaaa", tok, "share_stop", {"type": "input"}))
+	check("share_stop válido ok", bool(r.get("ok", false))
+		and pc.shell.stops.size() == 1 and String(pc.shell.stops[0][1].type) == "input")
+
+	# share_stop sin tipo: error.
+	r = _resp(pc, peer, LINK.encode_request("aaaa", tok, "share_stop", {}))
+	check("share_stop sin tipo rechazado",
+		not bool(r.get("ok", false)) and pc.shell.stops.size() == 1)
+
+	# Shell sin los handlers: parámetros válidos pero error de disponibilidad.
+	pc.shell = StubBare.new()
+	r = _resp(pc, peer, LINK.encode_request("dddd", "", "share_notify",
+		{"type": "screen", "side": "north", "state": "active"}))
+	check("share_notify sin handler -> error",
+		not bool(r.get("ok", false)) and String(r.get("error", "")) == "no disponible")
+	pc.shell = StubShell.new()
 
 	# método inválido: bad request
 	r = _resp(pc, peer, JSON.print({"v": 1, "hid": "aaaa", "token": tok, "method": "shutdown"}) + "\n")

@@ -42,7 +42,7 @@ rsync -a "$GDTK/mcp" "$HOST:gdtk/"
 # borran en destino para que gvd.py los recompile a su ISA la primera vez.
 rsync -a --exclude 'gvd-capture' --exclude 'gvd-cursor' --exclude '__pycache__' "$GDTK/tools" "$HOST:gdtk/"
 ssh "$HOST" 'rm -f ~/gdtk/tools/gvd/gvd-capture ~/gdtk/tools/gvd/gvd-cursor'
-rsync -a "$GDTK/session/gdtk-session" "$GDTK/session/gdtk-session-x11" "$GDTK/session/keyboard.sh" "$GDTK/session/gdtk-supervisor" "$GDTK/session/gdtk-version" "$GDTK/session/gdtk-preflight" "$GDTK/session/gdtk-preflight.gd" "$GDTK/session/gdtk-session-sway" "$GDTK/session/sway.conf" "$GDTK/session/portal.sh" "$GDTK/session/autostart.sh" "$GDTK/session/sensor-hub.sh" "$GDTK/session/gdtk-rotate" "$GDTK/session/gdtk-sensor-hub" "$GDTK/session/gdtk-sensor-hub.service" "$GDTK/session/input-settings.sh" "$HOST:gdtk/session/"
+rsync -a "$GDTK/session/gdtk-session" "$GDTK/session/gdtk-session-x11" "$GDTK/session/keyboard.sh" "$GDTK/session/gdtk-supervisor" "$GDTK/session/gdtk-version" "$GDTK/session/gdtk-preflight" "$GDTK/session/gdtk-preflight.gd" "$GDTK/session/gdtk-session-sway" "$GDTK/session/sway.conf" "$GDTK/session/gdtk-outputs" "$GDTK/session/portal.sh" "$GDTK/session/autostart.sh" "$GDTK/session/sensor-hub.sh" "$GDTK/session/gdtk-rotate" "$GDTK/session/gdtk-sensor-hub" "$GDTK/session/gdtk-sensor-hub.service" "$GDTK/session/input-settings.sh" "$HOST:gdtk/session/"
 # Portal RemoteDesktop propio (input remoto libei): el backend lo implementa el shell
 # (modules/wayland/eis_server.c). El frontend xdg-desktop-portal lo enruta sólo en la
 # sesión gdtk (UseIn/DesktopNames), así no toca xfce ni las demás sesiones del host.
@@ -67,6 +67,6 @@ ssh "$HOST" 'mkdir -p ~/.config/xdg-desktop-portal ~/.local/share/xdg-desktop-po
 # Store de versiones (Fase 1): snapshot del árbol desplegado y activarlo, así el
 # supervisor puede promover/volver ante un arranque roto. GDTK_NO_STORE=1 lo omite.
 if [ -z "${GDTK_NO_STORE:-}" ]; then
-	ssh "$HOST" 'chmod +x ~/gdtk/session/gdtk-version ~/gdtk/session/gdtk-preflight 2>/dev/null; GDTK_GODOT="$HOME/gdtk/bin/godot-gdtk" ~/gdtk/session/gdtk-version snapshot --from "$HOME/gdtk" --note "deploy $(date +%F_%T)" --use' \
+	ssh "$HOST" 'chmod +x ~/gdtk/session/gdtk-version ~/gdtk/session/gdtk-preflight 2>/dev/null; GDTK_GODOT="$HOME/gdtk/bin/godot-gdtk" ~/gdtk/session/gdtk-version snapshot --from "$HOME/gdtk" --note "deploy $(date +%F_%T)"' \
 		|| echo "aviso: no se creó el snapshot inicial (¿falta jq en $HOST?)"
 fi

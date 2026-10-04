@@ -1,0 +1,87 @@
+#!/bin/sh
+# Reenvía un gesto de touchpad al shell por su RPC (sway bindgesture -> acá).
+#
+#   gdtk-gesture left|right|up|down|pinch-in|pinch-out
+#
+# Best-effort: sin python3, sin token o sin shell escuchando, sale 0 sin ruido (un
+# gesto perdido no debe romper la sesión). El token y el puerto siguen la misma
+# convención que tests/control_test.sh y mcp/gdtk_mcp.py.
+command -v python3 >/dev/null 2>&1 || exit 0
+case "${1:-}" in
+	left|right|up|down|pinch-in|pinch-out) ;;
+	*) exit 0 ;;
+esac
+python3 - "$1" <<'PY'
+import json
+import os
+import socket
+import sys
+
+# Secuencia de llamadas RPC por gesto. El pinch arma el ciclo completo
+# begin->update(scale)->end: sway sólo avisa una vez por gesto (lo captura él),
+# así que cada pinch es un paso de zoom. scale>1 aleja los dedos (zoom in).
+ACTIONS = {
+    "left": [("gesture", {"kind": "swipe", "direction": "left", "fingers": 3})],
+    "right": [("gesture", {"kind": "swipe", "direction": "right", "fingers": 3})],
+    "up": [("gesture", {"kind": "swipe", "direction": "up", "fingers": 3})],
+    "down": [("gesture", {"kind": "swipe", "direction": "down", "fingers": 3})],
+    "pinch-out": [
+        ("gesture", {"kind": "pinch", "phase": "begin", "fingers": 2}),
+        ("gesture", {"kind": "pinch", "phase": "update", "fingers": 2, "scale": 1.15}),
+        ("gesture", {"kind": "pinch", "phase": "end", "fingers": 2}),
+    ],
+    "pinch-in": [
+        ("gesture", {"kind": "pinch", "phase": "begin", "fingers": 2}),
+        ("gesture", {"kind": "pinch", "phase": "update", "fingers": 2, "scale": 0.85}),
+        ("gesture", {"kind": "pinch", "phase": "end", "fingers": 2}),
+    ],
+}
+
+action = sys.argv[1] if len(sys.argv) > 1 else ""
+requests = ACTIONS.get(action)
+if not requests:
+    sys.exit(0)
+
+env_port = os.environ.get("GDTK_CONTROL_PORT")
+try:
+    port = int(env_port) if env_port else 7777
+except ValueError:
+    port = 7777
+
+runtime = os.environ.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid()
+# Con GDTK_CONTROL_PORT el shell nombra el token con el puerto (ver remote.gd).
+name = ("gdtk-control-%d.token" % port) if env_port else "gdtk-control.token"
+try:
+    with open(os.path.join(runtime, name), "r") as handle:
+        token = handle.read().strip()
+except OSError:
+    sys.exit(0)
+if not token:
+    sys.exit(0)
+
+
+def exchange(handle, request_id, method, params):
+    payload = json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+    handle.write(payload + "\n")
+    handle.flush()
+    return handle.readline()
+
+
+try:
+    sock = socket.create_connection(("127.0.0.1", port), timeout=2)
+except OSError:
+    sys.exit(0)
+try:
+    stream = sock.makefile("rw")
+    if not exchange(stream, 1, "auth", {"token": token}):
+        sys.exit(0)
+    request_id = 2
+    for method, params in requests:
+        if not exchange(stream, request_id, method, params):
+            break
+        request_id += 1
+except Exception:
+    pass
+finally:
+    sock.close()
+PY

@@ -114,6 +114,9 @@ nota: con autologin el keyring no se desbloquea por PAM (pedirá la contraseña 
 Además `deploy.sh` debe rsyncear el nuevo script. Write set: session/*, deploy.sh (sólo rsync).
 
 ## K13 — Modo ventanas tradicional (WindowMaker) — primero DISEÑO
+> **Actualizado**: la premisa de "modo global" quedó superada por
+> `SPEC-hybrid-windows.md` (K13g/K13h): modo **por ventana** + flotantes ancladas a su
+> pantalla + unidades con eje + ranura Escritorio. El BlockApp "Ventanas" se retiró.
 Escribir `SPEC-wm-mode.md` (no código todavía) tras leer SPEC-windows.md,
 SPEC-sugar-frame-blocks.md, shell.gd, frame.gd, tiles_ui.gd y modules/wayland/wl_server.c:
 - Modo **flotante por defecto** (ventanas libres con barra de título estilo WindowMaker: texto

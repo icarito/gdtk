@@ -218,6 +218,37 @@ static func deskflow_restore(links, removed):
 	return out
 
 
+# Rangos [west_lo,west_hi, east_lo,east_hi, north_lo,north_hi, south_lo,south_hi]
+# para el portal InputCapture, derivados de los links Deskflow locales. Las
+# direcciones suspendidas (gvd extiende el escritorio hacia ese borde: el input NO
+# cruza) quedan en rango puntual 0..0, así el borde no captura input. Puro; espeja
+# el orden que espera `eis_server_set_capture_ranges`.
+static func capture_ranges(links, disabled = []):
+	var r = [0.0, 100.0, 0.0, 100.0, 0.0, 100.0, 0.0, 100.0]
+	var idx = {"west": 0, "east": 2, "north": 4, "south": 6}
+	if typeof(links) == TYPE_ARRAY:
+		for l in links:
+			if typeof(l) != TYPE_DICTIONARY:
+				continue
+			var d = String(l.get("direction", "")).strip_edges()
+			if not idx.has(d):
+				continue
+			var lr = l.get("local_range")
+			if lr == null or typeof(lr) != TYPE_ARRAY or lr.size() < 2:
+				continue
+			var e = int(idx[d])
+			r[e] = clamp(float(lr[0]), 0.0, 100.0)
+			r[e + 1] = clamp(float(lr[1]), 0.0, 100.0)
+	if typeof(disabled) == TYPE_ARRAY:
+		for d in disabled:
+			var ds = String(d).strip_edges()
+			if idx.has(ds):
+				var de = int(idx[ds])
+				r[de] = 0.0
+				r[de + 1] = 0.0
+	return r
+
+
 static func _remote_loop():
 	return "for c in \"$HOME/gdtk/tools/gvd/gvd.py\" \"$HOME/Proyectos/gvd/gvd.py\"" \
 		+ " \"$HOME/gvd/gvd.py\" \"$(command -v gvd 2>/dev/null)\"; do" \

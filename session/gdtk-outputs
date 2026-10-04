@@ -1,0 +1,28 @@
+#!/bin/sh
+# Con varias pantallas, sway pone el shell (fullscreen) en la salida enfocada al
+# arrancar y las demás quedan negras (escritorio vacío; sin swaybg no hay fondo).
+# Enfoca la externa si hay una conectada (si no, la interna) y avisa en las otras.
+# GDTK_SHELL_OUTPUT=<nombre> fuerza una salida (ver `swaymsg -t get_outputs`).
+# Lo llama sway.conf justo antes de lanzar el supervisor.
+outs="$(swaymsg -t get_outputs -r 2>/dev/null | python3 -c '
+import json, os, sys
+act = [o["name"] for o in json.load(sys.stdin) if o.get("active")]
+internal = lambda n: n.startswith(("eDP", "LVDS", "DSI"))
+order = [n for n in act if not internal(n)] + [n for n in act if internal(n)]
+want = os.environ.get("GDTK_SHELL_OUTPUT", "")
+if want in order:
+    order.remove(want); order.insert(0, want)
+print(" ".join(order))
+' 2>/dev/null)" || exit 0
+# shellcheck disable=SC2086
+set -- $outs
+[ "$#" -ge 1 ] || exit 0
+main="$1"; shift
+# Regla (no un focus suelto: sway igual mapeaba el shell en su salida por defecto):
+# cada vez que aparece el shell, incluso al relanzarlo el supervisor, va a "$main".
+swaymsg "for_window [app_id=\"godot-gdtk\"] move container to output $main, focus output $main" >/dev/null 2>&1
+swaymsg focus output "$main" >/dev/null 2>&1
+for o in "$@"; do
+	swaynag -o "$o" -t warning -m "gdtk está en la otra pantalla ($main)" >/dev/null 2>&1 &
+done
+exit 0

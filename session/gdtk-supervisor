@@ -4,10 +4,11 @@
 # Salida 0 = el usuario salio (termina la sesion); 75 = reinicio pedido (MCP gdtk_restart_shell).
 # Logs en ~/.local/state/gdtk: shell.log (corrida actual), shell.prev.log, crash-*.log.
 #
-# Versionado (Fase 1): si existe un store (gdtk-version) con current, el shell arranca
-# desde esa version y GDTK_HOME apunta ahi. Una version que corre PROMOTE_AFTER segundos
-# se marca buena; si el shell se cae, se vuelve a last_good antes de relanzar. Sin store
-# el comportamiento es identico al de siempre (aditivo).
+# Versionado: lo que corre es SIEMPRE el arbol vivo (--path original, ~/gdtk/shell):
+# sincronizar basta, no hay snapshot que activar. El store (gdtk-version) es solo una red
+# de seguridad automatica: un shell vivo que lleva PROMOTE_AFTER s sano se guarda solo
+# como last_good; si el shell vivo se cae 2 veces seguidas al arrancar, se usa last_good
+# hasta el proximo reinicio pedido (que vuelve al arbol vivo). Ver `gdtk-version status`.
 # ponytail: no detecta cuelgues (proceso vivo pero congelado): para eso gdtk_restart_shell force=true.
 LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/gdtk"
 RUN="${XDG_RUNTIME_DIR:-/tmp}"
@@ -22,12 +23,8 @@ mkdir -p "$LOGDIR"
 pid=""
 say() { echo "[supervisor] $*"; echo "$(date '+%F %T') $*" >>"$LOGDIR/supervisor.log"; }
 
-# Version activa: symlink atomico del store. Sin store => CONTENT vacio (modo clasico).
+# CONTENT vacio = arbol vivo. Solo se llena en fallback (ver mas abajo).
 CONTENT=""
-if [ -L "$STORE/current" ]; then
-	c="$(readlink -f "$STORE/current" 2>/dev/null || true)"
-	[ -n "$c" ] && [ -d "$c/shell" ] && CONTENT="$c"
-fi
 
 # Separa el binario del resto y guarda el --path original. El valor de --path se
 # reemplaza por la version activa cuando hay store; si no, se conserva el original.
@@ -47,6 +44,19 @@ take_lock() {
 		old=""
 		[ -f "$LOCK/pid" ] && old="$(cat "$LOCK/pid" 2>/dev/null)"
 		if [ -n "$old" ] && kill -0 "$old" 2>/dev/null; then
+			# Un supervisor de OTRA sesion de sway es un resto: su shell quedo colgado al
+			# perder el display y su lock impedia arrancar la sesion nueva.
+			old_sock="$(tr '\0' '\n' <"/proc/$old/environ" 2>/dev/null | sed -n 's/^SWAYSOCK=//p')"
+			if [ -n "${SWAYSOCK:-}" ] && [ "$old_sock" != "$SWAYSOCK" ]; then
+				say "supervisor viejo (pid $old) de otra sesion de sway: lo termino"
+				old_shell="$(cat "$RUN/gdtk-shell.pid" 2>/dev/null)"
+				kill "$old" 2>/dev/null
+				[ -n "$old_shell" ] && kill -9 "$old_shell" 2>/dev/null
+				sleep 1
+				kill -9 "$old" 2>/dev/null
+				rm -rf "$LOCK"
+				continue
+			fi
 			say "ya hay un supervisor vivo (pid $old); no arranco otro"
 			exit 0
 		fi
@@ -55,8 +65,23 @@ take_lock() {
 	echo $$ >"$LOCK/pid"
 }
 
+# Deskflow lo lanza el shell desacoplado (PPID 1): si sobrevive al shell, su enlace
+# EIS apunta al shell muerto pero sigue conectado por TCP, y el servidor (bastion)
+# deja el puntero "en" este equipo sin que nadie inyecte nada. Se termina apenas
+# termina el shell; el shell siguiente lo relanza (y ya reapea restos al arrancar).
+kill_deskflow() {
+	pkill -u "$(id -u)" -x deskflow-core 2>/dev/null
+	pkill -u "$(id -u)" -x deskflow 2>/dev/null
+}
+
 stop_now() {
-	[ -n "$pid" ] && kill "$pid" 2>/dev/null
+	# El shell puede quedar colgado al perder el display: TERM y, si no basta, KILL.
+	if [ -n "$pid" ]; then
+		kill "$pid" 2>/dev/null
+		sleep 1
+		kill -9 "$pid" 2>/dev/null
+	fi
+	kill_deskflow
 	rm -rf "$LOCK"
 	exit 0
 }
@@ -64,6 +89,13 @@ stop_now() {
 take_lock
 trap stop_now HUP INT TERM
 trap 'rm -rf "$LOCK"' EXIT
+# Vigia: si muere el sway de esta sesion (cierre de sesion), terminar con el shell y
+# salir, en vez de quedar vivo con el lock tomado.
+if [ -n "${SWAYSOCK:-}" ]; then
+	sup=$$
+	( while [ -S "$SWAYSOCK" ] && kill -0 "$sup" 2>/dev/null; do sleep 5; done
+	  kill -0 "$sup" 2>/dev/null && kill -TERM "$sup" ) &
+fi
 
 fails=0
 while :; do
@@ -82,7 +114,12 @@ while :; do
 		launch_path="$CONTENT/shell"
 		version="$(basename "$CONTENT")"
 		export GDTK_HOME="$CONTENT"
+		export GDTK_FALLBACK="$version"
+		say "FALLBACK: corriendo la copia guardada $version, NO el arbol vivo (reinicia el shell para volver)"
+	else
+		unset GDTK_HOME GDTK_FALLBACK
 	fi
+	if [ -n "$version" ]; then echo "fallback $version"; else echo "vivo $ORIG_PATH"; fi >"$LOGDIR/running-version"
 	start=$(date +%s)
 	say "arrancando${version:+ version $version} ($launch_path)"
 	# tee por un fifo: el log queda en disco y la salida sigue llegando a quien lanzo la sesion.
@@ -96,15 +133,20 @@ while :; do
 	# Promocion a buena: si sigue vivo tras PROMOTE_AFTER, sella last_good. Si se cae
 	# antes, kill -0 falla y no promueve (el pid del archivo evita reciclar un pid ajeno).
 	promoter=""
-	if [ -n "$version" ] && [ -x "$VER" ]; then
+	if [ -x "$VER" ]; then
 		( sleep "$PROMOTE_AFTER"
 		  if kill -0 "$pid" 2>/dev/null && [ "$(cat "$RUN/gdtk-shell.pid" 2>/dev/null)" = "$pid" ]; then
-			"$VER" good "$version" >/dev/null 2>&1 && say "version $version marcada buena"
+			if [ -n "$version" ]; then
+				"$VER" good "$version" >/dev/null 2>&1 && say "version $version marcada buena"
+			else
+				"$VER" autogood >/dev/null 2>&1 && say "arbol vivo guardado como last_good"
+			fi
 		  fi ) &
 		promoter=$!
 	fi
 	wait "$pid"; rc=$?
 	pid=""
+	kill_deskflow
 	[ -n "$promoter" ] && kill "$promoter" 2>/dev/null
 	# No usar `wait` sin argumentos: un hijo del shell (gvd, terminal, deskflow) puede
 	# heredar el FIFO y mantener vivo al tee, dejando al supervisor colgado sin
@@ -122,7 +164,7 @@ while :; do
 		[ "$rc" -eq 0 ] || say "salida pedida; el cierre termino con rc=$rc"
 		rm -f "$QUIT"; exit 0
 	elif [ "$rc" -eq 75 ] || [ -f "$FLAG" ]; then
-		say "reinicio pedido (rc=$rc)"; fails=0; unset GDTK_LAST_CRASH
+		say "reinicio pedido (rc=$rc)"; fails=0; CONTENT=""; unset GDTK_LAST_CRASH
 		continue
 	elif [ "$rc" -eq 0 ]; then
 		exit 0
@@ -130,16 +172,13 @@ while :; do
 	crash="$LOGDIR/crash-$(date +%Y%m%d-%H%M%S).log"
 	cp "$LOGDIR/shell.log" "$crash"
 	ls -t "$LOGDIR"/crash-*.log | tail -n +11 | xargs -r rm -f
-	# Versionado: la version que acaba de caer no es la ultima buena -> volver a last_good.
-	if [ -n "$CONTENT" ] && [ -x "$VER" ]; then
-		cur="$(basename "$CONTENT")"
-		lg="$(basename "$(readlink "$STORE/last_good" 2>/dev/null)" 2>/dev/null || true)"
-		if [ -n "$lg" ] && [ "$lg" != "$cur" ]; then
-			say "rollback $cur -> $lg (la version cayo)"
-			"$VER" use "$lg" >/dev/null 2>&1 || true
-			CONTENT="$(readlink -f "$STORE/current" 2>/dev/null || true)"
-		else
-			say "sin rollback (current=$cur last_good=${lg:-none})"
+	# Red de seguridad: caidas seguidas del arbol vivo -> last_good (solo hasta el proximo
+	# reinicio pedido). Una caida suelta no cambia de version.
+	if [ -z "$CONTENT" ] && [ -x "$VER" ] && [ $(($(date +%s) - start)) -lt 60 ] && [ "$fails" -ge 1 ]; then
+		lg="$(readlink -f "$STORE/last_good" 2>/dev/null || true)"
+		if [ -n "$lg" ] && [ -d "$lg/shell" ]; then
+			say "el arbol vivo cayo al arrancar 2 veces seguidas: uso last_good $(basename "$lg")"
+			CONTENT="$lg"
 		fi
 	fi
 	# Caidas seguidas = cada una a menos de 60 s de arrancar; si no, se empieza a contar de nuevo.

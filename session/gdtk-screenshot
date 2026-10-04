@@ -1,0 +1,98 @@
+#!/bin/sh
+# Pantallazo del escritorio gdtk -> <Imágenes>/Pantallazos/Pantallazo-<fecha>.png
+#
+# PrintScreen lo atiende el propio shell (shell.gd: captura el viewport compuesto). Este
+# comando es para terminales/scripts o como respaldo, con dos vías:
+#
+#   1) grim (wlroots) contra el compositor actual. grim 1.5 usa ext-image-copy-capture
+#      (preferido) y cae a wlr-screencopy. Sólo sirve si $WAYLAND_DISPLAY es sway (donde
+#      corre el shell); desde una app anidada de gdtk el socket es el compositor anidado,
+#      que no implementa protocolos de captura.
+#   2) JSON-RPC `screenshot` del shell (viewport compuesto, todo el escritorio). Funciona
+#      desde cualquier contexto, incluido el anidado y sin grim.
+#
+# Imprime la ruta del PNG y sale 0; si fallan las dos vías, error por stderr y sale 1.
+
+set -u
+
+home="${HOME:-}"
+[ -n "$home" ] || { echo "pantallazo: sin HOME" >&2; exit 1; }
+runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
+# $XDG_PICTURES_DIR/Pantallazos, con respaldo a ~/Imágenes, ~/Pictures o el HOME.
+pics=""
+if [ -f "$home/.config/user-dirs.dirs" ]; then
+	pics=$(sed -n 's/^XDG_PICTURES_DIR="\(.*\)"/\1/p' "$home/.config/user-dirs.dirs" | head -n1)
+	[ -n "$pics" ] && pics=$(printf '%s' "$pics" | sed "s#\$HOME#$home#g")
+fi
+if [ -z "$pics" ] && [ -d "$home/Imágenes" ]; then pics="$home/Imágenes"; fi
+if [ -z "$pics" ] && [ -d "$home/Pictures" ]; then pics="$home/Pictures"; fi
+[ -n "$pics" ] || pics="$home"
+dir="$pics/Pantallazos"
+mkdir -p "$dir" 2>/dev/null || true
+file="$dir/Pantallazo-$(date +%Y-%m-%d_%H-%M-%S).png"
+
+# 1) grim: usa ext-image-copy-capture / wlr-screencopy del compositor. -c incluye el cursor.
+if command -v grim >/dev/null 2>&1; then
+	if grim -c "$file" 2>/dev/null && [ -s "$file" ]; then
+		echo "$file"
+		exit 0
+	fi
+	rm -f "$file" 2>/dev/null || true
+fi
+
+# 2) RPC del shell: viewport compuesto (todo el escritorio gdtk, apps anidadas incluidas).
+command -v python3 >/dev/null 2>&1 || { echo "pantallazo: sin grim y sin python3" >&2; exit 1; }
+port="${GDTK_CONTROL_PORT:-7777}"
+if [ -n "${GDTK_CONTROL_PORT:-}" ]; then
+	token_file="$runtime/gdtk-control-$port.token"
+else
+	token_file="$runtime/gdtk-control.token"
+fi
+python3 - "$port" "$token_file" "$file" <<'PY'
+import base64
+import json
+import socket
+import sys
+
+port, token_file, path = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+try:
+    token = open(token_file).read().strip()
+except OSError:
+    sys.exit(3)
+if not token:
+    sys.exit(3)
+try:
+    sock = socket.create_connection(("127.0.0.1", port), timeout=3)
+except OSError:
+    sys.exit(3)
+try:
+    stream = sock.makefile("rw")
+    seq = [0]
+
+    def call(method, params):
+        seq[0] += 1
+        stream.write(json.dumps({"jsonrpc": "2.0", "id": seq[0], "method": method,
+                                 "params": params}) + "\n")
+        stream.flush()
+        line = stream.readline()
+        return json.loads(line) if line else {}
+
+    call("auth", {"token": token})
+    reply = call("screenshot", {"max_width": 0})
+    b64 = (reply.get("result") or {}).get("png_base64", "")
+    if not b64:
+        sys.exit(4)
+    with open(path, "wb") as handle:
+        handle.write(base64.b64decode(b64))
+finally:
+    sock.close()
+PY
+rc=$?
+if [ "$rc" -eq 0 ] && [ -s "$file" ]; then
+	echo "$file"
+	exit 0
+fi
+rm -f "$file" 2>/dev/null || true
+echo "pantallazo: no se pudo capturar (grim ni RPC del shell)" >&2
+exit 1
