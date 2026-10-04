@@ -189,6 +189,10 @@ Notas del InputCapture (server Deskflow ↔ sway), verificadas e2e:
 - El shell corre como cliente de **sway**, que clava el puntero en el borde y vuelve
   `event.relative` ~0: mientras la captura EIS está activa, `shell.gd` pide pointer
   lock (`Input.MOUSE_MODE_CAPTURED` → SDL relative) y lo suelta al volver al escritorio.
+- Mientras hay un arrastre local (botón sostenido, mover/redimensionar ventana, DnD de Wayland)
+  `shell._capture_remote_input_event` no le pasa el movimiento a `capture_motion`: el puntero no
+  cruza a Deskflow y el soltar no queda en el otro equipo con el arrastre colgado. Ya capturado,
+  todo sigue yendo al otro equipo.
 - Los clientes (`use_remote`) usan el path RemoteDesktop (sender) y reconectan solos; el
   server en bastion se relanza ~5 s si muere (tick del shell). Contraseña/edición fina de
   los rangos de borde: `settings/pages/displays.gd` + `shell/screen_layout.link_ranges`

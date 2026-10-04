@@ -9436,6 +9436,9 @@ func _ptr_log_motion(rel):
 		_ptr_log_samples, rel, has_rel, has_pf, pfocus, Input.get_mouse_mode()])
 
 
+var _capture_drag_held = false   # sólo para loguear una vez por arrastre
+
+
 func _capture_remote_input_event(event):
 	# En exposé el mouse es del shell: no reenviar a RemoteInput/Deskflow, o el
 	# `set_input_as_handled` del capture mataría el arrastre entre escritorios.
@@ -9448,6 +9451,16 @@ func _capture_remote_input_event(event):
 	var captured = false
 	var now = OS.get_ticks_msec()
 	if event is InputEventMouseMotion:
+		# Arrastrando (botón sostenido, mover/redimensionar ventana, DnD) el puntero no
+		# cruza a Deskflow: el soltar caería en el otro equipo y el arrastre quedaría
+		# colgado acá. Ya capturado, en cambio, todo sigue yendo al otro equipo.
+		if not remote_input.is_capturing() and (event.button_mask != 0 or chrome_drag != null
+				or (compositor != null and compositor.is_dragging())):
+			if not _capture_drag_held:
+				_capture_drag_held = true
+				print("deskflow: arrastre en curso, el puntero no cruza")
+			return false
+		_capture_drag_held = false
 		captured = remote_input.capture_motion(event.position, event.relative, now)
 	elif event is InputEventMouseButton:
 		if event.button_index == BUTTON_WHEEL_UP and event.pressed:
