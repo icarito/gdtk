@@ -117,6 +117,10 @@ public:
 	Vector2 get_drag_icon_offset() const;
 	bool is_dragging() const;
 	void end_frame();
+	// Sólo manda los frame callbacks a lo visible, sin tocar la visibilidad. Se usa en el
+	// camino "present-only" del shell: re-muestra el contenido de una ventana sin rearmar
+	// la UI ImGui (SPEC-rendimiento-compositor P1).
+	void send_frame_callbacks();
 
 	void set_size(int p_id, const Vector2 &p_size);
 	void set_maximized(int p_id, bool p_maximized);

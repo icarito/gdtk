@@ -686,6 +686,7 @@ void WaylandCompositor::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_drag_icon_offset"), &WaylandCompositor::get_drag_icon_offset);
 	ClassDB::bind_method(D_METHOD("is_dragging"), &WaylandCompositor::is_dragging);
 	ClassDB::bind_method(D_METHOD("end_frame"), &WaylandCompositor::end_frame);
+	ClassDB::bind_method(D_METHOD("send_frame_callbacks"), &WaylandCompositor::send_frame_callbacks);
 	ClassDB::bind_method(D_METHOD("set_size", "id", "size"), &WaylandCompositor::set_size);
 	ClassDB::bind_method(D_METHOD("set_maximized", "id", "maximized"), &WaylandCompositor::set_maximized);
 	ClassDB::bind_method(D_METHOD("set_popup_bounds", "id", "box"), &WaylandCompositor::set_popup_bounds);
@@ -758,8 +759,11 @@ void WaylandCompositor::_notification(int p_what) {
 	switch (p_what) {
 		case NOTIFICATION_PROCESS: {
 			if (server != NULL) {
+				// Los frame callbacks se mandan al presentar (end_frame), no en cada
+				// vuelta del motor: el reloj del cliente sigue a la presentación real
+				// del shell y no al tick (SPEC-rendimiento-compositor). Acá sólo se
+				// despachan los eventos de entrada/salida de las apps.
 				wl_server_dispatch(server);
-				wl_server_frame_done(server);
 			}
 			_reap_children();
 		} break;
@@ -1027,6 +1031,10 @@ bool WaylandCompositor::is_dragging() const {
 
 // Fin de un frame del shell: lo que no se dibujó deja de recibir frame callbacks (la app
 // oculta deja de pintar, como en cualquier compositor) y sus commits no piden redibujo.
+// Los frame callbacks se emiten acá, tras la presentación: el cliente no dibuja "al
+// ritmo del motor" sino al ritmo al que el shell realmente mostró un frame
+// (SPEC-rendimiento-compositor). Antes se mandaban en cada NOTIFICATION_PROCESS, lo
+// que hacía renderizar de más a las apps visibles.
 void WaylandCompositor::end_frame() {
 	drawn = drawn_collect;
 	drawn_collect.clear();
@@ -1039,6 +1047,15 @@ void WaylandCompositor::end_frame() {
 		ids.push_back(e->get());
 	}
 	wl_server_set_visible(server, ids.ptr(), ids.size());
+	send_frame_callbacks();
+}
+
+// Sólo frame callbacks (sin recalcular visibilidad), para el camino present-only del shell
+// (una ventana visible commiteó contenido y sólo hace falta re-muestrear la textura).
+void WaylandCompositor::send_frame_callbacks() {
+	if (server != NULL) {
+		wl_server_frame_done(server);
+	}
 }
 
 void WaylandCompositor::set_size(int p_id, const Vector2 &p_size) {

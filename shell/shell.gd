@@ -1494,7 +1494,7 @@ func _process(_delta):
 	if compositor.commit_count != last_commits:
 		last_commits = compositor.commit_count
 		last_commit_ms = now
-		request_redraw()
+		_present_commit()
 	if activity_instance != null and activity_instance.get("animate"):
 		last_activity = now
 	# Vecindario: el hilo deja el último resultado; si cambió y la vista está a la
@@ -1534,6 +1534,23 @@ func _process(_delta):
 		var sleep = SLEEP_ACTIVE if busy else SLEEP_IDLE
 		if OS.low_processor_usage_mode_sleep_usec != sleep:
 			OS.low_processor_usage_mode_sleep_usec = sleep
+
+
+# Re-muestra el contenido ya presente de las ventanas tras un commit, sin rearmar la UI
+# ImGui: la textura de la ventana se actualiza in-place (dmabuf o shm) y alcanza con marcar
+# el canvas sucio y mandar los frame callbacks de la presentación
+# (SPEC-rendimiento-compositor P1). Si la UI está viva (exposé, animaciones, Vecindario) se
+# usa el camino completo: ahí el commit tiene que rearmar el frame de ImGui.
+func _present_commit():
+	if expose or not tile_anim.empty() or not wm_anim.empty() or neighborhood_view:
+		request_redraw()
+		return
+	if view != null and is_instance_valid(view):
+		view.update()
+	if compositor != null and compositor.has_method("send_frame_callbacks"):
+		compositor.send_frame_callbacks()
+	else:
+		request_redraw()
 
 
 func _arm_clock():
