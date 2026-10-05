@@ -109,3 +109,29 @@ Cierre del harness: `sway` headless detenido; `/tmp/kilo/wl` queda como runtime 
   sesión para tomar el cambio de motor).
 - Verificar en sesión real (no headless): notificaciones layer-shell, OSD y menús de
   Firefox/Xwayland siguen pintando; arrastre/exposé siguen tomando el camino completo.
+
+## P4 scanout directo — integración con overlays y ciclo de vida (`b67fe49`)
+
+Cierra lo pendiente de P4 tras el puente dmabuf (`3b1ad32`) y su activación (`ddabd66`).
+
+- **Pausa por overlay**: `wl_server_scanout_set_suspended`; el shell la maneja en
+  `shell._scanout_tick()` (OSD, Frame, exposé, Vecindario). Al pausar se reimporta el
+  último dmabuf (`scanout_off_reimport`) para no dejar hueco; al desaparecer el overlay,
+  el próximo commit dmabuf reengancha solo.
+- **Menús del cliente**: candidato nulo si hay popups abiertos; otra ventana visible en
+  la principal también aparta el scanout (`scanout_has_visible_sibling`).
+- **Ciclo de vida**: `gdtk_scanout_reset()` limpia subsurfaces al recrear/destruir el
+  compositor. RPC `state` → `compositor.scanout_suspended`. Test `scanout_overlay_test.gd`.
+
+Validación aislada (sway headless `WLR_RENDERER=gles2`, runtime/puerto propios,
+`GDTK_SCANOUT_DIRECT=1`, es2gears_wayland fullscreen por RPC):
+
+| momento | scanout | dmabuf_commits |
+|---|---|---|
+| fullscreen (reposo) | `scanout:"on"` | 33 → 33 (congelado) |
+| `media show` (OSD) | `scanout_suspended:true` | 50 → 88 (vuelve a textura) |
+| OSD terminado | `scanout_suspended:false` | 88 → 88 (reenganchado) |
+
+`tools/verify_all.sh`: todos `ok`, 0 `FAIL`, 3 rc=124 conocidos. **No** se activó la
+sesión viva: el binario con este motor se instala con corte controlado (fuera de
+bastion) cuando se pida.

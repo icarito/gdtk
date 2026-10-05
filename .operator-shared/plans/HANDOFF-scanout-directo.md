@@ -27,6 +27,31 @@ Ya entregado y commiteado (no rehacer):
 Pendiente: **P4**. PoC de F2 (opción B) **ya implementado y validado en instancia aislada**
 el 2026-10-05 (ver abajo). Falta la parte de shell (app mode / gate con Frame) y deploy.
 
+### Integración con shell y ciclo de vida (`b67fe49`, 2026-10-05)
+
+Resuelto el solapamiento con overlays y el cierre del puente:
+
+- `wl_server` expone `scanout_suspended` (`wl_server_scanout_set_suspended`/`_suspended`);
+  el shell lo pausa desde `_scanout_tick()` (shell.gd) cuando dibuja un overlay:
+  OSD de volumen/brillo, Frame, exposé o Vecindario. Al pausar, las ventanas en scanout
+  vuelven al camino textura reimportando su último dmabuf (`scanout_off_reimport`), así
+  no queda hueco antes del próximo commit. La reanudación es implícita (próximo dmabuf).
+- El candidato se anula además si el toplevel tiene un popup abierto (menú del cliente,
+  lo dibuja Godot y la subsurface lo taparía) o si otra ventana visible comparte la
+  salida principal (`scanout_has_visible_sibling`); `wl_server_set_visible` re-evalúa y
+  aparta sin esperar commits.
+- `gdtk_scanout_reset()` destruye las subsurfaces al recrear/destruir el compositor
+  embebido (llamado en `wl_server_create` y `wl_server_destroy`); antes quedaban
+  huérfanas mostrando el último frame.
+- RPC `state` → `compositor.scanout_suspended`. Test `tests/scanout_overlay_test.gd`
+  (10 ok) sobre la política de pausa.
+
+Validado e2e en sway headless aislado (`tools/verify_all.sh` sin FAIL; ver evidencia en
+la sesión `sessions/2026-10-05_rendimiento-compositor.md`): fullscreen dmabuf congela
+`dmabuf_commits`; `media show` → `scanout_suspended:true` y `dmabuf_commits` vuelve a
+subir; al terminar el OSD se reanuda y se congela.
+
+
 ## Resultado PoC F2 opción B (2026-10-05)
 
 **§7.1 resuelto: SÍ se puede.** SDL expone `info.info.wl.surface` en `SDL_SysWMinfo`
@@ -62,8 +87,9 @@ Validación aislada (sway headless `WLR_RENDERER=gles2`, Intel Iris Xe, es2gears
 
 Limitaciones del PoC: solo xdg (no Xwayland), solo fullscreen en la **salida principal**,
 `place_above` (sin transparencia: Frame/OSD quedan tapados; se necesita RGBA/alpha para el
-hueco), sync explícito no reenviado a sway (confiar en implicit sync), ciclo de vida de
-subsurface no se limpia al recrear el compositor. Gateado por `GDTK_SCANOUT_DIRECT` (off
+hueco), sync explícito no reenviado a sway (confiar en implicit sync). Ciclo de vida de
+subsurface **resuelto** en `b67fe49` (`gdtk_scanout_reset`); el solapamiento con overlays
+se resuelve pausando el scanout (`b67fe49`). Gateado por `GDTK_SCANOUT_DIRECT` (off
 por defecto ⇒ sin regresión).
 
 Multi-monitor: Fase C (ventanas en salidas secundarias + cruce por arrastre + menú
@@ -73,10 +99,16 @@ ok=29, `window_output_transfer_test` ok=22, 0 fallas.
 
 ## Próximo paso
 
-1. Integrar en shell (app mode / apagar scanout al abrir Frame) y decidir transparencia
-   para Frame/OSD encima.
-2. Reenviar/exponer sync explícito a sway y cerrar el ciclo de vida de la subsurface.
-3. F0 medir GPU/frame antes de generalizar (ver abajo).
+1. ~~Integrar en shell (app mode / apagar scanout al abrir Frame) y decidir transparencia
+   para Frame/OSD encima.~~ Hecho (`b67fe49`): se pausa con overlay; **decisión: no hub
+   de alpha**, se vuelve al camino textura mientras el overlay está visible.
+2. ~~Reenviar/exponer sync explícito a sway y cerrar el ciclo de vida de la subsurface.~~
+   Ciclo de vida cerrado (`gdtk_scanout_reset` + `1de3cac`). Sync explícito a sway
+   **sigue pendiente**: hoy se confía en implicit sync (Mesa/Intel); documentado abajo.
+3. F0 medir GPU/frame antes de generalizar (ver abajo). Pendiente; requiere sesión viva.
+4. Siguiente alcance: Xwayland y salidas secundarias (hoy sólo xdg fullscreen en la
+   principal) y subsurfaces de cliente con contenido (hoy sólo se miran popups).
+
 
 
 ## Anclajes de código

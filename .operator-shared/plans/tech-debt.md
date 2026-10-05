@@ -51,6 +51,9 @@ cosas; **B** frena trabajo; **C** higiene.
 - **Arquitectural: el compositor embebido no tiene CRTC ⇒ sin direct scanout** (`SPEC-compositor.md`
   dec. 3): la ventana activa no puede ir a un plano de hardware, siempre pasa por la textura de
   Godot y la escena del shell. Salida: compositor en hilo/proceso propio o scanout directo (P4).
+  **RESUELTO 2026-10-05** (`3b1ad32` puente dmabuf, `ddabd66` activo por defecto, `b67fe49`
+  pausa con overlays). Pendiente: sync explícito a sway (hoy implicit sync), Xwayland y salidas
+  secundarias, y medir GPU/frame (F0) antes de generalizar.
 
 ## B — Pruebas y herramientas
 
