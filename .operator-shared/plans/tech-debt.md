@@ -41,6 +41,8 @@ cosas; **B** frena trabajo; **C** higiene.
   `SPEC-rendimiento-compositor.md`. (Frame callbacks atados a la presentación: resuelto 2026-10-05.)
 - **Import dmabuf sin explicit sync** (`wl_server_bind_dmabuf`, `SPEC-dmabuf.md` §5): con sync
   implícita el import puede bloquear el hilo principal bajo carga. Salida: `linux-drm-syncobj`.
+  **RESUELTO 2026-10-05** (`linux-drm-syncobj-v1` anunciado; espera GPU del acquire y release
+  con el buffer; fallback a implicit sync; `GDTK_NO_EXPLICIT_SYNC` para desactivar).
 - **Firefox reintenta subsurfaces y llena el log** (14 150 warnings
   `Couldn't map window ... as subsurface` en una sesión): timing de map de popups/subsurfaces en
   `wl_server.c`; cada intento escribe a stderr. Salida: arreglar el parent-mapped y bajar el ruido.

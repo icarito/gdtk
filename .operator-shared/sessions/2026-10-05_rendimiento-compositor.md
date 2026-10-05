@@ -31,12 +31,26 @@ y anchors en el spec.
    al camino completo. Medido headless: `present light=61 full=0` con Gears.
 5. **`input_capture_cursor_test.gd`**: el harness no declaraba `chrome_drag`/`_capture_drag_held`
    (rotura desde 9cf7e57); `verify_all` queda verde.
+6. **P2 explicit sync** (`linux-drm-syncobj-v1`): anunciado con feedback propio; en cada commit
+   dmabuf con acquire, espera el fence en la GPU (`sync_file` + `eglWaitSyncKHR`) y libera el
+   release con el buffer (helper de wlroots). Fallback a implicit sync; `GDTK_NO_EXPLICIT_SYNC`
+   para desactivar. Estado en `shell.log` y RPC `state` (`compositor.explicit_sync`).
 
-Commits: `d4661dd` (frame_done + present-only), `c1fca3f` (diagnóstico dmabuf), `6eabcbf`
-(docs), `ac5d938` (fix del test).
+Commits: `d4661dd` (frame_done + present-only), `c1fca3f` (diagnóstico dmabuf), `6eabcbf`/
+`350b1a6`/`9e13d2d` (docs), `ac5d938` (fix test), `1fc2431` (métricas present), `874e5b2` (P2).
 
-No se commiteó el WIP ajeno de `shell.gd`/`remote.gd` (PEER_CALL, lanzamiento con `sh -c`,
-RPC `peers`/`share_window`), que sigue en el árbol.
+## Prueba en cupid.local (2026-10-05)
+
+Sesión gdtk de cupid (i5-4300U, Haswell) actualizada con `deploy.sh icarito@cupid.local` y
+shell reiniciado (sin apps abiertas; autorizado por el operador). Resultado:
+`compositor dmabuf: on`, `compositor sync explícito: on`. Firefox lanzado por el RPC: 73
+commits dmabuf + 3 shm, y **`present {light:76, full:0}`** (P1 evitando el rebuild de ImGui).
+Ningún cliente adjuntó aún puntos de sync (Mesa/Firefox no optaron), así que el camino
+acquire/release no se ejercitó end-to-end; el global queda anunciado para cuando un cliente lo
+use. Sin crash-loop (el rc=134 fue el crash conocido al matar el shell viejo).
+
+No se commiteó el WIP ajeno (`shell.gd`/`remote.gd`: PEER_CALL, lanzamiento con `sh -c`, RPC
+`peers`/`share_window`), que sigue en el árbol.
 
 ## Evidencia / validación
 
@@ -76,11 +90,10 @@ Cierre del harness: `sway` headless detenido; `/tmp/kilo/wl` queda como runtime 
 
 ## Cómo retomar
 
-- **P1 present-only: hecho** (commits arriba). Próximos: **P2** explicit sync (`linux-drm-syncobj`)
-  y **P3** map de popups/subsurfaces — ambos requieren probar en sesión real (apps GTK/Firefox) y
-  no se pudieron validar headless; no se tocaron.
-- Medir en la próxima sesión gdtk: `shell.log` (línea `compositor dmabuf:`), RPC `state`
-  (`compositor.dmabuf_commits`/`shm_commits` en dos lecturas) y HUD F1 (`fps 0`). Comparar con GNOME.
+- **P1 y P2: hechos.** Próximo: **P3** map de popups/subsurfaces (ruido de Firefox) y **P4**
+  arquitectural (compositor en otro hilo/proceso o scanout directo).
+- Medir en la sesión gdtk: `shell.log` (`compositor dmabuf:`, `compositor sync explícito:`) y RPC
+  `state` (`compositor.dmabuf_commits`/`shm_commits`, `compositor.explicit_sync`, `present`).
 - **Rollback del binario**: `cp ~/gdtk/bin/godot-gdtk.prev ~/gdtk/bin/godot-gdtk` (reinicia la
   sesión para tomar el cambio de motor).
 - Verificar en sesión real (no headless): notificaciones layer-shell, OSD y menús de

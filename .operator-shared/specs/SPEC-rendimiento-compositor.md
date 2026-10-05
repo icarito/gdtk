@@ -52,35 +52,34 @@ gdtk:   app ──dmabuf──> wlroots EMBEBIDO (headless, SIN output/CRTC)
    (`~/.local/state/gdtk/shell.prev.log`): el timing de map de popups/subsurfaces hace
    reintentar a Firefox, y cada intento escribe a stderr.
 
-## Decisión tomada: frame callbacks en la presentación (hecho)
+## Decisión tomada: present-only (hecho)
 
-`wl_server_frame_done()` se llama en `WaylandCompositor::end_frame()`
-(`modules/wayland/wayland_compositor.cpp`), que corre en la señal `redrawn` de
-`ImGuiCanvas` (conectada en `shell/layers.gd:23`), y **no** en `NOTIFICATION_PROCESS`. El
-cliente no dibuja "al ritmo del motor" sino al ritmo al que el shell realmente mostró un
-frame.
+Ante un commit de ventana visible, el shell re-muestra sin rearmar ImGui
+(`shell.gd:_present_commit`): `view.update()` (marca el canvas sucio) +
+`compositor.send_frame_callbacks()` (frame callbacks de la presentación). Con UI viva
+(exposé, `tile_anim`/`wm_anim`, Vecindario) cae al camino completo. Medido: `present
+light=61 full=0`. La textura de la ventana se actualiza in-place (dmabuf/shm), así que no
+hace falta reasignar `TextureRect`.
 
-- `end_frame()` ya era load-bearing (visibilidad/throttle por `drawn`/`wl_server_set_visible`),
-  así que la conexión es confiable.
-- Capas y override-redirect de Xwayland también piden redraw por commit: sus surfaces pasan
-  por `surface_state_import` → `_count_commit` (`wl_server.c:1575` para layer surfaces,
-  `:2041` para xors). Por eso no se cuelgan al atar el callback a la presentación.
-- Con `update_hz = 4` (`shell/shell.gd:1275`) el canvas presenta al menos 4 Hz en reposo:
-  nunca se deja de mandar callbacks del todo.
+Antes de eso, los frame callbacks ya se atan a la **presentación**: `wl_server_frame_done()`
+se llama en `WaylandCompositor::end_frame()` (señal `redrawn` de `ImGuiCanvas`), no en
+`NOTIFICATION_PROCESS`. Capas y xors también piden redraw por commit
+(`surface_state_import` → `_count_commit`), así que no se cuelgan; `update_hz=4` garantiza
+callbacks aun en reposo.
 
-Riesgo residual a verificar en sesión real: notificaciones layer-shell (mako), OSD y menús
-de Firefox/Xwayland. Si algo dejara de pintar, volver el binario `~/gdtk/bin/godot-gdtk.prev`.
+## Decisión tomada: sincronización explícita (hecho)
+
+`linux-drm-syncobj-v1` anunciado (`wl_server.c:setup_syncobj`): en cada commit dmabuf con
+punto de acquire, se espera el fence **en la GPU** (export del punto a `sync_file` +
+`eglWaitSyncKHR` sobre `EGL_ANDROID_native_fence_sync`), y el release se libera con el buffer
+(`wlr_linux_drm_syncobj_v1_state_signal_release_with_buffer`). Fallback a implicit sync si
+falta EGL fence o el punto no materializó. Estado en `shell.log` y RPC (compositor.explicit_sync);
+`GDTK_NO_EXPLICIT_SYNC` fuerza el camino viejo. Probado en cupid (Haswell): `on`, Firefox por
+dmabuf sin regresiones (ningún cliente optó aún por adjuntar puntos).
 
 ## Plan pendiente (por impacto)
 
-- **P1 — present-only (mayor ganancia de CPU).** No rearmar la UI ImGui cuando sólo cambió
-  el contenido de una ventana: marcar el canvas sucio (p. ej. `CanvasItem.update()` sobre
-  `view`) en vez de `request_redraw()` en el camino de commits. `shell.gd:1496`; las ventanas
-  son `TextureRect` hijos de `view` (`shell.gd:2386`–`:2425`), y `ImGuiCanvas` conserva sus
-  canvas items entre builds (`imgui_canvas.cpp`). Verificar con la caja `update_hz`/`input_hz`
-  (`shell.gd:1269`–`:1276`) y que la UI que sí cambia siga pidiendo `request_redraw`.
-- **P2 — explicit sync en dmabuf** (`linux-drm-syncobj`) para no bloquear el hilo principal
-  en el import. `SPEC-dmabuf.md` §5.
+- ~~**P1 — present-only**~~ y ~~**P2 — explicit sync**~~: hechos.
 - **P3 — map de popups/subsurfaces**: arreglar el parent-mapped y bajar el ruido de Firefox
   (`wl_server.c`, popup configure/map).
 - **P4 — arquitectural**: separar el compositor a su hilo/proceso, o ceder el scanout directo
