@@ -72,6 +72,12 @@
 - `SPEC-embedded-multi-output.md`
   - Description: Salidas múltiples dentro del compositor embebido: Frame sólo en la principal, workspaces/ventanas por output, captura offscreen para gvd y base común para multi-monitor físico.
   - Read If: Implementando gdtk como emisor, salidas virtuales, captura gvd, cruce de ventanas entre pantallas o soporte multi-monitor.
+- `SPEC-physical-multi-monitor.md`
+  - Description: Monitores físicos adicionales: una ventana Godot flotante que cubre todos los monitores («span»), principal en (0,0), `_screen_size()`, hotplug por sway.
+  - Read If: Segundo monitor físico, `session/gdtk-outputs`, `shell/output_layout.gd`, cualquier uso de `get_viewport_rect()`.
+- `SPEC-rendimiento-compositor.md`
+  - Description: Rendimiento del compositor embebido y del shell: por qué GNOME gana por construcción (damage tracking, vblank, direct scanout), frame callbacks atados a la presentación (hecho), y plan present-only / explicit sync / scanout.
+  - Read If: FPS bajo o CPU alta, frame pacing, frame callbacks, dmabuf/shm, o antes de tocar el camino de presentación de ventanas.
 - `SPEC-sugar-frame-blocks.md`, `SPEC-sugar-frame-applets.md`
   - Description: Frame de bloques cuadrados Sugar/NeXT y applets (estados, fuentes, registro `applet_mods`, Portapapeles).
   - Read If: Tocando `shell/frame.gd` o `shell/applet_*.gd`.
@@ -114,6 +120,9 @@
 - `2026-10-04_cuelgue-cursor.md`
   - Description: Diagnóstico del cuelgue del shell en bastion (resuelto f26c8a4).
   - Read If: El shell se cuelga o el cursor se congela.
+- `2026-10-05_rendimiento-compositor.md`
+  - Description: Research de rendimiento (Meet FPS bajo/CPU alta) + acciones cortas entregadas: frame_done a la presentación, diagnóstico dmabuf; binario rebuild+instalado y validado headless.
+  - Read If: Retomando el rendimiento del compositor/shell, o el plan present-only/explicit-sync.
 
 ### `plans/` - Planes vigentes
 

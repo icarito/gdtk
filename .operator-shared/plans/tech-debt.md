@@ -32,6 +32,22 @@ cosas; **B** frena trabajo; **C** higiene.
 - **El historial del portapapeles necesita el motor recompilado** (`ext-data-control-v1`
   en `wl_server.c`, 2026-10-04). Con un binario viejo el applet queda `no_disponible`.
 
+## B — Rendimiento
+
+- **El shell reconstruye toda la UI ImGui por cada commit de ventana visible.** Un commit
+  visible pide frame completo (`shell.gd:1496`) y ImGui rearma Frame/Hogar/ventanas (GDScript)
+  aunque sólo cambió el contenido de una ventana: CPU alta y techo de FPS con video. Salida:
+  *present-only* (marcar el canvas sucio sin rearmar ImGui), P1 de
+  `SPEC-rendimiento-compositor.md`. (Frame callbacks atados a la presentación: resuelto 2026-10-05.)
+- **Import dmabuf sin explicit sync** (`wl_server_bind_dmabuf`, `SPEC-dmabuf.md` §5): con sync
+  implícita el import puede bloquear el hilo principal bajo carga. Salida: `linux-drm-syncobj`.
+- **Firefox reintenta subsurfaces y llena el log** (14 150 warnings
+  `Couldn't map window ... as subsurface` en una sesión): timing de map de popups/subsurfaces en
+  `wl_server.c`; cada intento escribe a stderr. Salida: arreglar el parent-mapped y bajar el ruido.
+- **Arquitectural: el compositor embebido no tiene CRTC ⇒ sin direct scanout** (`SPEC-compositor.md`
+  dec. 3): la ventana activa no puede ir a un plano de hardware, siempre pasa por la textura de
+  Godot y la escena del shell. Salida: compositor en hilo/proceso propio o scanout directo (P4).
+
 ## B — Pruebas y herramientas
 
 - **`AGENTS.md` lista 7 tests de ≈60.** El runner real es `tools/verify_all.sh` (aislado
