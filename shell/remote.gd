@@ -430,6 +430,9 @@ func _state():
 			"dmabuf_commits": shell.compositor.dmabuf_commits if shell.compositor.has_method("get_dmabuf_commits") else 0,
 			"shm_commits": shell.compositor.shm_commits if shell.compositor.has_method("get_shm_commits") else 0,
 		},
+		# Presentaciones livianas (present-only, sin rearmar ImGui) vs completas del shell
+		# (SPEC-rendimiento-compositor P1): dos lecturas muestran qué camino domina.
+		"present": {"light": shell.present_light, "full": shell.present_full},
 		# Frame: items con su posición en pantalla (vacío si no se dibujó).
 		"frame": {"visible": shell.frame.drawn, "items": shell.frame.items_layout},
 		# Input remoto: clientes libei conectados y pedidos esperando el diálogo.

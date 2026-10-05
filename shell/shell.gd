@@ -1464,6 +1464,11 @@ const SLEEP_IDLE = 250000
 const COMMIT_ACTIVE_MS = 500
 var last_activity = 0
 var last_commit_ms = 0
+# Presentaciones por el camino liviano (present-only: commit de ventana, sin rearmar ImGui)
+# y por el completo. Se exponen por el RPC `state` para medir P1
+# (SPEC-rendimiento-compositor).
+var present_light = 0
+var present_full = 0
 
 
 # Un commit Wayland puede traer capas/texturas nuevas (y con dmabuf el VisualServer
@@ -1543,8 +1548,10 @@ func _process(_delta):
 # usa el camino completo: ahí el commit tiene que rearmar el frame de ImGui.
 func _present_commit():
 	if expose or not tile_anim.empty() or not wm_anim.empty() or neighborhood_view:
+		present_full += 1
 		request_redraw()
 		return
+	present_light += 1
 	if view != null and is_instance_valid(view):
 		view.update()
 	if compositor != null and compositor.has_method("send_frame_callbacks"):
