@@ -98,11 +98,12 @@ func stop():
 func draw(frame, ui, scr, loc, w, h):
 	var g = min(w, h) * 0.52
 	var col = frame.NX_TEXT if state == "activo" else frame.NX_TEXT_DIM
-	# El clip de icons/np con relieve, como los bloques Vecindario/Grupo/Hogar.
+	# El clip de icons/np, plano (el relieve es de los bloques de navegación, no de
+	# las dockapps).
 	var icon = frame.shell._load_np_icon("clips") if frame.shell != null else null
 	if icon != null:
-		frame._draw_emboss_icon(ui, loc + Vector2((w - g) * 0.5, h * 0.04), Vector2(g, g), icon,
-			frame.NX_FACE)
+		ui.set_cursor_pos(loc + Vector2((w - g) * 0.5, h * 0.04))
+		ui.image(icon, Vector2(g, g))
 	else:
 		frame._draw_shared_glyph(ui, Rect2(scr + Vector2((w - g) * 0.5, h * 0.06), Vector2(g, g)),
 			"clipboard", col)
