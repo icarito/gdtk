@@ -80,6 +80,34 @@ Sin números no se elige track. Extender lo que ya existe, no inventar HUD nuevo
   - la brecha es grande en todos los casos → evaluar **Track B** antes de invertir más
     en A.
 
+### F0 — Resultados (2026-10-05, bastion: i7-1185G7 / Iris Xe, 8 cores)
+
+Método: `bench/f0_probe.sh` (sólo lectura; CPU del shell + "desktop" = session.slice+app.slice
+o session scope, sin agentes; GPU por `gt_freq`; `[FRT_PERF]`/`[FRT_GPU]` con `FRT_PERF=1`
+vía flag `~/.gdtk-frt-perf`). GLES3 pasó a default en `e7898cd` (`session/gdtk-session-sway`).
+
+| escenario | shell CPU (% core) | render (ms) | GPU (ms) | present |
+|---|---|---|---|---|
+| gdtk GLES3 Home reposo | 3,3 | 0,09 | — | 0 |
+| gdtk GLES3 video fullscreen (estático) | 4,3 | 0,22 | 0,7–1,8 | ≈ dmabuf 27/s |
+| gdtk GLES3 2 tiled + video | 9,2 | 0,49 | 0,91 | ≈ dmabuf 26/s |
+| gdtk GLES3 tiled + interacción | ~15 | 0,53 | 0,74 | ≈ dmabuf 24/s |
+| GNOME video (mismo host) | gnome-shell 6,4 (5,5–9,2) | — | — | — |
+
+Hallazgos:
+1. **GLES3 fue el gran salto**: el mismo tiled/video que en GLES2 medía shell ~23–25% ahora
+   da 9–15%, y habilita `[FRT_GPU]`. Sin GLES3 no hay ms de GPU.
+2. **Fullscreen estático ya está a la par de GNOME** (shell 4,3% vs 6,4%; GPU <2 ms).
+3. Bajo interacción/tiled el shell sube por **redibujo completo**: el costo restante es
+   daño/partial (A1) y cursor (A2), no falta de KMS.
+4. **P4/scanout no se pudo medir fullscreen** en la sesión real: con Slack "visible" detrás
+   el guard de ventana-sola lo bloquea. Queda revisar si un fullscreen debe ocultar a las de
+   atrás (o si el shell no debería marcarlas visibles).
+
+Decisión: **Track A (sin KMS)**. No se justifica DRM/KMS todavía; priorizar A1 (damage) y
+A2 (cursor del host). Caveats: entorno real del usuario, agentes de fondo, varianza por
+interacción; GNOME no se midió en tiled/multi-monitor.
+
 ## Track A — sin KMS (por impacto)
 
 - **A1 — Damage/partial.** No recomponer la UI entera por commit: daño por
@@ -132,9 +160,10 @@ Prerequisito duro de B2: presentación multi-ventana nativa en FRT/SDL
 
 ## 7. Orden propuesto
 
-1. **F0** (medir, fijar gate). ← siguiente acción.
-2. **A1 + A2** (damage + cursor) si F0 dice Track A.
-3. **A3 + A4 + A5** (cobertura, scheduling, multi-output).
+1. **F0** (medir, fijar gate). **HECHO** (2026-10-05): decisión **Track A**; GLES3 default
+   ya entregado (`e7898cd`). ← siguiente acción.
+2. **A1 + A2** (damage + cursor del host) — es donde quedó el costo restante.
+3. **A3 + A4 + A5** (cobertura P4, scheduling, multi-output).
 4. Re-evaluar **B1→B4** con los números de F0 y el resultado de A.
 
 ## 8. Archivos previstos
