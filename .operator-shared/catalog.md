@@ -78,6 +78,9 @@
 - `SPEC-rendimiento-compositor.md`
   - Description: Rendimiento del compositor embebido y del shell: por qué GNOME gana por construcción (damage tracking, vblank, direct scanout), frame callbacks atados a la presentación (hecho), y plan present-only / explicit sync / scanout.
   - Read If: FPS bajo o CPU alta, frame pacing, frame callbacks, dmabuf/shm, o antes de tocar el camino de presentación de ventanas.
+- `SPEC-scanout-directo.md`
+  - Description: P4: sacar el contenido de la ventana activa del camino de Godot. Opciones A (app mode), B (puente dmabuf zero-copy hacia sway) y C (quitar sway); incógnita crítica: crear una subsuperficie de la ventana FRT en sway.
+  - Read If: Se retoma P4, el costo de la pasada de Godot por frame, o scanout/direct scanout y presentación de la ventana activa.
 - `SPEC-sugar-frame-blocks.md`, `SPEC-sugar-frame-applets.md`
   - Description: Frame de bloques cuadrados Sugar/NeXT y applets (estados, fuentes, registro `applet_mods`, Portapapeles).
   - Read If: Tocando `shell/frame.gd` o `shell/applet_*.gd`.
@@ -132,3 +135,6 @@
 - `bastion-migration.md`
   - Description: Veredicto y bloqueantes para migrar bastion de GNOME a gdtk.
   - Read If: Priorizando trabajo, o sesión diaria / funciones de GNOME faltantes.
+- `HANDOFF-scanout-directo.md`
+  - Description: Handoff de P4 (scanout directo): estado, primer paso (medir y resolver si FRT/SDL exponen la wl_surface), anclajes, comandos, gotchas y decisiones.
+  - Read If: Se retoma P4 con contexto fresco.
