@@ -9,3 +9,5 @@ device-laptop.png Laptop  id=7456572  Laptop by Suprihatin from Noun Project
 device-tablet.png Tablet  id=8239581  Tablet by insdesign86 from Noun Project
 device-mobile.png Smartphone  id=196038  Smartphone by Universal Icons from Noun Project
 device-tv.png    Television  id=844034  Television by Joel Wisneski from Noun Project
+group.png        Sharing  id=8413080  Sharing by Ricons from Noun Project
+clips.png        Paperclip  id=8323899  Paperclip by Muhammad Shayan from Noun Project

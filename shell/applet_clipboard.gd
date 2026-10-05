@@ -96,9 +96,16 @@ func stop():
 # Dibujo propio dentro de la placa (scr: coords de pantalla, loc: locales a la ventana).
 # `frame` presta sus helpers de fuente/glifo para que la tesela combine con el resto.
 func draw(frame, ui, scr, loc, w, h):
-	var g = min(w, h) * 0.46
+	var g = min(w, h) * 0.52
 	var col = frame.NX_TEXT if state == "activo" else frame.NX_TEXT_DIM
-	frame._draw_shared_glyph(ui, Rect2(scr + Vector2((w - g) * 0.5, h * 0.06), Vector2(g, g)), "clipboard", col)
+	# El clip de icons/np con relieve, como los bloques Vecindario/Grupo/Hogar.
+	var icon = frame.shell._load_np_icon("clips") if frame.shell != null else null
+	if icon != null:
+		frame._draw_emboss_icon(ui, loc + Vector2((w - g) * 0.5, h * 0.04), Vector2(g, g), icon,
+			frame.NX_FACE)
+	else:
+		frame._draw_shared_glyph(ui, Rect2(scr + Vector2((w - g) * 0.5, h * 0.06), Vector2(g, g)),
+			"clipboard", col)
 	var text = value
 	if state != "activo":
 		text = "no disp." if state == "no_disponible" else "vacío"

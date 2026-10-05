@@ -1405,9 +1405,14 @@ func _window_block_width(side, items):
 # el ícono de clip (WindowMaker).
 func _draw_window_dock_empty(ui, pos, side, mouse):
 	var tile = _tile(ui, pos, side, "win_clip", NX_FACE)
-	var g = side * 0.5
-	_draw_shared_glyph(ui, Rect2(tile.rect.position + Vector2((side - g) * 0.5, (side - g) * 0.5),
-		Vector2(g, g)), "clipboard", NX_TEXT_DIM)
+	var g = side * 0.62
+	var icon = shell._load_np_icon("clips")
+	if icon != null:
+		_draw_emboss_icon(ui, pos + Vector2((side - g) * 0.5, (side - g) * 0.5), Vector2(g, g),
+			icon, tile.face)
+	else:
+		_draw_shared_glyph(ui, Rect2(tile.rect.position + Vector2((side - g) * 0.5, (side - g) * 0.5),
+			Vector2(g, g)), "clipboard", NX_TEXT_DIM)
 	return tile
 
 
@@ -3372,7 +3377,8 @@ func _draw_group_tile(ui, pos, side):
 	var inner = side - 2.0 * bw
 	var s = clamp(inner - title_h - 2.0 * pad, ICON_MIN * ts, ICON_MAX * ts)
 	var iy = bw + max(pad, (inner - s - title_h) * 0.5)
-	var icon = shell._load_sugar_svg("network-wired", shell.SUGAR_STROKE, shell.SUGAR_FILL)
+	# Mismo tratamiento que Vecindario y Hogar: PNG de icons/np con relieve.
+	var icon = shell._load_np_icon("group")
 	if icon != null:
 		_draw_emboss_icon(ui, pos + Vector2((side - s) * 0.5, iy), Vector2(s, s), icon, b.face)
 	else:
