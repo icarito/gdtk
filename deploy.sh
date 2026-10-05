@@ -5,7 +5,7 @@
 # glibc marca el binario como x86-64-v4 y el loader lo rechaza ("CPU ISA level is lower than required").
 # ponytail: parche de toolchain; binarios portables de verdad = build en el SDK buildroot del CI.
 set -e
-HOST="$1"; DRIVER="${2:-GLES2}"
+HOST="$1"; DRIVER="${2:-GLES3}"
 [ -n "$HOST" ] || { echo "uso: $0 usuario@host [GLES2|GLES3]"; exit 1; }
 GDTK="$(cd "$(dirname "$0")" && pwd)"
 # Árbol aislado del motor con SlugVector2D; GODOT permite elegir otro checkout.
@@ -55,7 +55,7 @@ rsync -a "$GDTK/session/gdtk-governor-helper" "$GDTK/session/gdtk-governor-provi
 # sesión gdtk (UseIn/DesktopNames), así no toca xfce ni las demás sesiones del host.
 rsync -a "$GDTK/session/gdtk.portal" "$GDTK/session/gdtk-portals.conf" "$HOST:gdtk/session/"
 desktop() { # desktop <archivo> <nombre> <script>
-	printf '[Desktop Entry]\nName=%s\nComment=Shell tipo Sugar sobre Godot/ImGui con compositor wlroots embebido\nExec=env GDTK_VIDEO_DRIVER=%s %s/gdtk/session/%s\nType=Application\nDesktopNames=gdtk\n' \
+	printf '[Desktop Entry]\nName=%s\nComment=Shell tipo Sugar sobre Godot/ImGui con compositor wlroots embebido\nExec=env GDTK_VIDEO_DRIVER_FORCE=%s %s/gdtk/session/%s\nType=Application\nDesktopNames=gdtk\n' \
 		"$2" "$DRIVER" "$RHOME" "$3" | ssh "$HOST" "cat > ~/gdtk/session/$1"
 }
 desktop gdtk.desktop "gdtk" gdtk-session-sway   # sway es el default; cage ya no se soporta

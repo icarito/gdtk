@@ -25,6 +25,10 @@ if [ -z "$GDTK_GODOT" ]; then
 	[ -x "$GDTK_GODOT" ] || GDTK_GODOT=/home/icarito/Proyectos/godot3-box3d/godot-dev/bin/godot.frt.opt.debug.x86_64.gdtklite
 fi
 export GDTK_GODOT
+# Driver de video del shell: GLES3 por defecto; GLES2 es SÓLO fallback (el supervisor
+# lo fuerza tras caídas repetidas, session/gdtk-supervisor). GDTK_VIDEO_DRIVER_FORCE
+# fuerza uno a mano. Se ignora el GDTK_VIDEO_DRIVER=GLES2 que exportaba el .desktop viejo.
+export GDTK_VIDEO_DRIVER="${GDTK_VIDEO_DRIVER_FORCE:-GLES3}"
 export SDL_VIDEODRIVER=wayland SDL_VIDEO_WAYLAND_ALLOW_LIBDECOR=0
 # Sin audio ni joysticks en el shell: sus hilos despiertan la CPU sin uso (el shell las vacía para las apps).
 export SDL_AUDIODRIVER=dummy SDL_JOYSTICK_HIDAPI=0 SDL_HIDAPI_LIBUSB=0

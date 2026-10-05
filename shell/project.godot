@@ -31,7 +31,7 @@ pointing/emulate_mouse_from_touch=false
 
 [rendering]
 
-quality/driver/driver_name="GLES2"
+quality/driver/driver_name="GLES3"
 ; ImGui emite un solo lote por vista: el Vecindario con muchas redes pasaba los 16384 vértices
 ; por defecto ("poly has too many indices") y no dibujaba nada.
 batching/parameters/batch_buffer_size=65535

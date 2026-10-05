@@ -20,6 +20,8 @@ export SDL_AUDIODRIVER=dummy SDL_JOYSTICK_HIDAPI=0 SDL_HIDAPI_LIBUSB=0
 export SDL_VIDEODRIVER=x11
 # EGL en vez de GLX: el compositor embebido necesita EGL para importar dmabuf (zero-copy).
 export SDL_VIDEO_X11_FORCE_EGL=1 SDL_VIDEO_FORCE_EGL=1
+# Driver: GLES3 por defecto; GLES2 es sólo fallback (lo fuerza el supervisor tras caídas).
+export GDTK_VIDEO_DRIVER="${GDTK_VIDEO_DRIVER_FORCE:-GLES3}"
 # Sin window manager nadie aplica el fullscreen de SDL: tamaño y posición explícitos desde xrandr.
 # ponytail: se lee una vez al arrancar; rotar la pantalla (X200 Tablet) no redimensiona la ventana.
 RES="$(xrandr --current 2>/dev/null | awk '/\*/ {print $1; exit}')"
