@@ -135,7 +135,9 @@ while :; do
 	tee "$LOGDIR/shell.log" <"$fifo" &
 	tee_pid=$!
 	# shellcheck disable=SC2086
-	"$BIN" $safe $EXTRA --path "$launch_path" >"$fifo" 2>&1 &
+	# $safe va DESPUÉS de $EXTRA: en safe-mode debe ganar el --video-driver GLES2
+	# sobre el --video-driver (GLES3) que trae la sesión (main.cpp: el último gana).
+	"$BIN" $EXTRA $safe --path "$launch_path" >"$fifo" 2>&1 &
 	pid=$!
 	echo "$pid" >"$RUN/gdtk-shell.pid"
 	# Promocion a last_good_content: SOLO con progreso semantico observado del PID
