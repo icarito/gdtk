@@ -16,7 +16,7 @@ const VERSION = 1
 # remoto completo, sólo lo necesario para pantalla y el aviso de lados compartidos).
 const METHODS = ["ping", "gvd_recv", "gvd_stop", "gvd_send", "gvd_status",
 	"share_notify", "share_stop", "clip_set", "audio_recv", "audio_stop", "gvd_size",
-	"window_input", "gvd_meta"]
+	"window_input", "window_input_stream", "gvd_meta"]
 
 # Parámetros válidos de los avisos de lados compartidos (G5). El `side` llega YA
 # invertido por el emisor: acá sólo se valida el vocabulario, no se transforma.
@@ -67,7 +67,9 @@ static func window_input_events(params):
 				out.append({"kind": kind, "button": button, "pressed": bool(raw.pressed)})
 			"key":
 				var physical = int(raw.get("physical", 0))
-				if physical <= 0 or physical > 0xFFFFFF or typeof(raw.get("pressed", null)) != TYPE_BOOL:
+				# Godot 3 reserva el rango 0x01000000 para teclas especiales
+				# (flechas, función, multimedia). También deben cruzar el canal.
+				if physical <= 0 or physical > 0x1FFFFFFF or typeof(raw.get("pressed", null)) != TYPE_BOOL:
 					return []
 				out.append({"kind": kind, "physical": physical, "pressed": bool(raw.pressed),
 					"echo": bool(raw.get("echo", false))})
@@ -76,6 +78,29 @@ static func window_input_events(params):
 			_:
 				return []
 	return out
+
+
+# Línea de un lote de la «Pantalla compartida» DENTRO del stream persistente ya
+# autenticado. A diferencia de `window_input`, la línea no repite hid/token ni
+# método: la conexión queda marcada como stream tras el handshake. Puro.
+static func encode_window_stream(events):
+	return JSON.print({
+		"v": VERSION,
+		"events": events if typeof(events) == TYPE_ARRAY else [],
+	}) + "\n"
+
+
+# Decodifica una línea del stream: aplica la misma validación que `window_input`.
+# Devuelve el lote validado o [] si la línea es basura/versión distinta/inválida.
+# Puro.
+static func parse_window_stream(line):
+	var parsed = JSON.parse(String(line))
+	if parsed.error != OK or typeof(parsed.result) != TYPE_DICTIONARY:
+		return []
+	var r = parsed.result
+	if int(r.get("v", 0)) != VERSION:
+		return []
+	return window_input_events(r)
 
 
 # Título, acento e ícono de la ventana que se comparte (`gvd_meta`), para que el
@@ -210,7 +235,18 @@ static func selftest():
 	ok = ok and window_input_events({"events": [{"kind": "motion", "x": 0.5, "y": 1.0},
 		{"kind": "button", "button": 1, "pressed": true},
 		{"kind": "key", "physical": 65, "pressed": false}, {"kind": "reset"}]}).size() == 4
+	ok = ok and window_input_events({"events": [{"kind": "key", "physical": 0x01000014,
+		"pressed": true}]}).size() == 1
 	ok = ok and window_input_events({"events": [{"kind": "motion", "x": 2.0, "y": 0.0}]}).empty()
+	var sl = encode_window_stream([{"kind": "motion", "x": 0.25, "y": 0.5},
+		{"kind": "reset"}])
+	ok = ok and sl.ends_with("\n") and sl.count("\n") == 1
+	ok = ok and valid_method("window_input_stream")
+	ok = ok and parse_window_stream(sl).size() == 2
+	ok = ok and parse_window_stream("basura").empty()
+	ok = ok and parse_window_stream(JSON.print({"v": 9, "events": [{"kind": "reset"}]}) + "\n").empty()
+	ok = ok and parse_window_stream(JSON.print({"v": 1, "events": [
+		{"kind": "button", "button": 99, "pressed": true}]}) + "\n").empty()
 	ok = ok and valid_share_params("share_notify",
 		{"type": "screen", "side": "north", "state": "active"})
 	ok = ok and not valid_share_params("share_notify",

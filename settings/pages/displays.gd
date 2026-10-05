@@ -54,38 +54,65 @@ func _build():
 	_build_sizes()
 
 
-# Filas para editar la resolución REAL de cada equipo (px). La disposición y los %
-# de solape se calculan con estos tamaños.
+# La geometria usa tamaño fisico; resolución queda como metadata para gvd/UI.
 func _build_sizes():
 	h_gap(6)
-	h_note("Tamaños (px): ajustá la resolución real de cada equipo.")
+	h_note("Tamaño físico (cm) y resolución (px). La disposición usa los centímetros.")
 	var row = h_row()
 	h_label("Este equipo", row)
-	_size_spin(layout.local.w, row, layout.local.id, true)
-	_size_spin(layout.local.h, row, layout.local.id, false)
+	_dim_spin(layout.local.w / 10.0, row, layout.local.id, true)
+	_dim_spin(layout.local.h / 10.0, row, layout.local.id, false)
+	_px_spin(layout.local.px_w, row, layout.local.id, true)
+	_px_spin(layout.local.px_h, row, layout.local.id, false)
 	for sc in layout.screens:
 		row = h_row()
 		h_label(_label_of(sc), row)
-		_size_spin(sc.w, row, sc.id, true)
-		_size_spin(sc.h, row, sc.id, false)
+		_dim_spin(sc.w / 10.0, row, sc.id, true)
+		_dim_spin(sc.h / 10.0, row, sc.id, false)
+		_px_spin(sc.px_w, row, sc.id, true)
+		_px_spin(sc.px_h, row, sc.id, false)
 
 
-func _size_spin(value, row, sc_id, is_w):
+func _dim_spin(value, row, sc_id, is_w):
 	var sp = SpinBox.new()
-	sp.min_value = 100
-	sp.max_value = 8000
-	sp.step = 1
+	sp.min_value = 5
+	sp.max_value = 300
+	sp.step = 0.1
 	sp.value = float(value)
-	sp.rect_min_size.x = 96
-	sp.connect("value_changed", self, "_on_size_changed", [String(sc_id), bool(is_w)])
+	sp.suffix = " cm"
+	sp.rect_min_size.x = 88
+	sp.connect("value_changed", self, "_on_dim_changed", [String(sc_id), bool(is_w)])
 	row.add_child(sp)
 	return sp
 
 
-func _on_size_changed(value, sc_id, is_w):
-	_apply_size(sc_id, value if is_w else null, null if is_w else value)
+func _px_spin(value, row, sc_id, is_w):
+	var sp = SpinBox.new()
+	sp.min_value = 100
+	sp.max_value = 16384
+	sp.step = 1
+	sp.value = float(value)
+	sp.suffix = " px"
+	sp.rect_min_size.x = 104
+	sp.connect("value_changed", self, "_on_px_changed", [String(sc_id), bool(is_w)])
+	row.add_child(sp)
+	return sp
+
+
+func _on_dim_changed(value, sc_id, is_w):
+	_apply_size(sc_id, value * 10.0 if is_w else null, null if is_w else value * 10.0)
+	# Cambiar el tamaño físico puede dejar un hueco con el vecino: sin contacto no
+	# hay enlace Deskflow y el puntero deja de cruzar.
+	drag_id = String(sc_id)
+	_snap_release()
+	drag_id = ""
 	if canvas != null:
 		canvas.update()
+	_commit()
+
+
+func _on_px_changed(value, sc_id, is_w):
+	_apply_pixels(sc_id, int(value) if is_w else null, null if is_w else int(value))
 	_commit()
 
 
@@ -103,6 +130,21 @@ func _apply_size(id, w, h):
 			if h != null:
 				layout.screens[i].h = float(h)
 			return
+
+
+func _apply_pixels(id, w, h):
+	var sc = layout.local if String(id) == String(layout.local.id) else null
+	if sc == null:
+		for item in layout.screens:
+			if String(item.id) == String(id):
+				sc = item
+				break
+	if sc == null:
+		return
+	if w != null:
+		sc.px_w = int(w)
+	if h != null:
+		sc.px_h = int(h)
 
 
 func _on_resized():
@@ -197,13 +239,13 @@ func _catalog():
 func _ensure_layout():
 	var stored = settings.get("screens", {})
 	if SL == null:
-		return {"version": 1, "local": {"id": "local", "label": "Este equipo", "local": true,
-			"x": 0.0, "y": 0.0, "w": 1280.0, "h": 800.0}, "screens": []}
+		return {"version": 2, "local": {"id": "local", "label": "Este equipo", "local": true,
+			"x": 0.0, "y": 0.0, "w": 340.0, "h": 212.5, "px_w": 1280, "px_h": 800}, "screens": []}
 	var lay = SL.normalize_layout(stored if typeof(stored) == TYPE_DICTIONARY else {})
 	var size = OS.get_screen_size()
 	if size.x > 0.0 and size.y > 0.0:
-		lay.local.w = size.x
-		lay.local.h = size.y
+		lay.local.px_w = int(size.x)
+		lay.local.px_h = int(size.y)
 	if lay.screens.empty():
 		for c in _catalog():
 			var sc = SL.default_screen(String(c.get("id", "")), String(c.get("label", "")))
@@ -212,19 +254,9 @@ func _ensure_layout():
 			sc.peer = String(c.get("peer", ""))
 			sc.w = float(c.get("w", SL.DEFAULT_W))
 			sc.h = float(c.get("h", SL.DEFAULT_H))
+			sc.px_w = int(c.get("px_w", SL.DEFAULT_PX_W))
+			sc.px_h = int(c.get("px_h", SL.DEFAULT_PX_H))
 			lay.screens.append(sc)
-	var dirs = _stored_directions()
-	for sc in lay.screens:
-		var entry = dirs.get(sc.id, {})
-		var d = String(entry.get("direction", "none")) if typeof(entry) == TYPE_DICTIONARY else "none"
-		if SL.valid_direction(d) and d != "none":
-			# along (0..1) = dónde sobre ese borde lo dejó la vista Grupo (drag libre
-			# en 360°); sin dato, al inicio del borde como antes.
-			var along = float(entry.get("along", -1.0)) if typeof(entry) == TYPE_DICTIONARY else -1.0
-			var off = 0.0
-			if along >= 0.0 and along <= 1.0:
-				off = SL.offset_px(d, along, lay.local, sc)
-			lay = SL.place_direction(lay, sc.id, d, off)
 	return lay
 
 
@@ -343,7 +375,8 @@ func _draw_canvas():
 
 
 func _size_of(sc):
-	return "%d×%d" % [int(round(float(sc.w))), int(round(float(sc.h)))]
+	return "%.1f×%.1f cm · %d×%d px" % [float(sc.w) / 10.0, float(sc.h) / 10.0,
+		int(sc.px_w), int(sc.px_h)]
 
 
 func _label_of(sc):

@@ -48,7 +48,9 @@ const GVD_SESSION = preload("res://gvd_session.gd")
 # K17: planes puros de automatización de gvd (emisor local/receptor remoto por
 # ssh, `--position` del mapa, suspensión del vínculo Deskflow).
 const GVD_LAUNCH = preload("res://gvd_launch.gd")
-const PEER_CALL = preload("res://peer_call.gd")
+# Host.sc (no preload): la recarga transaccional conserva los preload cacheados y los
+# métodos nuevos de peer_call.gd no se verían hasta el próximo login.
+var PEER_CALL = Host.sc("res://peer_call.gd")
 const PEER_LINK = preload("res://peer_link.gd")
 const AUDIO_SEND = preload("res://audio_send.gd")
 const MENU_STYLE = preload("res://menu_style.gd")
@@ -574,9 +576,28 @@ func ui_scale(vp):
 	return clamp(grid_unit(vp) / GRID_BASE, 0.5, 4.0)
 
 
-# Mantiene la escala de UI sincronizada con el viewport (barato e idempotente).
+# --- Pantalla principal vs escritorio (span fisico) ----------------------------
+
+# Tamano de la PANTALLA PRINCIPAL (SPEC-physical-multi-monitor.md contrato 2): el
+# Frame, Hogar, Grupo, Vecindario, Expone y OSD se componen contra la principal, no
+# contra el viewport (que en span cubre el escritorio completo). Sin span, o con una
+# sola salida, coincide con el viewport: comportamiento identico al actual.
+func _screen_size():
+	if screen_size.x > 0.0 and screen_size.y > 0.0:
+		return screen_size
+	return get_viewport_rect().size
+
+
+# Rect del escritorio completo (envolvente de todas las salidas del span). Solo para
+# lo que debe cubrirlo: el Control de ventanas y el chrome (pueden vivir/arrastrarse
+# a una salida secundaria). Con una sola salida es el viewport.
+func _desktop_rect():
+	return Rect2(Vector2.ZERO, get_viewport_rect().size)
+
+
+# Mantiene la escala de UI sincronizada con la pantalla principal (barato e idempotente).
 func _sync_ui_scale():
-	var want = ui_scale(get_viewport_rect().size)
+	var want = ui_scale(_screen_size())
 	if abs(want - get_imgui_scale()) > 0.01:
 		imgui_scale = want
 	_sync_ui_font(want)
@@ -723,7 +744,7 @@ func cycle_wm_mode():
 
 
 func _default_axis():
-	return WM_UNITS.default_axis(_tile_rect(get_viewport_rect().size))
+	return WM_UNITS.default_axis(_tile_rect(_screen_size()))
 
 
 # Guarda la geometría flotante actual para restaurarla al volver a flotante. No
@@ -814,7 +835,7 @@ func _compute_float_layout(cr, units = null, s = 0.0):
 	if units == null:
 		units = _units()
 		s = _row_s(units)
-	var vp = get_viewport_rect().size
+	var vp = _screen_size()
 	for id in float_layout.ids_z():
 		if not tiles.has(id) or not hybrid.is_floating(id):
 			float_layout.remove(id)
@@ -842,6 +863,11 @@ func _compute_float_layout(cr, units = null, s = 0.0):
 		var fr = Rect2(local.position + off, local.size)
 		if wm_maximized.has(id):
 			fr = Rect2(cr.position.x + off.x, cr.position.y, cr.size.x, cr.size.y)
+		# Fase C: con span, una flotante puede vivir en una salida secundaria; su
+		# rect se reubica en coords GLOBALES de esa salida (fuera del mosaico).
+		if span_active:
+			_span_register_window(id)
+			fr = _span_float_frame(id, fr)
 		window_rects[id] = fr
 		# Con decoración del cliente (CSD: GTK4, etc.) no reservamos barra: el cliente
 		# dibuja su propia barra dentro del rect; el shell sólo gestiona geometría.
@@ -921,7 +947,7 @@ func _update_csd_hover(pos):
 		h = int(chrome_drag.get("id", -1)) if _is_csd(int(chrome_drag.get("id", -1))) else -1
 	else:
 		var scale = get_imgui_scale()
-		var gin = grid_unit(get_viewport_rect().size)
+		var gin = grid_unit(_screen_size())
 		for id in _hit_order_ids():
 			if id == fullscreen_id or minimized.has(id) or not tiles.has(id):
 				continue
@@ -1023,7 +1049,7 @@ func _chrome_pick(pos):
 		if _is_csd(id):
 			var maximized = wm_maximized.has(id) or maximize_state.has(id)
 			var cpart = WINDOW_CHROME.csd_hit(pos, fr, scale,
-				grid_unit(get_viewport_rect().size), maximized)
+				grid_unit(_screen_size()), maximized)
 			if cpart != "":
 				return {"id": id, "part": cpart}
 			if Rect2(fr).has_point(pos):
@@ -1284,6 +1310,12 @@ func _ready():
 	for v in ["SDL_AUDIODRIVER", "SDL_JOYSTICK_HIDAPI", "SDL_HIDAPI_LIBUSB"]:
 		OS.set_environment(v, "")
 
+	# Span fisico (SPEC-physical-multi-monitor): el worker de hotplug empieza a mirar
+	# las salidas del anfitrion. En pruebas/tests (--screenshot) o sin SWAYSOCK queda
+	# inerte; con una sola salida no cambia nada.
+	if screenshot_path == "":
+		_start_span_watch()
+
 	if Host.live_reload:
 		_adopt_windows()
 	else:
@@ -1353,11 +1385,11 @@ func _adopt_windows():
 				tiles.erase(id)
 		wm_units = []
 		if lay.has("units"):
-			wm_units = WM_UNITS.parse(lay.get("units", []), _tile_rect(get_viewport_rect().size))
+			wm_units = WM_UNITS.parse(lay.get("units", []), _tile_rect(_screen_size()))
 		else:
 			# Migración del layout viejo {groups, weights}: mismo eje por orientación.
 			wm_units = WM_UNITS.from_legacy(tiles, lay.get("groups", []), lay.get("weights", {}),
-				_tile_rect(get_viewport_rect().size))
+				_tile_rect(_screen_size()))
 		_prune_units()
 		hybrid = WM_HYBRID.new()
 		if lay.has("hybrid"):
@@ -1474,6 +1506,44 @@ var present_full = 0
 var debug_input = OS.get_environment("GDTK_DEBUG_INPUT") != ""
 
 
+# --- Span fisico (SPEC-physical-multi-monitor.md) ------------------------------
+# Tamano de la pantalla principal (cero = una sola salida -> viewport). `span_active`
+# indica que el viewport cubre el escritorio completo y la principal queda en (0,0).
+# El plan lo produce el worker de hotplug (swaymsg get_outputs) y lo aplica el shell
+# fuera del render; `span_phys_ids` mapea salida logica -> salida del compositor
+# embebido. Con GDTK_SPAN=0 o sin compositor multi-output queda todo inerte.
+var screen_size = Vector2.ZERO
+var span_active = false
+var span_plan = {}
+var span_phys_ids = {}
+var span_thread = null
+var span_req = null
+var span_last_sig = ""
+# Gate Fase 0 (plan multimonitor): el modo span lo pide Configuración > Monitores
+# (`span.enabled`); GDTK_SPAN=1 lo fuerza encendido y GDTK_SPAN=0 lo fuerza apagado
+# por encima del ajuste. Hasta medir el costo en hardware debil (Fase 0) el ajuste
+# arranca apagado por default.
+var span_env = OS.get_environment("GDTK_SPAN").strip_edges()  # "0" | "1" | ""
+var span_cfg_enabled = false
+var span_cfg_primary = ""
+var span_cfg_order = []
+var span_applied = false
+var span_next_ms = 0
+var span_mutex = Mutex.new()
+var span_mod = null
+var span_mod_path = "res://span_layout.gd"
+const SPAN_POLL_MS = 2000
+# Fase C (SPEC-embedded-multi-output §7): asignacion ventana -> salida logica del
+# span (`win_outputs`), posicion local de cada flotante dentro de su salida
+# (`win_out_local`, top-left) y layout normalizado salidas+ventanas
+# (`span_out_layout`). Solo se usan con span_active.
+var win_outputs = {}
+var win_out_local = {}
+var span_out_layout = {}
+var out_mod = null
+const OUT_MOD_PATH = "res://output_layout.gd"
+
+
 # Un commit Wayland puede traer capas/texturas nuevas (y con dmabuf el VisualServer
 # no se entera de que cambió el contenido): se rearma el frame siguiente.
 func _process(_delta):
@@ -1532,6 +1602,8 @@ func _process(_delta):
 	# swaymsg de ajustes de entrada: reap de Threads one-shot (bloqueó a lo sumo su
 	# propio Thread, no el frame).
 	_sway_exec_poll()
+	# Span fisico: worker de hotplug (swaymsg get_outputs), nunca en el render.
+	_span_tick(now)
 	_reap_rotate()
 	# Volumen/brillo: copia el estado del worker y mantiene vivo el OSD mientras se
 	# desvanece (mismo patrón que el resto de los workers).
@@ -1640,7 +1712,7 @@ func _imgui_frame():
 	view.visible = row
 	# Zoom (Grupo/Vecindario): la capa neighborhood_ui se usa para ambos niveles y se
 	# transforma según su nivel (escala/alfa de capa), visible también al cerrar.
-	var nb_vp = get_viewport_rect().size
+	var nb_vp = _screen_size()
 	neighborhood_ui.visible = current_activity == null and not expose and (zoom_level > 0 or zoom_f > 0.001)
 	if neighborhood_ui.visible:
 		var lt = ZOOM.layer_transform(zoom_level, zoom_f)
@@ -1655,7 +1727,7 @@ func _imgui_frame():
 	var id = _current_wayland_id()
 	_update_dialogs(id)
 	if tiles_ui != null:
-		tiles_ui.rect_size = get_viewport_rect().size
+		tiles_ui.rect_size = _desktop_rect().size
 		tiles_ui.refresh()
 	# Decoración por ventana (OpenStep): se redibuja con el tamaño de la vista.
 	for did in deco_nodes.keys():
@@ -1663,7 +1735,7 @@ func _imgui_frame():
 		if dnode != null and is_instance_valid(dnode):
 			dnode.refresh(view.rect_size)
 	if expose_bg != null:
-		expose_bg.rect_size = get_viewport_rect().size
+		expose_bg.rect_size = _screen_size()
 		expose_bg.visible = expose
 		if expose:
 			expose_bg.refresh()
@@ -1763,7 +1835,7 @@ func _row_s(units):
 	if home_slide_since >= 0:
 		var k = clamp(float(OS.get_ticks_msec() - home_slide_since) / TILE_ANIM_MS, 0.0, 1.0)
 		return lerp(home_slide_from, home_slide_to, _ease(k))
-	var vp = get_viewport_rect().size
+	var vp = _screen_size()
 	var a = float(n) if _at_home() else float(_focused_unit_index(units))
 	var s = a + pan / max(vp.x, 1.0)
 	# Desde el Hogar hacia "siguiente" la fila da la vuelta: entra por la izquierda.
@@ -1791,7 +1863,7 @@ func _home_vis(units):
 # Límites del paneo (px) desde la ranura `a`: hasta el Hogar por ambos lados; desde el
 # Hogar, una vuelta entera en cada sentido.
 func _pan_limits(units, a):
-	var vp = get_viewport_rect().size
+	var vp = _screen_size()
 	if _at_home():
 		return Vector2.ZERO  # el Hogar se deja por la cadena vertical, no por los costados
 	var n = float(units.size())
@@ -1821,7 +1893,7 @@ func _draw_home_alpha(alpha):
 
 # x del Hogar dentro de la fila: 0 = centrado en pantalla, ±ancho = fuera de vista.
 func _home_x(units):
-	var vp = get_viewport_rect().size
+	var vp = _screen_size()
 	return (float(units.size()) - _row_s(units)) * vp.x
 
 
@@ -1832,7 +1904,7 @@ func _home_x(units):
 func _compute_slide_layout():
 	tile_rects.clear()
 	var units = _units()
-	var vp = get_viewport_rect().size
+	var vp = _screen_size()
 	# Pantalla completa: la ventana ocupa todo; el resto queda fuera de pantalla.
 	if fullscreen_id >= 0 and tiles.has(fullscreen_id):
 		for id in tiles:
@@ -1914,7 +1986,7 @@ func _compute_handles():
 		hover_handle = null
 		resize_handle = null
 		return
-	var vp = get_viewport_rect().size
+	var vp = _screen_size()
 	for i in range(u.size() - 1):
 		var r = tile_rects.get(u[i])
 		if r == null:
@@ -1977,7 +2049,7 @@ func _resize_to(h, mouse_x):
 # según su eje con TILE_GAP. Lo usa el exposé para escalar cada ventana a su lugar real.
 func _unit_local_layout(members):
 	var out = {}
-	var vp = get_viewport_rect().size
+	var vp = _screen_size()
 	var area = _tile_rect(vp)
 	if members.size() == 1:
 		out[members[0]] = area
@@ -2013,7 +2085,7 @@ func _compute_expose_layout():
 		expose_sel = 0
 		return
 	expose_sel = int(clamp(expose_sel, 0, max(tiles.size() - 1, 0)))
-	var vp = get_viewport_rect().size
+	var vp = _screen_size()
 	var box = _tile_rect(vp)
 	var local = []
 	for u in range(n):
@@ -2255,7 +2327,7 @@ func _join_into(id, target_id, side):
 		hybrid.reanchor(id, anchor)
 		# Coloca la flotante dentro del área del destino (todos los escritorios
 		# comparten la caja local): encaja sin deformar y la sube al tope.
-		var box = _tile_rect(get_viewport_rect().size)
+		var box = _tile_rect(_screen_size())
 		var lr = float_layout.rect(id)
 		if lr != null:
 			float_layout.restore_one(id, lr, box)
@@ -2345,7 +2417,7 @@ func _expose_drag_card(id):
 	var d = expose_drag
 	if d == null or not d.moved or int(d.id) != id or expose_unit_cards.empty():
 		return null
-	var vp = get_viewport_rect().size
+	var vp = _screen_size()
 	var cur = tile_rects.get(id, Rect2(Vector2.ZERO, vp))
 	var local = cur.size
 	var ui = _expose_index_of_window(id)
@@ -2526,8 +2598,10 @@ func _content_fit(csize, ssize, cpos):
 
 
 func _update_tiles():
-	view.rect_size = get_viewport_rect().size
-	compositor.default_size = _tile_rect(view.rect_size).size
+	view.rect_size = _desktop_rect().size
+	# El default del compositor embebido sigue a la SALIDA PRINCIPAL: es el tamano
+	# de los clientes que no eligen salida (con span el viewport es el escritorio).
+	compositor.default_size = _tile_rect(_screen_size()).size
 	if expose:
 		_compute_expose_layout()
 	else:
@@ -2541,6 +2615,10 @@ func _update_tiles():
 			_free_deco(id)
 			tile_rects.erase(id)
 			expose_cards.erase(id)
+			# Fase C: no dejar la asignacion de salida de una ventana muerta (un id
+			# de toplevel reusado heredaria el output viejo).
+			win_outputs.erase(id)
+			win_out_local.erase(id)
 			if expose_hover == id:
 				expose_hover = -1
 			tile_anim.erase(id)
@@ -2878,7 +2956,7 @@ func _spawn_ghost(id, to_rect):
 	var rect = tile_rects.get(id)
 	if rect == null:
 		return
-	var vp = get_viewport_rect().size
+	var vp = _screen_size()
 	var vis = Rect2(Vector2.ZERO, vp).clip(rect)
 	if vis.size.x < 8.0 or vis.size.y < 8.0:
 		return
@@ -3077,7 +3155,7 @@ func _pan_by(amount):
 		return
 	if fullscreen_id >= 0:
 		return
-	var vp = get_viewport_rect().size
+	var vp = _screen_size()
 	var a = float(n) if _at_home() else float(_focused_unit_index(units))
 	pan_active = true
 	var lim = _pan_limits(units, a)
@@ -3090,7 +3168,7 @@ func _pan_by(amount):
 # su animación. Al soltar, swipe_model decide el snap (mitad del recorrido o fling).
 func _on_swipe(event):
 	var now = OS.get_ticks_msec()
-	var vp = get_viewport_rect().size
+	var vp = _screen_size()
 	var kind = int(event.device) / SWIPE_DEVICE
 	if kind == 1 and not swipe.active:
 		swipe.begin(int(event.device) % SWIPE_DEVICE, now)
@@ -3180,7 +3258,7 @@ func _wheel_vchain(dir):
 func _over_center_icon(p):
 	if not ((_at_home() and not apps_view) or zoom_level > 0):
 		return false
-	var vp = get_viewport_rect().size
+	var vp = _screen_size()
 	return ZOOM.center_icon_rect(zoom_f, vp, grid_unit(vp) * 0.90).has_point(p)
 
 
@@ -3263,7 +3341,7 @@ func _swipe_pan(p):
 	var n = units.size()
 	if n == 0:
 		return
-	var vp = get_viewport_rect().size
+	var vp = _screen_size()
 	var a = float(n) if _at_home() else float(_focused_unit_index(units))
 	pan_active = true
 	var lim = _pan_limits(units, a)
@@ -3288,7 +3366,7 @@ func _snap_pan(step = null):
 		return
 	var units = _units()
 	var n = units.size()
-	var vp = get_viewport_rect().size
+	var vp = _screen_size()
 	var a = float(n) if _at_home() else float(_focused_unit_index(units))
 	# `step` (gesto de 3 dedos) decide el destino por snap/fling; si no, el más cercano.
 	var delta = int(step) if step != null else int(round(pan / max(vp.x, 1.0)))
@@ -3358,7 +3436,7 @@ func _float_half(id, dir):
 		return
 	if hybrid.is_tiled(id):
 		set_window_mode(id, WM_HYBRID.FLOATING)
-	var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(get_viewport_rect().size)
+	var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(_screen_size())
 	if not float_layout.has(id):
 		if float_memory.has(id) and float_memory[id] != null:
 			float_layout.restore_one(id, float_memory[id], box)
@@ -4061,7 +4139,7 @@ func _draw_home(offset = 0.0):
 	if apps_view:
 		_draw_apps(offset)
 		return
-	var vp = get_viewport_rect().size
+	var vp = _screen_size()
 	set_next_window_pos(Vector2(offset, 0.0), true)
 	set_next_window_size(vp, true)
 	var flags = WINDOW_NO_DECORATION | WINDOW_NO_BACKGROUND | WINDOW_NO_MOVE | WINDOW_NO_SAVED_SETTINGS | WINDOW_NO_BRING_TO_FRONT_ON_FOCUS
@@ -4329,7 +4407,7 @@ func _maybe_start_rotate():
 # En X11 sin WM la ventana no sigue el tamaño del root al rotar; se ajusta acá.
 func _x11_follow_screen():
 	var scr = OS.get_screen_size()
-	if scr.x > 0.0 and scr != get_viewport_rect().size:
+	if scr.x > 0.0 and scr != _screen_size():
 		OS.window_size = scr
 		OS.window_position = Vector2.ZERO
 
@@ -4832,7 +4910,7 @@ func _activity_icon_of(app):
 
 
 func _draw_apps(offset = 0.0):
-	var vp = get_viewport_rect().size
+	var vp = _screen_size()
 	# Una celda libre a cada lado y sobre/bajo la zona desplazable.
 	var u = grid_unit(vp)
 	set_next_window_pos(Vector2(offset + u, u), true)
@@ -4901,7 +4979,7 @@ func _frame_origin_for_app(app):
 
 func _draw_activity():
 	# Sin barra fija: la actividad usa toda la pantalla y el Frame va encima.
-	var vp = get_viewport_rect().size
+	var vp = _screen_size()
 	if current_activity == null:
 		return
 	if current_activity.has("script") and activity_instance != null and activity_instance.has_method("draw"):
@@ -5449,7 +5527,7 @@ func _open_wayland(activity):
 	_pending_add(name, _expect_for(activity))
 	starting[name] = OS.get_ticks_msec()
 
-	var vp = get_viewport_rect().size
+	var vp = _screen_size()
 	view.rect_position = Vector2.ZERO
 	view.rect_size = vp
 	view.rect_clip_content = true
@@ -5460,7 +5538,11 @@ func _open_wayland(activity):
 	for i in range(1, activity.wayland.size()):
 		args.push_back(activity.wayland[i])
 
-	var pid = compositor.launch(cmd, args)
+	# Godot hace chdir a su proyecto (~/gdtk/shell): las apps arrancan desde $HOME.
+	args.insert(0, cmd)
+	args.insert(0, "cd \"$HOME\" 2>/dev/null; exec \"$0\" \"$@\"")
+	args.insert(0, "-c")
+	var pid = compositor.launch("sh", args)
 	last_launch_pid = pid
 	if pid < 0:
 		_pending_remove(name)
@@ -5504,7 +5586,9 @@ func _apply_settings():
 		ui_scale_factor = settings_bridge.ui_scale()
 		_apply_ui_scale_env()
 		_apply_input_settings()
+		_sync_directions_from_screen_layout()
 		_apply_deskflow_settings()
+		_apply_span_settings()
 
 
 # Exporta la escala de UI a los toolkits para que las apps (Firefox, GTK, Qt) no
@@ -5570,6 +5654,439 @@ func _sway_exec_poll():
 			_sway_exec_states.remove(i)
 
 
+# --- Span fisico (SPEC-physical-multi-monitor.md) ------------------------------
+# Fase E sin varias ventanas nativas: UNA ventana borderless cubre el envolvente de
+# los monitores; la principal queda en (0,0) y el resto se reordena a su derecha. El
+# worker de hotplug consulta `swaymsg -t get_outputs -r` fuera del render; el shell
+# aplica el plan (geometria sway, salidas del compositor embebido, tamano de la
+# pantalla principal). GDTK_SPAN=0, sin SWAYSOCK o sin binario multi-output: inerte.
+#
+# Este corte NO reubica ventanas en las salidas secundarias (Fase C de
+# SPEC-embedded-multi-output): el escritorio extendido queda visible y las salidas
+# logicas se anuncian, pero las ventanas siguen viviendo en la principal.
+
+func _span_model():
+	if span_mod == null:
+		span_mod = Host.sc(span_mod_path)
+	return span_mod
+
+
+func span_enabled():
+	return span_wanted()
+
+
+# Entre el ajuste de Configuración y las variables de entorno: SWAYSOCK es requisito
+# (sin compositor no hay salidas ni reordenado); GDTK_SPAN=0/1 fuerzan por encima del
+# ajuste persistido.
+func span_wanted():
+	if OS.get_environment("SWAYSOCK").strip_edges() == "":
+		return false
+	if span_env == "0":
+		return false
+	if span_env == "1":
+		return true
+	return span_cfg_enabled
+
+
+func _start_span_watch():
+	if not span_enabled():
+		return
+	span_next_ms = 0
+
+
+# Sondeo periodico desde _process: lanza el Thread si no hay uno en vuelo y reapa.
+func _span_tick(now):
+	if not span_enabled():
+		return
+	if span_thread != null:
+		_span_reap()
+		return
+	if now < span_next_ms:
+		return
+	span_next_ms = now + SPAN_POLL_MS
+	_span_request()
+
+
+func _span_request():
+	var state = {"done": false, "text": ""}
+	span_req = state
+	span_thread = Thread.new()
+	span_thread.start(self, "_span_work", state)
+
+
+func _span_work(state):
+	var out = []
+	# Bloqueante dentro del Thread (OS.execute con captura); el reap corre en el frame.
+	OS.execute("swaymsg", ["-t", "get_outputs", "-r"], true, out, true)
+	state.text = String(out[0]) if out.size() > 0 else ""
+	span_mutex.lock()
+	state.done = true
+	span_mutex.unlock()
+
+
+func _span_reap():
+	if span_thread == null or span_req == null:
+		return
+	span_mutex.lock()
+	var done = span_req.done
+	span_mutex.unlock()
+	if not done:
+		return
+	span_thread.wait_to_finish()
+	span_thread = null
+	var text = String(span_req.text)
+	span_req = null
+	if text.strip_edges() == "":
+		return
+	_span_apply(text)
+
+
+# Aplica un snapshot de `swaymsg -t get_outputs -r`: calcula el plan de span y, si
+# cambia respecto del ultimo aplicado, reordena sway, ajusta la ventana, mapea las
+# salidas del compositor embebido y fija la pantalla principal.
+func _span_apply(text):
+	var model = _span_model()
+	if model == null:
+		return
+	var outs = model.parse_outputs(text)
+	if outs.empty():
+		return
+	var forced = OS.get_environment("GDTK_SHELL_OUTPUT").strip_edges()
+	if forced == "":
+		forced = span_cfg_primary
+	var plan = model.plan(outs, forced, span_cfg_order)
+	if not bool(plan.ok):
+		return
+	var sig = _span_signature(plan)
+	if sig == span_last_sig and span_applied:
+		return
+	span_last_sig = sig
+	span_plan = plan
+	var single = not bool(plan.active)
+	span_active = not single
+	screen_size = Vector2.ZERO if single else plan.screen.size
+	# Sway: posicion de cada salida (principal a 0,0) + geometria de la ventana.
+	for cmd in model.position_commands(plan):
+		_sway_exec_async(cmd)
+	_sway_exec_async([model.single_window_command() if single
+		else model.span_window_command(plan.desktop)])
+	_span_sync_outputs(model.output_ops(plan))
+	_span_apply_transfer(plan)
+	span_applied = true
+	request_redraw()
+
+
+func _span_signature(plan):
+	var parts = [String(plan.primary), "1" if bool(plan.active) else "0"]
+	for e in plan.entries:
+		var r = e.rect
+		parts.append("%s@%d,%d,%d,%d" % [String(e.id), int(r.position.x),
+			int(r.position.y), int(r.size.x), int(r.size.y)])
+	return PoolStringArray(parts).join("|")
+
+
+# Crea/actualiza/quita las salidas logicas del compositor embebido para que los
+# clientes vean un wl_output por monitor fisico (con nombre estable y geometria del
+# span). No toca la principal (la crea wl_server_create).
+func _span_sync_outputs(ops):
+	if compositor == null or not compositor.has_method("add_output"):
+		return
+	var want = {}
+	for o in ops:
+		want[String(o.id)] = o
+	# Retirar las que ya no estan (nunca la principal).
+	for id in span_phys_ids.keys():
+		if not want.has(id):
+			compositor.remove_output(span_phys_ids[id])
+			span_phys_ids.erase(id)
+	var prim_id = 0
+	if compositor.has_method("get_primary_output_id"):
+		prim_id = int(compositor.get_primary_output_id())
+	for id in want.keys():
+		var o = want[id]
+		if bool(o.primary):
+			if prim_id > 0:
+				compositor.configure_output(prim_id, o.rect, o.scale)
+			continue
+		if span_phys_ids.has(id):
+			compositor.configure_output(span_phys_ids[id], o.rect, o.scale)
+		else:
+			var new_id = int(compositor.add_output(String(o.name), o.rect, o.scale, false))
+			if new_id > 0:
+				span_phys_ids[id] = new_id
+
+
+# Ajuste "span" de Configuración > Monitores: actualiza enabled/principal/orden y
+# fuerza una reaplicacion (la firma incluye principal y orden). Si se apago el
+# escritorio extendido, vuelve a una sola salida (fullscreen) sin reiniciar.
+func _apply_span_settings():
+	if settings_bridge == null or settings_bridge.model == null:
+		return
+	var s = settings_bridge.span()
+	var changed = bool(s.enabled) != span_cfg_enabled \
+		or String(s.primary) != span_cfg_primary \
+		or str(s.order) != str(span_cfg_order)
+	span_cfg_enabled = bool(s.enabled)
+	span_cfg_primary = String(s.primary)
+	span_cfg_order = s.order
+	if not span_wanted():
+		if span_applied or span_active or not span_phys_ids.empty():
+			_span_off_now()
+	elif changed:
+		# La firma incluye principal y orden: forzar una reaplicacion.
+		span_last_sig = ""
+		span_next_ms = 0
+
+
+# Vuelve a una sola salida: quita las salidas fisicas del compositor embebido y, si
+# el span estaba aplicado, pide fullscreen. Idempotente.
+func _span_off_now():
+	# Fase C: antes de retirar las salidas, devolver sus ventanas a la principal.
+	for wid in win_outputs.keys():
+		if _span_window_output(wid) != "primary":
+			_return_window_to_primary(int(wid))
+	win_outputs.clear()
+	win_out_local.clear()
+	span_out_layout = {}
+	if compositor != null and compositor.has_method("remove_output"):
+		for id in span_phys_ids.keys():
+			compositor.remove_output(span_phys_ids[id])
+	span_phys_ids.clear()
+	if span_applied:
+		var model = _span_model()
+		if model != null:
+			_sway_exec_async([model.single_window_command()])
+	span_active = false
+	screen_size = Vector2.ZERO
+	span_applied = false
+	span_last_sig = ""
+	request_redraw()
+
+
+# Estado del span para el RPC `state` (JSON-friendly).
+func span_state():
+	var model = _span_model()
+	return {"active": span_active, "env": span_env, "enabled": span_cfg_enabled,
+		"primary_name": span_cfg_primary, "order": span_cfg_order,
+		"primary": [_screen_size().x, _screen_size().y],
+		"desktop": [get_viewport_rect().size.x, get_viewport_rect().size.y],
+		"outputs": model.state_entries(span_plan) if model != null else []}
+
+
+# --- Fase C: ventana -> salida del span --------------------------------------
+# El modelo puro (output_layout.gd) decide; aca solo se mantiene el mapeo, se
+# traduce a la API nativa del compositor y se reubican los rects globales. Todo
+# inerte con span apagado (comportamiento identico al actual).
+
+func _output_model():
+	if out_mod == null:
+		out_mod = Host.sc(OUT_MOD_PATH)
+	return out_mod
+
+
+func _span_register_window(id):
+	if not win_outputs.has(id):
+		win_outputs[id] = "primary"
+
+
+func _span_window_output(id):
+	if not win_outputs.has(id):
+		return "primary"
+	return String(win_outputs[id])
+
+
+func _span_output_rect(oid):
+	var key = String(oid)
+	for o in span_out_layout.get("outputs", []):
+		if String(o.id) == key:
+			return Rect2(o.rect)
+	for e in span_plan.get("entries", []):
+		if String(e.id) == key:
+			return Rect2(e.rect)
+	if key == "primary":
+		return Rect2(Vector2.ZERO, _screen_size())
+	return Rect2()
+
+
+func _span_primary_rect():
+	return _span_output_rect("primary")
+
+
+func _span_native_output_id(oid):
+	if String(oid) == "primary":
+		if compositor != null and compositor.has_method("get_primary_output_id"):
+			return int(compositor.get_primary_output_id())
+		return 0
+	return int(span_phys_ids.get(String(oid), 0))
+
+
+func _span_set_toplevel_output(id, oid):
+	if compositor == null or not compositor.has_method("set_toplevel_output"):
+		return
+	var native = _span_native_output_id(oid)
+	if native > 0:
+		compositor.set_toplevel_output(int(id), native)
+
+
+# Caja LOCAL de una ventana flotante para encajar/arrastrar: la salida a la que
+# pertenece (0,0 + su tamano), o la caja de la principal si no tiene salida.
+func _span_float_box(id):
+	var oid = _span_window_output(id)
+	if oid != "primary":
+		var r = _span_output_rect(oid)
+		if r.size.x > 0.0 and r.size.y > 0.0:
+			return Rect2(Vector2.ZERO, r.size)
+	return wm_box if wm_box.size.x > 0.0 else _tile_rect(_screen_size())
+
+
+# Rect GLOBAL definitivo de una flotante en span: para la principal conserva el
+# rect del mosaico/row (ya global, en (0,0)); para una secundaria usa la posicion
+# local recordada dentro de su salida.
+func _span_float_frame(id, base_fr):
+	var oid = _span_window_output(id)
+	if oid == "primary":
+		win_out_local[id] = Vector2(base_fr.position) - _span_primary_rect().position
+		return base_fr
+	var out_rect = _span_output_rect(oid)
+	if out_rect.size.x <= 0.0 or out_rect.size.y <= 0.0:
+		return base_fr
+	# Maximizada en una secundaria: llena esa salida (la spec §5 pide que
+	# maximize/fullscreen usen el rect de su output, no el viewport principal).
+	if wm_maximized.has(id):
+		return Rect2(out_rect.position, out_rect.size)
+	var local = win_out_local.get(id, null)
+	if local == null:
+		local = Vector2(base_fr.position) - out_rect.position
+	var OL = _output_model()
+	if OL == null:
+		return base_fr
+	local = OL.clamp_local(Vector2(local), base_fr.size, _span_output_desc(oid))
+	win_out_local[id] = local
+	return Rect2(out_rect.position + local, base_fr.size)
+
+
+func _span_output_desc(oid):
+	for o in span_out_layout.get("outputs", []):
+		if String(o.id) == String(oid):
+			return o
+	return _span_primary_rect()
+
+
+# Cruce por arrastre: el puntero decide la salida destino. Reasigna con
+# move_window, avisa al compositor y deja la ventana 1:1 bajo el cursor.
+func _span_drag_move(id, pointer, desired):
+	var OL = _output_model()
+	if OL == null:
+		return
+	# Una fullscreen no cruza por arrastre hasta salir de fullscreen (spec §7).
+	if id == fullscreen_id:
+		return
+	_span_register_window(id)
+	var layout = {"outputs": span_out_layout.get("outputs", []), "windows": win_outputs}
+	var oid = _span_window_output(id)
+	var target = OL.output_at(layout, pointer)
+	if target == "":
+		target = oid
+	if target != oid:
+		var res = OL.move_window(layout, id, target)
+		if bool(res.ok):
+			span_out_layout = res.layout
+			win_outputs = _span_windows_from(res.layout.windows)
+			_span_set_toplevel_output(id, target)
+			oid = target
+	var out_rect = _span_output_rect(oid)
+	var size = window_rects.get(id, Rect2()).size
+	if size.x <= 0.0 or size.y <= 0.0:
+		var lr = float_layout.rect(id)
+		size = lr.size if lr != null else Vector2(400.0, 300.0)
+	var local = _output_model().clamp_local(Vector2(desired) - out_rect.position,
+		size, _span_output_desc(oid))
+	win_out_local[id] = local
+	# En la principal el rect autoritativo es float_layout (off del row = 0 al
+	# estar el escritorio enfocado): reflejarlo para que el frame siguiente no
+	# salte a una posicion vieja.
+	if oid == "primary" and float_layout.has(id):
+		float_layout.set_rect(id, Rect2(out_rect.position + local, size))
+	_apply_live_float_move(id, Rect2(out_rect.position + local, size))
+
+
+# Accion de menu: mover una ventana a `oid` conservando su posicion relativa.
+func _span_move_window_to(id, oid):
+	if not span_active or not tiles.has(id) or not hybrid.is_floating(id):
+		return
+	var OL = _output_model()
+	if OL == null:
+		return
+	_span_register_window(id)
+	var layout = {"outputs": span_out_layout.get("outputs", []), "windows": win_outputs}
+	var from = _span_window_output(id)
+	var fr = window_rects.get(id, null)
+	var size = fr.size if fr != null else Vector2(400.0, 300.0)
+	var res = OL.move_window(layout, id, oid)
+	if not bool(res.ok):
+		return
+	var tr = OL.transfer_rect(layout, from, oid, Rect2(fr.position, size) if fr != null
+		else Rect2(_span_output_rect(oid).position, size))
+	span_out_layout = res.layout
+	win_outputs = _span_windows_from(res.layout.windows)
+	_span_set_toplevel_output(id, oid)
+	var target_rect = tr.rect if bool(tr.ok) else Rect2(_span_output_rect(oid).position, size)
+	win_out_local[id] = target_rect.position - _span_output_rect(oid).position
+	if String(oid) == "primary" and float_layout.has(id):
+		# La principal usa el rect de float_layout (row/mosaico): reubicarlo ahi.
+		float_layout.set_rect(id, Rect2(target_rect.position, target_rect.size))
+	_apply_live_float_move(id, Rect2(target_rect.position, target_rect.size))
+	request_redraw()
+
+
+# Devuelve una ventana a la principal al retirarse su salida (spec §4/§9).
+func _return_window_to_primary(id):
+	var prim = _span_primary_rect()
+	var fr = window_rects.get(id, null)
+	var size = fr.size if fr != null else Vector2(400.0, 300.0)
+	var desired = Vector2(fr.position) if fr != null else prim.position + Vector2(8.0, 8.0)
+	desired.x = clamp(desired.x, prim.position.x, max(prim.position.x, prim.end.x - size.x))
+	desired.y = clamp(desired.y, prim.position.y, max(prim.position.y, prim.end.y - size.y))
+	win_outputs[id] = "primary"
+	win_out_local[id] = desired - prim.position
+	if float_layout.has(id):
+		float_layout.set_rect(id, Rect2(desired, size))
+	_span_set_toplevel_output(id, "primary")
+
+
+# reconcile_outputs devuelve las ventanas con ids String (vienen del diccionario
+# normalizado); el shell las maneja con el id int del toplevel.
+func _span_windows_from(d):
+	var out = {}
+	for k in d.keys():
+		out[int(k)] = String(d[k])
+	return out
+
+
+# Reconcilia las ventanas con el plan nuevo: agrega salidas, retira las ausentes
+# y devuelve sus ventanas a la principal.
+func _span_apply_transfer(plan):
+	var OL = _output_model()
+	if OL == null:
+		return
+	var descs = plan.get("descriptors", [])
+	if typeof(descs) != TYPE_ARRAY or descs.empty():
+		return
+	var prev = span_out_layout
+	if typeof(prev) != TYPE_DICTIONARY or prev.empty():
+		prev = {"outputs": descs, "windows": win_outputs}
+	else:
+		# Fusionar las ventanas vivas (pudieron registrarse desde el ultimo plan).
+		prev = {"outputs": prev.outputs, "windows": win_outputs}
+	var rec = OL.reconcile_outputs(prev, descs)
+	if not bool(rec.ok):
+		return
+	span_out_layout = rec.layout
+	win_outputs = _span_windows_from(rec.layout.windows)
+	for wid in rec.get("moved", []):
+		_return_window_to_primary(int(wid))
+
+
 func _apply_deskflow_settings():
 	if settings_bridge == null or settings_bridge.model == null:
 		return
@@ -5606,6 +6123,8 @@ func _apply_deskflow_settings():
 	var key = effective_mode + "|" + String(cfg.get("host", "")) + "|" + str(int(cfg.get("port", 24800))) \
 		+ "|" + local + "|" + service + "|auto=" + str(bool(cfg.get("auto", false))) \
 		+ "|" + _settings_layout_key()
+	var deskflow_was_configured = _deskflow_settings_key != ""
+	var config_changed = deskflow_was_configured and key != _deskflow_settings_key
 	var writes = _deskflow_config_writes(effective_mode, cfg, home, local)
 	if writes.empty():
 		if _svc_thread != null and _service_running("Deskflow"):
@@ -5613,9 +6132,6 @@ func _apply_deskflow_settings():
 		return
 	var auto_key = key + "|auto=" + str(bool(cfg.get("auto", false)))
 	var auto = bool(cfg.get("auto", false))
-	if auto and _svc_thread == null:
-		_write_texts_async(writes)
-		return
 	if key == _deskflow_settings_key:
 		# Ajustes sin cambios: sólo rearma el deseo de autoarranque (el tick arranca).
 		if auto and auto_key != _deskflow_auto_key:
@@ -5631,7 +6147,11 @@ func _apply_deskflow_settings():
 		_deskflow_arm()
 	else:
 		_deskflow_want = false
-	_write_texts_async(writes)
+	# En una recarga transaccional el servicio se transfiere al shell candidato,
+	# pero su cache de configuración empieza vacío. También debe releer el archivo.
+	var reload_running = _service_running("Deskflow") \
+		and (config_changed or not deskflow_was_configured)
+	_write_texts_async(writes, "", null, reload_running)
 
 
 # Marca que el autoarranque quiere el servicio corriendo y difiere el primer intento
@@ -6069,23 +6589,100 @@ func _set_host_direction(host_id, dir):
 # El equipo se soltó en un ángulo alrededor del local (vista Grupo): lado + posición a lo
 # largo del borde (0..1). Conserva el resto de la entrada (modo, etc.) y queda confirmado;
 # Configuración → Pantallas lo usa para ubicar la pantalla.
+func _screen_layout_host(layout, host_id, create = true):
+	var lay = SCREEN_LAYOUT.normalize_layout(layout)
+	var id = String(host_id)
+	var direct = SCREEN_LAYOUT.screen_by_id(lay, id)
+	if direct != null:
+		return {"layout": lay, "screen": direct}
+	var name = _peer_name_for(id)
+	for i in range(lay.screens.size()):
+		var sc = lay.screens[i]
+		if String(sc.get("label", "")).to_lower() == name.to_lower() \
+				or String(sc.get("peer", "")).to_lower() == name.to_lower():
+			sc.id = id
+			sc.label = name
+			sc.peer = name
+			lay.screens[i] = sc
+			return {"layout": lay, "screen": sc}
+	if not create:
+		return {"layout": lay, "screen": null}
+	var sc2 = SCREEN_LAYOUT.default_screen(id, name, false)
+	sc2.peer = name
+	lay.screens.append(sc2)
+	return {"layout": lay, "screen": sc2}
+
+
+func _write_screen_layout(layout):
+	if settings_bridge == null or settings_bridge.model == null:
+		return
+	var lay = SCREEN_LAYOUT.normalize_layout(layout)
+	settings_bridge.settings["screens"] = lay
+	settings_bridge.write_atomic(settings_bridge.settings_path(),
+		settings_bridge.model.to_json(settings_bridge.settings))
+
+
+# settings["screens"] es la fuente canonica. host_directions queda como proyeccion
+# compatible para Grupo/gvd y conserva sólo metadatos de pareo ajenos a la geometria.
+func _sync_directions_from_screen_layout():
+	if settings_bridge == null:
+		return
+	var raw_layout = settings_bridge.settings.get("screens", {})
+	var legacy = typeof(raw_layout) != TYPE_DICTIONARY or int(raw_layout.get("version", 1)) < SCREEN_LAYOUT.VERSION
+	var lay = SCREEN_LAYOUT.normalize_layout(raw_layout)
+	var changed_layout = legacy
+	for hid in host_directions.keys():
+		var mapped = _screen_layout_host(lay, String(hid), false)
+		if mapped.screen != null and SCREEN_LAYOUT.to_json(mapped.layout) != SCREEN_LAYOUT.to_json(lay):
+			lay = mapped.layout
+			changed_layout = true
+	var derived = SCREEN_LAYOUT.to_host_directions(lay)
+	var next = host_directions.duplicate(true)
+	for sc in lay.screens:
+		var id = String(sc.id)
+		var old = next.get(id, {})
+		old = old.duplicate() if typeof(old) == TYPE_DICTIONARY else {}
+		if legacy and bool(old.get("input", false)):
+			sc.share.input = true
+			changed_layout = true
+		if derived.has(id):
+			for k in derived[id].keys():
+				old[k] = derived[id][k]
+		else:
+			old["direction"] = "none"
+		if bool(sc.get("share", {}).get("input", false)):
+			old["input"] = true
+		else:
+			old.erase("input")
+		next[id] = DIRECTIONS_MODEL.sanitize_entry(old)
+	if str(next) != str(host_directions):
+		host_directions = next
+		_refresh_direction_views()
+		_persist_directions()
+	if changed_layout:
+		_write_screen_layout(lay)
+
+
 func _set_host_placement(host_id, side, along):
 	var id = String(host_id)
 	if id == "":
 		return
-	var base = host_directions.get(id, {})
-	base = base.duplicate() if typeof(base) == TYPE_DICTIONARY else {}
-	base["direction"] = String(side)
-	base["along"] = clamp(float(along), 0.0, 1.0)
-	base["confirm"] = "confirmed"
-	if not base.has("mode"):
-		base["mode"] = "extend"
-	var entry = DIRECTIONS_MODEL.sanitize_entry(base)
-	if String(entry.get("direction", "none")) == "none":
+	if settings_bridge == null:
 		return
-	host_directions[id] = entry
-	_refresh_direction_views()
-	_persist_directions()
+	var found = _screen_layout_host(settings_bridge.settings.get("screens", {}), id, true)
+	var lay = found.layout
+	var sc = found.screen
+	var d = String(side)
+	if sc == null or not SCREEN_LAYOUT.valid_direction(d) or d == "none":
+		return
+	var off = SCREEN_LAYOUT.offset_px(d, clamp(float(along), 0.0, 1.0), lay.local, sc)
+	lay = SCREEN_LAYOUT.place_direction(lay, id, d, off)
+	_write_screen_layout(lay)
+	_sync_directions_from_screen_layout()
+	# Esta ruta ya mutó el snapshot del puente antes de escribirlo; su poll no verá
+	# una revisión nueva. Aplicar ahora para regenerar rangos/conf y reiniciar el
+	# servicio con la topología que acaba de dibujar Grupo.
+	_apply_deskflow_settings()
 	request_redraw()
 
 
@@ -6515,10 +7112,9 @@ func _run_deskflow_server(host_id, plan):
 
 
 # --- Aplicar layout de Deskflow (K5) -----------------------------------------
-# Recibe el payload del editor puro: links {direction, peer, host} y, para las
-# direcciones que se quitaron, {direction:"none", host}. Persiste las MISMAS
-# direcciones en host_directions (fuente única: de ahí derivan gvd y Deskflow)
-# con estado "confirmed", regenera ~/.config/Deskflow/deskflow-server.conf (con
+# Compatibilidad con el editor cardinal anterior: recibe links {direction, peer,
+# host}. La vista Grupo nueva escribe settings["screens"] directamente; esta ruta
+# conserva host_directions para el editor antiguo y regenera el mismo conf (con
 # backup .bak) y reinicia el servicio. Nunca bloquea el hilo de render: la
 # escritura va a un Thread de un solo uso reapeado por _plan_poll, que al
 # terminar reinicia con el ciclo de vida existente (_service_running/
@@ -6685,7 +7281,7 @@ func _write_text_work(userdata):
 
 # Varias escrituras atómicas en un solo Thread (servidor Deskflow: layout barrier +
 # ajustes). Mismo reap en _plan_poll que _write_text_async.
-func _write_texts_async(entries, then_toggle = "", then_launch = null):
+func _write_texts_async(entries, then_toggle = "", then_launch = null, restart_deskflow = false):
 	var writes = []
 	if typeof(entries) == TYPE_ARRAY:
 		for e in entries:
@@ -6703,7 +7299,8 @@ func _write_texts_async(entries, then_toggle = "", then_launch = null):
 			_launch_tracked(String(launch.get("key", "")), String(launch.get("cmd", "")),
 				launch.get("args", []))
 		return
-	var state = {"done": false, "then_toggle": t, "then_launch": launch}
+	var state = {"done": false, "then_toggle": t, "then_launch": launch,
+		"then_restart_deskflow": bool(restart_deskflow)}
 	var th = Thread.new()
 	_plan_write_threads.append(th)
 	_plan_write_states.append(state)
@@ -6879,8 +7476,8 @@ func _kill_pantalla_receivers():
 
 # Abre el receptor local en un tile: reutiliza la actividad wayland "Pantalla"
 # con el argv calculado.
-func _open_pantalla_window(gvd_path, has_sway, port):
-	var plan = GVD_LAUNCH.local_recv_argv(gvd_path, has_sway, port)
+func _open_pantalla_window(gvd_path, has_sway, port, video = Vector2()):
+	var plan = GVD_LAUNCH.local_recv_argv(gvd_path, has_sway, port, video)
 	if not bool(plan.get("ok", false)):
 		activity_error = "pantalla: " + String(plan.get("error", ""))
 		return
@@ -7070,7 +7667,7 @@ func _pantalla_fit_poll():
 			continue
 		if hybrid.is_tiled(id):
 			set_window_mode(id, WM_HYBRID.FLOATING)
-		var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(get_viewport_rect().size)
+		var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(_screen_size())
 		var center = null
 		if float_layout.has(id) and _pantalla_fitted.has(id):
 			var cur = float_layout.rect(id)
@@ -7148,7 +7745,7 @@ func _peer_gvd_open(port, _from, hid = "", video = Vector2()):
 	if _pantalla_window_ids().empty():
 		_pending_remove("Pantalla")
 		starting.erase("Pantalla")
-	_open_pantalla_window(path, _has_sway_socket(), int(port))
+	_open_pantalla_window(path, _has_sway_socket(), int(port), video)
 	return true
 
 
@@ -7176,25 +7773,63 @@ func _peer_gvd_send(_port, _target):
 # ponytail: la topología incluye todas las pantallas ubicadas, no sólo las encendidas;
 # un vecino apagado no conecta su cliente, así que no recibe el puntero.
 func _group_input_on(host_id):
-	var e = host_directions.get(String(host_id), {})
-	return typeof(e) == TYPE_DICTIONARY and bool(e.get("input", false))
+	return _screen_share_on(host_id, "input")
+
+
+func _screen_share_on(host_id, kind):
+	if settings_bridge == null:
+		return false
+	var found = _screen_layout_host(settings_bridge.settings.get("screens", {}), host_id, false)
+	var sc = found.screen
+	return sc != null and bool(sc.get("share", {}).get(String(kind), false))
+
+
+func _screen_share_set(host_id, kind, on):
+	if settings_bridge == null:
+		return false
+	var found = _screen_layout_host(settings_bridge.settings.get("screens", {}), host_id, bool(on))
+	if found.screen == null:
+		return false  # apagar algo que nunca se encendió: nada que escribir
+	var lay = SCREEN_LAYOUT.set_share(found.layout, found.screen.id, kind, on)
+	_write_screen_layout(lay)
+	return true
+
+
+func _group_screen_on(host_id):
+	return _screen_share_on(host_id, "screen")
+
+
+func _group_screen_set(host_id, on, action = null):
+	var id = String(host_id)
+	if not _screen_share_set(id, "screen", on):
+		return
+	if on:
+		if action != null and not _screen_session_active(id):
+			_run_host_plan(id, action)
+	else:
+		_stop_gvd_screen(id)
+	request_redraw()
 
 
 func _group_input_set(host_id, on):
 	var id = String(host_id)
+	_screen_share_set(id, "input", on)
 	var e = host_directions.get(id, null)
-	if typeof(e) != TYPE_DICTIONARY:
-		return
-	e = e.duplicate()
-	if on:
-		e["input"] = true
-	else:
-		e.erase("input")
-	host_directions[id] = DIRECTIONS_MODEL.sanitize_entry(e)
-	_persist_directions()
+	# El dockapp "Compartiendo" corta por nombre de equipo, que puede no estar en
+	# host_directions: aun así hay que apagar el servicio (antes salía acá y quedaba).
+	if typeof(e) == TYPE_DICTIONARY:
+		e = e.duplicate()
+		if on:
+			e["input"] = true
+		else:
+			e.erase("input")
+		host_directions[id] = DIRECTIONS_MODEL.sanitize_entry(e)
+		_persist_directions()
 	var any = false
-	for k in host_directions.keys():
-		if _group_input_on(k):
+	var lay = SCREEN_LAYOUT.normalize_layout(settings_bridge.settings.get("screens", {})) \
+		if settings_bridge != null else {"screens": []}
+	for sc in lay.screens:
+		if bool(sc.get("share", {}).get("input", false)):
 			any = true
 			break
 	_deskflow_write("share_here" if any else "off", "")
@@ -7319,10 +7954,15 @@ func _peer_clip_set(text):
 # Audio: túnel PulseAudio/PipeWire (`pactl`, modelo audio_send.gd). El receptor abre
 # module-native-protocol-tcp sólo para la IP del emisor; el emisor crea un
 # module-tunnel-sink hacia él, lo pone por omisión y muda los streams. Un destino a la
-# vez, no se persiste. Todo lo bloqueante (peer, pactl) corre en Threads de un solo uso (_bg).
+# vez. La preferencia persiste; todo lo bloqueante (peer, pactl) corre en Threads
+# de un solo uso (_bg).
 var _audio_mutex = Mutex.new()
 var _audio_send = {}   # emisor: {hid, module, sink, prev}
 var _audio_recv = {}   # receptor: {hid, module}
+var _sharing_retry_at = {}
+var _sharing_poll_at = 0
+const SHARING_RETRY_MS = 10000
+const SHARING_POLL_MS = 1000
 var _bg_threads = []
 
 
@@ -7361,10 +8001,7 @@ func _audio_status_changed():
 
 
 func _group_audio_on(host_id):
-	_audio_mutex.lock()
-	var on = String(_audio_send.get("hid", "")) == String(host_id)
-	_audio_mutex.unlock()
-	return on
+	return _screen_share_on(host_id, "audio")
 
 
 func _group_audio_set(host_id, on):
@@ -7379,7 +8016,46 @@ func _group_audio_set(host_id, on):
 			host += ".local"
 		target = {"id": String(host_id), "host": host, "port": int(ep.port),
 			"token": _peer_token_get(host_id), "me": _local_hid()}
+	_screen_share_set(host_id, "audio", on)
 	_bg("_audio_work", target)
+
+
+# Las preferencias sobreviven al shell. Si un par vuelve a aparecer, se reconcilia
+# el estado deseado sin bloquear ni crear un ciclo de vida paralelo.
+func _sharing_reconcile():
+	if settings_bridge == null or neighborhood_ui == null:
+		return
+	var now = OS.get_ticks_msec()
+	if now < _sharing_poll_at:
+		return
+	_sharing_poll_at = now + SHARING_POLL_MS
+	var lay = SCREEN_LAYOUT.normalize_layout(settings_bridge.settings.get("screens", {}))
+	for sc in lay.screens:
+		var id = String(sc.id)
+		if _neighborhood_host(id) == null:
+			continue
+		if bool(sc.share.get("screen", false)) and not _screen_session_active(id):
+			var skey = id + ":screen"
+			if now >= int(_sharing_retry_at.get(skey, 0)):
+				_sharing_retry_at[skey] = now + SHARING_RETRY_MS
+				var host = _neighborhood_host(id)
+				for action in neighborhood_ui._host_actions(host, "confirmed"):
+					if String(action.get("id", "")) == "share_my_screen" \
+							and bool(action.get("enabled", false)):
+						_start_gvd_screen(id, action)
+						break
+		if bool(sc.share.get("audio", false)) and not _group_audio_runtime_on(id):
+			var akey = id + ":audio"
+			if now >= int(_sharing_retry_at.get(akey, 0)):
+				_sharing_retry_at[akey] = now + SHARING_RETRY_MS
+				_group_audio_set(id, true)
+
+
+func _group_audio_runtime_on(host_id):
+	_audio_mutex.lock()
+	var on = String(_audio_send.get("hid", "")) == String(host_id)
+	_audio_mutex.unlock()
+	return on
 
 
 # Thread: apaga el envío actual (si hay) y, si `t` trae destino, enciende hacia él.
@@ -7482,8 +8158,14 @@ var _window_input_buttons = {}
 var _window_input_keys = {}
 var _window_input_last_send = 0
 var _window_input_last_keepalive = 0
+# Stream persistente cliente→emisor (un solo lote en vuelo, igual que antes). El
+# peer vive entre lotes y se cierra por idle o al caer; lo usa sólo el Thread worker.
+var _window_input_stream_peer = null
+var _window_input_stream_used = 0
+var _window_input_stream_off = ""   # hid del par con shell viejo (sin window_input_stream)
 const WINDOW_INPUT_KEEPALIVE_MS = 500
 const WINDOW_INPUT_STALE_MS = 1800
+const WINDOW_INPUT_STREAM_IDLE_MS = 10000
 
 
 func _window_input_is_hold_button(button):
@@ -7511,8 +8193,16 @@ func _group_drop_window(wid, global_pos):
 	if not bool(t.online):
 		activity_error = "compartir: " + String(t.name) + " está apagado"
 		return true
+	# El bloque puede venir de la sección de minimizadas del Frame. Restaurarlo y
+	# enfocarlo antes de crear window_cast fuerza un frame actual de la aplicación
+	# y evita que el receptor arranque mostrando el último buffer congelado.
+	if minimized.has(int(wid)):
+		_focus_tile(int(wid))
 	_group_share_window(String(t.id), int(wid))
 	return true
+
+
+const WINDOW_CAST_FPS = 30   # tope de cadencia de la ventana compartida (captura y emisor)
 
 
 func _group_share_window(hid, wid):
@@ -7532,11 +8222,11 @@ func _group_share_window(hid, wid):
 	var path = dir.plus_file("win-" + AUDIO_SEND.sink_name(hid).replace("gdtk_send_", "") + ".frames")
 	var cast = WINDOW_CAST.new()
 	add_child(cast)
-	if not cast.start(compositor, wid, path, 20):
+	if not cast.start(compositor, wid, path, WINDOW_CAST_FPS):
 		cast.queue_free()
 		activity_error = "compartir: la ventana todavía no tiene tamaño"
 		return
-	var sp = GVD_LAUNCH.window_send_argv(gvd_path, String(target.peer), path, 20)
+	var sp = GVD_LAUNCH.window_send_argv(gvd_path, String(target.peer), path, WINDOW_CAST_FPS)
 	if not bool(sp.get("ok", false)):
 		cast.stop()
 		cast.queue_free()
@@ -7647,13 +8337,32 @@ func _window_input_poll():
 		var hid = String(_window_input_state.get("hid", ""))
 		if token != "":
 			_peer_token_set(hid, token)
+		# El worker devuelve el peer del stream si sigue sano (null si no); y avisa si
+		# el par no soporta el método nuevo para no reintentar el handshake cada lote.
+		_window_input_stream_peer = _window_input_state.get("peer", null)
+		if _window_input_stream_peer != null:
+			_window_input_stream_used = OS.get_ticks_msec()
+		if bool(_window_input_state.get("old", false)):
+			_window_input_stream_off = hid
 		_window_input_thread = null
 		_window_input_state = null
 	var now = OS.get_ticks_msec()
+	# Idle: cerrar el stream sin datos (el servidor también lo reapea a los ~10 s).
+	if _window_input_stream_peer != null \
+			and now - _window_input_stream_used > WINDOW_INPUT_STREAM_IDLE_MS:
+		PEER_CALL.close_peer(_window_input_stream_peer)
+		_window_input_stream_peer = null
+	# Cambió (o terminó) el par compartido: volver a intentar el método nuevo.
+	if _window_input_stream_off != "" and _window_input_stream_off != _pantalla_sender:
+		_window_input_stream_off = ""
 	if (not _window_input_buttons.empty() or not _window_input_keys.empty()) \
 			and now - _window_input_last_keepalive >= WINDOW_INPUT_KEEPALIVE_MS:
 		_window_input_enqueue({"kind": "keepalive"})
 		_window_input_last_keepalive = now
+	# Un lote en vuelo: si el worker anterior no terminó, se espera (misma compuerta
+	# que había con una conexión por lote; el stream sólo evita reconectar).
+	if _window_input_thread != null:
+		return
 	if now - _window_input_last_send < 16:
 		return
 	_window_input_mutex.lock()
@@ -7670,13 +8379,18 @@ func _window_input_poll():
 	var ep = _peer_endpoint_for(hid)
 	if not bool(ep.get("ok", false)):
 		return
-	var state = {"done": false, "token": "", "hid": hid}
+	var use_old = _window_input_stream_off == hid
+	if use_old and _window_input_stream_peer != null:
+		PEER_CALL.close_peer(_window_input_stream_peer)
+		_window_input_stream_peer = null
+	var state = {"done": false, "token": "", "hid": hid, "peer": null, "old": use_old}
 	_window_input_state = state
 	_window_input_thread = Thread.new()
 	_window_input_last_send = now
 	_window_input_thread.start(self, "_window_input_work", {"state": state,
 		"host": String(ep.peer), "port": int(ep.port), "hid": hid,
-		"token": _peer_token_get(hid), "events": events})
+		"token": _peer_token_get(hid), "events": events,
+		"peer": null if use_old else _window_input_stream_peer, "old": use_old})
 
 
 var _window_input_last_err = ""   # bajo _window_input_mutex
@@ -7686,15 +8400,70 @@ func _window_input_work(u):
 	var host = String(u.host)
 	if host.find(".") < 0 and not host.is_valid_ip_address():
 		host += ".local"
-	var r = PEER_CALL.request_status(host, int(u.port), _local_hid(), String(u.token),
-		"window_input", {"events": u.events}, 1000)
-	var resp = r.get("response", {})
+	var hid = _local_hid()
+	var token = String(u.token)
+	var peer = u.get("peer", null)
+	var old_mode = bool(u.get("old", false))
+	var ok = false
+	var err = ""
+	if old_mode:
+		# Par con shell viejo: método clásico, una conexión por lote.
+		var old = PEER_CALL.request_status(host, int(u.port), hid, token,
+			"window_input", {"events": u.events}, 1000)
+		var oresp = old.get("response", {})
+		ok = bool(oresp.get("ok", false))
+		if ok:
+			if oresp.has("token"):
+				token = String(oresp.token)
+		else:
+			err = String(oresp.get("error", old.get("error", "")))
+	else:
+		# 1) Stream ya abierto: escribir el lote sin esperar respuesta.
+		if peer != null:
+			if PEER_CALL.send_stream(peer, u.events):
+				ok = true
+			else:
+				PEER_CALL.close_peer(peer)
+				peer = null
+		# 2) Handshake (primera vez o tras reconectar): autentica y, si el par lo
+		# soporta, la conexión queda abierta para los lotes siguientes.
+		if not ok and peer == null:
+			peer = PEER_CALL.connect_peer(host, int(u.port), 1000)
+			if peer == null:
+				err = "no se pudo conectar"
+			else:
+				var r = PEER_CALL.request_on(peer, hid, token,
+					"window_input_stream", {"events": u.events}, 1000)
+				var resp = r.get("response", {})
+				if bool(resp.get("ok", false)):
+					ok = true
+					if resp.has("token"):
+						token = String(resp.token)
+				else:
+					err = String(resp.get("error", r.get("error", "")))
+					PEER_CALL.close_peer(peer)
+					peer = null
+		# 3) El par no conoce el método (shell viejo): caer al clásico, una sola vez
+		# por par (queda marcado en _window_input_stream_off).
+		if not ok and err == "bad request":
+			old_mode = true
+			var old2 = PEER_CALL.request_status(host, int(u.port), hid, token,
+				"window_input", {"events": u.events}, 1000)
+			var oresp2 = old2.get("response", {})
+			ok = bool(oresp2.get("ok", false))
+			if ok:
+				err = ""
+				if oresp2.has("token"):
+					token = String(oresp2.token)
+			else:
+				err = String(oresp2.get("error", old2.get("error", "")))
 	_window_input_mutex.lock()
-	if bool(resp.get("ok", false)) and resp.has("token"):
-		u.state.token = String(resp.token)
+	if ok and peer != null:
+		u.state.peer = peer
+	u.state.token = token
+	u.state.old = old_mode
 	# Un rechazo (p. ej. «bad request» de un equipo con el shell viejo) se registra una
 	# vez por error distinto: antes el control fallaba en silencio.
-	var err = "" if bool(resp.get("ok", false)) else String(resp.get("error", r.get("error", "")))
 	if err != _window_input_last_err:
 		_window_input_last_err = err
 		if err != "":
@@ -7766,12 +8535,21 @@ func _cast_meta_changed(c):
 	# El ícono (PNG 64 px en base64) se arma una vez por app: sólo se reintenta mientras
 	# todavía no cargó (los íconos se cargan de a poco por frame).
 	var app = String(compositor.get_app_id(wid))
-	if c.get("icon_app", null) != app or String(c.get("icon_b64", "")) == "":
+	# Un ícono legítimamente ausente también es un resultado: no regenerarlo en
+	# cada frame ni inundar el canal peer con metadatos idénticos.
+	if not c.has("icon_app") or c.get("icon_app", null) != app:
 		c.icon_app = app
 		c.icon_b64 = _icon_png_b64(_window_icon(wid, _window_activity_name(wid)))
 	var meta = {"title": String(compositor.get_title(wid)),
 		"accent": "#" + accent.to_html(false), "icon": String(c.icon_b64)}
-	if c.get("meta_sent", {}) == meta:
+	# En Godot 3 no dependemos de `Dictionary == Dictionary` para comparar contenido:
+	# `meta` es una instancia nueva en cada tick y esa comparación provocó un envío
+	# gvd_meta por frame, saturando PeerControl y haciendo tartamudear el receptor.
+	var sent = c.get("meta_sent", {})
+	if typeof(sent) == TYPE_DICTIONARY \
+			and String(sent.get("title", "")) == String(meta.title) \
+			and String(sent.get("accent", "")) == String(meta.accent) \
+			and String(sent.get("icon", "")) == String(meta.icon):
 		return false
 	c.meta_sent = meta
 	return true
@@ -8276,6 +9054,7 @@ func _tracked_launch_work(userdata):
 
 # Reapea los Threads de lanzamiento terminados (no bloquea).
 func _gvd_poll():
+	_sharing_reconcile()
 	_window_input_poll()
 	if not _casts.empty():
 		_casts_poll()
@@ -8589,7 +9368,7 @@ func _begin_client_drag(id, kind, edge):
 		return
 	if not tiles.has(id) or minimized.has(id) or id == fullscreen_id:
 		return
-	var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(get_viewport_rect().size)
+	var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(_screen_size())
 	var was_max = wm_maximized.has(id) or maximize_state.has(id)
 	if was_max:
 		# Un arrastre pedido por el cliente sobre una maximizada la desmaximiza.
@@ -8668,7 +9447,7 @@ func _begin_super_drag(pos, button):
 	elif was_max:
 		wm_maximized.erase(id)
 		maximize_state.erase(id)
-	var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(get_viewport_rect().size)
+	var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(_screen_size())
 	if not float_layout.has(id):
 		# Restaura el rect previo si lo recordamos (tamaño anterior, no una cascada);
 		# si no, cascada nueva (~74% del área).
@@ -8751,7 +9530,7 @@ func _open_unmanaged_window(id):
 	ACTIVITIES.append(activity)
 	wayland_ids[name] = id
 
-	var vp = get_viewport_rect().size
+	var vp = _screen_size()
 	view.rect_position = Vector2.ZERO
 	view.rect_size = vp
 	view.rect_clip_content = true
@@ -9071,9 +9850,10 @@ func _on_view_input(event):
 		_focus_follow(hit)
 		compositor.pointer_motion(hit.id, hit.pos)
 	elif event is InputEventMouseButton:
-		# Super+clic: mover (izquierdo) o redimensionar (derecho) la ventana bajo el
-		# puntero, sin reenviar el clic a la app. Sirve también para CSD.
-		if (event.button_index == BUTTON_LEFT or event.button_index == BUTTON_RIGHT):
+		# Super+clic: mover (izquierdo) o redimensionar (derecho o medio) la ventana bajo
+		# el puntero, sin reenviar el clic a la app. Sirve también para CSD.
+		if (event.button_index == BUTTON_LEFT or event.button_index == BUTTON_RIGHT
+				or event.button_index == BUTTON_MIDDLE):
 			if event.pressed:
 				if _super_held(event) and chrome_drag == null and not expose:
 					if _begin_super_drag(event.position, event.button_index):
@@ -9143,6 +9923,7 @@ func _draw_window_menu():
 	MENU_STYLE.begin(self)
 	if begin_popup("##wm_menu"):
 		var id = wm_menu_id
+		var moved_menu = false
 		if not tiles.has(id):
 			end_popup()
 		else:
@@ -9156,11 +9937,26 @@ func _draw_window_menu():
 			separator()
 			if MENU_STYLE.item(self, "Restaurar" if (wm_maximized.has(id) or maximize_state.has(id)) else "Maximizar"):
 				_toggle_maximize_window(id)
+			# Fase C: accion explicita para mover la ventana a otra salida del span.
+			if span_active and fl:
+				separator()
+				var cur_out = _span_window_output(id)
+				if MENU_STYLE.item(self, "Mover a pantalla principal", "", cur_out == "primary"):
+					_span_move_window_to(id, "primary")
+					moved_menu = true
+				for e in span_plan.get("entries", []):
+					if bool(e.primary):
+						continue
+					if MENU_STYLE.item(self, "Mover a " + String(e.name), "", cur_out == String(e.id)):
+						_span_move_window_to(id, String(e.id))
+						moved_menu = true
 			if MENU_STYLE.item(self, "Cerrar"):
 				_close_window_id(id)
 			end_popup()
 			if chosen != "":
 				set_window_mode(id, chosen)
+				wm_menu_id = -1
+			elif moved_menu:
 				wm_menu_id = -1
 	MENU_STYLE.end(self)
 
@@ -9208,7 +10004,7 @@ func _on_chrome_input(event):
 		chrome_drag = {"id": id, "kind": "press"}
 		_close_window_id(id)
 		return true
-	var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(get_viewport_rect().size)
+	var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(_screen_size())
 	if part == "title" or part == "grip":
 		# Doble clic en la barra: maximizar/restaurar. Un clic simple enfoca y prepara
 		# el arrastre; NO desmaximiza por sí solo (eso destrozaba la geometría y hacía
@@ -9344,8 +10140,9 @@ func _commit_chrome_drag():
 		return
 	var id = int(chrome_drag.id)
 	if String(chrome_drag.kind) == "resize" and drag_overlay != null and tiles.has(id):
-		var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(get_viewport_rect().size)
-		float_layout.resize_to(id, drag_overlay.rect, box)
+		var box = _span_float_box(id)
+		var local_rect = chrome_drag.get("local_rect", drag_overlay.rect)
+		float_layout.resize_to(id, local_rect, box)
 		_pantalla_snap_aspect(id, box)
 	# K13f — Snap flotante: si el drop quedó en una franja del borde, la ventana toma
 	# esa mitad o se maximiza arriba. Un único set de geometría al soltar (igual que
@@ -9359,7 +10156,7 @@ func _commit_chrome_drag():
 		elif target == "tile-half":
 			_snap_tile_to(id, zone)
 		elif zone == "left" or zone == "right":
-			var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(get_viewport_rect().size)
+			var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(_screen_size())
 			wm_maximized.erase(id)
 			if not float_layout.has(id):
 				float_layout.place_new(id, box)
@@ -9384,7 +10181,7 @@ func _chrome_drag_motion(pos):
 		drag_overlay = null
 		window_dragging = false
 		return
-	var box = wm_box if wm_box.size.x > 0.0 else _tile_rect(get_viewport_rect().size)
+	var box = _span_float_box(id)
 	var kind = String(chrome_drag.kind)
 	if kind != "move" and kind != "resize":
 		return
@@ -9401,31 +10198,52 @@ func _chrome_drag_motion(pos):
 			if restored != null:
 				chrome_drag["grab"] = WM_DRAG.proportional_grab(
 					Vector2(chrome_drag.grab), big.size, restored.size)
-		float_layout.drag_to(id, pos - chrome_drag.grab, box)
-		# Reflejar el modelo en el nodo visible en este mismo evento. Si esperamos al
-		# siguiente ciclo de layout, la decoración/título alcanza a viajar sola antes
-		# que la textura de la ventana y el gesto se percibe como un label flotante.
-		_apply_live_float_move(id, float_layout.rect(id))
+		if span_active:
+			# Fase C: el puntero decide la salida; el cruce reasigna y reubica en
+			# coords globales. float_layout sólo conserva tamano/z-order.
+			_span_drag_move(id, pos, pos - chrome_drag.grab)
+			if float_layout.has(id):
+				float_layout.drag_to(id, float_layout.rect(id).position, box)
+		else:
+			float_layout.drag_to(id, pos - chrome_drag.grab, box)
+			# Reflejar el modelo en el nodo visible en este mismo evento. Si esperamos al
+			# siguiente ciclo de layout, la decoración/título alcanza a viajar sola antes
+			# que la textura de la ventana y el gesto se percibe como un label flotante.
+			_apply_live_float_move(id, float_layout.rect(id))
 		# K13f/K13i — Snap contextual con histéresis: cerca del borde del hueco se
 		# ofrece una mitad (izquierda/derecha) o maximizar (franja superior). Si la
 		# pantalla centrada ya tiene mosaico, la mitad inserta en mosaico; si no,
 		# redimensiona la flotante. La aplicación sucede al soltar (_commit_chrome_drag).
-		var thr = WM_DRAG.EDGE_SNAP * get_imgui_scale()
-		var zone = WM_DRAG.zone_hold(String(chrome_drag.get("zone", "")), pos, box, thr)
-		chrome_drag["zone"] = zone
-		if zone == "":
+		# Una ventana en una salida secundaria no se snapea al mosaico de la principal.
+		if (not span_active) or _span_window_output(id) == "primary":
+			var thr = WM_DRAG.EDGE_SNAP * get_imgui_scale()
+			var zone = WM_DRAG.zone_hold(String(chrome_drag.get("zone", "")), pos, box, thr)
+			chrome_drag["zone"] = zone
+			if zone == "":
+				if drag_overlay != null and String(drag_overlay.get("kind", "")) == "snap":
+					drag_overlay = null
+			else:
+				var target = "maximize" if zone == "max" else ("tile-half" if _centered_unit_has_tiled() else "float-half")
+				drag_overlay = {"id": id, "kind": "snap", "zone": zone, "target": target,
+					"rect": box if zone == "max" else WM_DRAG.snap_rect(zone, box)}
+		else:
+			chrome_drag["zone"] = ""
 			if drag_overlay != null and String(drag_overlay.get("kind", "")) == "snap":
 				drag_overlay = null
-		else:
-			var target = "maximize" if zone == "max" else ("tile-half" if _centered_unit_has_tiled() else "float-half")
-			drag_overlay = {"id": id, "kind": "snap", "zone": zone, "target": target,
-				"rect": box if zone == "max" else WM_DRAG.snap_rect(zone, box)}
 	else:
 		# Resize diferido: NO se redimensiona la ventana real en cada motion (eso
 		# dispara un set_size/buffer nuevo por frame y se siente el lag). Se guarda
 		# la geometría objetivo y se dibuja un overlay; se aplica al soltar.
 		var nr = WINDOW_CHROME.resized(chrome_drag.start, String(chrome_drag.edge), pos - chrome_drag.from)
-		drag_overlay = {"id": id, "kind": "resize", "rect": float_layout.clamp_rect(box, nr)}
+		var local_rect = float_layout.clamp_rect(box, nr)
+		chrome_drag["local_rect"] = local_rect
+		# El overlay se dibuja en coords globales; en una secundaria la caja local
+		# arranca en (0,0), asi que se corre al origen de su salida.
+		var draw_rect = local_rect
+		if span_active and _span_window_output(id) != "primary":
+			draw_rect = Rect2(local_rect.position + _span_output_rect(_span_window_output(id)).position,
+				local_rect.size)
+		drag_overlay = {"id": id, "kind": "resize", "rect": draw_rect}
 		_apply_cursor(_cursor_for_part(String(chrome_drag.edge)))
 	# Durante el arrastre la ventana debe seguir al puntero 1:1, sin la animación
 	# de reacomodo (que haría un efecto elástico).
@@ -10223,7 +11041,7 @@ func _draw_input_requests():
 		return
 	var req = input_requests[0]
 	var size = Vector2(460, 130)
-	set_next_window_pos(get_viewport_rect().size * 0.5 - size * 0.5, true)
+	set_next_window_pos(_screen_size() * 0.5 - size * 0.5, true)
 	set_next_window_size(size, true)
 	set_next_window_bg_alpha(1.0)
 	if begin("Control remoto##eis", WINDOW_NO_COLLAPSE | WINDOW_NO_RESIZE | WINDOW_NO_MOVE | WINDOW_NO_SAVED_SETTINGS):

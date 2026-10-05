@@ -91,6 +91,20 @@ func _init():
 	check("ruta con traversal rechazada", S.wallpaper({"path": "/a/../b.png"}).path == "")
 	check("modo desconocido cae a gradiente", S.wallpaper({"mode": "zoom"}).mode == "gradient")
 
+	# Multi-monitor (span): normalización, validación y default.
+	var m0 = S.span({})
+	check("span default apagado", not m0.enabled and m0.primary == "" and m0.order.empty())
+	check("default trae span", S.defaults().has("span") and not S.defaults().span.enabled)
+	var m1 = S.span({"enabled": "on", "primary": "DP-1",
+		"order": ["HDMI-A-1", "DP-1", "bad name", "HDMI-A-1"]})
+	check("span enabled tolerante", m1.enabled)
+	check("span primary validado", m1.primary == "DP-1")
+	check("span order sin duplicados ni invalidos", m1.order == ["HDMI-A-1", "DP-1"])
+	check("span con basura cae a default",
+		not S.span({"enabled": "maybe"}).enabled and S.span("no dict").primary == "")
+	check("span es en vivo", S.is_live("span"))
+	check("restart_notice de span vacio", S.restart_notice("span") == "")
+
 	# Vocabulario de producto: nada de nombres internos en lo visible.
 	var forbidden = ["gvd", "deskflow", "mdns", "dns-sd", "recv", "server", "client", "hid", "role"]
 	var labels = []

@@ -24,11 +24,12 @@ func _init():
 	check("menu_trigger: suelta no dispara",
 		F.menu_trigger(BUTTON_RIGHT, false) == "" and F.menu_trigger(BUTTON_LEFT, false) == "")
 
-	# Applet de teclado -> su menú; el resto -> selector de controles del Frame.
-	# (El bloque "Ventanas" se retiró: ahora el modo es por ventana.)
+	# Cada applet con su menú propio; el resto no abre menú (el selector genérico sólo
+	# aparece en un slot vacío de la barra).
 	check("applet_menu teclado", F.applet_menu("teclado") == "teclado")
-	check("applet_menu ventanas retirado", F.applet_menu("ventanas") == "picker")
-	check("applet_menu otros", F.applet_menu("recursos") == "picker" and F.applet_menu("reloj") == "picker")
+	check("applet_menu termico", F.applet_menu("termico") == "gov")
+	check("applet_menu reloj", F.applet_menu("reloj") == "reloj")
+	check("applet_menu sin menú", F.applet_menu("recursos") == "" and F.applet_menu("ventanas") == "")
 
 	# Sombra del Frame: ahora son filas dibujadas dentro de las ventanas reales, no
 	# ventanas ImGui separadas que puedan capturar mouse sobre las apps.

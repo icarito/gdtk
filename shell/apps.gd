@@ -31,6 +31,10 @@ var watching = {}
 var chosen_rect = null
 var tiles = []
 var suppress_click = ""
+# Memos: fold() es pura; match_window_apps depende sólo de app_id y de `apps` (se vacía en scan()).
+# El Frame/anillo piden el ícono de cada ventana en cada frame: sin esto era O(apps x FOLD) por frame.
+var _fold_memo = {}
+var _mwa_memo = {}
 
 
 func _init():
@@ -53,6 +57,7 @@ func data_dirs():
 func scan():
 	scanned = true
 	apps = []
+	_mwa_memo.clear()
 	path_dirs = OS.get_environment("PATH").split(":", false)
 	var desktops = Array(OS.get_environment("XDG_CURRENT_DESKTOP").to_lower().split(":", false))
 	desktops.append("gdtk")
@@ -213,11 +218,17 @@ func _on_exit(pid, code, shell):
 
 # Minúsculas y sin tildes, para buscar sin importar mayúsculas ni acentos.
 func fold(s):
-	s = s.to_lower()
+	var hit = _fold_memo.get(s)
+	if hit != null:
+		return hit
+	var r = s.to_lower()
 	for i in range(0, FOLD.size(), 2):
 		for ch in FOLD[i]:
-			s = s.replace(ch, FOLD[i + 1])
-	return s
+			r = r.replace(ch, FOLD[i + 1])
+	if _fold_memo.size() > 4096:
+		_fold_memo.clear()
+	_fold_memo[s] = r
+	return r
 
 
 func matches():
@@ -242,6 +253,15 @@ func matches():
 # actividad era el Name del .desktop ("Archivos") igual encontraba el icono, pero
 # otra ventana de la misma app nombrada por el app_id ("Nautilus") caía al genérico.
 func match_window_apps(app_id):
+	var key = String(app_id)
+	if _mwa_memo.has(key):
+		return _mwa_memo[key]
+	var out = _match_window_apps(app_id)
+	_mwa_memo[key] = out
+	return out
+
+
+func _match_window_apps(app_id):
 	var out = []
 	var w = fold(String(app_id).strip_edges())
 	if w == "":
@@ -393,7 +413,7 @@ func draw(ui):
 		if query != shown_query:
 			shown_query = query
 			ui.set_scroll_here_y(0.0)
-		var side = ui.grid_unit(ui.get_viewport_rect().size) * 1.5
+		var side = ui.grid_unit(ui._screen_size()) * 1.5
 		var cols = max(1, int(ui.get_content_region_avail().x / side))
 		var top = ui.get_window_pos().y
 		var bottom = top + ui.get_window_size().y

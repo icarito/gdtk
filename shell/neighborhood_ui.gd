@@ -19,7 +19,9 @@ extends Control
 # neighborhood.gd (Thread) y de las cachés del shell.
 
 const MAP = preload("res://neighborhood_map.gd")
-const GROUP = preload("res://group_model.gd")
+# group_model cambia junto con esta vista durante el pulido. Cargarlo desde texto
+# evita que una recarga transaccional conserve la versión cacheada por preload.
+var GROUP = Host.sc("res://group_model.gd") if Host != null else load("res://group_model.gd")   # sin autoload (tests)
 const MENU = preload("res://menu_style.gd")
 const SHARED = preload("res://shared_block.gd")
 const SL = preload("res://screen_layout.gd")
@@ -125,7 +127,7 @@ func set_mode(m):
 func refresh(force = false):
 	if model == null:
 		return
-	var vp = get_viewport_rect().size
+	var vp = shell._screen_size() if shell != null else get_viewport_rect().size
 	if not force and model.version == drawn_version and vp == drawn_size:
 		return
 	drawn_version = model.version
@@ -412,7 +414,7 @@ func _group_toggle_items(member, include_remove):
 	var keyboard = _group_action(host, "serve_input_here")
 	var rows = []
 	rows.append(_group_toggle_row("group_extend", "Extender mi pantalla", id, extend,
-		online, direction, _shell_bool("_screen_session_active", id)))
+		online, direction, _shell_bool("_group_screen_on", id)))
 	rows.append(_group_toggle_row("group_keyboard", "Compartir teclado y mouse", id, keyboard,
 		online, direction, _shell_bool("_group_input_on", id)))
 	# Audio: como extender, pero sin lado (no es espacial); basta con que esté encendido.
@@ -500,6 +502,11 @@ func _activate_group_row(item):
 		call_deferred("refresh", true)
 		return
 	var action = item.get("action", null)
+	if kind == "group_extend":
+		if shell != null and shell.has_method("_group_screen_set"):
+			shell._group_screen_set(id, not bool(item.get("is_on", false)), action)
+		call_deferred("refresh", true)
+		return
 	if kind == "group_keyboard" and not bool(item.get("is_on", false)):
 		_group_keyboard(id, true)
 		return
@@ -507,9 +514,7 @@ func _activate_group_row(item):
 		if action != null:
 			_run_host_action(id, action)
 		return
-	if kind == "group_extend":
-		_stop_group_extend(id)
-	elif kind == "group_keyboard":
+	if kind == "group_keyboard":
 		_group_keyboard(id, false)
 
 
@@ -618,7 +623,7 @@ func _elapsed_ms():
 
 func _bar():
 	if shell != null and shell.has_method("frame_bar_h"):
-		return float(shell.frame_bar_h(get_viewport_rect().size))
+		return float(shell.frame_bar_h(shell._screen_size()))
 	return 64.0
 
 
@@ -1084,7 +1089,9 @@ func _host_actions(host, confirm_override = ""):
 			ctx.direction_confirm = String(entry.get("confirm", "unconfirmed"))
 	if String(confirm_override) != "" and String(ctx.get("direction", "")) != "":
 		ctx.direction_confirm = String(confirm_override)
-	if _in_conflict(id):
+	# En Grupo los equipos se ubican por ángulo (sin solapes) y el layout reparte los
+	# rangos del borde: compartir un lado no es conflicto, sólo lo es en el Vecindario.
+	if mode != "group" and _in_conflict(id):
 		ctx.direction_conflict = true
 	# Grupo: sólo en la vista Grupo se ofrece sumar/quitar; el Vecindario conserva
 	# su menú. El conjunto de miembros se pasa sin tokens ni secretos.

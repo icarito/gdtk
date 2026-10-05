@@ -31,6 +31,22 @@ func _init():
 	var bad = SL.sanitize_screen({"id": "h", "w": 0, "h": -1, "x": "nope"})
 	check("tamano/coordenada invalidos caen a defaults",
 		bad.w == SL.DEFAULT_W and bad.h == SL.DEFAULT_H and bad.x == 0.0)
+	check("resolución separada de geometría física",
+		bad.px_w == SL.DEFAULT_PX_W and bad.px_h == SL.DEFAULT_PX_H)
+	var old = SL.normalize_layout({"version": 1, "local": {"id": "local", "local": true,
+		"x": 0, "y": 0, "w": 1920, "h": 1080}, "screens": [{"id": "cupid",
+		"x": -1440, "y": 0, "w": 1440, "h": 2160}]})
+	check("v1 migra px a resolución y plano físico", old.version == 2
+		and old.local.px_w == 1920 and old.screens[0].px_h == 2160
+		and abs(old.local.w - 1920.0 * SL.LEGACY_MM_PER_PX) < 0.01)
+	var shared = SL.set_share(old, "cupid", "input", true)
+	check("preferencia de compartir vive en pantalla", shared.screens[0].share.input
+		and not shared.screens[0].share.screen)
+	shared.screens.append(SL.sanitize_screen({"id": "tengu"}))
+	shared = SL.set_share(shared, "cupid", "audio", true)
+	shared = SL.set_share(shared, "tengu", "audio", true)
+	check("audio persistente conserva un solo destino", not shared.screens[0].share.audio
+		and shared.screens[1].share.audio)
 	check("pantalla no-diccionario -> null", SL.sanitize_screen(42) == null)
 	check("screens duplicadas descartadas",
 		SL.sanitize_screens([{"id": "a"}, {"id": "a"}, {"id": "b"}]).size() == 2)
@@ -48,6 +64,14 @@ func _init():
 	check("sin contacto si hay hueco", SL.contact(a, far).empty())
 	check("direction_of devuelve cardinal o vacio",
 		SL.direction_of(a, b_east) == "east" and SL.direction_of(a, far) == "")
+	var physical_a = {"id": "pa", "x": 0.0, "y": 0.0, "w": 340.0, "h": 190.0,
+		"px_w": 3840, "px_h": 2160}
+	var physical_b = {"id": "pb", "x": 340.0, "y": 0.0, "w": 340.0, "h": 190.0,
+		"px_w": 1920, "px_h": 1080}
+	var physical_ranges = SL.link_ranges(physical_a, physical_b)
+	check("rangos usan tamaño físico aunque cambie DPI/resolución",
+		physical_ranges.local_range == [0.0, 100.0]
+		and physical_ranges.peer_range == [0.0, 100.0])
 
 	# Imantado: siempre pegado, sin solape y con contacto minimo.
 	var lay = {
@@ -118,6 +142,8 @@ func _init():
 	check("host_directions con direccion confirmada", dirs.size() == 2
 		and String(dirs.h1.direction) == "east" and String(dirs.h1.confirm) == "confirmed"
 		and not dirs.has("h3"))
+	check("radial se deriva de la misma geometría física",
+		abs(float(dirs.h1.along) - 0.5) < 0.0001)
 	check("links locales para teclado/mouse", SL.local_links(chain).size() == 1
 		and String(SL.local_links(chain)[0].peer) == "tengu")
 	check("sin conflictos si cada borde tiene un vecino", SL.conflicts(chain).empty())

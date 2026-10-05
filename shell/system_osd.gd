@@ -263,7 +263,7 @@ func draw(shell):
 	var alpha = _osd_alpha()
 	if alpha <= 0.0:
 		return
-	var vp = shell.get_viewport_rect().size
+	var vp = shell._screen_size()
 	var s = shell.ui_scale(vp)
 	var w = min(vp.x * 0.46, 430.0 * s)
 	var h = 94.0 * s

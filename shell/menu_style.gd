@@ -131,7 +131,7 @@ static func chrome(ui, title):
 	ui.set_cursor_pos(text_pos - origin)
 	ui.text_colored(TITLE_TEXT, String(title))
 	# Primer ítem debajo de la barra (coordenada local).
-	ui.set_cursor_pos(Vector2(0.0, wpos.y + b + th + GAP_Y * s - origin.y))
+	ui.set_cursor_pos(Vector2(PAD_X * s, wpos.y + b + th + GAP_Y * s - origin.y))  # x = padding: antes 0 y el 1.er ítem quedaba pegado al borde
 
 
 # Ítem de menú. Si hay ícono lo dibuja a la izquierda y alinea la etiqueta; el

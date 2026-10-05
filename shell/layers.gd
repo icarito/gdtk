@@ -24,9 +24,10 @@ func _ready():
 
 
 func _update():
-	# El output del compositor mide lo que la vista: las anclas se resuelven contra la pantalla
-	# aunque todavía no se haya abierto ninguna ventana.
-	var vp = shell.get_viewport_rect().size
+	# El output principal mide lo que la pantalla principal del shell: las anclas se
+	# resuelven contra ella aunque todavía no se haya abierto ninguna ventana (con
+	# span, contra la principal, no contra el escritorio completo).
+	var vp = shell._screen_size()
 	if compositor.default_size != vp:
 		compositor.default_size = vp
 	var seen = {}

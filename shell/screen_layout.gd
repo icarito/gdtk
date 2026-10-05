@@ -3,7 +3,8 @@ extends Reference
 # Modelo puro (K11b) del diseno de pantallas de Configuracion > Pantallas.
 #
 # Reemplaza el panel "Distribucion": las pantallas son rectangulos con tamano
-# real/virtual y posicion (x, y) en un plano. Al soltar una pantalla arrastrada se
+# fisico y posicion (x, y) en un plano de milimetros. La resolucion en pixeles es
+# metadata: no decide cuanto borde fisico comparte una pantalla. Al soltar se
 # imanta para quedar SIEMPRE pegada por un borde a otra, sin solaparse, con un
 # contacto minimo > 0 (para que el mouse pase) y permitiendo desplazamiento libre
 # a lo largo del borde (alineacion arbitraria, no solo centrada).
@@ -19,14 +20,16 @@ extends Reference
 # Vocabulario: este modelo no produce texto visible salvo las etiquetas que le
 # pasa el llamador. El default de la pantalla local es "Este equipo".
 
-const VERSION = 1
+const VERSION = 2
 
-const DEFAULT_W = 1280.0
-const DEFAULT_H = 800.0
-# Contacto minimo de borde (px) para que el puntero cruce de una pantalla a otra.
-const MIN_CONTACT = 24.0
-# Tolerancia de "pegado" al buscar aristas (px).
-const TOUCH_TOL = 1.0
+const DEFAULT_W = 340.0       # mm, ~15.4" 16:10
+const DEFAULT_H = 212.5
+const DEFAULT_PX_W = 1280
+const DEFAULT_PX_H = 800
+const LEGACY_MM_PER_PX = 25.4 / 96.0
+# Contacto minimo fisico para que el puntero cruce de una pantalla a otra.
+const MIN_CONTACT = 8.0
+const TOUCH_TOL = 0.5
 
 const DIRECTIONS = ["north", "south", "east", "west"]
 const SIDE_ORDER = ["east", "west", "south", "north"]
@@ -57,7 +60,10 @@ static func default_screen(id = "", label = "", is_local = false):
 		"y": 0.0,
 		"w": DEFAULT_W,
 		"h": DEFAULT_H,
+		"px_w": DEFAULT_PX_W,
+		"px_h": DEFAULT_PX_H,
 		"offset": 0.0,
+		"share": {"screen": false, "input": false, "audio": false},
 	}
 
 
@@ -76,6 +82,14 @@ static func sanitize_screen(s):
 		out.w = DEFAULT_W
 	if out.h <= 0.0:
 		out.h = DEFAULT_H
+	out.px_w = int(clamp(_num(s.get("px_w", DEFAULT_PX_W), DEFAULT_PX_W), 100.0, 16384.0))
+	out.px_h = int(clamp(_num(s.get("px_h", DEFAULT_PX_H), DEFAULT_PX_H), 100.0, 16384.0))
+	var sh = s.get("share", {})
+	out.share = {
+		"screen": bool(sh.get("screen", false)) if typeof(sh) == TYPE_DICTIONARY else false,
+		"input": bool(sh.get("input", false)) if typeof(sh) == TYPE_DICTIONARY else false,
+		"audio": bool(sh.get("audio", false)) if typeof(sh) == TYPE_DICTIONARY else false,
+	}
 	out.offset = _num(s.get("offset", 0.0), 0.0)
 	return out
 
@@ -99,8 +113,13 @@ static func sanitize_screens(arr):
 static func normalize_layout(data):
 	if typeof(data) != TYPE_DICTIONARY:
 		data = {}
-	var out = {"version": VERSION, "local": null, "screens": []}
+	# Sólo migra persistencia que declara v1. Diccionarios sin versión son fixtures o
+	# llamadas internas y ya usan las unidades actuales.
+	var legacy = data.has("version") and int(data.get("version", VERSION)) < VERSION
+	var out = {"version": VERSION, "unit": "mm", "local": null, "screens": []}
 	var raw_local = data.get("local", null)
+	if legacy and typeof(raw_local) == TYPE_DICTIONARY:
+		raw_local = _migrate_legacy(raw_local)
 	var local = sanitize_screen(raw_local) if raw_local != null else null
 	if local == null or (local.id == "" and local.label == ""):
 		local = default_screen(LOCAL_ID, LOCAL_LABEL, true)
@@ -109,7 +128,13 @@ static func normalize_layout(data):
 		local.id = LOCAL_ID
 	out.local = local
 	var seen = {local.id: true}
-	for s in sanitize_screens(data.get("screens", [])):
+	var raw_screens = data.get("screens", [])
+	if legacy and typeof(raw_screens) == TYPE_ARRAY:
+		var migrated = []
+		for raw in raw_screens:
+			migrated.append(_migrate_legacy(raw))
+		raw_screens = migrated
+	for s in sanitize_screens(raw_screens):
 		s.local = false
 		if seen.has(s.id):
 			continue
@@ -117,6 +142,38 @@ static func normalize_layout(data):
 		out.screens.append(s)
 	out.version = VERSION
 	return out
+
+
+static func _migrate_legacy(s):
+	if typeof(s) != TYPE_DICTIONARY:
+		return s
+	var out = s.duplicate(true)
+	var pw = _num(s.get("w", DEFAULT_PX_W), DEFAULT_PX_W)
+	var ph = _num(s.get("h", DEFAULT_PX_H), DEFAULT_PX_H)
+	out["px_w"] = int(pw)
+	out["px_h"] = int(ph)
+	out["x"] = _num(s.get("x", 0.0), 0.0) * LEGACY_MM_PER_PX
+	out["y"] = _num(s.get("y", 0.0), 0.0) * LEGACY_MM_PER_PX
+	out["w"] = pw * LEGACY_MM_PER_PX
+	out["h"] = ph * LEGACY_MM_PER_PX
+	return out
+
+
+static func set_share(layout, id, kind, enabled):
+	var lay = normalize_layout(layout)
+	if not ["screen", "input", "audio"].has(String(kind)):
+		return lay
+	# El transporte de audio admite un solo destino. Mantener esa restriccion en
+	# la preferencia evita que la reconciliacion oscile entre dos equipos.
+	if String(kind) == "audio" and bool(enabled):
+		for other in lay.screens:
+			other.share.audio = false
+	var sc = screen_by_id(lay, id)
+	if sc == null or bool(sc.local):
+		return lay
+	sc.share[String(kind)] = bool(enabled)
+	_store_screen(lay, sc)
+	return lay
 
 
 # --- Geometria -----------------------------------------------------------------
@@ -508,14 +565,24 @@ static func topology(layout, local_name = ""):
 # Direcciones de todos los vecinos en el formato de host_directions (fuente unica
 # de Pantalla y Teclado y mouse). Sólo las pantallas con contacto confirmado.
 static func to_host_directions(layout):
+	var lay = normalize_layout(layout)
 	var out = {}
-	for e in output(layout):
+	for e in output(lay):
+		var anchor = screen_by_id(lay, String(e.via))
+		var moving = screen_by_id(lay, String(e.id))
+		var along = 0.5
+		if anchor != null and moving != null:
+			if String(e.direction) == "east" or String(e.direction) == "west":
+				along = (moving.y + moving.h * 0.5 - anchor.y) / max(anchor.h, 1.0)
+			else:
+				along = (moving.x + moving.w * 0.5 - anchor.x) / max(anchor.w, 1.0)
 		out[String(e.id)] = {
 			"direction": String(e.direction),
 			"confirm": "confirmed",
 			"mode": "extend",
 			"link": "screen",
 			"offset": float(e.offset_px),
+			"along": clamp(along, 0.0, 1.0),
 		}
 	return out
 

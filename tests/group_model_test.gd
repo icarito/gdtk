@@ -88,6 +88,12 @@ func _init():
 	check("dirección merge", String(m4.get("direction", "")) == "west")
 	check("host vivo adjunto", not m4.get("host", {}).empty())
 	check("tokens no se filtran", String(JSON.print(ms4)).find(secret) < 0)
+	var legacy_dupe = GM.members({
+		"61950c8964e60e15": {"direction": "east"},
+		"cupid": {"direction": "east"}}, {"cli:61950c8964e60e15": secret},
+		[{"id": "cupid", "label": "cupid", "peer": "cupid", "local": false}], [], [])
+	check("nombre histórico y HID forman una sola ficha", legacy_dupe.size() == 1
+		and String(legacy_dupe[0].id) == "61950c8964e60e15")
 
 	# 5) Pantalla sin host vivo: miembro por pantalla, offline, con su nombre.
 	var scrs5 = [{"id": "h7", "label": "Cupido", "peer": "cupido", "local": false}]
@@ -263,14 +269,16 @@ func _placement_tests(GM):
 	check("lado invalido => -1", SL.angle_from_placement("none", 0.5, half) < 0.0)
 
 	# offset_px: centra al par sobre la posición pedida y deja contacto mínimo.
-	var anchor = {"x": 0.0, "y": 0.0, "w": 1000.0, "h": 600.0}
+	var anchor = {"id": "local", "local": true, "x": 0.0, "y": 0.0,
+		"w": 1000.0, "h": 600.0}
 	var mover = {"x": 0.0, "y": 0.0, "w": 400.0, "h": 300.0}
 	check("offset_px centrado en N/S", abs(SL.offset_px("north", 0.5, anchor, mover) - 300.0) < 0.01)
 	check("offset_px centrado en E/O", abs(SL.offset_px("east", 0.5, anchor, mover) - 150.0) < 0.01)
 	check("offset_px extremo conserva contacto", SL.offset_px("south", 1.0, anchor, mover)
 		<= 1000.0 - SL.MIN_CONTACT and SL.offset_px("south", 0.0, anchor, mover)
 		>= SL.MIN_CONTACT - 400.0)
-	var lay_sc = SL.place_direction({"screens": [{"id": "h1", "w": 400.0, "h": 300.0}]}, "h1",
+	var lay_sc = SL.place_direction({"local": anchor,
+		"screens": [{"id": "h1", "w": 400.0, "h": 300.0}]}, "h1",
 		"east", SL.offset_px("east", 0.9, anchor, mover))
 	check("place_direction con offset deja contacto", not SL.link_ranges(lay_sc.local,
 		SL.screen_by_id(lay_sc, "h1")).empty())

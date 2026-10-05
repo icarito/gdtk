@@ -21,6 +21,8 @@ class ShellStub:
 	var apps = StubApps.new()
 	func request_redraw():
 		pass
+	func _load_np_icon(_name):
+		return null   # sin íconos: el frame cae al glifo vectorial
 	func _ease_out(k):
 		return k
 	func _units():

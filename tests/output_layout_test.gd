@@ -180,5 +180,54 @@ func _init():
 	check("retirar la principal rechazado", not bool(L.remove_output(rl, "primary").ok))
 	check("retirar inexistente rechazado", not bool(L.remove_output(rl, "remote:nope").ok))
 
+	# --- Envolvente y span (SPEC-physical-multi-monitor.md) -------------------
+	var sp = L.normalize_layout({"outputs": [
+		L.default_primary(Rect2(0, 0, 1920, 1080)),
+		{"id": "physical:DP-1", "kind": "physical", "rect": Rect2(1920, 0, 1280, 800),
+			"primary": false, "target": "span"},
+	]})
+	check("bounding_rect del span", L.bounding_rect(sp) == Rect2(0, 0, 3200, 1080))
+	check("bounding_rect con una sola salida",
+		L.bounding_rect(L.normalize_layout({})) == Rect2(0, 0, 1920, 1080))
+	var sr = L.span_rects(sp)
+	check("span_rects: principal en (0,0)",
+		sr.size() == 2 and sr[0].id == "primary" and sr[0].rect == Rect2(0, 0, 1920, 1080))
+	check("span_rects: secundaria a la derecha",
+		sr[1].id == "physical:DP-1" and sr[1].rect == Rect2(1920, 0, 1280, 800))
+
+	# --- Reconcile de descubrimiento fisico ----------------------------------
+	var base = L.normalize_layout({})
+	var rec = L.reconcile_outputs(base, [
+		{"id": "primary", "kind": "physical", "rect": Rect2(0, 0, 1920, 1080), "primary": true},
+		{"id": "physical:DP-1", "kind": "physical", "rect": Rect2(1920, 0, 1280, 800),
+			"primary": false, "target": "span"},
+	])
+	check("reconcile agrega la secundaria",
+		bool(rec.ok) and rec.added == ["physical:DP-1"] and L.output_count(rec.layout) == 2)
+	check("reconcile conserva una sola primary", L.primary_count(rec.layout) == 1)
+	check("reconcile sin remociones", rec.removed.empty() and rec.moved.empty())
+	var rl2 = L.assign_window(rec.layout, "w-1", "physical:DP-1").layout
+	check("ventana asignada a la fisica",
+		L.window_output(rl2, "w-1") == "physical:DP-1")
+	# Cambio de geometria de una salida existente.
+	var rec2 = L.reconcile_outputs(rl2, [
+		{"id": "primary", "kind": "physical", "rect": Rect2(0, 0, 1920, 1080), "primary": true},
+		{"id": "physical:DP-1", "kind": "physical", "rect": Rect2(1920, 0, 1024, 768),
+			"primary": false, "target": "span"},
+	])
+	check("reconcile reporta cambio de geometria",
+		bool(rec2.ok) and rec2.changed == ["physical:DP-1"]
+		and L.window_output(rec2.layout, "w-1") == "physical:DP-1")
+	# Desenchufar la fisica devuelve su ventana a la principal.
+	var rec3 = L.reconcile_outputs(rec2.layout, [
+		{"id": "primary", "kind": "physical", "rect": Rect2(0, 0, 1920, 1080), "primary": true},
+	])
+	check("reconcile retira la ausente",
+		bool(rec3.ok) and rec3.removed == ["physical:DP-1"] and L.output_count(rec3.layout) == 1)
+	check("reconcile devuelve la ventana a primary",
+		L.window_output(rec3.layout, "w-1") == "primary" and rec3.moved == ["w-1"])
+	check("reconcile con descriptor invalido no rompe",
+		not bool(L.reconcile_outputs(base, "bogus").ok))
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

@@ -1294,9 +1294,9 @@ class GstReceiver:
 
     Correr el pipeline dentro de gvd permite fijar titulo/app_id de la ventana
     (waylandsink usa g_get_prgname) y vigilar los cuadros decodificados: si no
-    llega ninguno en ~5 s, o si cambia el tamano del video (fin de la sesion
-    ScreenCast del emisor / reajuste de layout), se reinicia SOLO el pipeline,
-    sin tocar el proceso ni el cursor. El cursor se reescala con el tamano nuevo.
+    llega ninguno en ~5 s se reinicia SOLO el pipeline, sin tocar el proceso ni
+    el cursor. Los cambios de tamano se renegocian en el pipeline vivo para no
+    destruir y recrear la superficie Wayland (eso causa un salto en el layout).
     """
 
     TICK_MS = 250
@@ -1369,7 +1369,9 @@ class GstReceiver:
         with self.lock:
             self.video_size = size
             if U.size_changed(self.expected, size):
-                self.restart_want = True
+                self.expected = size
+                if self.cursor is not None:
+                    self.cursor.set_video_size(size[0], size[1])
         return self.gst.PadProbeReturn.OK
 
     def _start_pipeline(self):
@@ -1847,7 +1849,10 @@ def shm_capture(path, fps, max_frames=0):
             except FileNotFoundError:
                 return 0
             now = time.monotonic()
-            if frame is not None and (fresh or now - last_out >= SHM_KEEPALIVE_S):
+            # Sondeo fino (2 ms) y `period` sólo como tope de cadencia: dormir un periodo
+            # entero sumaba hasta 1/fps de latencia a cada frame.
+            if frame is not None and ((fresh and now - last_out >= period)
+                                      or now - last_out >= SHM_KEEPALIVE_S):
                 out.write(frame)
                 out.flush()
                 sent += 1
@@ -1855,8 +1860,7 @@ def shm_capture(path, fps, max_frames=0):
                 last_out = now
                 if max_frames and sent >= max_frames:
                     return 0
-            nxt += period
-            time.sleep(max(0.0, nxt - time.monotonic()))
+            time.sleep(0.002)
     except (BrokenPipeError, KeyboardInterrupt):
         return 0
 

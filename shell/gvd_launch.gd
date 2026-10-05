@@ -179,10 +179,12 @@ static func local_send_argv(gvd_path, peer, port = 0, position = "", wlr_virtual
 # emisor remoto usa otro puerto. El emisor wlroots ya no transmite el puntero en
 # el video (--overlay-cursor 0); se usa el puntero propio de este equipo, así que
 # se desactiva el cursor separado (no hay que mover el cursor de sway por red).
-static func local_recv_argv(gvd_path, has_sway = false, port = 0):
+static func local_recv_argv(gvd_path, has_sway = false, port = 0, video = Vector2()):
 	var plan = ACTIONS.gvd_recv_plan(gvd_path, {"sink": "auto", "port": int(port)})
 	if bool(plan.get("ok", false)) and typeof(plan.get("args", [])) == TYPE_ARRAY:
 		plan["args"].append_array(["--cursor", "none"])
+		if video.x >= 2.0 and video.y >= 2.0:
+			plan["args"].append_array(["--video-size", "%dx%d" % [int(video.x), int(video.y)]])
 	return plan
 
 
@@ -404,6 +406,8 @@ static func selftest():
 	var rpp = local_recv_argv("/home/u/gvd/gvd.py", false, 5601)
 	ok = ok and rpp.args.find("--port") >= 0 and rpp.args.find("5601") >= 0
 	ok = ok and local_recv_argv("/home/u/gvd/gvd.py", false, 5600).args.find("--port") < 0
+	var rpsz = local_recv_argv("/home/u/gvd/gvd.py", false, 5600, Vector2(1920, 972))
+	ok = ok and rpsz.args.find("--video-size") >= 0 and rpsz.args.find("1920x972") >= 0
 
 	# Emisor local: posición va al argv; ruta inválida falla.
 	var sp = local_send_argv("/home/u/Proyectos/gvd/gvd.py", "tengu.local", 5600, "right")

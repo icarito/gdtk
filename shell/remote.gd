@@ -338,6 +338,20 @@ func _handle_line(conn, line):
 			_reply(conn, id, true)
 		"screenshot":
 			_reply(conn, id, _screenshot(params))
+		"peers":
+			# Banco de pruebas e2e: equipos descubiertos ({id, label}).
+			var peers = []
+			var hs = shell.neighborhood.get("hosts") if shell.neighborhood != null else []
+			for h in (hs if typeof(hs) == TYPE_ARRAY else []):
+				peers.append({"id": str(h.get("id", "")), "label": str(h.get("label", ""))})
+			_reply(conn, id, peers)
+		"share_window":
+			# Mismo camino que soltar el bloque de la ventana sobre un equipo del Grupo.
+			shell._group_share_window(str(params.get("host", "")), int(params.get("id", -1)))
+			_reply(conn, id, true)
+		"unshare_window":
+			shell._group_unshare_window(str(params.get("host", "")))
+			_reply(conn, id, true)
 		"hud_snapshot":
 			_reply(conn, id, _hud_snapshot(params))
 		"hud_command":
@@ -430,10 +444,15 @@ func _state():
 			"dmabuf_commits": shell.compositor.dmabuf_commits if shell.compositor.has_method("get_dmabuf_commits") else 0,
 			"shm_commits": shell.compositor.shm_commits if shell.compositor.has_method("get_shm_commits") else 0,
 			"explicit_sync": shell.compositor.explicit_sync_state if shell.compositor.has_method("get_explicit_sync_state") else "?",
+			"scanout": shell.compositor.scanout_state() if shell.compositor.has_method("scanout_state") else "?",
+			"scanout_on": shell.compositor.scanout_enabled() if shell.compositor.has_method("scanout_enabled") else false,
 		},
 		# Presentaciones livianas (present-only, sin rearmar ImGui) vs completas del shell
 		# (SPEC-rendimiento-compositor P1): dos lecturas muestran qué camino domina.
 		"present": {"light": shell.present_light, "full": shell.present_full},
+		# Span físico (SPEC-physical-multi-monitor): activo, tamaño de la pantalla
+		# principal y del escritorio completo, y salidas lógicas del compositor.
+		"span": shell.span_state() if shell.has_method("span_state") else {},
 		# Frame: items con su posición en pantalla (vacío si no se dibujó).
 		"frame": {"visible": shell.frame.drawn, "items": shell.frame.items_layout},
 		# Input remoto: clientes libei conectados y pedidos esperando el diálogo.

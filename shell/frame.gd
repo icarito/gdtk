@@ -51,6 +51,17 @@ const NX_TEXT = Color(0.93, 0.94, 0.97, 1.0)
 const NX_TEXT_DIM = Color(0.60, 0.63, 0.72, 1.0)
 const NX_SEL = Color(0.98, 0.80, 0.36, 1.0)
 const NX_CUR = Color(0.32, 0.60, 0.98, 1.0)  # fallback; ver _cur()
+# Bisel "chiseled" y placa LCD (ideas de wmdockapps): el borde no es un tono plano
+# sino un degradé corto desde la cara, y las dockapps viven sobre una pantalla
+# rehundida con gradiente, dither y glare. Se calcula desde la cara de cada tesela
+# para que cualquier acento herede el mismo relieve.
+const BEVEL_HI = 0.58        # intensidad de la luz del bisel (hacia NX_FOCUS)
+const BEVEL_LO = 0.72        # intensidad de la sombra del bisel (hacia NX_DARK)
+const NX_LCD_TOP = Color(0.085, 0.095, 0.135, 1.0)
+const NX_LCD_BOTTOM = Color(0.050, 0.058, 0.085, 1.0)
+const NX_LCD_DEEP = Color(0.030, 0.035, 0.055, 1.0)
+const NX_GLARE = Color(1.0, 1.0, 1.0, 0.05)
+const NX_LCD_CYAN = Color(0.45, 0.95, 0.72, 1.0)   # acento del reloj
 const BEVEL_BASE = 2.0    # grosor base del bisel (se escala con la UI y Apariencia)
 # Sombra suave del Frame sobre el contenido, pegada al borde interior de cada barra.
 const SHADOW = 3.0
@@ -92,6 +103,8 @@ onready var shell = get_parent()
 
 var label_font = -1
 var label_font_px = -1
+# Textura dither de la placa LCD, cacheada por tamaño (no se regenera por frame).
+var _dither_cache = {}
 
 var visible = false
 var entered = false
@@ -196,6 +209,8 @@ var applets_bar_rect = Rect2()  # franja inferior del último dibujo (clic derec
 var applet_picker_want = false
 var applet_picker_open = false
 var applet_action_want = ""
+var clock_analog = false       # reloj: digital (7 seg, por defecto) o analógico
+var clock_saved = false
 var applet_press = null    # id del applet pulsado (aún sin arrastrar)
 var applet_drag = null     # id del applet que se está arrastrando (reordenar)
 var applet_from = Vector2.ZERO
@@ -619,6 +634,9 @@ func _load_applets():
 		pin_bottom_bar = bool(pins.get("bottom", false))
 	pin_saved_top = pin_top_bar
 	pin_saved_bottom = pin_bottom_bar
+	# Modo del reloj (digital por defecto).
+	clock_analog = String(applets_raw.get("clock", "digital")) == "analog"
+	clock_saved = clock_analog
 	if not applets_raw.empty():
 		var bottom = applets_raw.get("bottom", null)
 		if typeof(bottom) == TYPE_ARRAY:
@@ -773,7 +791,8 @@ func _save_applets():
 	var pins_changed = not (_same_list(pinned_top, pinned_saved_top) and _same_list(pinned_dock, pinned_saved_dock))
 	var order_changed = not (_same_list(bar_order["top"], bar_order_saved["top"]) and _same_list(bar_order["dock"], bar_order_saved["dock"]))
 	if _same_list(bottom, applets_saved_bottom) and not pins_changed and not order_changed \
-			and pin_top_bar == pin_saved_top and pin_bottom_bar == pin_saved_bottom:
+			and pin_top_bar == pin_saved_top and pin_bottom_bar == pin_saved_bottom \
+			and clock_analog == clock_saved:
 		applets_dirty = false
 		return
 	var path = _applets_path()
@@ -784,6 +803,7 @@ func _save_applets():
 	applets_raw["top"] = pinned_top
 	applets_raw["dock"] = pinned_dock
 	applets_raw["pin"] = {"top": pin_top_bar, "bottom": pin_bottom_bar}
+	applets_raw["clock"] = "analog" if clock_analog else "digital"
 	var tmp = path + ".tmp"
 	var w = File.new()
 	if w.open(tmp, File.WRITE) != OK:
@@ -800,6 +820,7 @@ func _save_applets():
 	pinned_saved_dock = pinned_dock.duplicate()
 	pin_saved_top = pin_top_bar
 	pin_saved_bottom = pin_bottom_bar
+	clock_saved = clock_analog
 	applets_dirty = false
 
 
@@ -1436,12 +1457,17 @@ static func menu_trigger(button_index, pressed):
 	return ""
 
 
-# Menú que abre el clic derecho sobre un applet: "teclado" para el applet de
-# teclado; "picker" (selector de controles del Frame) para el resto. Puro para test.
+# Menú que abre el clic derecho (o Enter) sobre un applet: cada uno con su propio
+# menú; el selector genérico de controles sólo aparece al clic derecho en un slot
+# vacío (ver _input). Puro para test.
 static func applet_menu(id):
 	if id == "teclado":
 		return "teclado"
-	return "picker"
+	if id == "termico":
+		return "gov"
+	if id == "reloj":
+		return "reloj"
+	return ""
 
 
 # ¿Hay que muestrear los applets? Sí mientras alguna franja que los contiene esté a
@@ -1460,12 +1486,24 @@ func _applet_primary(id):
 
 
 # Menú contextual del applet (clic derecho). Mismo destino que el equivalente de
-# teclado en _frame_key (Enter/Espacio).
+# teclado en _frame_key (Enter/Espacio). El selector genérico no aparece acá: sólo en
+# un slot vacío de la barra.
 func _applet_context(id):
-	if applet_menu(id) == "teclado":
-		applet_action_want = "teclado"
-	else:
-		applet_picker_want = true
+	var m = applet_menu(id)
+	if m == "":
+		return
+	applet_action_want = m
+	applet_picker_want = false
+	shell.request_redraw()
+
+
+# Alterna el reloj entre digital (7 segmentos) y analógico y lo persiste.
+func _set_clock_analog(v):
+	if clock_analog == v:
+		return
+	clock_analog = v
+	applets_dirty = true
+	_save_applets()
 	shell.request_redraw()
 
 
@@ -1663,7 +1701,9 @@ func _stop_shared_side(type, key):
 		if shell.has_method("_peer_share_notify"):
 			shell._peer_share_notify(k, {"type": t, "state": "stopped"})
 	elif t == "screen":
-		if shell.has_method("_stop_gvd_screen"):
+		if shell.has_method("_group_screen_set"):
+			shell._group_screen_set(k, false)
+		elif shell.has_method("_stop_gvd_screen"):
 			shell._stop_gvd_screen(k)
 	elif t == "input":
 		# Misma salida que el interruptor del Grupo (también avisa al otro equipo).
@@ -1726,39 +1766,106 @@ func _draw_shared_face(ui, pos, rect, diagram, side):
 	var bw = _bevel_w(ui)
 	var u = float(side)
 	var c = rect.position + Vector2(u * 0.5, u * 0.5)
+	# Fondo de radar viejo (scope, anillos, retícula, marcas y barrido). El centro es
+	# "este equipo" y cada par cae como un blip en su ángulo.
+	_draw_radar(ui, c, u * 0.46)
 	var half = u * 0.14
-	var crect = Rect2(c - Vector2(half, half), Vector2(half, half) * 2.0)
 	var accent = shell.accent if shell != null else NX_CUR
 	var e = max(1.0, bw * 0.5)
-	if bool(diagram.get("local_focus", true)):
-		ui.imgui_draw_rect_filled(crect.grow(e + 1.0), accent, 0.0)
-	ui.imgui_draw_rect_filled(crect, NX_BG, 0.0)
-	_draw_shared_glyph(ui, crect, "screen", NX_TEXT)
-	var ns = u * 0.28
-	var radius = u * 0.34
-	for p in diagram.get("radial", []):
+	# Este equipo: barco propio, disco redondo en el centro del radar.
+	var local_focus = bool(diagram.get("local_focus", true))
+	if local_focus:
+		ui.imgui_draw_circle(c, half + e + 1.0, accent, 28, 2.0)
+	ui.imgui_draw_circle_filled(c, half, NX_BG, 28)
+	_draw_shared_glyph(ui, Rect2(c - Vector2(half * 0.62, half * 0.62), Vector2(half * 1.24, half * 1.24)),
+		"screen", NX_TEXT)
+	if local_focus:
+		_draw_shared_pointer(ui, c + Vector2(half * 0.66, half * 0.66), half * 1.5)
+	var ns = u * 0.20
+	var radius = u * 0.35
+	var radial = diagram.get("radial", [])
+	for idx in range(radial.size()):
+		var p = radial[idx]
 		if typeof(p) != TYPE_DICTIONARY:
 			continue
 		var col = _shared_state_color(String(p.get("state", "active")))
 		var dir = Vector2(cos(deg2rad(float(p.angle))), sin(deg2rad(float(p.angle))))
-		var nc = c + dir * radius
-		var nrect = Rect2(nc - Vector2(ns, ns) * 0.5, Vector2(ns, ns))
+		# Órbita alterna para que pares con ángulos cercanos no se pisen.
+		var rr = radius * (1.0 - 0.13 * float(idx % 2))
+		var nc = c + dir * rr
 		_draw_shared_link(ui, c + dir * (half * 1.3), nc - dir * (ns * 0.55), dir,
 			String(p.get("direction", "none")), col)
-		if bool(p.get("focused", false)):
-			ui.imgui_draw_rect_filled(nrect.grow(e + 1.0), accent, 0.0)
-		ui.imgui_draw_rect_filled(nrect, NX_BG, 0.0)
+		# Blip redondo y limpio: aro del color de estado con el glifo adentro (sin caja
+		# oscura ni burbuja). El foco suma un aro de acento y el puntero.
+		var focused = bool(p.get("focused", false))
+		if focused:
+			ui.imgui_draw_circle(nc, ns * 0.66, accent, 20, 1.6)
+		ui.imgui_draw_circle(nc, ns * 0.50, col, 20, 1.4)
 		var kind = String(p.get("kind", "screen"))
 		if kind == "both":
-			var h2 = Vector2(ns * 0.5, ns)
-			_draw_shared_glyph(ui, Rect2(nrect.position, h2), "screen", col)
-			_draw_shared_glyph(ui, Rect2(nrect.position + Vector2(ns * 0.5, 0.0), h2), "input", col)
+			_draw_shared_glyph(ui, Rect2(nc - Vector2(ns * 0.32, ns * 0.26), Vector2(ns * 0.32, ns * 0.52)),
+				"screen", col)
+			_draw_shared_glyph(ui, Rect2(nc - Vector2(0.0, ns * 0.26), Vector2(ns * 0.32, ns * 0.52)),
+				"input", col)
 		else:
-			_draw_shared_glyph(ui, nrect, kind, col)
-		if ns >= 16.0 and kind != "both":
-			# El texto usa cursor LOCAL a la ventana: `pos` + desplazamiento dentro del rect.
-			ui.set_cursor_pos(pos + (nrect.position - rect.position) + Vector2(ns * 0.5 - 3.5, ns * 0.22))
-			ui.text_colored(NX_TEXT, String(p.get("initial", "")))
+			_draw_shared_glyph(ui, Rect2(nc - Vector2(ns * 0.26, ns * 0.26), Vector2(ns * 0.52, ns * 0.52)),
+				kind, col)
+		if focused:
+			_draw_shared_pointer(ui, nc + Vector2(ns * 0.5, ns * 0.5), ns)
+		# Inicial como etiqueta tenue debajo del blip (el detalle va en el tooltip).
+		var initial = String(p.get("initial", ""))
+		if initial != "" and ns >= 14.0:
+			var small = _push_label_font(ui)
+			ui.set_cursor_pos(pos + (nc - rect.position) + Vector2(-_text_w(ui, initial) * 0.5, ns * 0.66))
+			ui.text_colored(_lcd(col, "on"), initial)
+			if small:
+				ui.pop_font()
+
+
+# Scope de radar viejo: disco oscuro con retícula, tres anillos concéntricos, marcas
+# del borde y un barrido giratorio con estela. Puramente decorativo; da contexto a los
+# blips (los pares) que se dibujan encima.
+func _draw_radar(ui, c, R):
+	if R < 6.0:
+		return
+	var teal = Color(0.36, 0.95, 0.74, 1.0)
+	var grid = Color(0.36, 0.95, 0.74, 0.07)
+	var dim = Color(0.36, 0.95, 0.74, 0.15)
+	ui.imgui_draw_circle_filled(c, R + 2.0, NX_LCD_DEEP, 48)
+	ui.imgui_draw_circle_filled(c, R, NX_LCD_TOP, 48)
+	# Retícula.
+	ui.imgui_draw_rect_filled(Rect2(Vector2(c.x - R, c.y - 0.5), Vector2(R * 2.0, 1.0)), grid, 0.0)
+	ui.imgui_draw_rect_filled(Rect2(Vector2(c.x - 0.5, c.y - R), Vector2(1.0, R * 2.0)), grid, 0.0)
+	# Anillos.
+	for k in [0.34, 0.62, 1.0]:
+		ui.imgui_draw_circle(c, R * k, dim, 48, 1.0)
+	# Marcas de rumbo.
+	for i in range(24):
+		var a = TAU * float(i) / 24.0
+		var d = Vector2(cos(a), sin(a))
+		var r0 = R * (0.84 if i % 6 == 0 else 0.91)
+		ui.imgui_draw_polyline(PoolVector2Array([c + d * r0, c + d * R]), dim, 1.0)
+	# Barrido lento: ala con estela corta y tenue, y línea guía apenas más viva.
+	var lead = fmod(float(OS.get_ticks_msec()) * 0.00036, TAU)
+	for k in range(10):
+		var a = lead - float(k) * 0.06
+		var alpha = 0.14 * (1.0 - float(k) / 10.0)
+		var d = Vector2(cos(a), sin(a))
+		ui.imgui_draw_polyline(PoolVector2Array([c, c + d * R]), Color(teal.r, teal.g, teal.b, alpha), 1.5)
+	var ld = Vector2(cos(lead), sin(lead))
+	ui.imgui_draw_polyline(PoolVector2Array([c, c + ld * R]), Color(0.62, 1.0, 0.82, 0.35), 1.5)
+
+
+# Flecha de puntero dibujada con franjas (blanca con contorno oscuro): marca qué equipo# tiene el mouse y el teclado ahora. `at` es la punta, en coords de pantalla.
+func _draw_shared_pointer(ui, at, s):
+	var k = max(1.0, s / 20.0)
+	for i in range(8):
+		var w = (2.0 + float(i) * 1.1) * k
+		var y = float(i) * 2.0 * k
+		ui.imgui_draw_rect_filled(Rect2(at + Vector2(-k, y - k), Vector2(w + 2.0 * k, 2.0 * k + 2.0 * k)), NX_BG, 0.0)
+	for i in range(8):
+		var w = (2.0 + float(i) * 1.1) * k
+		ui.imgui_draw_rect_filled(Rect2(at + Vector2(0.0, float(i) * 2.0 * k), Vector2(w, 2.0 * k)), Color(1, 1, 1, 1), 0.0)
 
 
 # Tramo entre el centro y el par: puntos y cabeza cuadrada del lado de quien es
@@ -1837,11 +1944,12 @@ func _emboss():
 	return shell == null or shell.appearance == null or bool(shell.appearance.get("emboss", true))
 
 
-# Bisel clásico: claro arriba/izquierda, oscuro abajo/derecha. `pressed` lo invierte
-# (estado hundido). Sin redondeo; las teselas del Frame nunca son redondas. `hover`
-# activa el relieve en modo plano.
+# Bisel "chiseled" (wmdockapps): arriba/izquierda luz, abajo/derecha sombra, cada
+# lado como un degradé corto desde la cara (no un tono plano). `pressed` invierte el
+# relieve (estado hundido). Sin redondeo; las teselas del Frame nunca son redondas.
+# `hover` activa el 3D en modo plano.
 func _bevel(ui, r, face, pressed, hover = false):
-	ui.imgui_draw_rect_filled(r, face, 0.0)
+	_fill_face(ui, r, face)
 	var w = _bevel_w(ui)
 	if _flat_blocks() and not (hover or pressed):
 		# Plano: sólo una línea inferior tenue separa la tesela del fondo.
@@ -1849,12 +1957,53 @@ func _bevel(ui, r, face, pressed, hover = false):
 		ui.imgui_draw_rect_filled(Rect2(Vector2(r.position.x, r.end.y - edge_w),
 			Vector2(r.size.x, edge_w)), NX_DARK.linear_interpolate(face, 0.45), 0.0)
 		return
-	var light = NX_DARK if pressed else NX_LIGHT
-	var dark = NX_LIGHT if pressed else NX_DARK
-	ui.imgui_draw_rect_filled(Rect2(r.position, Vector2(r.size.x, w)), light, 0.0)
-	ui.imgui_draw_rect_filled(Rect2(r.position, Vector2(w, r.size.y)), light, 0.0)
-	ui.imgui_draw_rect_filled(Rect2(Vector2(r.position.x, r.end.y - w), Vector2(r.size.x, w)), dark, 0.0)
-	ui.imgui_draw_rect_filled(Rect2(Vector2(r.end.x - w, r.position.y), Vector2(w, r.size.y)), dark, 0.0)
+	if w <= 0.0 or r.size.x <= 2.0 or r.size.y <= 2.0:
+		return
+	var hi = face.linear_interpolate(NX_FOCUS, BEVEL_HI)
+	var lo = face.linear_interpolate(NX_DARK, BEVEL_LO)
+	var light = lo if pressed else hi
+	var dark = hi if pressed else lo
+	_bevel_bands(ui, r, face, light, dark, w)
+
+
+# Cara de la tesela: gradiente vertical sutil (apenas más oscura al pie) que da el
+# volumen de plástico biselado. Una sola pasada, igual que antes.
+func _fill_face(ui, r, face):
+	if ui.has_method("imgui_draw_rect_filled_multicolor"):
+		var foot = face.linear_interpolate(NX_DARK, 0.14)
+		ui.imgui_draw_rect_filled_multicolor(r, face, face, foot, foot)
+	else:
+		ui.imgui_draw_rect_filled(r, face, 0.0)
+
+
+# Cuatro franjas de degradé, una por lado, sin solaparse: las horizontales van de
+# ancho completo (la superior manda en la esquina sup.-der., la inferior en la
+# inf.-izq.), las verticales quedan entre ambas. El primer píxel de cada franja es
+# el color pleno, así el borde queda nítido además del degradé.
+func _bevel_bands(ui, r, face, light, dark, w):
+	var x0 = r.position.x
+	var y0 = r.position.y
+	var x1 = r.end.x
+	var y1 = r.end.y
+	var ww = min(w, r.size.x * 0.5)
+	var wh = min(w, r.size.y * 0.5)
+	var grad = ui.has_method("imgui_draw_rect_filled_multicolor")
+	if wh > 0.0:
+		_band(ui, Rect2(Vector2(x0, y0), Vector2(r.size.x, wh)), light, light, face, face, grad)
+		_band(ui, Rect2(Vector2(x0, y1 - wh), Vector2(r.size.x, wh)), face, face, dark, dark, grad)
+	var mid_h = r.size.y - 2.0 * wh
+	if ww > 0.0 and mid_h > 0.0:
+		_band(ui, Rect2(Vector2(x0, y0 + wh), Vector2(ww, mid_h)), light, face, light, face, grad)
+		_band(ui, Rect2(Vector2(x1 - ww, y0 + wh), Vector2(ww, mid_h)), face, dark, face, dark, grad)
+
+
+# Una franja del bisel: degradé de 4 esquinas si el binding lo trae; si no (stubs de
+# test), relleno plano con el color exterior.
+func _band(ui, rect, tl, tr, bl, br, grad):
+	if grad:
+		ui.imgui_draw_rect_filled_multicolor(rect, tl, tr, bl, br)
+	else:
+		ui.imgui_draw_rect_filled(rect, tl, 0.0)
 
 
 # Ícono grabado en el bloque: el INTERIOR queda del mismo color que la cara (no una
@@ -2305,8 +2454,9 @@ func _input(event):
 					shell.request_redraw()
 					get_tree().set_input_as_handled()
 					return
-				if _applet_bar_at(mouse_pos):
+				if _applet_bar_at(mouse_pos) and not _bar_occupied_at(mouse_pos):
 					applet_picker_want = true
+					applet_action_want = ""
 					shell.request_redraw()
 					get_tree().set_input_as_handled()
 					return
@@ -2777,6 +2927,22 @@ func _applet_bar_at(pos):
 	return pos.y <= h or pos.y >= get_viewport().size.y - h
 
 
+# ¿El punto cae sobre un bloque ya dibujado de la barra (applet, pin, ventana,
+# Compartiendo o tesela de navegación)? El selector genérico sólo abre en slots
+# vacíos, así que esto lo excluye.
+func _bar_occupied_at(pos):
+	if not applets_drawn:
+		return false
+	for r in place_rects:
+		if r.has_point(pos):
+			return true
+	for zone in ["top", "dock"]:
+		for it in bar_layout.get(zone, []):
+			if it.rect.has_point(pos):
+				return true
+	return false
+
+
 # Suelta de un bloque de app (pin del Frame o icono del lanzador): a una barra se
 # fija/mueve a ese slot; al centro del escritorio se estalla —salvo que sea una app o
 # ventana top-level activa, que vuelve a su lugar—.
@@ -2961,15 +3127,38 @@ func _draw_applets(ui, vp, off, mouse, grid):
 	_draw_bar_blocks(ui, "dock", dock_x, 0.0, grid, mouse)
 	var pin_x = float(grid.margin) + float(grid.n - 1) * float(grid.pitch)
 	var y = 0.0
-	# El selector de controles del Frame (fijar/quitar applets y barras) se abre con
-	# clic derecho sobre un applet o sobre la franja; ya no hay celda "+".
-	if applet_picker_want:
-		applet_picker_want = false
-		ui.open_popup("##applets_add")
 	# Pin de la barra inferior (K19): fija la franja o vuelve al autohide.
 	if _draw_pin_toggle(ui, Vector2(pin_x, y), side, pin_bottom_bar, "pin_bottom"):
 		toggle_pin("bottom")
 		entered = true
+	# Los menús del Frame (selector de controles y menús por applet) se dibujan al
+	# final de `draw()`, fuera de las ventanas de barra: así aparecen sobre las apps y
+	# no dependen de que la barra inferior esté a la vista.
+	# Las teselas del DockApp de ventanas se dibujan donde esté su token: también
+	# en la barra inferior (antes sólo aparecían en la superior).
+	if bar_order["dock"].has(WINDOW_TOKEN) and not running().empty():
+		_draw_windows(ui, "dock", side, 0.0, by, mouse)
+		_draw_window_grip(ui, "dock", mouse)
+	_draw_inner_shadow(ui, Vector2(0.0, by), vp.x, 1.0)
+	ui.end()
+	ui.pop_style_var()
+	applets_drawn = true
+
+
+# Menús del Frame, dibujados al final del frame (después de las barras y los
+# estallidos) para que queden por encima. Un solo popup a la vez: el selector de
+# controles se abre en slots vacíos; cada applet en su propio menú.
+func _draw_frame_popups(ui, mouse, side):
+	if applet_picker_want:
+		applet_picker_want = false
+		applet_action_want = ""
+		ui.open_popup("##applets_add")
+	elif applet_action_want != "":
+		var act = applet_action_want
+		applet_action_want = ""
+		applet_picker_want = false
+		ui.open_popup("##applet_" + act)
+	applet_picker_open = false
 	MENU_STYLE.begin(ui)
 	if ui.begin_popup("##applets_add"):
 		applet_picker_open = true
@@ -2984,17 +3173,13 @@ func _draw_applets(ui, vp, off, mouse, grid):
 			if MENU_STYLE.item(ui, a.name, "", applets_visible.has(a.id)):
 				_applet_set_visible(a.id, not applets_visible.has(a.id))
 		# Autocierre: si el puntero sale del popup (con margen de media celda) hacia
-		# el escritorio u otra ventana, se cierra. NO se cierra mientras está sobre
-		# el popup o sobre la barra que lo abrió.
+		# el escritorio u otra ventana, se cierra.
 		var pop = Rect2(ui.get_window_pos(), ui.get_window_size())
 		var margin = side * 0.5
-		if not (pop.grow(margin).has_point(mouse) or applets_bar_rect.grow(margin).has_point(mouse)):
+		if not (pop.grow(margin).has_point(mouse) or _applet_bar_at(mouse)):
 			ui.close_current_popup()
 		ui.end_popup()
 	MENU_STYLE.end(ui)
-	if applet_action_want != "":
-		ui.open_popup("##applet_" + applet_action_want)
-		applet_action_want = ""
 	MENU_STYLE.begin(ui)
 	if ui.begin_popup("##applet_teclado"):
 		MENU_STYLE.chrome(ui, "Teclado")
@@ -3036,15 +3221,16 @@ func _draw_applets(ui, vp, off, mouse, grid):
 					shell.request_redraw()
 		ui.end_popup()
 	MENU_STYLE.end(ui)
-	# Las teselas del DockApp de ventanas se dibujan donde esté su token: también
-	# en la barra inferior (antes sólo aparecían en la superior).
-	if bar_order["dock"].has(WINDOW_TOKEN) and not running().empty():
-		_draw_windows(ui, "dock", side, 0.0, by, mouse)
-		_draw_window_grip(ui, "dock", mouse)
-	_draw_inner_shadow(ui, Vector2(0.0, by), vp.x, 1.0)
-	ui.end()
-	ui.pop_style_var()
-	applets_drawn = true
+	# Reloj: alternar entre la esfera analógica y el display de 7 segmentos.
+	MENU_STYLE.begin(ui)
+	if ui.begin_popup("##applet_reloj"):
+		MENU_STYLE.chrome(ui, "Reloj")
+		if MENU_STYLE.item(ui, "Digital (7 segmentos)", "", not clock_analog):
+			_set_clock_analog(false)
+		if MENU_STYLE.item(ui, "Analógico", "", clock_analog):
+			_set_clock_analog(true)
+		ui.end_popup()
+	MENU_STYLE.end(ui)
 
 
 # Filas de sombra sin hit target: se dibujan dentro de la ventana real del Frame,
@@ -3064,6 +3250,125 @@ static func shadow_rows(origin, width, dir, rows_value = SHADOW, alpha_value = S
 func _draw_inner_shadow(ui, origin, width, dir):
 	for row in shadow_rows(origin, width, dir):
 		ui.imgui_draw_rect_filled(row.rect, Color(0.0, 0.0, 0.0, row.alpha), 0.0)
+
+
+# --- Placa LCD de las dockapps ----------------------------------------------
+# Niveles de LCD (wmdockapps): un mismo acento en off/dim/on/bright para que el
+# estado se lea como una pantalla encendida y no como texto plano.
+func _lcd(accent, level):
+	match String(level):
+		"off":
+			return NX_LCD_TOP.linear_interpolate(accent, 0.26)
+		"dim":
+			return NX_LCD_TOP.linear_interpolate(accent, 0.56)
+		"bright":
+			return accent.linear_interpolate(Color(1, 1, 1, 1), 0.38)
+	return accent
+
+
+# Placa de pantalla rehundida: gradiente vertical (teñido por el acento según
+# `glow`), dither de puntos, una línea de glare de vidrio y un borde interior oscuro
+# arriba/izquierda con luz abajo/derecha (inverso al bisel de las teselas).
+func _lcd_plate(ui, scr, loc, w, h, accent, glow):
+	if w <= 0.0 or h <= 0.0:
+		return
+	var r = Rect2(scr, Vector2(w, h))
+	var top = NX_LCD_TOP
+	var bot = NX_LCD_BOTTOM
+	if glow > 0.0 and accent != null:
+		top = top.linear_interpolate(accent, clamp(glow, 0.0, 0.80))
+		bot = bot.linear_interpolate(accent, clamp(glow * 0.45, 0.0, 0.55))
+	if ui.has_method("imgui_draw_rect_filled_multicolor"):
+		ui.imgui_draw_rect_filled_multicolor(r, top, top, bot, bot)
+	else:
+		ui.imgui_draw_rect_filled(r, top, 0.0)
+	_draw_lcd_dither(ui, loc, w, h)
+	var e = max(1.0, round(ui.get_imgui_scale()))
+	if w > 3.0 * e:
+		ui.imgui_draw_rect_filled(Rect2(Vector2(scr.x + e, scr.y + e), Vector2(w - 2.0 * e, 1.0)), NX_GLARE, 0.0)
+	var deep = Color(NX_LCD_DEEP.r, NX_LCD_DEEP.g, NX_LCD_DEEP.b, 0.85)
+	var lit = NX_LCD_TOP.linear_interpolate(NX_FOCUS, 0.28)
+	ui.imgui_draw_rect_filled(Rect2(r.position, Vector2(r.size.x, e)), deep, 0.0)
+	ui.imgui_draw_rect_filled(Rect2(r.position, Vector2(e, r.size.y)), deep, 0.0)
+	ui.imgui_draw_rect_filled(Rect2(Vector2(r.position.x, r.end.y - e), Vector2(r.size.x, e)), lit, 0.0)
+	ui.imgui_draw_rect_filled(Rect2(Vector2(r.end.x - e, r.position.y), Vector2(e, r.size.y)), lit, 0.0)
+
+
+# Trama de puntos 1px (estilo LCD) cacheada por tamaño: se genera una vez por
+# tamaño, no cuesta por frame.
+func _lcd_dither_tex(w, h):
+	var key = "%dx%d" % [int(round(w)), int(round(h))]
+	if _dither_cache.has(key):
+		return _dither_cache[key]
+	var iw = int(max(2.0, round(w)))
+	var ih = int(max(2.0, round(h)))
+	var img = Image.new()
+	img.create(iw, ih, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 0))
+	img.lock()
+	var dot = Color(1, 1, 1, 0.045)
+	for y in range(1, ih, 2):
+		for x in range(1, iw, 2):
+			img.set_pixel(x, y, dot)
+	img.unlock()
+	var tex = ImageTexture.new()
+	tex.create_from_image(img, 0)
+	_dither_cache[key] = tex
+	return tex
+
+
+func _draw_lcd_dither(ui, loc, w, h):
+	var tex = _lcd_dither_tex(w, h)
+	if tex == null:
+		return
+	ui.set_cursor_pos(loc)
+	ui.image(tex, Vector2(w, h))
+
+
+# --- Reloj LCD de 7 segmentos -----------------------------------------------
+const SEG7 = {
+	"0": "abcdef", "1": "bc", "2": "abged", "3": "abgcd", "4": "fgbc",
+	"5": "afgcd", "6": "afgcde", "7": "abc", "8": "abcdefg", "9": "abcdfg",
+	"-": "g", " ": "",
+}
+
+
+# Rectángulos de los 7 segmentos de un dígito de alto `dh` y ancho `dw`, grosor `t`.
+func _seg7_rects(o, dh, dw, t):
+	var mid = o.y + dh * 0.5
+	var ins = t * 0.5
+	var hw = max(0.5, dw - 2.0 * t)
+	var hv = max(0.5, dh * 0.5 - t)
+	return {
+		"a": Rect2(o.x + t, o.y, hw, t),
+		"b": Rect2(o.x + dw - t, o.y + ins, t, hv),
+		"c": Rect2(o.x + dw - t, mid + ins, t, hv),
+		"d": Rect2(o.x + t, o.y + dh - t, hw, t),
+		"e": Rect2(o.x, mid + ins, t, hv),
+		"f": Rect2(o.x, o.y + ins, t, hv),
+		"g": Rect2(o.x + t, mid - t * 0.5, hw, t),
+	}
+
+
+# Un dígito: primero los segmentos apagados (fantasma, la firma de un LCD real) y
+# encima los encendidos del carácter.
+func _draw_seg7_digit(ui, o, dh, ch, on, off):
+	var dw = dh * 0.52
+	var t = max(1.0, dh * 0.16)
+	var rects = _seg7_rects(o, dh, dw, t)
+	var rad = max(0.5, t * 0.3)
+	for k in ["a", "b", "c", "d", "e", "f", "g"]:
+		ui.imgui_draw_rect_filled(rects[k], off, rad)
+	for ch2 in String(SEG7.get(ch, "")):
+		if rects.has(ch2):
+			ui.imgui_draw_rect_filled(rects[ch2], on, rad)
+
+
+func _draw_seg7_colon(ui, o, dh, on):
+	var rad = max(1.0, dh * 0.11)
+	var x = o.x + dh * 0.12
+	ui.imgui_draw_circle_filled(Vector2(x, o.y + dh * 0.33), rad, on, 0)
+	ui.imgui_draw_circle_filled(Vector2(x, o.y + dh * 0.67), rad, on, 0)
 
 
 # Un applet: bloque cuadrado U x U con bisel; el estado va por color de la barra/
@@ -3086,20 +3391,28 @@ func _draw_applet(ui, id, pos, scr, w, side, is_sel, mouse, is_ghost = false):
 		line = NX_SEL
 	elif state == "error" or state == "no_disponible":
 		line = Color(0.95, 0.55, 0.30, 1.0)
-	# Placa común: los recursos y el reloj aprovechan toda la celda.
+	# Placa LCD común (rehundida, con gradiente, dither y glare): unifica todas las
+	# dockapps. El estado enciende el acento de la pantalla (`glow`).
 	var bw = _bevel_w(ui)
 	var gp_w = max(24.0, w - 2.0 * bw - 6.0)
 	var gp_h = max(24.0, side - 2.0 * bw - 6.0)
 	var gp_scr = scr + Vector2((w - gp_w) * 0.5, bw + 3.0)
 	var gp_loc = pos + Vector2((w - gp_w) * 0.5, bw + 3.0)
-	if id != "recursos":
-		ui.imgui_draw_rect_filled(Rect2(gp_scr, Vector2(gp_w, gp_h)), Color(0.10, 0.11, 0.14, 1.0), 0.0)
+	var accent = line
+	var glow = 0.22 if state == "activo" else 0.0
+	if id == "recursos":
+		accent = _load_color()
+		glow = (0.12 + 0.45 * clamp(sysmon.cpu_now() / 100.0, 0.0, 1.0)) if sysmon.has_cpu else 0.0
+	elif id == "termico" and sysmon.has_temp:
+		accent = _temp_color()
+		glow = 0.22
+	elif id == "reloj":
+		accent = NX_LCD_CYAN
+	_lcd_plate(ui, gp_scr, gp_loc, gp_w, gp_h, accent, glow)
 	var v = _applet_value(id)
 	if id == "recursos":
-		_draw_resources(ui, gp_scr, gp_loc, gp_w, gp_h)
+		_draw_resources(ui, gp_scr, gp_loc, gp_w, gp_h, accent)
 	elif id == "termico":
-		if sysmon.has_temp:
-			line = _temp_color()
 		_draw_thermal(ui, gp_scr, gp_loc, gp_w, gp_h)
 	elif id == "reloj":
 		_draw_clock(ui, gp_scr, gp_loc, gp_w, gp_h, v)
@@ -3107,10 +3420,10 @@ func _draw_applet(ui, id, pos, scr, w, side, is_sel, mouse, is_ghost = false):
 		applet_mods[id].draw(self, ui, gp_scr, gp_loc, gp_w, gp_h)
 	else:
 		ui.set_cursor_pos(gp_loc + Vector2(4.0, 3.0))
-		ui.text_colored(NX_TEXT_DIM, a.short)
+		ui.text_colored(_lcd(accent, "off"), a.short)
 		var vw = _text_w(ui, v)
 		ui.set_cursor_pos(gp_loc + Vector2(max(3.0, (gp_w - vw) * 0.5), gp_h * 0.45))
-		ui.text_colored(NX_TEXT, v)
+		ui.text_colored(_lcd(accent, "on"), v)
 	if b.hover and not is_ghost and applet_mods.has(id) and applet_mods[id].detail != "":
 		ui.set_tooltip(applet_mods[id].detail)
 	var pct = _applet_pct(id)
@@ -3119,15 +3432,11 @@ func _draw_applet(ui, id, pos, scr, w, side, is_sel, mouse, is_ghost = false):
 		ui.imgui_draw_rect_filled(Rect2(rect.position + Vector2(4.0, side - 6.0), Vector2(bar_w, 3.0)), line, 0.0)
 
 
-# Applet de sistema: gráfica de CPU como área desde abajo, con el fondo teñido por
-# la carga, y diales circulares de MEM y SWP. Sin indicadores de texto (el detalle
-# va en el tooltip); el color distingue los diales (verde RAM, ámbar swap).
-func _draw_resources(ui, scr, loc, w, h):
-	var load_ratio = clamp(sysmon.cpu_now() / 100.0, 0.0, 1.0) if sysmon.has_cpu else 0.0
-	var col = _load_color()
-	# Fondo según actividad: la placa se tiñe del color de carga.
-	var bg = Color(0.10, 0.11, 0.14, 1.0).linear_interpolate(col, 0.12 + 0.40 * load_ratio)
-	ui.imgui_draw_rect_filled(Rect2(scr, Vector2(w, h)), bg, 3.0)
+# Applet de sistema: gráfica de CPU como área desde abajo y diales circulares
+# concéntricos de MEM y SWP. Sin indicadores de texto (el detalle va en el tooltip);
+# el color distingue los diales (verde RAM, ámbar swap). La placa LCD, con el tinte
+# de carga, la dibuja _draw_applet.
+func _draw_resources(ui, scr, loc, w, h, col):
 	# CPU a TODO el ancho, como área desde abajo.
 	_cpu_area(ui, scr + Vector2(3.0, 3.0), w - 6.0, h - 6.0, col)
 	# Un solo dial CONCÉNTRICO y centrado: SWP exterior (ámbar), MEM interior
@@ -3136,9 +3445,9 @@ func _draw_resources(ui, scr, loc, w, h):
 	var c = scr + Vector2(w * 0.5, h * 0.5)
 	var r_out = max(8.0, min(h, w) * 0.42)
 	var r_in = max(5.0, r_out * 0.60)
-	ui.imgui_draw_circle_filled(c, r_out + 2.0, Color(0.06, 0.07, 0.11, 0.72), 0)
-	_dial(ui, c, r_out, sysmon.swap / 100.0, Color(0.95, 0.70, 0.30, 1.0))
-	_dial(ui, c, r_in, sysmon.ram / 100.0, Color(0.50, 0.90, 0.45, 1.0))
+	ui.imgui_draw_circle_filled(c, r_out + 2.0, Color(0.02, 0.03, 0.05, 0.55), 0)
+	_dial(ui, c, r_out, sysmon.swap / 100.0, _lcd(Color(0.95, 0.70, 0.30, 1.0), "on"))
+	_dial(ui, c, r_in, sysmon.ram / 100.0, _lcd(Color(0.50, 0.90, 0.45, 1.0), "on"))
 
 
 # Área de CPU anclada abajo: columnas rellenas + línea superior. Al ser área (no una
@@ -3202,11 +3511,11 @@ func _temp_color():
 # (carga, con rayo si carga) a la derecha y governor como etiqueta chica al pie. Sin
 # números grandes que se encimen en la celda (el detalle va en el tooltip).
 func _draw_thermal(ui, scr, loc, w, h):
-	var col = _temp_color()
+	var col = _lcd(_temp_color(), "on")
 	var tf = clamp((sysmon.temp_c - 30.0) / 70.0, 0.0, 1.0) if sysmon.has_temp else 0.0
-	_draw_thermo(ui, Vector2(scr.x + w * 0.26, scr.y + h * 0.10), h * 0.52, tf, col)
+	_draw_thermo(ui, Vector2(scr.x + w * 0.28, scr.y + h * 0.12), h * 0.52, tf, col)
 	if sysmon.has_battery:
-		_draw_battery_icon(ui, Rect2(scr.x + w * 0.50, scr.y + h * 0.16, w * 0.42, h * 0.26),
+		_draw_battery_icon(ui, Rect2(scr.x + w * 0.58, scr.y + h * 0.12, w * 0.22, h * 0.52),
 			clamp(sysmon.battery_pct / 100.0, 0.0, 1.0), sysmon.battery_charging())
 	# Governor (la selección se hace con clic izquierdo; ver _applet_primary). Fuente
 	# de etiqueta (más chica que la de UI) para que no compita con los símbolos.
@@ -3214,7 +3523,7 @@ func _draw_thermal(ui, scr, loc, w, h):
 	var small = _push_label_font(ui)
 	gov = _truncate_w(ui, gov, w - 8.0)
 	ui.set_cursor_pos(loc + Vector2(4.0, h * 0.72))
-	ui.text_colored(NX_TEXT_DIM, gov)
+	ui.text_colored(col, gov)
 	if small:
 		ui.pop_font()
 
@@ -3235,27 +3544,30 @@ func _draw_thermo(ui, c, hgt, frac, col):
 	ui.imgui_draw_circle_filled(bulb_c, max(2.0, bulb_r * 0.62), col, 0)
 
 
-# Batería simbólica: cuerpo con contorno claro e interior oscuro, relleno
-# proporcional y rayo si está cargando. El contorno (y no sólo un bloque oscuro) la
-# hace legible a tamaño chico y deja claro dónde está el borne.
+# Batería simbólica VERTICAL (como el termómetro): cuerpo alto con contorno claro e
+# interior oscuro, relleno de abajo hacia arriba, borne arriba y rayo si carga. El
+# contorno (y no sólo un bloque oscuro) la hace legible a tamaño chico.
 func _draw_battery_icon(ui, r, frac, charging):
 	var line = NX_TEXT_DIM
-	var cap_w = max(2.0, r.size.x * 0.10)
-	var body = Rect2(r.position, Vector2(max(5.0, r.size.x - cap_w - 1.0), r.size.y))
+	var cap_h = max(2.0, r.size.y * 0.10)
+	var body = Rect2(r.position + Vector2(0.0, cap_h + 1.0),
+		Vector2(r.size.x, max(5.0, r.size.y - cap_h - 1.0)))
 	ui.imgui_draw_rect_filled(body, Color(0.06, 0.07, 0.11, 0.92), 1.5)
 	_draw_outline(ui, body, line)
-	# Borne (positivo): rectángulo corto a la derecha, centrado verticalmente.
-	ui.imgui_draw_rect_filled(Rect2(Vector2(body.end.x + 1.0, r.position.y + r.size.y * 0.30),
-		Vector2(cap_w, r.size.y * 0.40)), line, 1.0)
-	var inr = body.grow(-max(1.5, body.size.y * 0.20))
+	# Borne (positivo) arriba, centrado.
+	var cap_w = r.size.x * 0.42
+	ui.imgui_draw_rect_filled(Rect2(Vector2(r.position.x + (r.size.x - cap_w) * 0.5, r.position.y),
+		Vector2(cap_w, cap_h)), line, 1.0)
+	var inr = body.grow(-max(1.5, body.size.x * 0.22))
 	var col = Color(0.55, 0.90, 0.55, 1.0) if charging else Color(0.60, 0.80, 0.95, 1.0)
 	if not charging and frac < 0.20:
 		col = Color(0.95, 0.45, 0.35, 1.0)
-	var fw = inr.size.x * clamp(frac, 0.0, 1.0)
-	if fw > 0.0:
-		ui.imgui_draw_rect_filled(Rect2(inr.position, Vector2(fw, inr.size.y)), col, 1.0)
+	var fh = inr.size.y * clamp(frac, 0.0, 1.0)
+	if fh > 0.0:
+		ui.imgui_draw_rect_filled(Rect2(Vector2(inr.position.x, inr.end.y - fh),
+			Vector2(inr.size.x, fh)), col, 1.0)
 	if charging:
-		_draw_bolt(ui, body.position + body.size * 0.5, min(body.size.x, body.size.y) * 0.46,
+		_draw_bolt(ui, body.position + body.size * 0.5, min(body.size.x, body.size.y) * 0.44,
 			Color(0.98, 0.85, 0.35, 1.0))
 
 
@@ -3269,7 +3581,42 @@ func _draw_bolt(ui, c, s, col):
 	ui.imgui_draw_polyline(pts, col, max(1.5, s * 0.34), true)
 
 
+# Reloj LCD de 7 segmentos (retro): HH:MM con los segmentos apagados visibles en
+# tenue, como una pantalla real. Reemplaza el reloj analógico.
 func _draw_clock(ui, scr, loc, w, h, value):
+	if clock_analog:
+		_draw_clock_analog(ui, scr, loc, w, h, value)
+		return
+	var s = String(value)
+	var ci = s.find(":")
+	var hh = s.substr(0, ci) if ci > 0 else s
+	var mm = s.substr(ci + 1) if ci >= 0 else ""
+	if hh.length() < 2:
+		hh = "0" + hh
+	if mm.length() < 2:
+		mm = mm + "0"
+	var glyphs = [hh.substr(0, 1), hh.substr(1, 1), ":", mm.substr(0, 1), mm.substr(1, 1)]
+	var dh = max(8.0, min(h * 0.66, w / 4.9))
+	var dw = dh * 0.52
+	var colon_w = dh * 0.24
+	var gap = dw * 0.18
+	var total = 4.0 * dw + colon_w + 4.0 * gap
+	var x = scr.x + max(1.0, (w - total) * 0.5)
+	var y = scr.y + (h - dh) * 0.5
+	var on = _lcd(NX_LCD_CYAN, "bright")
+	var off = _lcd(NX_LCD_CYAN, "off").linear_interpolate(NX_LCD_TOP, 0.55)
+	for g in glyphs:
+		if g == ":":
+			_draw_seg7_colon(ui, Vector2(x, y), dh, on)
+			x += colon_w + gap
+		else:
+			_draw_seg7_digit(ui, Vector2(x, y), dh, g, on, off)
+			x += dw + gap
+
+
+# Reloj analógico (opción del popup): esfera, agujas de hora/minuto y la hora digital
+# debajo, sobre la placa LCD.
+func _draw_clock_analog(ui, scr, loc, w, h, value):
 	var size = min(w, h)
 	var center = scr + Vector2(w * 0.5, h * 0.40)
 	var radius = size * 0.32
@@ -3282,7 +3629,7 @@ func _draw_clock(ui, scr, loc, w, h, value):
 		ui.imgui_draw_polyline(PoolVector2Array([center, tip]), NX_FOCUS, hand.width)
 	ui.imgui_draw_circle_filled(center, 2.0, NX_SEL, 0)
 	ui.set_cursor_pos(loc + Vector2((w - _text_w(ui, value)) * 0.5, h - 15.0 * ui.get_imgui_scale()))
-	ui.text_colored(NX_TEXT, value)
+	ui.text_colored(_lcd(NX_LCD_CYAN, "on"), value)
 
 
 func _draw_outline(ui, rect, color):
@@ -3779,7 +4126,7 @@ func draw(ui):
 	var home = shell.current_activity == null
 	var mouse = ui.get_mouse_pos()
 	var now = OS.get_ticks_msec()
-	var vp = ui.get_viewport_rect().size
+	var vp = ui._screen_size()
 	var bh = shell.frame_bar_h(vp)
 	# Los applets y las ventanas se dibujan con su ícono; permitir la carga perezosa
 	# de varios por frame (antes 2): con varias ventanas/pines distintas, las de más
@@ -3840,6 +4187,7 @@ func draw(ui):
 		applets_drawn = false
 		shared_layout = []
 		shared_drawn = false
+		applet_picker_open = false
 		_draw_explosions(ui)
 		return
 	if not top_drawn:
@@ -3939,6 +4287,8 @@ func draw(ui):
 	# El estallido va al final: su overlay (ventana ImGui sin mouse) queda por encima
 	# de las barras, no tapado por su fondo.
 	_draw_explosions(ui)
+	# Menús del Frame al final, sobre todo lo demás (barras, drag y estallidos).
+	_draw_frame_popups(ui, mouse, side)
 
 	# Cerrar tiene prioridad sobre alternar/minimizar y sobre cambiar: la mini-tesela
 	# 'x' va encima del bloque cuadrado y puede compartir el clic en la esquina.
@@ -4030,7 +4380,7 @@ func _draw_explosions(ui):
 	# una caen en la ventana de debug del módulo y aparecen mal ubicadas. Overlay de
 	# pantalla completa, sin fondo y sin mouse (NoMouseInputs), padding 0 para que
 	# las coordenadas absolutas coincidan (mismo patrón que system_osd.gd).
-	var vp = ui.get_viewport_rect().size
+	var vp = ui._screen_size()
 	ui.set_next_window_pos(Vector2.ZERO, true)
 	ui.set_next_window_size(vp, true)
 	ui.set_next_window_bg_alpha(0.0)

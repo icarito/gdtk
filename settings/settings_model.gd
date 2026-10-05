@@ -96,10 +96,16 @@ const CONTROL_DEFAULT = {
 	"auto": false,
 	"name": "",
 }
+# Multi-monitor (SPEC-physical-multi-monitor): escritorio extendido en una sola
+# ventana (span). `enabled` activa/desactiva; `primary` es el nombre de la salida
+# principal ("" = automática: externa > interna); `order` es el orden izquierda->
+# derecha de las demás salidas ([] = automático por posición física). El shell lo
+# relee en vivo y reordena sway/el envolvente sin reiniciar.
+const SPAN_DEFAULT = {"enabled": false, "primary": "", "order": []}
 const HOST_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.:-_%[]"
 const NAME_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
 
-const FIELDS = ["keyboard", "locale", "accent", "wallpaper", "natural_scroll", "deskflow", "appearance", "ui_scale"]
+const FIELDS = ["keyboard", "locale", "accent", "wallpaper", "natural_scroll", "deskflow", "appearance", "ui_scale", "span"]
 
 const HEX_CHARS = "0123456789abcdef"
 
@@ -117,6 +123,7 @@ func defaults():
 		"deskflow": CONTROL_DEFAULT.duplicate(true),
 		"appearance": APPEARANCE_DEFAULT.duplicate(true),
 		"ui_scale": UI_SCALE_DEFAULT,
+		"span": SPAN_DEFAULT.duplicate(true),
 	}
 
 
@@ -136,6 +143,7 @@ func normalize(data):
 	out["deskflow"] = deskflow(data.get("deskflow", {}))
 	out["appearance"] = appearance(data.get("appearance", {}))
 	out["ui_scale"] = ui_scale_value(data.get("ui_scale", null))
+	out["span"] = span(data.get("span", {}))
 	for k in data.keys():
 		if not out.has(k):
 			out[k] = data[k]
@@ -341,6 +349,30 @@ func ui_scale_value(v):
 	return clamp(f, UI_SCALE_MIN, UI_SCALE_MAX)
 
 
+# Escritorio extendido multi-monitor normalizado. `enabled` es tolerante a textos
+# ("on"/"1"); `primary` es un nombre de salida válido (ver screen_name) o "" (auto);
+# `order` es una lista de nombres de salida sin duplicados.
+func span(v):
+	if typeof(v) != TYPE_DICTIONARY:
+		v = {}
+	var out = SPAN_DEFAULT.duplicate(true)
+	out.enabled = bool_value(v.get("enabled", out.enabled), out.enabled)
+	out.primary = screen_name(v.get("primary", ""))
+	out.order = span_order(v.get("order", []))
+	return out
+
+
+func span_order(list):
+	var out = []
+	if typeof(list) != TYPE_ARRAY:
+		return out
+	for item in list:
+		var n = screen_name(item)
+		if n != "" and not out.has(n):
+			out.append(n)
+	return out
+
+
 # Variables de entorno para que el resto del escritorio escale igual que el shell.
 # GTK/GNOME usan GDK_SCALE (entero) + GDK_DPI_SCALE (fracción); Qt y el cursor sus
 # propias variables. Puro y testeable.
@@ -405,7 +437,8 @@ func locale_file_content(locale):
 # reiniciar. Acento y fondo sí se aplican al instante en el shell.
 func is_live(field):
 	return field == "accent" or field == "wallpaper" or field == "natural_scroll" \
-		or field == "deskflow" or field == "appearance" or field == "ui_scale"
+		or field == "deskflow" or field == "appearance" or field == "ui_scale" \
+		or field == "span"
 
 
 func restart_notice(field):
@@ -511,4 +544,11 @@ func selftest():
 	assert(c.position == Vector2(60, 80))
 	var s = wallpaper_rect("solid", Vector2(80, 40), Vector2(200, 200))
 	assert(s == Rect2(0, 0, 200, 200))
+	var sp0 = span({})
+	assert(not sp0.enabled and sp0.primary == "" and sp0.order.empty())
+	var sp1 = span({"enabled": "on", "primary": "DP-1", "order": ["HDMI-A-1", "DP-1", "bad name"]})
+	assert(sp1.enabled and sp1.primary == "DP-1")
+	assert(sp1.order == ["HDMI-A-1", "DP-1"], "orden sin duplicados ni nombres inválidos")
+	assert(span({"enabled": "no"}).enabled == false)
+	assert(is_live("span"))
 	print("settings_model selftest ok")

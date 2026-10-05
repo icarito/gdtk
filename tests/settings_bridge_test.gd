@@ -40,6 +40,7 @@ func _init():
 	var err2 = B.write_atomic(path, JSON.print({
 		"accent": "#e8615a", "keyboard": "us", "locale": "en_US.UTF-8",
 		"wallpaper": {"mode": "solid", "color": "#123456"}, "screens": [{"x": 0, "y": 0}],
+		"span": {"enabled": true, "primary": "DP-1", "order": ["HDMI-A-1"]},
 	}))
 	check("write_atomic del snapshot", err2 == "")
 	B.reload_now()
@@ -48,6 +49,8 @@ func _init():
 	check("teclado releido", B.settings.keyboard == "us")
 	check("idioma releido", B.settings.locale == "en_US.UTF-8")
 	check("campo de otra pagina conservado", B.settings.has("screens"))
+	check("span releido", B.span().enabled and B.span().primary == "DP-1"
+		and B.span().order == ["HDMI-A-1"])
 	check("fondo solido", B.wallpaper_kind() == "solid")
 	check("sin imagen no hay textura", not B.has_wallpaper_image())
 

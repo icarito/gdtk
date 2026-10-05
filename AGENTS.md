@@ -203,11 +203,15 @@ Notas del InputCapture (server Deskflow ↔ sway), verificadas e2e:
 - Editar y commitear **sólo en el repo** (`~/Proyectos/gdtk`), con write set explícito.
 - Todo cambio de scripts debe **sincronizarse siempre** a `~/gdtk` después de pasar
   tests/preflight. No declarar “listo para probar” si todavía existe sólo en el repo.
-- **No usar `reload_shell`, `restart_shell`, `recovery.restart()`, matar Godot ni
-  reiniciar sway/la sesión mientras VS Code/Codex esté abierto dentro de gdtk**.
-  Aunque la recarga pretenda conservar `Host`, en uso real ya reinició el compositor
-  y tumbó sus clientes varias veces. Tratar cualquier recarga del shell principal
-  como destructiva.
+- En **bastion** se permite un **soft reload transaccional** con `reload_shell` aunque
+  VS Code/Codex esté abierto: verificado el 2026-10-04 que conserva el mismo proceso,
+  `Host`, compositor y ventanas. Usarlo sólo para scripts recargables después de
+  tests/preflight + sync a `~/gdtk`; pedirlo por el control local y comprobar después
+  que `state` responde y que siguen vivos el mismo PID y las ventanas. Si falla, parar
+  y reportar: no escalar automáticamente a un reinicio.
+- **Siguen siendo destructivos y están prohibidos con VS Code/Codex abierto**:
+  `restart_shell`, `recovery.restart()`, matar Godot y reiniciar sway/la sesión. Una
+  recarga tampoco activa cambios de `Host`/`main.gd`/autoloads ni del engine.
 - Para ciclos rápidos, probar los scripts en una instancia de desarrollo anidada y
   aislada (puerto, token, runtime, PID/lock y logs propios). Sincronizar la instalación
   igualmente, pero activar el shell principal una sola vez al final, con el trabajo
@@ -218,9 +222,9 @@ Notas del InputCapture (server Deskflow ↔ sway), verificadas e2e:
   así llegó a un deploy y tumbó el arranque.
 - No editar `~/gdtk` a mano ni borrar su `bin/`; no confundir `~/gdtk` (instalación)
   con `~/Proyectos/gdtk` (repo).
-- Tras cambios de scripts: sincronizar siempre, pero **no recargar el shell principal
-  mientras aloje VS Code/Codex**. Probar en la instancia anidada aislada y activar el
-  shell principal una sola vez al final, después de guardar/cerrar sus clientes.
+- Tras cambios de scripts: sincronizar siempre. En bastion se puede aplicar una sola
+  recarga transaccional siguiendo el preflight y la verificación anteriores; para
+  iteraciones riesgosas o fuera de bastion, preferir la instancia anidada aislada.
   Tras cambios de engine: **recompilar**; su activación también requiere ese corte
   controlado final.
 - Para decidir entre recarga y reinicio, consultar

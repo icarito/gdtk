@@ -7,7 +7,10 @@ extends Node
 #
 # No expone el control remoto completo: sólo los métodos de peer_link.METHODS.
 
-const LINK = preload("res://peer_link.gd")
+# Debe entrar junto con peer_control en la recarga transaccional. Con preload el
+# proceso conservaba el validador anterior y rechazaba teclas especiales de Godot 3
+# aunque peer_link.gd ya estuviera actualizado en disco.
+var LINK = Host.sc("res://peer_link.gd") if Host != null else load("res://peer_link.gd")
 
 var shell = null
 var server = null
@@ -34,6 +37,10 @@ func start(p_shell, p_port):
 # (ERR_ALREADY_IN_USE): se reintenta cada LISTEN_RETRY_MS en vez de quedar sordo.
 const LISTEN_RETRY_MS = 5000
 var _listen_retry_at = 0
+
+# Un stream de input sin datos durante este tiempo se cierra solo (el cliente
+# reconecta al próximo lote). Evita conexiones colgadas tras dejar de compartir.
+const STREAM_IDLE_MS = 10000
 
 
 func _listen():
@@ -117,10 +124,15 @@ func _process(_delta):
 	while server.is_connection_available():
 		var peer = server.take_connection()
 		peer.set_no_delay(true)
-		conns.append({"peer": peer, "buf": PoolByteArray(), "close": false})
+		conns.append({"peer": peer, "buf": PoolByteArray(), "close": false,
+			"stream": false, "hid": "", "last": 0})
 	for i in range(conns.size() - 1, -1, -1):
 		var conn = conns[i]
-		_poll(conn)
+		if conn.get("stream", false) \
+				and OS.get_ticks_msec() - int(conn.get("last", 0)) > STREAM_IDLE_MS:
+			conn.close = true
+		else:
+			_poll(conn)
 		if conn.close:
 			if conn.peer.get_status() == StreamPeerTCP.STATUS_CONNECTED:
 				conn.peer.disconnect_from_host()
@@ -139,6 +151,13 @@ func _poll(conn):
 			var buf = conn.buf
 			buf.append_array(data[1])
 			conn.buf = buf
+	# Conexión en modo stream: la autenticación ya ocurrió en el handshake; cada
+	# línea es sólo {"events":[...]} y NO se responde. Se refresca `last` sólo al
+	# recibir datos para que el idle cierre de verdad.
+	if conn.get("stream", false):
+		if available > 0 and _poll_stream(conn):
+			conn.last = OS.get_ticks_msec()
+		return
 	# una sola línea por conexión (petición/ respuesta), sin pipelining
 	var idx = -1
 	for i in range(conn.buf.size()):
@@ -149,7 +168,42 @@ func _poll(conn):
 		return
 	var line = conn.buf.subarray(0, idx - 1).get_string_from_utf8().strip_edges() if idx > 0 else ""
 	_handle(conn, line)
-	conn.close = true
+	# El handshake de `window_input_stream` deja la conexión abierta; el resto se cierra.
+	if not conn.get("stream", false):
+		conn.close = true
+
+
+# Aplica todas las líneas completas del stream; conserva el resto en conn.buf.
+# Devuelve false (y marca close) si una línea es inválida o el shell rechaza el lote.
+func _poll_stream(conn):
+	var buf = conn.buf
+	var line_start = 0
+	var consumed = 0
+	var batches = []
+	for i in range(buf.size()):
+		if buf[i] == 10:
+			if i > line_start:
+				var line = buf.subarray(line_start, i - 1).get_string_from_utf8().strip_edges()
+				if line != "":
+					var events = LINK.parse_window_stream(line)
+					if events.empty():
+						conn.close = true
+						return false
+					batches.append(events)
+			line_start = i + 1
+			consumed = i + 1
+	if consumed >= buf.size():
+		conn.buf = PoolByteArray()
+	elif consumed > 0:
+		conn.buf = buf.subarray(consumed, buf.size() - 1)
+	if shell == null or not is_instance_valid(shell) \
+			or not shell.has_method("_peer_window_input"):
+		return false
+	for events in batches:
+		if not bool(shell._peer_window_input(String(conn.hid), events)):
+			conn.close = true
+			return false
+	return true
 
 
 func _peer_is_confirmed(hid):
@@ -258,6 +312,28 @@ func _handle(conn, line):
 					err = "ventana no compartida"
 			else:
 				err = "no disponible"
+		"window_input_stream":
+			# Handshake del canal persistente: misma autenticación que el resto y,
+			# si sale bien, la conexión queda marcada como stream (sin respuesta por
+			# lote). Los equipos con shell viejo no conocen el método: su parseo lo
+			# rechaza como "bad request" y el cliente cae al `window_input` clásico.
+			var ev_stream = LINK.window_input_events(params)
+			if ev_stream.empty():
+				err = "parámetros inválidos"
+			elif not shell.has_method("_peer_window_input"):
+				err = "no disponible"
+			elif not bool(shell._peer_window_input(hid, ev_stream)):
+				err = "ventana no compartida"
+			else:
+				ok = true
+				conn.stream = true
+				conn.hid = hid
+				conn.last = OS.get_ticks_msec()
+				conn.buf = PoolByteArray()
+			_send(conn, LINK.encode_response(ok, err, extra))
+			if not ok:
+				conn.close = true
+			return
 		"gvd_meta":
 			var meta = LINK.video_meta(params)
 			if meta.empty():

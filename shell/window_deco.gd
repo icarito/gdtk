@@ -150,7 +150,7 @@ func _draw_csd(rect, scale, active, reveal = 1.0, hovered = true, inside = false
 	if peer != null:
 		base = peer
 	var col = Color(base.r, base.g, base.b, 0.94 if active else 0.55)
-	var g = WINDOW_CHROME.move_grip_rect(rect, scale, reveal, shell.grid_unit(shell.get_viewport_rect().size), inside)
+	var g = WINDOW_CHROME.move_grip_rect(rect, scale, reveal, shell.grid_unit(shell._screen_size()), inside)
 	var v = g if inside else WINDOW_CHROME.reveal_clip(g, rect.position.y)
 	if v.size.x > 0.0 and v.size.y > 0.0:
 		draw_rect(v.grow(max(1.0, scale)), Color(0.05, 0.06, 0.10, 0.55))

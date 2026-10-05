@@ -1,0 +1,26 @@
+SYMPTOM: el input de la «Pantalla compartida» (ventana de otro equipo) llega con mucha latencia. Cada lote de
+eventos abre una conexión TCP nueva (shell/peer_call.gd request_status: connect + sondeo con delay_msec(5) +
+espera de respuesta), hay UN solo lote en vuelo (shell/shell.gd _window_input_poll / _window_input_work),
+compuerta de 16 ms, y el token rota con cada respuesta.
+REFERENCE (cómo se ve bien): una sola conexión TCP persistente por (receptor→emisor) con TCP_NODELAY; los
+lotes de eventos se escriben apenas hay datos; el emisor los aplica sin responder cada lote.
+ALLOWED FILES: shell/peer_call.gd, shell/peer_control.gd, shell/peer_link.gd, shell/shell.gd (SOLO el bloque
+_window_input_* y _peer_window_input; nada más), tests/peer_link_test.gd, tests/peer_control_test.gd.
+FORBIDDEN: window_cast.gd, gvd*, frame.gd, neighborhood*, cualquier otro. No commitear, no deployar, no revertir
+cambios ajenos (el árbol tiene trabajo sin commitear de otros: no tocar lo que no sea tuyo).
+RULES: (1) Compatibilidad: el método `window_input` actual sigue funcionando (equipos con shell viejo).
+(2) Nada de I/O bloqueante en _process/render: el canal vive en el Thread existente del worker.
+(3) Sin secretos en logs/argumentos.
+PROCEDURE: leer peer_call.gd, peer_control.gd (servidor: TCP_Server + take_connection en _process, ~l.121),
+peer_link.gd, y shell.gd ~l.7740-7900. Diseño propuesto: método nuevo `window_input_stream`: el cliente hace el
+handshake normal (hid+token, recibe ok+token nuevo), y si el servidor lo soporta la conexión queda abierta; el
+servidor la marca como stream (hid autenticado) y en cada _process lee líneas JSON `{"events":[...]}` y las
+pasa a `_peer_window_input(hid, events)` SIN responder; cierra tras ~10 s sin datos o error. El cliente
+(Thread) mantiene la conexión, envía lotes ni bien llegan (motion coalescido como hoy), `set_no_delay(true)`,
+y reconecta/cae al método viejo si el servidor responde «método no soportado». Una pequeña pieza pura
+(codificar/decodificar líneas de stream) va en peer_link.gd con test. Correr SOLO:
+  /home/icarito/Proyectos/godot3-box3d/godot-dev/bin/godot.frt.opt.tools.x86_64.gdtk --no-window --path shell -s $PWD/tests/peer_link_test.gd
+  (y peer_control_test.gd). Validar parseo de shell.gd/peer_control.gd con
+  ~/gdtk/bin/godot-gdtk --no-window --path shell -s $PWD/tests/parse_check.gd
+REPORTAR: archivos y funciones tocadas, tests, qué NO pudiste verificar (e2e lo hace el lead).
+No uses board_read/board_post.

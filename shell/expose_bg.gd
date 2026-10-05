@@ -110,7 +110,7 @@ func _draw_unit_labels():
 
 
 func _draw_background():
-	var vp = get_viewport_rect().size
+	var vp = shell._screen_size()
 	var sb = shell.settings_bridge
 	var mode = "gradient"
 	if sb != null:

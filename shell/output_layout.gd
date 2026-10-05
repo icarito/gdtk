@@ -24,6 +24,9 @@ const KIND_PHYSICAL = "physical"
 const KIND_REMOTE = "remote"
 const TARGET_MAIN = "main_viewport"
 const TARGET_OFFSCREEN = "offscreen"
+# Presentacion de una salida fisica dentro de la ventana span (una sola superficie
+# que cubre el envolvente de todos los monitores; SPEC-physical-multi-monitor.md).
+const TARGET_SPAN = "span"
 
 const DIRECTIONS = ["north", "south", "east", "west"]
 
@@ -256,6 +259,38 @@ static func enabled_outputs(layout):
 	return out
 
 
+# --- Span fisico (SPEC-physical-multi-monitor.md) ------------------------------
+
+# Envolvente de las salidas habilitadas (coords globales del compositor). Con una
+# sola salida es su propio rect.
+static func bounding_rect(layout):
+	var lay = normalize_layout(layout)
+	var r = null
+	for o in lay.outputs:
+		if not o.enabled:
+			continue
+		r = o.rect if r == null else r.merge(o.rect)
+	if r == null:
+		return lay.outputs[0].rect
+	return r
+
+
+# Salidas en orden de span: la principal en (0,0) y el resto a su derecha, sin
+# solapes ni zonas muertas horizontales (el ancho del envolvente es la suma).
+# Devuelve [{id, rect, scale, primary}] en ese orden. No muta el layout.
+static func span_rects(layout):
+	var lay = normalize_layout(layout)
+	var out = []
+	var x = 0.0
+	for o in lay.outputs:
+		if not o.enabled:
+			continue
+		var r = Rect2(x, 0.0, o.rect.size.x, o.rect.size.y)
+		out.append({"id": String(o.id), "rect": r, "scale": o.scale, "primary": o.primary})
+		x += o.rect.size.x
+	return out
+
+
 # --- Geometria -----------------------------------------------------------------
 
 static func overlaps(a, b):
@@ -306,6 +341,40 @@ static func local_to_global(output, point):
 	if o == null:
 		return null
 	return Vector2(point) + o.rect.position
+
+
+# Posicion local de una ventana (top-left) dentro de una salida: la deja dentro
+# salvo que la ventana sea mas grande que la salida (entonces permite el borde).
+static func clamp_local(local, size, output):
+	var o = sanitize_output(output)
+	var s = Vector2(size)
+	var l = Vector2(local)
+	var bounds = o.rect.size if o != null else Vector2.ZERO
+	var mx = bounds.x - s.x
+	var my = bounds.y - s.y
+	l.x = clamp(l.x, min(0.0, mx), max(0.0, mx))
+	l.y = clamp(l.y, min(0.0, my), max(0.0, my))
+	return l
+
+
+# Traslada un rect GLOBAL de la salida `from_id` a la `to_id`: conserva el tamano y
+# la posicion relativa al origen de `from`, encajada en `to`. Devuelve
+# {ok, error, rect, local, output} o {ok:false,...}. Puro; lo usan el cruce por
+# arrastre y la accion de menu (Fase C, SPEC-embedded-multi-output.md §7).
+static func transfer_rect(layout, from_id, to_id, rect):
+	var lay = normalize_layout(layout)
+	var from = output_by_id(lay, from_id)
+	var to = output_by_id(lay, to_id)
+	var r = Rect2(rect)
+	if from == null:
+		return {"ok": false, "error": "salida origen inexistente", "rect": r,
+			"local": null, "output": String(to_id)}
+	if to == null or not to.enabled:
+		return {"ok": false, "error": "salida destino inexistente o deshabilitada",
+			"rect": r, "local": null, "output": String(to_id)}
+	var local = clamp_local(Vector2(r.position) - from.rect.position, r.size, to)
+	return {"ok": true, "error": "", "rect": Rect2(to.rect.position + local, r.size),
+		"local": local, "output": String(to.id)}
 
 
 # Cruce de borde: mueve el punto global por `motion` y decide si entro en otra
@@ -438,6 +507,89 @@ static func remove_output(layout, id):
 			outs.append(o)
 	lay.outputs = outs
 	var res = _ok(lay)
+	res["moved"] = moved
+	return res
+
+
+# Reconcilia el layout con un conjunto de descriptores descubierto afuera (p. ej.
+# `swaymsg -t get_outputs`): agrega los nuevos, actualiza rect/escala/estado de los
+# existentes, retira los ausentes y devuelve las ventanas de los retirados a la
+# principal. Conserva la asignacion de las salidas que siguen existiendo. Exige
+# exactamente una primary en el resultado (la marcada, o la que ya existia, o la
+# default). Devuelve {ok, layout, error, added, removed, changed, moved}.
+static func reconcile_outputs(layout, descriptors):
+	var lay = normalize_layout(layout)
+	if typeof(descriptors) != TYPE_ARRAY:
+		return _fail(lay, "descriptores invalidos")
+	var new_outs = []
+	var seen = {}
+	var prim = null
+	for e in descriptors:
+		var o = sanitize_output(e)
+		if o == null or seen.has(o.id):
+			continue
+		seen[o.id] = true
+		if o.primary and prim == null:
+			prim = o
+		new_outs.append(o)
+	if prim == null:
+		var old_prim = primary_id(lay)
+		for o in new_outs:
+			if String(o.id) == old_prim:
+				prim = o
+				break
+	if prim == null:
+		if seen.has(PRIMARY_ID):
+			for o in new_outs:
+				if String(o.id) == PRIMARY_ID:
+					prim = o
+					break
+		else:
+			prim = default_primary()
+			seen[PRIMARY_ID] = true
+			new_outs.push_front(prim)
+	for o in new_outs:
+		o.primary = String(o.id) == String(prim.id)
+		if o.primary:
+			o.kind = KIND_PHYSICAL
+			o.target = TARGET_MAIN
+			o.direction = ""
+	var ordered = [prim]
+	for o in new_outs:
+		if String(o.id) != String(prim.id):
+			ordered.append(o)
+	var old_ids = {}
+	for o in lay.outputs:
+		old_ids[String(o.id)] = true
+	var new_ids = {}
+	for o in ordered:
+		new_ids[String(o.id)] = true
+	var added = []
+	var removed = []
+	var changed = []
+	for o in ordered:
+		var key = String(o.id)
+		if not old_ids.has(key):
+			added.append(key)
+			continue
+		var old = output_by_id(lay, key)
+		if old != null and (old.rect != o.rect or abs(old.scale - o.scale) > 0.001
+				or old.enabled != o.enabled):
+			changed.append(key)
+	for o in lay.outputs:
+		var key = String(o.id)
+		if not new_ids.has(key):
+			removed.append(key)
+	lay.outputs = ordered
+	var moved = []
+	for wid in lay.windows.keys():
+		if not new_ids.has(String(lay.windows[wid])):
+			lay.windows[wid] = String(prim.id)
+			moved.append(wid)
+	var res = _ok(lay)
+	res["added"] = added
+	res["removed"] = removed
+	res["changed"] = changed
 	res["moved"] = moved
 	return res
 

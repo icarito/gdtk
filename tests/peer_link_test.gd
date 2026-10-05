@@ -71,6 +71,21 @@ func _init():
 		and P.window_input_events({"events": [{"kind": "button", "button": 99,
 		"pressed": true}]}).empty())
 
+	# Stream persistente de input: línea sin hid/token/método, validada igual.
+	check("window_input_stream en la lista blanca", P.valid_method("window_input_stream"))
+	var sl = P.encode_window_stream([{"kind": "motion", "x": 0.1, "y": 0.9},
+		{"kind": "reset"}])
+	check("window_stream: una línea", sl.ends_with("\n") and sl.count("\n") == 1)
+	check("window_stream: round-trip", P.parse_window_stream(sl).size() == 2)
+	check("window_stream: basura rechazada", P.parse_window_stream("no json").empty())
+	check("window_stream: versión distinta rechazada",
+		P.parse_window_stream(JSON.print({"v": 9, "events": [{"kind": "reset"}]}) + "\n").empty())
+	check("window_stream: lote inválido rechazado",
+		P.parse_window_stream(JSON.print({"v": 1, "events": [
+			{"kind": "button", "button": 99, "pressed": true}]}) + "\n").empty())
+	check("window_stream: boolean no-array => vacío",
+		P.parse_window_stream(JSON.print({"v": 1, "events": "x"}) + "\n").empty())
+
 	var vm = P.video_meta({"title": "htop\n@x\u0007", "accent": "#E8615A"})
 	check("video_meta: título sin controles y acento normalizado",
 		vm.get("title", "") == "htop @x" and vm.get("accent", "") == "#e8615a")

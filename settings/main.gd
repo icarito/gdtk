@@ -19,6 +19,7 @@ const PAGES = [
 	{"id": "appearance", "label": "Apariencia", "path": "res://pages/appearance.gd"},
 	{"id": "wallpaper", "label": "Fondo de pantalla", "path": "res://pages/wallpaper.gd"},
 	{"id": "displays", "label": "Pantallas", "path": "res://pages/displays.gd"},
+	{"id": "monitors", "label": "Monitores", "path": "res://pages/monitors.gd"},
 ]
 
 var model = null

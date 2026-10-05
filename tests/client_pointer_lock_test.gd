@@ -68,6 +68,7 @@ func _init():
 	harness += "var compositor\nvar eis_cursor\nvar mouse_locked = false\n"
 	harness += "var client_pointer_locked = false\nvar client_cursor_hidden = false\n"
 	harness += "var _ptr_log_samples = 0\nvar last_activity = 0\nvar focused_tile = -1\nvar remote_cursor_parked = false\n"
+	harness += "var debug_input = false\n"
 	harness += "var input_enabled = true\nvar input_probe\nvar tree_probe\nvar redraws = 0\n"
 	harness += "func get_tree():\n\treturn tree_probe\nfunc request_redraw():\n\tredraws += 1\n"
 	harness += "func set_process_input(value):\n\tinput_enabled = value\n"

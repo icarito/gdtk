@@ -136,10 +136,30 @@ Decisiones tomadas con el usuario:
   TODO el sonido por ese equipo. Túnel PulseAudio/PipeWire por `pactl` (`audio_send.gd`): el
   receptor abre `module-native-protocol-tcp` (4714) sólo con `auth-ip-acl` = IP del pedido peer
   (nunca `auth-anonymous`); el emisor crea `module-tunnel-sink`, lo pone por omisión y muda los
-  streams; apagar restaura en ambos lados. Un destino a la vez, no se persiste, se apaga solo al salir
-  el shell. Anda con PipeWire y PulseAudio.
+  streams; apagar restaura en ambos lados. Un destino a la vez; la preferencia se
+  persiste por equipo y se reconcilia cuando éste reaparece. Anda con PipeWire y PulseAudio.
 - Métodos peer `audio_recv`/`audio_stop`. Como todo cambio de `peer_link.METHODS` o de un `preload`
   (p. ej. `gvd_launch.gd`), entra con el reinicio del proceso del shell; una recarga no alcanza.
+
+### Disposición física y preferencias persistentes (2026-10-04)
+- `settings.json:screens` (schema v2) es la única fuente de verdad. Cada vecino usa
+  su `hid`; `label`/`peer` son nombres mutables. `x/y/w/h` están en milímetros y la
+  resolución vive aparte en `px_w/px_h`. Los rangos Deskflow se calculan con tamaño
+  físico, no con la cantidad de píxeles de paneles con DPI distintos.
+- Configuración → Pantallas edita ancho/alto en centímetros y resolución en píxeles.
+  Arrastrar en Grupo actualiza ese mismo layout. `host_directions` es una proyección
+  derivada para brújula, gvd y handshake, no otra geometría autoritativa.
+- La migración v1 preserva la resolución y aproxima la geometría previa a 96 DPI hasta
+  que se ingresen medidas reales; nombres históricos (`cupid`, `tengu`) se reemplazan
+  por el `hid` estable al descubrir el equipo.
+- Cada pantalla guarda `share.screen`, `share.input` y `share.audio`. Los interruptores
+  de Grupo cambian esas preferencias; las sesiones se reconcilian cuando el equipo está
+  disponible. Detener desde el dockapp apaga también la preferencia correspondiente.
+- El receptor gvd recibe el tamaño anunciado en su argv y renegocia cambios de caps sin
+  reiniciar el pipeline: conserva una sola superficie Wayland para no provocar un salto
+  de ventanas en el equipo receptor.
+- Cambiar la topología regenera el conf y reinicia Deskflow mediante su ciclo de vida
+  existente, para que el proceso nunca siga usando el archivo anterior.
 
 ### Color de cada equipo (2026-10-04)
 - Cada equipo anuncia su acento de Configuración en el TXT mDNS (`accent=#rrggbb`, sólo ese formato;

@@ -96,23 +96,23 @@ func stop():
 # Dibujo propio dentro de la placa (scr: coords de pantalla, loc: locales a la ventana).
 # `frame` presta sus helpers de fuente/glifo para que la tesela combine con el resto.
 func draw(frame, ui, scr, loc, w, h):
-	var g = min(w, h) * 0.52
-	var col = frame.NX_TEXT if state == "activo" else frame.NX_TEXT_DIM
+	var g = min(w, h) * 0.48
+	var col = frame._lcd(frame.NX_TEXT, "on" if state == "activo" else "off")
 	# El clip de icons/np, plano (el relieve es de los bloques de navegación, no de
 	# las dockapps).
 	var icon = frame.shell._load_np_icon("clips") if frame.shell != null else null
 	if icon != null:
-		ui.set_cursor_pos(loc + Vector2((w - g) * 0.5, h * 0.04))
+		ui.set_cursor_pos(loc + Vector2((w - g) * 0.5, h * 0.08))
 		ui.image(icon, Vector2(g, g))
 	else:
-		frame._draw_shared_glyph(ui, Rect2(scr + Vector2((w - g) * 0.5, h * 0.06), Vector2(g, g)),
+		frame._draw_shared_glyph(ui, Rect2(scr + Vector2((w - g) * 0.5, h * 0.10), Vector2(g, g)),
 			"clipboard", col)
 	var text = value
 	if state != "activo":
 		text = "no disp." if state == "no_disponible" else "vacío"
 	var small = frame._push_label_font(ui)
 	text = frame._truncate_w(ui, text, w - 6.0)
-	ui.set_cursor_pos(loc + Vector2(max(3.0, (w - frame._text_w(ui, text)) * 0.5), h * 0.64))
+	ui.set_cursor_pos(loc + Vector2(max(3.0, (w - frame._text_w(ui, text)) * 0.5), h * 0.66))
 	ui.text_colored(col, text)
 	if small:
 		ui.pop_font()

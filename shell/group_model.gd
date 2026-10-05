@@ -150,13 +150,29 @@ static func members(directions, tokens, screens, live_hosts, bt_devices):
 	for key in order:
 		var m = by_key[key]
 		var nk = _norm(m.name)
-		if m.kind == KIND_HOST and nk != "" and nk != _norm(m.id):
+		if m.kind == KIND_HOST and nk != "":
 			var prev = by_name.get(nk, null)
 			if prev != null and (prev.host.empty() or m.host.empty()):
 				_merge_into(prev, m)
 				continue
 			by_name[nk] = m
 		deduped.append(m)
+
+	# Migración v1: si quedaron una ficha nominal y un único HID opaco en el mismo
+	# lado, son las dos identidades históricas de la misma pantalla. Sólo se fusiona
+	# cuando la asociación es inequívoca; nunca se adivina entre dos equipos.
+	for i in range(deduped.size() - 1, -1, -1):
+		var alias = deduped[i]
+		if _opaque_hid(String(alias.get("id", ""))) or String(alias.get("direction", "")) == "":
+			continue
+		var matches = []
+		for j in range(deduped.size()):
+			if i != j and _opaque_hid(String(deduped[j].get("id", ""))) \
+					and String(deduped[j].get("direction", "")) == String(alias.direction):
+				matches.append(j)
+		if matches.size() == 1:
+			_merge_into(deduped[matches[0]], alias)
+			deduped.remove(i)
 
 	_sort_members(deduped)
 	return deduped
@@ -591,6 +607,10 @@ static func _apply_host(m, host):
 
 
 static func _merge_into(target, src):
+	# La persistencia antigua podía guardar la misma máquina como hostname y como
+	# HID. Al fusionarlas, la identidad opaca estable debe ganar.
+	if _opaque_hid(String(src.get("id", ""))) and not _opaque_hid(String(target.get("id", ""))):
+		target.id = src.id
 	target.online = target.online or src.online
 	if target.host.empty() and not src.host.empty():
 		target.host = src.host
@@ -599,6 +619,16 @@ static func _merge_into(target, src):
 	if target.direction == "" and src.direction != "":
 		target.direction = src.direction
 		target.along = src.along
+
+
+static func _opaque_hid(value):
+	var s = String(value).strip_edges().to_lower()
+	if s.length() < 16:
+		return false
+	for i in range(s.length()):
+		if "0123456789abcdef".find(s[i]) < 0:
+			return false
+	return true
 
 
 static func _host_hid(h):

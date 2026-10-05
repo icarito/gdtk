@@ -59,7 +59,8 @@ class ParseTest(unittest.TestCase):
 
     def test_should_restart(self):
         # Cambio de tamano: reinicia aunque el flujo este fresco.
-        self.assertTrue(U.should_restart(100.0, 99.5, (1280, 800), (1600, 900)))
+        # El sink renegocia caps sin destruir/recrear su superficie Wayland.
+        self.assertFalse(U.should_restart(100.0, 99.5, (1280, 800), (1600, 900)))
         # Atasco: mas de 5 s sin cuadros decodificados.
         self.assertFalse(U.should_restart(100.0, 99.5, (1280, 800), (1280, 800)))
         self.assertTrue(U.should_restart(106.0, 99.5, (1280, 800), (1280, 800)))

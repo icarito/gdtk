@@ -1,0 +1,27 @@
+TAREA (SOLO LECTURA, no edites archivos, no commitees, no deployes): revisión de factibilidad para
+"ventana exportada = app remota": un output headless exclusivo por equipo remoto + un segundo wl_seat
+dedicado a su input, dentro del compositor wlroots embebido de gdtk.
+
+LEER: modules/wayland/wl_server.c (struct wl_server ~l.150-260: s->seat único, output_layout, outputs
+headless; foco de teclado ~l.1000-1015; puntero/botones/axis ~l.2810-2935; selección ~l.1591), wl_server.h,
+wayland_compositor.cpp, y .operator-shared/specs/SPEC-embedded-multi-output.md.
+Contexto: hoy el input remoto (shell/shell.gd _window_input_*, peer) se inyecta sobre un wid con el seat
+único, peleando el foco global con el usuario local.
+
+RESPONDER (en tu respuesta final, <= 60 líneas, con archivo:línea):
+1. ¿Qué parte de wl_server.c asume un solo seat (foco, cursor, selección, DnD, IME/text_input, popups grab)?
+   Listá cada uso de s->seat que habría que parametrizar por seat.
+2. ¿Cuál es el cambio mínimo para crear un segundo wlr_seat con otro nombre ("seat-<host>") con su propio
+   wlr_keyboard virtual y puntero? ¿Qué hace wlroots con dos wl_seat globals?
+3. Riesgo clave: toolkits de clientes (GTK3/4, Firefox, Qt, Electron) y su soporte real de múltiples wl_seat
+   globals; ¿una ventana enfocada por un seat distinto al "primero" recibe input bien? Si lo sabés, decilo;
+   si no, marcalo como "a verificar con una prueba" y proponé la prueba más barata (cliente Wayland concreto).
+4. Alternativa más barata que logre el mismo resultado (p. ej. un solo seat con foco por-grupo/"virtual
+   pointer" + output exclusivo, o xdg-activation) y su costo/limitaciones.
+5. Recomendación: ¿seat real, alternativa, o fase 1 sin seat (sólo output exclusivo + inyección por wid)?
+   Pasos de implementación en orden, cada uno verificable.
+No uses board_read/board_post.
+
+LÍMITE: máximo ~15 lecturas/greps; NO investigues wlroots fuera del repo. Si algo no se puede verificar,
+decilo y respondé igual. Entregá la respuesta final ANTES de agotar el contexto (la corrida anterior se
+abortó sin respuesta por leer demasiado).

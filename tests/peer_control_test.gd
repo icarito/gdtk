@@ -108,6 +108,51 @@ func _init():
 		{"events": [{"kind": "motion", "x": 9.0, "y": 0.0}]}))
 	check("window_input inválido rechazado", not bool(r.get("ok", false)))
 
+	# --- Stream persistente de input ----------------------------------------
+	# Handshake `window_input_stream`: autentica, aplica el lote inicial y deja la
+	# conexión marcada como stream (no la cierra).
+	var sconn = {"peer": peer}
+	peer.lines.clear()
+	pc._handle(sconn, LINK.encode_request("aaaa", tok, "window_input_stream",
+		{"events": [{"kind": "motion", "x": 0.5, "y": 0.5}]}))
+	var sresp = LINK.parse_response(peer.lines[0])
+	check("window_input_stream handshake ok", bool(sresp.get("ok", false)))
+	check("window_input_stream queda abierto", bool(sconn.get("stream", false))
+		and String(sconn.get("hid", "")) == "aaaa")
+	check("window_input_stream aplica lote inicial", pc.shell.input_events.size() == 2)
+
+	# Handshake con lote inválido: error y no queda como stream.
+	var sbad = {"peer": peer}
+	peer.lines.clear()
+	pc._handle(sbad, LINK.encode_request("aaaa", tok, "window_input_stream",
+		{"events": [{"kind": "motion", "x": 5.0, "y": 0.5}]}))
+	check("window_input_stream inválido rechazado",
+		not bool(LINK.parse_response(peer.lines[0]).get("ok", false))
+		and not bool(sbad.get("stream", false)))
+
+	# Líneas de stream sin handshake repetido: dos lotes en un mismo buffer.
+	var batch = LINK.encode_window_stream([{"kind": "motion", "x": 0.1, "y": 0.2}]) \
+		+ LINK.encode_window_stream([{"kind": "button", "button": 1, "pressed": true}])
+	var pconn = {"peer": peer, "buf": batch.to_utf8(), "hid": "aaaa",
+		"stream": true, "close": false, "last": 0}
+	var before = pc.shell.input_events.size()
+	check("window_stream poll procesa dos lotes", pc._poll_stream(pconn))
+	check("window_stream aplica dos lotes", pc.shell.input_events.size() == before + 2)
+	check("window_stream consume el buffer", pconn.buf.empty())
+
+	# Línea de stream inválida: cierra la conexión sin aplicar nada.
+	var bconn = {"peer": peer, "buf": "no json\n".to_utf8(), "hid": "aaaa",
+		"stream": true, "close": false, "last": 0}
+	check("window_stream línea inválida cierra", not pc._poll_stream(bconn)
+		and bool(bconn.get("close", false)))
+
+	# Línea parcial: se conserva hasta completar el \n.
+	var part = LINK.encode_window_stream([{"kind": "reset"}])
+	var qconn = {"peer": peer, "buf": part.substr(0, part.length() - 2).to_utf8(),
+		"hid": "aaaa", "stream": true, "close": false, "last": 0}
+	check("window_stream línea parcial espera", pc._poll_stream(qconn)
+		and not qconn.buf.empty())
+
 	# ping ya emparejado
 	r = _resp(pc, peer, LINK.encode_request("aaaa", "", "ping"))
 	check("ping emparejado", bool(r.get("ok", false)) and bool(r.get("paired", false)))

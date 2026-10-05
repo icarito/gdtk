@@ -198,6 +198,14 @@ func ui_scale():
 	return model.ui_scale_value(settings.get("ui_scale", 1.0))
 
 
+# Escritorio extendido multi-monitor (SPEC-physical-multi-monitor): enabled,
+# primary (nombre de salida o "") y order (izquierda->derecha de las demás).
+func span():
+	if model == null or not model.has_method("span"):
+		return {"enabled": false, "primary": "", "order": []}
+	return model.span(settings.get("span", {}))
+
+
 func has_wallpaper_image():
 	return _tex != null
 

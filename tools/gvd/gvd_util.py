@@ -104,13 +104,11 @@ def should_restart(now, last_buffer, expected_size, observed_size,
                    stall_timeout=STALL_TIMEOUT):
     """Decision del watchdog del receptor.
 
-    Reinicia si cambio el tamano del video decodificado o si no llega ningun
-    cuadro decodificado en `stall_timeout` segundos desde `last_buffer`. Antes
-    del primer cuadro (last_buffer None) no reinicia: la espera inicial la
-    gobierna el arranque del pipeline, no el watchdog.
+    Reinicia si no llega ningun cuadro decodificado en `stall_timeout` segundos
+    desde `last_buffer`. Un cambio de tamano se renegocia sin reiniciar para
+    conservar la misma superficie Wayland. Antes del primer cuadro
+    (last_buffer None) no reinicia: la espera inicial la gobierna el arranque.
     """
-    if size_changed(expected_size, observed_size):
-        return True
     if last_buffer is None:
         return False
     return (now - last_buffer) > stall_timeout
