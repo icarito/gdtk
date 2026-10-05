@@ -29,6 +29,17 @@ if not os.path.exists(_vp_hdr) or os.path.getmtime(_vp_hdr) < os.path.getmtime(_
 if not os.path.exists(_vp_src) or os.path.getmtime(_vp_src) < os.path.getmtime(_vp_xml):
     subprocess.check_call(["wayland-scanner", "private-code", _vp_xml, _vp_src])
 
+# linux-dmabuf-v1 (cliente): el puente de scanout directo crea un wl_buffer dmabuf
+# en la conexion del host (sway) a partir del fd del buffer del cliente embebido.
+# Se genera el header y el codigo cliente; el XML se vendoriza en protocols/.
+_dmabuf_xml = os.path.join(_here, "protocols", "linux-dmabuf-v1.xml")
+_dmabuf_hdr = os.path.join(_here, "linux-dmabuf-v1-client-protocol.h")
+_dmabuf_src = os.path.join(_here, "linux-dmabuf-v1-protocol.c")
+if not os.path.exists(_dmabuf_hdr) or os.path.getmtime(_dmabuf_hdr) < os.path.getmtime(_dmabuf_xml):
+    subprocess.check_call(["wayland-scanner", "client-header", _dmabuf_xml, _dmabuf_hdr])
+if not os.path.exists(_dmabuf_src) or os.path.getmtime(_dmabuf_src) < os.path.getmtime(_dmabuf_xml):
+    subprocess.check_call(["wayland-scanner", "private-code", _dmabuf_xml, _dmabuf_src])
+
 env_wayland.Append(CPPDEFINES=["WLR_USE_UNSTABLE"])
 env_wayland.ParseConfig("pkg-config wlroots-0.20 libeis-1.0 libsystemd --cflags")
 

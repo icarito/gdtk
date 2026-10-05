@@ -24,19 +24,60 @@ Ya entregado y commiteado (no rehacer):
   RPC `state` expone `compositor{dmabuf,explicit_sync,commits}` y `present{light,full}`.
 - Desplegado en bastion y cupid; cupid corre P1+P2.
 
-Pendiente: **P4** (este handoff). Nada de P4 está implementado.
+Pendiente: **P4**. PoC de F2 (opción B) **ya implementado y validado en instancia aislada**
+el 2026-10-05 (ver abajo). Falta la parte de shell (app mode / gate con Frame) y deploy.
 
-## Primer paso recomendado
+## Resultado PoC F2 opción B (2026-10-05)
 
-1. **F0 — medir** antes de diseñar más: costo GPU/frame del shell y por-ventana
-   (HUD F1, parches `FRT_PERF` `[FRT_GPU]`, dos lecturas de RPC `state`). Sin esto no
-   se cuantifica la ganancia.
-2. **Resolver el bloqueante §7.1 del spec**: ¿FRT/SDL exponen la `wl_surface` de la
-   ventana para crear una `wl_subsurface` del lado cliente? Si no, la opción B
-   (puente dmabuf hacia sway) necesita una superficie separada o un cambio de
-   engine. **Investigar esto primero**; define si B es viable.
-3. Recién entonces, PoC de F2 en instancia aislada, con feature flag
-   `GDTK_SCANOUT_DIRECT` y fallback al camino P1.
+**§7.1 resuelto: SÍ se puede.** SDL expone `info.info.wl.surface` en `SDL_SysWMinfo`
+(`/usr/include/SDL2/SDL_syswm.h:295-303`) y FRT ya usa `SDL_GetWindowWMInfo` en
+`platform/frt/frt_wl_gestures.cc`. Funciona con subsurfaces.
+
+Implementado (motor, sin tocar `shell.gd`):
+
+- `modules/wayland/scanout.c` + `scanout.h`: puente cliente hacia sway. Sobre la
+  conexión Wayland de SDL abre cola privada, bindea `wl_compositor`/`wl_subcompositor`/
+  `zwp_linux_dmabuf_v1`, crea una `wl_subsurface` de la ventana de Godot (input region
+  vacía, `place_above`), y arma un `wl_buffer` dmabuf con `zwp_linux_buffer_params_v1`
+  (fd compartido, zero-copy). Puentea el release de sway → `wlr_buffer_unlock` del
+  compositor embebido.
+- `modules/wayland/SCsub`: vendoriza `protocols/linux-dmabuf-v1.xml` y genera el
+  protocolo cliente.
+- `modules/wayland/wl_server.c`: en `surface_state_import`, si el toplevel raíz es xdg
+  fullscreen en la salida principal y hay dmabuf, **presenta al host y no crea textura
+  Godot**; refs `scanout_ref` retienen el `wlr_buffer` hasta el release del host;
+  `scanout_on_release`/`scanout_off`; gate `GDTK_SCANOUT_DIRECT`.
+- `modules/wayland/wayland_compositor.*`: `scanout_enabled()`/`scanout_state()`.
+- `platform/frt/frt_wl_gestures.cc` (repo motor `godot-gdtk-slug/platform/frt`): pasa
+  `wl_display`+`wl_surface` de SDL al módulo vía símbolo **weak** (`extern "C"`; cuidado:
+  sin `extern "C"` el símbolo queda manglado y nunca enlaza).
+- `shell/remote.gd`: RPC `state` → `compositor.scanout`/`scanout_on` (diagnóstico).
+
+Validación aislada (sway headless `WLR_RENDERER=gles2`, Intel Iris Xe, es2gears):
+
+- RPC `fullscreen` sobre el toplevel → `compositor.scanout == "on"`.
+- `dmabuf_commits` **congelado** (459 en 6 s) con la app a 31 FPS → Godot no importa.
+- Viewport de Godot entre 2 capturas (2 s): diff **0.0** (congelado). Salida de sway
+  (`grim`): diff medio ~6-7 → la app anima en sway vía subsurface.
+
+Limitaciones del PoC: solo xdg (no Xwayland), solo fullscreen en la **salida principal**,
+`place_above` (sin transparencia: Frame/OSD quedan tapados; se necesita RGBA/alpha para el
+hueco), sync explícito no reenviado a sway (confiar en implicit sync), ciclo de vida de
+subsurface no se limpia al recrear el compositor. Gateado por `GDTK_SCANOUT_DIRECT` (off
+por defecto ⇒ sin regresión).
+
+Multi-monitor: Fase C (ventanas en salidas secundarias + cruce por arrastre + menú
+"Mover a <monitor>") implementada en `shell/output_layout.gd` (`transfer_rect`,
+`clamp_local`) y `shell/shell.gd`; tests `output_layout_test` ok=72, `span_layout_test`
+ok=29, `window_output_transfer_test` ok=22, 0 fallas.
+
+## Próximo paso
+
+1. Integrar en shell (app mode / apagar scanout al abrir Frame) y decidir transparencia
+   para Frame/OSD encima.
+2. Reenviar/exponer sync explícito a sway y cerrar el ciclo de vida de la subsurface.
+3. F0 medir GPU/frame antes de generalizar (ver abajo).
+
 
 ## Anclajes de código
 

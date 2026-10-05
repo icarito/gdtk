@@ -56,6 +56,8 @@
 #include <wlr/xwayland/xwayland.h>
 #include <xkbcommon/xkbcommon.h>
 
+#include "scanout.h"
+
 struct wl_server;
 struct drag_icon_watch;
 
@@ -119,6 +121,17 @@ typedef struct xor_surf {
 // Estado por surface del arbol (raiz, subsurfaces, popups). Mantiene retenido
 // con wlr_buffer_lock el ultimo buffer importado para que Godot pueda
 // samplearlo; la identidad es el puntero de la surface (`key`).
+//
+// Scanout directo (P4): en vez de importar a textura, el buffer dmabuf se le
+// entrega al compositor anfitrion (sway). Cada buffer presentado queda retenido en
+// `scanout_refs` hasta que sway lo libera; recien ahi se suelta el wlr_buffer y el
+// cliente recibe su release (puente de ciclo de vida entre los dos compositores).
+typedef struct scanout_ref {
+	struct wl_list link;
+	uint64_t token;
+	struct wlr_buffer *buffer;
+} scanout_ref;
+
 typedef struct surface_state {
 	struct wl_list link;
 	struct wl_server *server;
@@ -126,6 +139,12 @@ typedef struct surface_state {
 	uint64_t key;
 	int id;
 	struct wlr_buffer *buffer;
+	// Scanout directo activo para esta surface raiz (solo toplevel fullscreen en la
+	// salida principal). `scale` es el entero de la salida.
+	bool scanout;
+	int scanout_scale;
+	struct wlr_buffer *scanout_last; // ultimo buffer presentado (dedup de commits sin buffer nuevo)
+	struct wl_list scanout_refs; // scanout_ref.link
 	struct wl_listener commit;
 	struct wl_listener destroy;
 	struct wl_listener new_subsurface;
@@ -251,6 +270,10 @@ struct wl_server {
 	bool throttle; // true tras el primer wl_server_set_visible: frame callbacks sólo a lo visible
 	int next_id;
 	int default_w, default_h;
+	// Scanout directo (P4): habilitado por GDTK_SCANOUT_DIRECT; `scanout_token`
+	// identifica cada buffer presentado al host.
+	bool scanout_enabled;
+	uint64_t scanout_token;
 
 	// Salidas logicas: coleccion explicita de wlr_output headless. `output_layout`
 	// (xdg-output usa este) y `outputs` (logical_output.link) viven toda la corrida.
@@ -349,6 +372,97 @@ static void surface_state_release_buffer(surface_state *st) {
 	}
 }
 
+// --- Scanout directo (P4 opcion B) ------------------------------------------
+
+static void scanout_refs_clear(surface_state *st) {
+	scanout_ref *r, *tmp;
+	wl_list_for_each_safe(r, tmp, &st->scanout_refs, link) {
+		wlr_buffer_unlock(r->buffer);
+		wl_list_remove(&r->link);
+		free(r);
+	}
+	st->scanout_last = NULL;
+}
+
+// sway libero un wl_buffer espejo: soltar el wlr_buffer retenido (recien ahi el
+// cliente del compositor embebido recibe su release y puede reciclar el buffer).
+static void scanout_on_release(void *ud, int id, uint64_t token) {
+	struct wl_server *s = ud;
+	if (s == NULL || id <= 0) {
+		return;
+	}
+	surface_state *st;
+	wl_list_for_each(st, &s->surfaces, link) {
+		if (!st->scanout || st->id != id) {
+			continue;
+		}
+		scanout_ref *r, *tmp;
+		wl_list_for_each_safe(r, tmp, &st->scanout_refs, link) {
+			if (r->token == token) {
+				wlr_buffer_unlock(r->buffer);
+				wl_list_remove(&r->link);
+				free(r);
+				return;
+			}
+		}
+	}
+}
+
+static logical_output *scanout_primary_output(struct wl_server *s) {
+	logical_output *o;
+	wl_list_for_each(o, &s->outputs, link) {
+		if (o->id == s->primary_output_id) {
+			return o;
+		}
+	}
+	return NULL;
+}
+
+// Candidato: surface raiz de un toplevel xdg fullscreen en la salida principal.
+// Nada de subsurfaces/popups, Xwayland ni salidas secundarias en el MVP.
+static bool scanout_candidate(struct wl_server *s, surface_state *st) {
+	if (!s->scanout_enabled || st->surface == NULL || st->id <= 0) {
+		return false;
+	}
+	toplevel *t = toplevel_find(s, st->id);
+	if (t == NULL || !t->mapped || t->tl == NULL) {
+		return false;
+	}
+	if (t->tl->base->surface != st->surface) {
+		return false;
+	}
+	if (t->output_id != s->primary_output_id) {
+		return false;
+	}
+	return t->tl->current.fullscreen;
+}
+
+static void scanout_buffer(surface_state *st, struct wlr_buffer *buf,
+		const struct wlr_dmabuf_attributes *attribs) {
+	struct wl_server *s = st->server;
+	logical_output *o = scanout_primary_output(s);
+	st->scanout = true;
+	st->scanout_scale = (o != NULL && o->scale > 0) ? o->scale : 1;
+	st->scanout_last = buf;
+	scanout_ref *r = calloc(1, sizeof(*r));
+	r->token = ++s->scanout_token;
+	r->buffer = buf;
+	wlr_buffer_lock(buf);
+	wl_list_insert(&st->scanout_refs, &r->link);
+	// Fullscreen en la principal: el shell lo dibuja en (0,0) del viewport.
+	gdtk_scanout_present(st->id, attribs, 0, 0, attribs->width, attribs->height,
+			st->scanout_scale, r->token);
+}
+
+static void scanout_off(surface_state *st) {
+	if (!st->scanout) {
+		return;
+	}
+	gdtk_scanout_hide(st->id);
+	scanout_refs_clear(st);
+	st->scanout = false;
+}
+
 static int surface_state_resolve_id(struct wl_server *s, struct wlr_surface *surface, int depth);
 
 // Espera explícita del acquire point / release del buffer (linux-drm-syncobj-v1); definida
@@ -371,6 +485,22 @@ static void surface_state_import(surface_state *st) {
 	if (buf == NULL) {
 		return;
 	}
+
+	struct wlr_dmabuf_attributes attribs;
+	bool has_dmabuf = s->dmabuf_enabled && wlr_buffer_get_dmabuf(buf, &attribs);
+
+	// Scanout directo: el dmabuf va al compositor anfitrion en vez de a una textura
+	// de Godot. Si deja de ser candidato, se apaga y sigue el camino actual.
+	if (has_dmabuf && scanout_candidate(s, st)) {
+		if (buf != st->scanout_last) {
+			scanout_buffer(st, buf, &attribs);
+		}
+		return;
+	}
+	if (st->scanout) {
+		scanout_off(st);
+	}
+
 	if (buf != st->buffer) {
 		wlr_buffer_lock(buf);
 		if (st->buffer != NULL) {
@@ -379,8 +509,7 @@ static void surface_state_import(surface_state *st) {
 		st->buffer = buf;
 	}
 
-	struct wlr_dmabuf_attributes attribs;
-	if (s->dmabuf_enabled && wlr_buffer_get_dmabuf(buf, &attribs)) {
+	if (has_dmabuf) {
 		if (s->syncobj_enabled) {
 			syncobj_apply(s, st);
 		}
@@ -446,6 +575,7 @@ static void handle_surface_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&st->destroy.link);
 	wl_list_remove(&st->link);
 	surface_state_release_buffer(st);
+	scanout_refs_clear(st);
 	free(st);
 }
 
@@ -458,6 +588,7 @@ static void surface_state_acquire(struct wl_server *s, struct wlr_surface *surfa
 	st->surface = surface;
 	st->key = (uint64_t)(uintptr_t)surface;
 	st->id = id;
+	wl_list_init(&st->scanout_refs);
 	st->commit.notify = handle_surface_commit;
 	wl_signal_add(&surface->events.commit, &st->commit);
 	st->new_subsurface.notify = handle_new_subsurface;
@@ -2264,6 +2395,10 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 	wl_list_init(&s->xors);
 	wl_list_init(&s->text_inputs);
 	wl_list_init(&s->outputs);
+	// Scanout directo (P4): opt-in por entorno; el puente vive en scanout.c.
+	s->scanout_enabled = getenv("GDTK_SCANOUT_DIRECT") != NULL;
+	gdtk_scanout_set_enabled(s->scanout_enabled);
+	gdtk_scanout_set_release_callback(scanout_on_release, s);
 
 	s->display = wl_display_create();
 	if (s->display == NULL) {
@@ -2484,6 +2619,8 @@ void wl_server_dispatch(wl_server *s) {
 	}
 	wl_event_loop_dispatch(s->loop, 0);
 	wl_display_flush_clients(s->display);
+	// Eventos del host (sway): release de los wl_buffers del puente de scanout.
+	gdtk_scanout_dispatch();
 }
 
 static void send_frame_done_iter(struct wlr_surface *surface, int sx, int sy, void *data) {
@@ -3293,6 +3430,15 @@ void wl_server_bind_dmabuf(wl_server *s, uint64_t key, unsigned int texid) {
 	// ponytail: sync implicita (Mesa/Intel); explicit sync (linux-drm-syncobj) si hay tearing.
 }
 
+int wl_server_scanout_enabled(wl_server *s) {
+	return s != NULL && s->scanout_enabled;
+}
+
+const char *wl_server_scanout_state(wl_server *s) {
+	(void)s;
+	return gdtk_scanout_state();
+}
+
 void wl_server_destroy(wl_server *s) {
 	if (s == NULL) {
 		return;
@@ -3300,6 +3446,8 @@ void wl_server_destroy(wl_server *s) {
 
 	// Evitar callbacks hacia Godot mientras se desmonta la escena.
 	memset(&s->cb, 0, sizeof(s->cb));
+	// El host ya no debe llamarnos al liberar buffers.
+	gdtk_scanout_set_release_callback(NULL, NULL);
 
 	if (s->new_toplevel.notify != NULL) {
 		wl_list_remove(&s->new_toplevel.link);

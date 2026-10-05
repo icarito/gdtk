@@ -149,6 +149,9 @@ void pointer_axis_stop();
 	int get_shm_commits() const;
 	String get_dmabuf_state() const;
 	String get_explicit_sync_state() const;
+	// Scanout directo (P4 opcion B): diagnostico del puente dmabuf hacia sway.
+	bool scanout_enabled() const;
+	String scanout_state() const;
 
 	// Salidas logicas (multi-output). `p_rect` es la geometria logica global;
 	// `p_scale` se redondea a un entero >=1. add_output devuelve el id (>0) o 0.

@@ -726,6 +726,8 @@ void WaylandCompositor::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("get_explicit_sync_state"), &WaylandCompositor::get_explicit_sync_state);
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "explicit_sync_state"), "", "get_explicit_sync_state");
+	ClassDB::bind_method(D_METHOD("scanout_enabled"), &WaylandCompositor::scanout_enabled);
+	ClassDB::bind_method(D_METHOD("scanout_state"), &WaylandCompositor::scanout_state);
 
 	ClassDB::bind_method(D_METHOD("add_output", "name", "rect", "scale", "primary"), &WaylandCompositor::add_output, DEFVAL(1.0), DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("configure_output", "id", "rect", "scale"), &WaylandCompositor::configure_output, DEFVAL(1.0));
@@ -1272,6 +1274,14 @@ String WaylandCompositor::get_explicit_sync_state() const {
 		return String("off (sin servidor)");
 	}
 	return String(wl_server_syncobj_state(server));
+}
+
+bool WaylandCompositor::scanout_enabled() const {
+	return server != NULL && wl_server_scanout_enabled(server);
+}
+
+String WaylandCompositor::scanout_state() const {
+	return String(wl_server_scanout_state(server));
 }
 
 Dictionary WaylandCompositor::_output_dict(int p_output_id) const {
