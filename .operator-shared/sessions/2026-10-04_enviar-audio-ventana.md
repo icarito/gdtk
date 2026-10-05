@@ -61,3 +61,12 @@ Contrato: `specs/SPEC-sugar-group-2026-10.md` § «Enviar audio y ventanas».
 - `reset` y la limpieza local liberan botones/teclas al perder foco, cerrar o cortar.
 - Deskflow se arbitra primero. Para conservar su latencia bajo carga, gvd baja a nice 5 y marca
   RTP como DSCP CS1 (`qos-dscp=8`); no requiere sudo y las reglas/router pueden ignorar DSCP.
+
+## Saturación y control (19:00)
+- bastion→cupid: bastion dibujaba 24 fps y capturaba 15,5/20 (readback síncrono por tick). Ahora
+  la captura es por cambio (`get_commit_count` + geometría, render `UPDATE_ONCE`, lectura cuando
+  `Engine.get_frames_drawn()` avanzó: la propiedad del nodo no vuelve sola a DISABLED) y gvd
+  repite cada 0,5 s. tengu: x264 50% → 8%.
+- El control no llegaba porque el shell de bastion arrancó antes de `window_input` (responde
+  «bad request»). El receptor ahora lo registra. bastion lo toma al reiniciar su shell.
+- Verificado tengu→cupid: `q` en la «Pantalla compartida» de cupid cerró htop en tengu.

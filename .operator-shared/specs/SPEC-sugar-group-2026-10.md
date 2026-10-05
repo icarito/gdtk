@@ -115,6 +115,10 @@ Decisiones tomadas con el usuario:
   ventanas: la original (corta y cierra el receptor remoto) o la «Pantalla compartida» del otro lado
   (termina su `gvd recv` y avisa con `share_stop`). Todo cierre pasa por `shell._close_window_id`.
   Una ventana por equipo a la vez (un receptor por puerto).
+  Costo: window_cast sólo re-renderiza y lee de la GPU cuando hubo commits o cambió la
+  geometría (el readback es síncrono y frenaba todo el shell); gvd sólo codifica frames
+  nuevos y, quieta la ventana, repite el último cada 0,5 s (keepalive). En un X200: shell
+  ~12% y x264 ~8% de CPU con htop compartido (antes 50% sólo el encoder).
   Mientras esa ventana receptora tiene foco, usa el puntero local (el video sigue con
   `--cursor none`) y devuelve movimiento normalizado, botones/rueda y teclado por el
   canal peer autenticado `window_input`. El emisor sólo acepta el lote si ese `hid`

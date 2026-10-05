@@ -7596,6 +7596,9 @@ func _window_input_poll():
 		"token": _peer_token_get(hid), "events": events})
 
 
+var _window_input_last_err = ""   # bajo _window_input_mutex
+
+
 func _window_input_work(u):
 	var host = String(u.host)
 	if host.find(".") < 0 and not host.is_valid_ip_address():
@@ -7606,6 +7609,14 @@ func _window_input_work(u):
 	_window_input_mutex.lock()
 	if bool(resp.get("ok", false)) and resp.has("token"):
 		u.state.token = String(resp.token)
+	# Un rechazo (p. ej. «bad request» de un equipo con el shell viejo) se registra una
+	# vez por error distinto: antes el control fallaba en silencio.
+	var err = "" if bool(resp.get("ok", false)) else String(resp.get("error", r.get("error", "")))
+	if err != _window_input_last_err:
+		_window_input_last_err = err
+		if err != "":
+			print("pantalla: el otro equipo rechaza el control (", err,
+				"); si dice «bad request», reiniciá su shell")
 	u.state.done = true
 	_window_input_mutex.unlock()
 

@@ -41,6 +41,13 @@ var _pending = null
 var _quit = false
 var _want = Vector2()
 var _want_since = 0
+# Sólo se re-renderiza y se lee de la GPU si hubo commits (de lo dibujado, incluida
+# esta ventana) o cambió la geometría; si no, gvd repite el último frame. El readback
+# es síncrono y frena todo el shell: hacerlo con la ventana quieta lo saturaba.
+var _last_commits = -1
+var _last_geo = Rect2()
+var _read_next = false
+var _requested_at = 0
 
 
 # Tamaño de salida: el de la ventana, achicado sin deformar hasta MAX_SIZE y con
@@ -73,9 +80,11 @@ func start(p_compositor, p_wid, p_path, p_fps = 20):
 	_vp = Viewport.new()
 	_vp.size = size
 	_vp.usage = Viewport.USAGE_2D
-	_vp.transparent_bg = false
+	# RGBA directo (el fondo negro opaco lo dibuja _draw_window): sin convertir 4 MB
+	# por frame. Se renderiza a demanda, sólo cuando la ventana cambió.
+	_vp.transparent_bg = true
 	_vp.render_target_v_flip = true
-	_vp.render_target_update_mode = Viewport.UPDATE_ALWAYS
+	_vp.render_target_update_mode = Viewport.UPDATE_ONCE
 	_canvas = Node2D.new()
 	_canvas.connect("draw", self, "_draw_window")
 	_vp.add_child(_canvas)
@@ -125,9 +134,31 @@ func _process(delta):
 			_mutex.unlock()
 			_vp.size = want
 			_canvas.update()
+			_vp.render_target_update_mode = Viewport.UPDATE_ONCE
+			_last_commits = -1   # forzar captura al nuevo tamaño
+			_read_next = false
 			return   # el viewport recién se re-renderiza al nuevo tamaño el próximo tick
+	# Lectura del render pedido en el tick anterior (un frame de latencia, sin esperar).
+	# Se lee recién cuando el motor dibujó un frame después del pedido (UPDATE_ONCE se
+	# consume en el VisualServer; la propiedad del nodo no cambia). Leer antes perdía
+	# el último cambio si el shell estaba en reposo.
+	if _read_next and Engine.get_frames_drawn() > _requested_at:
+		_read_next = false
+		_read_frame()
+	elif _read_next:
+		return
+	var commits = compositor.get_commit_count()
+	if commits == _last_commits and _geo == _last_geo:
+		return
+	_last_commits = commits
+	_last_geo = _geo
 	_canvas.update()
-	# Lo que se lee es el render del tick anterior: un frame de latencia, sin esperar.
+	_vp.render_target_update_mode = Viewport.UPDATE_ONCE
+	_read_next = true
+	_requested_at = Engine.get_frames_drawn()
+
+
+func _read_frame():
 	var img = _vp.get_texture().get_data()
 	if img == null or img.is_empty():
 		return

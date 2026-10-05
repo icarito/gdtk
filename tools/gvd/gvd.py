@@ -1787,6 +1787,11 @@ def build_parser():
 SHM_MAGIC = b"GVDSHM1\0"
 SHM_HEADER = 64
 SHM_RESIZED = 3   # rc de shm_capture: cambió el tamaño, rearmar sin contar como fallo
+# Sin frame nuevo sólo se repite el último cada tanto: codificar 20 fps idénticos le
+# costaba 50% de CPU a un X200. Los PTS los re-estampa attach_retimestamp por reloj,
+# así que el stream tolera la cadencia variable; la repetición mantiene vivo el RTP y
+# acota la espera de un receptor que se reengancha.
+SHM_KEEPALIVE_S = 0.5
 
 
 def shm_capture(path, fps, max_frames=0):
@@ -1796,7 +1801,7 @@ def shm_capture(path, fps, max_frames=0):
     Archivo (little endian): magic[8] | seq u64 | width u32 | height u32 |
     stride u32 | fourcc[4] | relleno hasta 64 | frame. seq impar = el escritor
     está a mitad de frame (seqlock): se descarta y se reintenta. Sin frame nuevo
-    se repite el anterior para sostener la cadencia del encoder. Termina cuando
+    se repite el anterior cada SHM_KEEPALIVE_S (no a cada tick). Termina cuando
     el archivo desaparece (el shell dejó de compartir) o se cierra stdout, y con
     SHM_RESIZED si cambia el tamaño (la ventana compartida se redimensionó): el
     emisor rearma el pipeline con el tamaño nuevo."""
@@ -1821,7 +1826,8 @@ def shm_capture(path, fps, max_frames=0):
     sys.stderr.write(f"GVDCAP1 {fourcc} {w} {h} {stride}\n")
     sys.stderr.flush()
     out = sys.stdout.buffer
-    last_seq, frame, sent = -1, None, 0
+    last_seq, frame, sent, fresh = -1, None, 0, False
+    last_out = 0.0
     period = 1.0 / max(1, fps)
     nxt = time.monotonic()
     try:
@@ -1837,13 +1843,16 @@ def shm_capture(path, fps, max_frames=0):
                         data = f.read(size)
                         f.seek(8)
                         if struct.unpack("<Q", f.read(8))[0] == s1 and len(data) == size:
-                            frame, last_seq = data, s1
+                            frame, last_seq, fresh = data, s1, True
             except FileNotFoundError:
                 return 0
-            if frame is not None:
+            now = time.monotonic()
+            if frame is not None and (fresh or now - last_out >= SHM_KEEPALIVE_S):
                 out.write(frame)
                 out.flush()
                 sent += 1
+                fresh = False
+                last_out = now
                 if max_frames and sent >= max_frames:
                     return 0
             nxt += period
