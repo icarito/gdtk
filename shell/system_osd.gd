@@ -21,6 +21,9 @@ const KEY_VOLUMEMUTE = SPKEY | 0x45
 const KEY_BRIGHTNESSUP = SPKEY | 0x35
 const KEY_BRIGHTNESSDOWN = SPKEY | 0x34
 
+# Log de teclas sin mapear: sólo con GDTK_DEBUG_INPUT=1 (evita ruido por tecla).
+var debug_input = OS.get_environment("GDTK_DEBUG_INPUT") != ""
+
 const VOL_STEP = 0.05
 const BRI_STEP = 0.05
 const BRI_MIN = 0.05        # piso: no dejar la pantalla en negro
@@ -84,7 +87,8 @@ func handle_input(event):
 	if event is InputEventKey and event.pressed and not event.echo:
 		var d = int(event.physical_scancode) if event.physical_scancode != 0 else int(event.scancode)
 		if d == 0 or d >= (1 << 24):
-			printerr("[osd-key] sc=", int(event.scancode), " phys=", int(event.physical_scancode), " uni=", int(event.unicode))
+			if debug_input:
+				printerr("[osd-key] sc=", int(event.scancode), " phys=", int(event.physical_scancode), " uni=", int(event.unicode))
 	if not (event is InputEventKey) or not event.pressed or event.echo:
 		return false
 	var sc = int(event.physical_scancode) if event.physical_scancode != 0 else int(event.scancode)

@@ -1469,6 +1469,9 @@ var last_commit_ms = 0
 # (SPEC-rendimiento-compositor).
 var present_light = 0
 var present_full = 0
+# Logs de entrada en caliente ([cursor], arrastre Deskflow): sólo con GDTK_DEBUG_INPUT=1.
+# Sin la variable no escriben a shell.log en cada cambio de cursor/motion del cliente.
+var debug_input = OS.get_environment("GDTK_DEBUG_INPUT") != ""
 
 
 # Un commit Wayland puede traer capas/texturas nuevas (y con dmabuf el VisualServer
@@ -9271,7 +9274,8 @@ func _apply_cursor(shape):
 # Cursor pedido por la app con foco de puntero: forma de Godot o imagen propia.
 func _on_client_cursor_shape(shape):
 	if int(shape) != client_cursor_shape or client_cursor_tex != null:
-		print("[cursor] forma de la app: ", int(shape))
+		if debug_input:
+			print("[cursor] forma de la app: ", int(shape))
 	client_cursor_shape = int(shape)
 	client_cursor_tex = null
 	_apply_client_cursor()
@@ -9287,7 +9291,8 @@ func _on_client_cursor_image(img, hotspot):
 		for x in range(0, img.get_width(), 2):
 			amax = max(amax, img.get_pixel(x, y).a)
 	img.unlock()
-	print("[cursor] imagen de la app ", img.get_width(), "x", img.get_height(), " hotspot ", hotspot, " alfa_max ", stepify(amax, 0.01))
+	if debug_input:
+		print("[cursor] imagen de la app ", img.get_width(), "x", img.get_height(), " hotspot ", hotspot, " alfa_max ", stepify(amax, 0.01))
 	var tex = ImageTexture.new()
 	tex.create_from_image(img, 0)
 	client_cursor_tex = tex
@@ -9684,7 +9689,8 @@ func _on_client_pointer_lock(id, locked):
 func _on_client_cursor_hidden(hidden):
 	if client_cursor_hidden == hidden:
 		return
-	print("[cursor] la app pide ", "ocultar" if hidden else "mostrar", " el puntero")
+	if debug_input:
+		print("[cursor] la app pide ", "ocultar" if hidden else "mostrar", " el puntero")
 	client_cursor_hidden = hidden
 	_apply_client_cursor_state()
 
@@ -9729,10 +9735,12 @@ func _apply_client_cursor_state():
 		return
 	if client_cursor_hidden or remote_cursor_parked:
 		if Input.get_mouse_mode() != Input.MOUSE_MODE_HIDDEN:
-			print("[cursor] oculto: la app enfocada (", focused_tile, ") pidió cursor vacío")
+			if debug_input:
+				print("[cursor] oculto: la app enfocada (", focused_tile, ") pidió cursor vacío")
 			Input.set_mouse_mode(Input.MOUSE_MODE_HIDDEN)
 	elif Input.get_mouse_mode() == Input.MOUSE_MODE_HIDDEN:
-		print("[cursor] visible otra vez")
+		if debug_input:
+			print("[cursor] visible otra vez")
 		Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
 		_reset_cursor()
 
@@ -9837,7 +9845,8 @@ func _capture_remote_input_event(event):
 				or (compositor != null and compositor.is_dragging())):
 			if not _capture_drag_held:
 				_capture_drag_held = true
-				print("deskflow: arrastre en curso, el puntero no cruza")
+				if debug_input:
+					print("deskflow: arrastre en curso, el puntero no cruza")
 			return false
 		_capture_drag_held = false
 		captured = remote_input.capture_motion(event.position, event.relative, now)
