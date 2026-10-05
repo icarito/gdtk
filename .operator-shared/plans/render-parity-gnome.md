@@ -90,6 +90,7 @@ vía flag `~/.gdtk-frt-perf`). GLES3 pasó a default en `e7898cd` (`session/gdtk
 |---|---|---|---|---|
 | gdtk GLES3 Home reposo | 3,3 | 0,09 | — | 0 |
 | gdtk GLES3 video fullscreen (estático) | 4,3 | 0,22 | 0,7–1,8 | ≈ dmabuf 27/s |
+| gdtk GLES3 video fullscreen, solo (Firefox) | 5,3 | 0,24 | 0,88 | ≈ dmabuf 26/s, **scanout off** |
 | gdtk GLES3 2 tiled + video | 9,2 | 0,49 | 0,91 | ≈ dmabuf 26/s |
 | gdtk GLES3 tiled + interacción | ~15 | 0,53 | 0,74 | ≈ dmabuf 24/s |
 | GNOME video (mismo host) | gnome-shell 6,4 (5,5–9,2) | — | — | — |
@@ -97,12 +98,15 @@ vía flag `~/.gdtk-frt-perf`). GLES3 pasó a default en `e7898cd` (`session/gdtk
 Hallazgos:
 1. **GLES3 fue el gran salto**: el mismo tiled/video que en GLES2 medía shell ~23–25% ahora
    da 9–15%, y habilita `[FRT_GPU]`. Sin GLES3 no hay ms de GPU.
-2. **Fullscreen estático ya está a la par de GNOME** (shell 4,3% vs 6,4%; GPU <2 ms).
+2. **Fullscreen estático ya está a la par de GNOME** (shell 4,3–5,3% vs 6,4%; GPU <2 ms).
 3. Bajo interacción/tiled el shell sube por **redibujo completo**: el costo restante es
    daño/partial (A1) y cursor (A2), no falta de KMS.
-4. **P4/scanout no se pudo medir fullscreen** en la sesión real: con Slack "visible" detrás
-   el guard de ventana-sola lo bloquea. Queda revisar si un fullscreen debe ocultar a las de
-   atrás (o si el shell no debería marcarlas visibles).
+4. **P4/scanout casi no engancha en uso real**: con la ventana fullscreen y sola, `scanout`
+   quedó **off**. Hipótesis: Firefox commitea el video en una **subsurface**, no en la surface
+   raíz, y `scanout_candidate` exige la raíz (`t->tl->base->surface == st->surface`); también
+   puede ser un popup xdg no vacío. Con es2gears (raíz directa) sí engancha. **A investigar**:
+   aceptar la subsurface con contenido / mirar por-ventana; pero como GLES3 ya compone un
+   fullscreen a ~5% de un core, la ganancia de scanout hoy es marginal.
 
 Decisión: **Track A (sin KMS)**. No se justifica DRM/KMS todavía; priorizar A1 (damage) y
 A2 (cursor del host). Caveats: entorno real del usuario, agentes de fondo, varianza por
