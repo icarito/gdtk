@@ -146,7 +146,11 @@ Decisiones tomadas con el usuario:
   se re-anuncia al cambiarlo). Como el XO de Sugar: en Grupo y Vecindario cada equipo se dibuja con
   su acento (anillo + relleno suave) y «Este equipo» con el propio; sin acento, colores neutros.
 - La «Pantalla compartida» que llega de otro equipo lleva un marco (y el asa de mover) con el
-  acento de ese equipo, para distinguirla de las ventanas locales.
+  acento de ese equipo, para distinguirla de las ventanas locales, y su bloque del Frame se
+  resalta con ese mismo color. Se muestra como «<título de la ventana original> @<equipo>»
+  (`shell.window_title`, usado por Frame, exposé y decoración). Título y acento los manda el
+  emisor por el método peer `gvd_meta` al empezar y cada vez que cambian; el acento del TXT
+  mDNS queda de respaldo.
 - `ctl=` sólo se anuncia si el canal peer escucha: vacío invalidaba el TXT y el equipo no se
   anunciaba en absoluto.
 

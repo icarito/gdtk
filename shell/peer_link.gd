@@ -16,7 +16,7 @@ const VERSION = 1
 # remoto completo, sólo lo necesario para pantalla y el aviso de lados compartidos).
 const METHODS = ["ping", "gvd_recv", "gvd_stop", "gvd_send", "gvd_status",
 	"share_notify", "share_stop", "clip_set", "audio_recv", "audio_stop", "gvd_size",
-	"window_input"]
+	"window_input", "gvd_meta"]
 
 # Parámetros válidos de los avisos de lados compartidos (G5). El `side` llega YA
 # invertido por el emisor: acá sólo se valida el vocabulario, no se transforma.
@@ -76,6 +76,26 @@ static func window_input_events(params):
 			_:
 				return []
 	return out
+
+
+# Título y acento de la ventana que se comparte (`gvd_meta`), para que el receptor la
+# muestre como «título @equipo» con el color del origen. Título: texto plano, sin
+# caracteres de control, hasta 200; acento: "#rrggbb" o "". {} si nada es válido. Puro.
+static func video_meta(params):
+	var p = params if typeof(params) == TYPE_DICTIONARY else {}
+	var raw = p.get("title", "")
+	var title = ""
+	if typeof(raw) == TYPE_STRING:
+		for i in range(min(raw.length(), 200)):
+			var c = raw.ord_at(i)
+			title += " " if c < 32 or c == 127 else raw[i]
+		title = title.strip_edges()
+	var acc = String(p.get("accent", "")).strip_edges().to_lower()
+	if acc.length() != 7 or acc[0] != "#" or not acc.substr(1).is_valid_hex_number():
+		acc = ""
+	if title == "" and acc == "":
+		return {}
+	return {"title": title, "accent": acc}
 
 
 static func valid_share_params(method, params):

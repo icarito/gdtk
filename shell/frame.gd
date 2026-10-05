@@ -2068,7 +2068,8 @@ func running():
 		if shell.compositor.get_parent_id(id) > 0:
 			continue
 		var name = shell._activity_for_window(id)
-		var title = shell.compositor.get_title(id)
+		var title = shell.window_title(id) if shell.has_method("window_title") \
+			else shell.compositor.get_title(id)
 		if title == "":
 			title = name if name != "" else "Ventana " + str(id)
 		by_id[id] = {"key": "w:" + str(id), "name": name, "title": title, "id": id,
@@ -3282,6 +3283,14 @@ func _draw_outline(ui, rect, color):
 # Bloque Hogar: tesela cuadrada con el ícono Sugar de hogar y el título corto abajo.
 # Resalta cuando la vista actual es el Hogar (la ranura extra al final de la fila).
 # Color de acento del shell para el bloque actual/fijado.
+# Acento para el bloque de una ventana: el del equipo de origen si es una «Pantalla
+# compartida» (window_peer_accent), si no el local.
+func _cur_for(item):
+	var peer = shell.window_peer_accent(int(item.id)) \
+		if shell != null and shell.has_method("window_peer_accent") and int(item.id) >= 0 else null
+	return Color(peer.r, peer.g, peer.b, 1.0) if peer != null else _cur()
+
+
 func _cur():
 	if shell != null and "accent" in shell:
 		return Color(shell.accent.r, shell.accent.g, shell.accent.b, 1.0)
@@ -3407,7 +3416,7 @@ func _draw_wifi_glyph(ui, c, r, col):
 func _draw_window_tile(ui, pos, side, item, current, is_sel, is_drop, mouse):
 	var face = NX_FACE
 	if current:
-		face = _cur()
+		face = _cur_for(item)
 	elif is_drop:
 		face = NX_SEL
 	elif is_sel:
@@ -3511,7 +3520,7 @@ func _draw_corner_close(ui, r, corner, hot, pressed):
 func _draw_window_mini(ui, pos, side, item, current, is_sel, is_drop, mouse):
 	var face = NX_FACE
 	if current:
-		face = _cur()
+		face = _cur_for(item)
 	elif is_drop:
 		face = NX_SEL
 	elif is_sel:
@@ -3533,7 +3542,7 @@ func _draw_window_mini(ui, pos, side, item, current, is_sel, is_drop, mouse):
 		ui.text_colored(NX_TEXT, mono)
 	# Barra mínima de título/estado: foco, minimizada o pantalla compartida.
 	var bar_h = max(3.0, side * 0.16)
-	var col = _cur() if current else (NX_TEXT_DIM if item.minimized else NX_LIGHT)
+	var col = _cur_for(item) if current else (NX_TEXT_DIM if item.minimized else NX_LIGHT)
 	ui.imgui_draw_rect_filled(Rect2(b.rect.position + Vector2(bw, side - bar_h - bw),
 		Vector2(max(1.0, inner), bar_h)), col, 0.0)
 	var cs = max(8.0, side * 0.30)

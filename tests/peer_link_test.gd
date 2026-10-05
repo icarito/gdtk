@@ -71,5 +71,15 @@ func _init():
 		and P.window_input_events({"events": [{"kind": "button", "button": 99,
 		"pressed": true}]}).empty())
 
+	var vm = P.video_meta({"title": "htop\n@x\u0007", "accent": "#E8615A"})
+	check("video_meta: título sin controles y acento normalizado",
+		vm.get("title", "") == "htop @x" and vm.get("accent", "") == "#e8615a")
+	check("video_meta: acento inválido se descarta", P.video_meta({"title": "a", "accent": "red"}).accent == "")
+	check("video_meta: nada válido => {}", P.video_meta({"title": 3, "accent": "x"}).empty())
+	var long_t = ""
+	for _i in range(300):
+		long_t += "a"
+	check("video_meta: título acotado a 200", P.video_meta({"title": long_t}).title.length() == 200)
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

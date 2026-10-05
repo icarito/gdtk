@@ -6976,6 +6976,7 @@ func _peer_call(peer_host, peer_id, method, params = {}):
 # Equipo que nos está transmitiendo (canal peer `gvd_recv`): si la persona cierra la
 # «Pantalla compartida», se le avisa con share_stop para que deje de emitir.
 var _pantalla_sender = ""
+var _pantalla_meta = {}   # {title, accent} de la ventana que nos comparten (gvd_meta)
 var _pantalla_video = Vector2()   # tamaño anunciado por el emisor (ventana compartida)
 var _pantalla_fitted = {}         # id -> video al que ya se ajustó
 
@@ -7035,11 +7036,35 @@ func _pantalla_fit_poll():
 		request_redraw()
 
 
-# Acento del equipo que nos transmite esta «Pantalla compartida» (TXT `accent`), o
-# null si la ventana es local o ese equipo no anuncia color. Lo usa window_deco.
+# Handler peer `gvd_meta`: título y acento de la ventana que nos comparten.
+func _peer_gvd_meta(hid, meta):
+	if String(hid) != _pantalla_sender:
+		return false
+	_pantalla_meta = meta
+	request_redraw()
+	return true
+
+
+# Título a mostrar (Frame, exposé, decoración): la «Pantalla compartida» lleva el de la
+# ventana original y «@equipo» al final; el resto, el que pone el cliente.
+func window_title(id):
+	if _pantalla_sender != "" and _pantalla_window_ids().has(id):
+		var t = String(_pantalla_meta.get("title", ""))
+		if t == "":
+			t = "Pantalla compartida"
+		return t + " @" + _peer_name_for(_pantalla_sender)
+	return compositor.get_title(id)
+
+
+# Acento del equipo que nos transmite esta «Pantalla compartida»: el que mandó por
+# `gvd_meta` y, si no, el de su TXT mDNS; null si la ventana es local o no hay color.
+# Lo usan window_deco (marco/asa) y el Frame (bloque de la ventana).
 func window_peer_accent(id):
 	if _pantalla_sender == "" or not _pantalla_window_ids().has(id):
 		return null
+	var sent = String(_pantalla_meta.get("accent", ""))
+	if sent != "":
+		return Color(sent)
 	var host = _neighborhood_host(_pantalla_sender)
 	if neighborhood_ui == null or not is_instance_valid(neighborhood_ui) \
 			or not neighborhood_ui.has_method("node_accent"):
@@ -7061,6 +7086,7 @@ func _pantalla_closed_here():
 
 func _peer_gvd_open(port, _from, hid = "", video = Vector2()):
 	_pantalla_sender = String(hid)
+	_pantalla_meta = {}
 	_pantalla_video = video
 	_pantalla_fitted = {}
 	var path = _gvd_path_local()
@@ -7676,6 +7702,17 @@ func _window_input_release_cast(c):
 	c.input_keys = {}
 
 
+# Título/acento actuales de la ventana compartida; true (y los guarda en meta_sent) si
+# cambiaron desde el último gvd_meta.
+func _cast_meta_changed(c):
+	var meta = {"title": String(compositor.get_title(int(c.wid))),
+		"accent": "#" + accent.to_html(false)}
+	if c.get("meta_sent", {}) == meta:
+		return false
+	c.meta_sent = meta
+	return true
+
+
 func _group_casting(wid):
 	for hid in _casts.keys():
 		if int(_casts[hid].wid) == int(wid):
@@ -7694,6 +7731,11 @@ func _casts_poll():
 			print("compartir: input remoto liberado por desconexión de ", hid)
 		if not _id_alive(int(c.wid)):
 			_stop_gvd_screen(hid)
+		elif is_instance_valid(c.node) and _cast_meta_changed(c):
+			var ep_m = _peer_endpoint_for(hid)
+			if bool(ep_m.get("ok", false)):
+				_peer_send_async([{"id": hid, "host": String(ep_m.peer), "port": int(ep_m.port),
+					"token": _peer_token_get(hid)}], "gvd_meta", c.meta_sent)
 		elif is_instance_valid(c.node) and c.node.size != c.sent:
 			c.sent = c.node.size
 			var ep = _peer_endpoint_for(hid)
@@ -7810,7 +7852,7 @@ func _share_windows():
 		var wid = int(id)
 		out.append({
 			"id": str(wid),
-			"title": String(compositor.get_title(wid)),
+			"title": String(window_title(wid)),
 			"peer_name": peer,
 			"maximized": bool(maximize_state.has(wid) or wm_maximized.has(wid)),
 		})

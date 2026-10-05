@@ -122,7 +122,8 @@ func _draw():
 	_draw_grip(p.resize, scale)
 	var font = get_font("font", "Label")
 	if font != null:
-		var label = shell.compositor.get_title(id)
+		var label = shell.window_title(id) if shell.has_method("window_title") \
+			else shell.compositor.get_title(id)
 		if label == "":
 			label = shell._activity_for_window(id)
 		_draw_title(font, p, String(label), active, scale)

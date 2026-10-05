@@ -78,7 +78,8 @@ func _draw():
 			pts.append(c + Vector2(cos(a), sin(a)) * rad)
 		draw_polyline(pts, _acc(0.95), 2.0)
 		if font != null:
-			var title = shell.compositor.get_title(id)
+			var title = shell.window_title(id) if shell.has_method("window_title") \
+				else shell.compositor.get_title(id)
 			if title == "":
 				title = shell._activity_for_window(id)
 			if title != "":

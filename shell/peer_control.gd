@@ -258,6 +258,14 @@ func _handle(conn, line):
 					err = "ventana no compartida"
 			else:
 				err = "no disponible"
+		"gvd_meta":
+			var meta = LINK.video_meta(params)
+			if meta.empty():
+				err = "parámetros inválidos"
+			elif shell.has_method("_peer_gvd_meta"):
+				ok = bool(shell._peer_gvd_meta(hid, meta))
+			else:
+				err = "no disponible"
 		"audio_stop":
 			ok = shell.has_method("_peer_audio_stop") and bool(shell._peer_audio_stop(hid))
 		_:
