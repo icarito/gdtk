@@ -64,6 +64,16 @@ Cierre del harness: `sway` headless detenido; `/tmp/kilo/wl` queda como runtime 
   próximo paso, no como acción corta a ciegas.
 - La advertencia de subsurfaces de Firefox y el explicit sync quedan documentados (P2/P3).
 
+## Verificado / descartado
+
+- **linux-dmabuf con feedback v4 correcto** (`wl_server.c:setup_dmabuf`: main_device = render
+  node, tranche con formatos, versión 4). No es la causa de que las apps caigan a software.
+- **P1 no rompe GTK/terminal**: Terminal (shm/dmabuf) 7 commits y captura válida;
+  `gtk4-widget-factory` no renderiza headless **igual con el binario viejo** (no es regresión).
+- **`control_test.sh` `gdtk_state view=home`** falla por carrera de arranque de la primera
+  llamada (falla con y sin el campo `compositor`); preexistente, ajeno a P1.
+- RPC `state` ahora expone `present:{light,full}` (commit) para medir P1 en la sesión real.
+
 ## Cómo retomar
 
 - **P1 present-only: hecho** (commits arriba). Próximos: **P2** explicit sync (`linux-drm-syncobj`)
