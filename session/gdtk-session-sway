@@ -10,6 +10,10 @@ export GDTK_SESSION=wayland GDTK_HOME="$HERE"
 # la salida principal se presenta a sway sin pasar por la escena de Godot. Opt-in;
 # GDTK_SCANOUT_DIRECT=0 lo desactiva (el motor interpreta 0/false como apagado).
 export GDTK_SCANOUT_DIRECT="${GDTK_SCANOUT_DIRECT:-1}"
+# Medición F0 (bench/f0_probe.sh): si existe este flag, el motor emite [FRT_PERF]/
+# [FRT_GPU] (ms/frame del hilo de render). Sólo para profiling; el flag desaparece al
+# reiniciar la máquina (vive en /run). No queda encendido en uso normal.
+[ -e "${XDG_RUNTIME_DIR:-/tmp}/gdtk-frt-perf" ] && export FRT_PERF=1
 # polkit, llavero, notificaciones y ~/.config/autostart (difiere hasta tener compositor).
 "$HERE/session/autostart.sh"
 # Sensores del Surface Pro 3 (acelerómetro) sin reactivar el táctil N-Trig dañado.
