@@ -7,14 +7,20 @@
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
 #include <drm_fourcc.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
 #include <wlr/backend/headless.h>
+#include <wlr/render/dmabuf.h>
+#include <wlr/render/drm_format_set.h>
+#include <wlr/render/drm_syncobj.h>
+#include <wlr/types/wlr_linux_drm_syncobj_v1.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/interfaces/wlr_keyboard.h>
 #include <wlr/render/dmabuf.h>
@@ -206,6 +212,18 @@ struct wl_server {
 	bool dmabuf_enabled;
 	const char *dmabuf_reason;
 	struct wlr_linux_dmabuf_v1 *linux_dmabuf;
+	// Sincronizacion explicita (linux-drm-syncobj-v1): el cliente adjunta puntos de
+	// acquire/release a cada buffer. Antes de muestrear esperamos el acquire en la GPU
+	// (eglWaitSyncKHR sobre el sync_file exportado) y liberamos el release del buffer
+	// cuando lo soltamos (SPEC-dmabuf §5). Fallback a implicit sync (Mesa) si algo falta.
+	struct wlr_linux_drm_syncobj_manager_v1 *linux_drm_syncobj;
+	bool syncobj_enabled;
+	const char *syncobj_reason;
+	bool syncobj_seen; // ya se atendió un commit con puntos de sync explícitos
+	int syncobj_drm_fd;
+	PFNEGLCREATESYNCKHRPROC eglCreateSyncKHR;
+	PFNEGLDESTROYSYNCKHRPROC eglDestroySyncKHR;
+	PFNEGLWAITSYNCKHRPROC eglWaitSyncKHR;
 
 	wl_server_callbacks cb;
 	struct wl_listener new_toplevel;
@@ -333,6 +351,10 @@ static void surface_state_release_buffer(surface_state *st) {
 
 static int surface_state_resolve_id(struct wl_server *s, struct wlr_surface *surface, int depth);
 
+// Espera explícita del acquire point / release del buffer (linux-drm-syncobj-v1); definida
+// junto a setup_dmabuf. No-op si el server no habilitó syncobj.
+static void syncobj_apply(struct wl_server *s, surface_state *st);
+
 // Importa el buffer current de la surface si hay uno. Se llama desde el commit
 // de la surface, unico momento en que wlroots deja valido current.buffer. Los
 // commits sin buffer (ack de configure, frame callbacks) se ignoran para no
@@ -359,6 +381,9 @@ static void surface_state_import(surface_state *st) {
 
 	struct wlr_dmabuf_attributes attribs;
 	if (s->dmabuf_enabled && wlr_buffer_get_dmabuf(buf, &attribs)) {
+		if (s->syncobj_enabled) {
+			syncobj_apply(s, st);
+		}
 		if (s->cb.dmabuf != NULL) {
 			s->cb.dmabuf(s->cb.ud, st->id, st->key, attribs.width, attribs.height);
 		}
@@ -803,6 +828,48 @@ static bool fill_formats(struct wl_server *s, struct wlr_drm_format_set *set) {
 	return any;
 }
 
+// Anuncia linux-drm-syncobj-v1 (sincronizacion explicita) si el EGL del shell puede
+// esperar fences en la GPU (EGL_ANDROID_native_fence_sync + EGL_KHR_wait_sync) y el render
+// node se abre. Si falta algo, queda el implicit sync de Mesa. GDTK_NO_EXPLICIT_SYNC fuerza
+// el camino viejo.
+static void setup_syncobj(struct wl_server *s, const char *node) {
+	s->syncobj_enabled = false;
+	s->syncobj_reason = "off";
+	if (getenv("GDTK_NO_EXPLICIT_SYNC") != NULL) {
+		s->syncobj_reason = "off (forzado)";
+		return;
+	}
+	const char *exts = eglQueryString(s->egl_dpy, EGL_EXTENSIONS);
+	if (exts == NULL ||
+			strstr(exts, "EGL_ANDROID_native_fence_sync") == NULL ||
+			strstr(exts, "EGL_KHR_wait_sync") == NULL) {
+		s->syncobj_reason = "off (sin EGL fence)";
+		return;
+	}
+	s->eglCreateSyncKHR = (PFNEGLCREATESYNCKHRPROC)eglGetProcAddress("eglCreateSyncKHR");
+	s->eglDestroySyncKHR = (PFNEGLDESTROYSYNCKHRPROC)eglGetProcAddress("eglDestroySyncKHR");
+	s->eglWaitSyncKHR = (PFNEGLWAITSYNCKHRPROC)eglGetProcAddress("eglWaitSyncKHR");
+	if (s->eglCreateSyncKHR == NULL || s->eglDestroySyncKHR == NULL || s->eglWaitSyncKHR == NULL) {
+		s->syncobj_reason = "off (faltan funciones EGL)";
+		return;
+	}
+	int fd = open(node, O_RDWR | O_CLOEXEC);
+	if (fd < 0) {
+		s->syncobj_reason = "off (sin render node)";
+		return;
+	}
+	// El manager guarda el fd (no lo duplica): se cierra en wl_server_destroy.
+	s->linux_drm_syncobj = wlr_linux_drm_syncobj_manager_v1_create(s->display, 1, fd);
+	if (s->linux_drm_syncobj == NULL) {
+		close(fd);
+		s->syncobj_reason = "off (manager fallo)";
+		return;
+	}
+	s->syncobj_drm_fd = fd;
+	s->syncobj_enabled = true;
+	s->syncobj_reason = "on";
+}
+
 // Anuncia linux-dmabuf con feedback armado a mano (main_device = render node).
 // Si falta EGL, extensiones, funciones o el render node: solo shm, con motivo.
 static void setup_dmabuf(struct wl_server *s) {
@@ -880,6 +947,42 @@ static void setup_dmabuf(struct wl_server *s) {
 
 	s->dmabuf_enabled = true;
 	s->dmabuf_reason = "on";
+
+	setup_syncobj(s, node);
+}
+
+// Anuncia linux-drm-syncobj-v1 para sincronizacion explicita. Sólo si el EGL del shell
+// puede esperar un fence en la GPU (EGL_ANDROID_native_fence_sync + EGL_KHR_wait_sync) y
+// el render node se puede abrir; si no, queda el implicit sync de Mesa. GDTK_NO_EXPLICIT_SYNC
+// fuerza el camino viejo (diagnóstico).
+static void syncobj_apply(struct wl_server *s, surface_state *st) {
+	struct wlr_linux_drm_syncobj_surface_v1_state *ss =
+			wlr_linux_drm_syncobj_v1_get_surface_state(st->surface);
+	if (ss == NULL || st->buffer == NULL) {
+		return;
+	}
+	if (!s->syncobj_seen) {
+		s->syncobj_seen = true;
+		fprintf(stderr, "wl_server: explicit sync activo en un cliente\n");
+	}
+	// Release: se señaliza cuando soltamos este buffer (wlr_buffer.events.release), que
+	// pasa al importar el próximo (surface_state_import desbloquea el anterior).
+	wlr_linux_drm_syncobj_v1_state_signal_release_with_buffer(ss, st->buffer);
+	// Acquire: esperar en la GPU antes de muestrear. export_sync_file exige que el punto
+	// ya haya materializado; si no, seguimos con implicit sync (sin tearing en Mesa/Intel).
+	if (ss->acquire_timeline != NULL) {
+		int fd = wlr_drm_syncobj_timeline_export_sync_file(ss->acquire_timeline, ss->acquire_point);
+		if (fd >= 0) {
+			EGLint attrs[] = { EGL_SYNC_NATIVE_FENCE_FD_ANDROID, fd, EGL_NONE };
+			EGLSyncKHR sync = s->eglCreateSyncKHR(s->egl_dpy, EGL_SYNC_NATIVE_FENCE_ANDROID, attrs);
+			if (sync != EGL_NO_SYNC_KHR) {
+				s->eglWaitSyncKHR(s->egl_dpy, sync, 0);
+				s->eglDestroySyncKHR(s->egl_dpy, sync);
+			} else {
+				close(fd);
+			}
+		}
+	}
 }
 
 static void handle_toplevel_set_title(struct wl_listener *listener, void *data) {
@@ -3017,6 +3120,16 @@ const char *wl_server_dmabuf_reason(wl_server *s) {
 	return s->dmabuf_reason;
 }
 
+const char *wl_server_syncobj_state(wl_server *s) {
+	if (s == NULL) {
+		return "sin servidor";
+	}
+	if (s->syncobj_enabled) {
+		return "on";
+	}
+	return s->syncobj_reason != NULL ? s->syncobj_reason : "off";
+}
+
 // --- Layout por surface (todo el arbol del toplevel) ---
 
 struct layer_data {
@@ -3310,6 +3423,12 @@ void wl_server_destroy(wl_server *s) {
 	}
 	if (s->display != NULL) {
 		wl_display_destroy(s->display);
+	}
+
+	// Recién ahora (tras el display_destroy del manager) cerramos el DRM fd de syncobj.
+	if (s->syncobj_enabled) {
+		close(s->syncobj_drm_fd);
+		s->syncobj_enabled = false;
 	}
 
 	free(s);

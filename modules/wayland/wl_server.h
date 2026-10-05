@@ -171,6 +171,8 @@ void wl_server_key(wl_server *s, uint32_t time_ms, uint32_t evdev_key, int press
 // dmabuf: 1 si se anuncio linux-dmabuf con feedback propio; estado/motivo para el reporte.
 int wl_server_dmabuf_enabled(wl_server *s);
 const char *wl_server_dmabuf_reason(wl_server *s);
+// Sincronizacion explicita: "on" o el motivo por el que quedo en implicit sync (Mesa).
+const char *wl_server_syncobj_state(wl_server *s);
 void wl_server_bind_dmabuf(wl_server *s, uint64_t key, unsigned int texid);
 // Llena hasta `max` capas del arbol del toplevel (o layer surface) `id` en orden de dibujo;
 // devuelve cuantas escribio (0 si el id no existe o no esta mapeado).

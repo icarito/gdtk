@@ -34,6 +34,9 @@ func _ready():
 		# software y el alto consumo de CPU/FPS bajo no es del shell.
 		if compositor.has_method("get_dmabuf_state"):
 			print("compositor dmabuf: ", compositor.dmabuf_state)
+		# Sincronización explícita (P2): "on" o el motivo de seguir en implicit sync.
+		if compositor.has_method("get_explicit_sync_state"):
+			print("compositor sync explícito: ", compositor.explicit_sync_state)
 		# Publica el socket del compositor interno en un archivo estable del runtime
 		# dir: otros gdtk (p. ej. el receptor remoto lanzado por ssh para "Extender")
 		# lo leen sin depender del número wayland-N ni de adivinar cuál es.

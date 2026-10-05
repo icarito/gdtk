@@ -429,6 +429,7 @@ func _state():
 			"dmabuf": shell.compositor.dmabuf_state if shell.compositor.has_method("get_dmabuf_state") else "?",
 			"dmabuf_commits": shell.compositor.dmabuf_commits if shell.compositor.has_method("get_dmabuf_commits") else 0,
 			"shm_commits": shell.compositor.shm_commits if shell.compositor.has_method("get_shm_commits") else 0,
+			"explicit_sync": shell.compositor.explicit_sync_state if shell.compositor.has_method("get_explicit_sync_state") else "?",
 		},
 		# Presentaciones livianas (present-only, sin rearmar ImGui) vs completas del shell
 		# (SPEC-rendimiento-compositor P1): dos lecturas muestran qué camino domina.

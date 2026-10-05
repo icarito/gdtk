@@ -724,6 +724,9 @@ void WaylandCompositor::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_dmabuf_state"), &WaylandCompositor::get_dmabuf_state);
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "dmabuf_state"), "", "get_dmabuf_state");
 
+	ClassDB::bind_method(D_METHOD("get_explicit_sync_state"), &WaylandCompositor::get_explicit_sync_state);
+	ADD_PROPERTY(PropertyInfo(Variant::STRING, "explicit_sync_state"), "", "get_explicit_sync_state");
+
 	ClassDB::bind_method(D_METHOD("add_output", "name", "rect", "scale", "primary"), &WaylandCompositor::add_output, DEFVAL(1.0), DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("configure_output", "id", "rect", "scale"), &WaylandCompositor::configure_output, DEFVAL(1.0));
 	ClassDB::bind_method(D_METHOD("remove_output", "id"), &WaylandCompositor::remove_output);
@@ -1262,6 +1265,13 @@ String WaylandCompositor::get_dmabuf_state() const {
 		return String("on");
 	}
 	return String("off (") + String(wl_server_dmabuf_reason(server)) + String(")");
+}
+
+String WaylandCompositor::get_explicit_sync_state() const {
+	if (server == NULL) {
+		return String("off (sin servidor)");
+	}
+	return String(wl_server_syncobj_state(server));
 }
 
 Dictionary WaylandCompositor::_output_dict(int p_output_id) const {
