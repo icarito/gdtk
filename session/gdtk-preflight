@@ -36,7 +36,9 @@ fi
 # en un bucle apretado. Offscreen lo desacopla de la sesión gráfica.
 export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-offscreen}"
 rc=0
-out="$("$GODOT" --no-window --path "$CONTENT/shell" -s "$SELF_DIR/gdtk-preflight.gd" 2>&1)" || rc=$?
+# Driver GLES2: el preflight es sólo parseo headless. GLES3 no existe en GPUs viejas
+# (p. ej. GM45) y el offscreen fallaría con EGL_BAD_MATCH antes de compilar nada.
+out="$("$GODOT" --video-driver GLES2 --no-window --path "$CONTENT/shell" -s "$SELF_DIR/gdtk-preflight.gd" 2>&1)" || rc=$?
 printf '%s\n' "$out" | grep '^FAIL' || true
 printf '%s\n' "$out" | grep '^preflight:' || true
 summary="$(printf '%s\n' "$out" | grep '^preflight:' || true)"
