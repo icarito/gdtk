@@ -29,9 +29,12 @@ fi
 # Por ssh no hay display: el binario FRT/SDL aborta en SDL_Init aunque vaya --no-window.
 # Con el driver offscreen compila todo pero aborta al salir (rc 134), así que el
 # veredicto sale del resumen "preflight: N scripts, M fallas" y no del rc.
-if [ -z "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]; then
-	export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-offscreen}"
-fi
+# SIEMPRE offscreen: es un chequeo de compilación headless. Si hereda el
+# WAYLAND_DISPLAY de una sesión viva, el binario intenta abrir OTRA ventana; si la
+# sesión no tiene salidas (p. ej. el seat lo tomó GDM), SDL_Init falla con "did not
+# add any displays", el preflight no llega a correr y el supervisor reintenta autogood
+# en un bucle apretado. Offscreen lo desacopla de la sesión gráfica.
+export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-offscreen}"
 rc=0
 out="$("$GODOT" --no-window --path "$CONTENT/shell" -s "$SELF_DIR/gdtk-preflight.gd" 2>&1)" || rc=$?
 printf '%s\n' "$out" | grep '^FAIL' || true
