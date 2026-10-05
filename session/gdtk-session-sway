@@ -6,6 +6,10 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 . "$HERE/session/keyboard.sh"
 . "$HERE/session/portal.sh"   # XDG_CURRENT_DESKTOP=gdtk para el portal RemoteDesktop
 export GDTK_SESSION=wayland GDTK_HOME="$HERE"
+# Scanout directo (P4 opción B, modules/wayland/scanout.c): la ventana fullscreen de
+# la salida principal se presenta a sway sin pasar por la escena de Godot. Opt-in;
+# GDTK_SCANOUT_DIRECT=0 lo desactiva (el motor interpreta 0/false como apagado).
+export GDTK_SCANOUT_DIRECT="${GDTK_SCANOUT_DIRECT:-1}"
 # polkit, llavero, notificaciones y ~/.config/autostart (difiere hasta tener compositor).
 "$HERE/session/autostart.sh"
 # Sensores del Surface Pro 3 (acelerómetro) sin reactivar el táctil N-Trig dañado.

@@ -2396,7 +2396,9 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 	wl_list_init(&s->text_inputs);
 	wl_list_init(&s->outputs);
 	// Scanout directo (P4): opt-in por entorno; el puente vive en scanout.c.
-	s->scanout_enabled = getenv("GDTK_SCANOUT_DIRECT") != NULL;
+	// "0"/"false" lo desactivan (getenv != NULL no alcanza para un flag booleano).
+	const char *scanout_env = getenv("GDTK_SCANOUT_DIRECT");
+	s->scanout_enabled = scanout_env != NULL && strcmp(scanout_env, "0") != 0 && strcmp(scanout_env, "false") != 0;
 	gdtk_scanout_set_enabled(s->scanout_enabled);
 	gdtk_scanout_set_release_callback(scanout_on_release, s);
 
