@@ -29,6 +29,11 @@ func _ready():
 		printerr("Host: no se pudo iniciar el compositor wayland")
 	else:
 		print("compositor socket: ", socket)
+		# Diagnóstico de rendimiento (SPEC-rendimiento-compositor): deja en shell.log si los
+		# clientes usan GPU (dmabuf) o copia por CPU (shm). Si dice "off", las apps van por
+		# software y el alto consumo de CPU/FPS bajo no es del shell.
+		if compositor.has_method("get_dmabuf_state"):
+			print("compositor dmabuf: ", compositor.dmabuf_state)
 		# Publica el socket del compositor interno en un archivo estable del runtime
 		# dir: otros gdtk (p. ej. el receptor remoto lanzado por ssh para "Extender")
 		# lo leen sin depender del número wayland-N ni de adivinar cuál es.

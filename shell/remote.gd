@@ -420,6 +420,16 @@ func _state():
 		"geom": shell.geom_state(),
 		# Vueltas del loop, pasos de física y frames dibujados: para medir el reposo.
 		"engine": [Engine.get_idle_frames(), Engine.get_physics_frames(), Engine.get_frames_drawn()],
+		# Commits Wayland acumulados: dos lecturas dan commits/s (qué ventana mantiene ocupado el loop).
+		"commits": shell.compositor.commit_count,
+		# Rendimiento del compositor embebido (SPEC-rendimiento-compositor): si "dmabuf" es
+		# "off", las apps copian por CPU y el FPS bajo/CPU alto no es del shell. Dos lecturas
+		# de dmabuf_commits/shm_commits dicen por qué camino va cada app.
+		"compositor": {
+			"dmabuf": shell.compositor.dmabuf_state if shell.compositor.has_method("get_dmabuf_state") else "?",
+			"dmabuf_commits": shell.compositor.dmabuf_commits if shell.compositor.has_method("get_dmabuf_commits") else 0,
+			"shm_commits": shell.compositor.shm_commits if shell.compositor.has_method("get_shm_commits") else 0,
+		},
 		# Frame: items con su posición en pantalla (vacío si no se dibujó).
 		"frame": {"visible": shell.frame.drawn, "items": shell.frame.items_layout},
 		# Input remoto: clientes libei conectados y pedidos esperando el diálogo.
