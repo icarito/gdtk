@@ -72,7 +72,7 @@ func _init():
 		return
 	var source = f.get_as_text()
 	f.close()
-	var harness = "extends Reference\nvar remote_input\nvar eis_cursor\nvar compositor\nvar mouse_locked = false\nvar client_pointer_locked = false\nvar client_cursor_hidden = false\nvar expose = false\nvar input_enabled = true\nvar input_probe\nvar tree_probe\nvar redraws = 0\nfunc get_tree():\n\treturn tree_probe\nfunc request_redraw():\n\tredraws += 1\nfunc set_process_input(value):\n\tinput_enabled = value\nfunc _apply_client_cursor_state():\n\tpass\n"
+	var harness = "extends Reference\nvar remote_input\nvar eis_cursor\nvar compositor\nvar mouse_locked = false\nvar client_pointer_locked = false\nvar client_cursor_hidden = false\nvar expose = false\nvar chrome_drag = null\nvar _capture_drag_held = false\nvar input_enabled = true\nvar input_probe\nvar tree_probe\nvar redraws = 0\nfunc get_tree():\n\treturn tree_probe\nfunc request_redraw():\n\tredraws += 1\nfunc set_process_input(value):\n\tinput_enabled = value\nfunc _apply_client_cursor_state():\n\tpass\n"
 	for name in ["_set_capture_cursor", "_sync_capture_cursor", "_capture_remote_input_event", "_move_eis_cursor"]:
 		harness += "\n" + _function(source, name)
 	harness = harness.replace("RemoteInput.DEVICE_ID", "69").replace("Input.", "input_probe.")
