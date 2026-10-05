@@ -128,6 +128,35 @@ def gpu_freq(pat):
     return None
 
 
+UID_ = env["F0_UID"]
+USER_SLICE = "/sys/fs/cgroup/user.slice/user-%s.slice" % UID_
+USER_SERVICE = USER_SLICE + "/user@%s.service" % UID_
+# gdtk: shell+apps viven en session-<sid>.scope; GNOME: shell en session.slice y apps
+# en app.slice. Excluye background.slice y scopes sueltos (agentes/SSH), que ensucian.
+DESK_ROOTS = [scope, USER_SERVICE + "/session.slice", USER_SERVICE + "/app.slice"]
+
+
+def usage_usec_rec(root):
+    tot = 0
+    if not os.path.isdir(root):
+        return 0
+    for dp, _dirs, _files in os.walk(root):
+        st = read(os.path.join(dp, "cpu.stat"))
+        if not st:
+            continue
+        for line in st.splitlines():
+            if line.startswith("usage_usec"):
+                try:
+                    tot += int(line.split()[1])
+                except Exception:
+                    pass
+    return tot
+
+
+def desk_usage():
+    return sum(usage_usec_rec(r) for r in DESK_ROOTS)
+
+
 def mem_available_kb():
     for line in comma("/proc/meminfo").splitlines():
         if line.startswith("MemAvailable:"):
@@ -192,6 +221,7 @@ def last_frt():
 
 t0 = time.time()
 b0, tot0, ctxt0 = cpu_snapshot()
+d0 = desk_usage()
 sh0 = proc_cpu_ticks(shell_pid)
 sc0 = scope_ctxsw()
 st0 = rpc("state", {}) if is_gdtk else None
@@ -206,6 +236,7 @@ while time.time() - t0 < secs:
     time.sleep(1.0)
 t1 = time.time()
 b1, tot1, ctxt1 = cpu_snapshot()
+d1 = desk_usage()
 sh1 = proc_cpu_ticks(shell_pid)
 sc1 = scope_ctxsw()
 st1 = rpc("state", {}) if is_gdtk else None
@@ -226,6 +257,7 @@ res = {
     "seconds": r2(dt),
     "machine_busy_cores": r2(((b1 - b0) / hz) / dt) if dt > 0 else None,
     "machine_busy_pct_of_all": r2(100.0 * (b1 - b0) / (tot1 - tot0)) if (tot1 - tot0) > 0 else None,
+    "desktop_busy_cores": r2(((d1 - d0) / 1e6) / dt) if dt > 0 else None,
     "shell_cpu_pct_core": r2((sh1 - sh0) / dt / hz * 100) if (sh0 is not None and sh1 is not None and dt > 0) else None,
     "global_ctxsw_per_s": per_s(ctxt0, ctxt1),
     "session_ctxsw_per_s": per_s(sc0, sc1),
@@ -264,8 +296,8 @@ json.dump(res, open(path, "w"), indent=1)
 
 print("host=%s desktop=%s shell=%s label=%s (%.0fs, %d cpus)" % (
     host, desktop, shell_name, label, dt, ncpu))
-print("  machine %.2f cores busy (%.1f%%) | shell %s %.2f%% core | ctxsw %s/s" % (
-    res["machine_busy_cores"] or 0, res["machine_busy_pct_of_all"] or 0,
+print("  desktop %.2f cores | machine %.2f cores busy (%.1f%%) | shell %s %.2f%% core | ctxsw %s/s" % (
+    res["desktop_busy_cores"] or 0, res["machine_busy_cores"] or 0, res["machine_busy_pct_of_all"] or 0,
     shell_name, res["shell_cpu_pct_core"] or 0, res["global_ctxsw_per_s"]))
 if res.get("gdtk"):
     g = res["gdtk"]
