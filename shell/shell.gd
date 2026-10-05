@@ -10100,7 +10100,9 @@ func _on_client_cursor_image(img, hotspot):
 # movimiento sería caro). La imagen va como cursor custom de la forma ARROW.
 func _apply_client_cursor():
 	var key = client_cursor_tex if client_cursor_tex != null else client_cursor_shape
-	if key == _client_cursor_applied:
+	# key es Object (tex) o int (shape): comparar sólo si son del mismo tipo, si no
+	# GDScript tira "Invalid operands 'Object' and 'int'". Si cambió el tipo, hay que aplicar.
+	if _client_cursor_applied != null and typeof(key) == typeof(_client_cursor_applied) and key == _client_cursor_applied:
 		return
 	_client_cursor_applied = key
 	if client_cursor_tex != null:
