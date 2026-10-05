@@ -41,6 +41,11 @@ void gdtk_scanout_present(int id, const struct wlr_dmabuf_attributes *attribs,
 // Quita la subsurface de `id` (detach + commit); vuelve al camino Godot.
 void gdtk_scanout_hide(int id);
 
+// Cierra el puente: destruye todas las subsurfaces del host y deja el estado listo
+// para reconstruirse. Se llama al recrear/destruir el compositor embebido para no
+// dejar subsurfaces huerfanas apuntando a ventanas ya muertas.
+void gdtk_scanout_reset(void);
+
 // Despacha sin bloquear la cola privada del host (release de wl_buffers, etc).
 void gdtk_scanout_dispatch(void);
 

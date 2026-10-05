@@ -446,6 +446,7 @@ func _state():
 			"explicit_sync": shell.compositor.explicit_sync_state if shell.compositor.has_method("get_explicit_sync_state") else "?",
 			"scanout": shell.compositor.scanout_state() if shell.compositor.has_method("scanout_state") else "?",
 			"scanout_on": shell.compositor.scanout_enabled() if shell.compositor.has_method("scanout_enabled") else false,
+			"scanout_suspended": shell.compositor.scanout_suspended() if shell.compositor.has_method("scanout_suspended") else false,
 		},
 		# Presentaciones livianas (present-only, sin rearmar ImGui) vs completas del shell
 		# (SPEC-rendimiento-compositor P1): dos lecturas muestran qué camino domina.

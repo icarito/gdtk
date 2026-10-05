@@ -177,6 +177,12 @@ const char *wl_server_syncobj_state(wl_server *s);
 // estado/motivo del puente hacia el host (sway) para diagnostico.
 int wl_server_scanout_enabled(wl_server *s);
 const char *wl_server_scanout_state(wl_server *s);
+// Pausa el scanout directo: lo pide el shell cuando hay un overlay suyo encima
+// (Frame/OSD/expose/vecindario) y el contenido de la app quedaria tapado. Al pausar,
+// las ventanas en scanout vuelven al camino textura sin dejar hueco. La reanudacion es
+// implicita: el proximo commit dmabuf vuelve a enganchar. `suspended` 1/0.
+void wl_server_scanout_set_suspended(wl_server *s, int suspended);
+int wl_server_scanout_suspended(wl_server *s);
 void wl_server_bind_dmabuf(wl_server *s, uint64_t key, unsigned int texid);
 // Llena hasta `max` capas del arbol del toplevel (o layer surface) `id` en orden de dibujo;
 // devuelve cuantas escribio (0 si el id no existe o no esta mapeado).

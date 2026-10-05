@@ -296,6 +296,32 @@ void gdtk_scanout_hide(int id) {
 	scanout_surface_destroy(ss);
 }
 
+// Cierra el puente sin tocar la conexion de SDL: destruye todas las subsurfaces
+// (con detach previo) y deja `inited`/`state` para que se reconstruya en el proximo
+// present. Se usa al recrear/destruir el compositor embebido: las ventanas viejas
+// ya no existen, pero las subsurfaces en sway seguian mostrando su ultimo frame.
+void gdtk_scanout_reset(void) {
+	if (!g.list_ready) {
+		return;
+	}
+	scanout_surface *ss, *tmp;
+	wl_list_for_each_safe(ss, tmp, &g.surfaces, link) {
+		if (g.inited && ss->surface != NULL) {
+			wl_surface_attach(ss->surface, NULL, 0, 0);
+			wl_surface_commit(ss->surface);
+		}
+		scanout_surface_destroy(ss);
+	}
+	if (g.inited && g.display != NULL) {
+		wl_display_flush(g.display);
+	}
+	// La conexion/queue y los protocolos siguen siendo validos (SDL no recrea la
+	// ventana); solo se reconstruyen las subsurfaces bajo demanda.
+	if (g.inited) {
+		g.state = g.compositor != NULL ? "reiniciado" : "sin host surface";
+	}
+}
+
 void gdtk_scanout_dispatch(void) {
 	if (!g.inited || g.queue == NULL || g.display == NULL) {
 		return;

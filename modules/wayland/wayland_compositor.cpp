@@ -728,6 +728,8 @@ void WaylandCompositor::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "explicit_sync_state"), "", "get_explicit_sync_state");
 	ClassDB::bind_method(D_METHOD("scanout_enabled"), &WaylandCompositor::scanout_enabled);
 	ClassDB::bind_method(D_METHOD("scanout_state"), &WaylandCompositor::scanout_state);
+	ClassDB::bind_method(D_METHOD("set_scanout_suspended", "suspended"), &WaylandCompositor::set_scanout_suspended);
+	ClassDB::bind_method(D_METHOD("scanout_suspended"), &WaylandCompositor::scanout_suspended);
 
 	ClassDB::bind_method(D_METHOD("add_output", "name", "rect", "scale", "primary"), &WaylandCompositor::add_output, DEFVAL(1.0), DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("configure_output", "id", "rect", "scale"), &WaylandCompositor::configure_output, DEFVAL(1.0));
@@ -1282,6 +1284,16 @@ bool WaylandCompositor::scanout_enabled() const {
 
 String WaylandCompositor::scanout_state() const {
 	return String(wl_server_scanout_state(server));
+}
+
+void WaylandCompositor::set_scanout_suspended(bool p_suspended) {
+	if (server != NULL) {
+		wl_server_scanout_set_suspended(server, p_suspended ? 1 : 0);
+	}
+}
+
+bool WaylandCompositor::scanout_suspended() const {
+	return server != NULL && wl_server_scanout_suspended(server) != 0;
 }
 
 Dictionary WaylandCompositor::_output_dict(int p_output_id) const {

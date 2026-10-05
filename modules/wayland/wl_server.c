@@ -274,6 +274,10 @@ struct wl_server {
 	// identifica cada buffer presentado al host.
 	bool scanout_enabled;
 	uint64_t scanout_token;
+	// Pausa pedida por el shell mientras hay un overlay suyo encima (Frame/OSD/...):
+	// con esto en true el scanout no se engancha y las ventanas ya en scanout se
+	// devuelven al camino textura.
+	bool scanout_suspended;
 
 	// Salidas logicas: coleccion explicita de wlr_output headless. `output_layout`
 	// (xdg-output usa este) y `outputs` (logical_output.link) viven toda la corrida.
@@ -420,8 +424,27 @@ static logical_output *scanout_primary_output(struct wl_server *s) {
 
 // Candidato: surface raiz de un toplevel xdg fullscreen en la salida principal.
 // Nada de subsurfaces/popups, Xwayland ni salidas secundarias en el MVP.
+//
+// Se aparta tambien si hay un popup abierto (menu del cliente: lo dibuja Godot y la
+// subsurface del host lo taparia) o si otra ventana visible comparte la principal.
+static bool scanout_has_visible_sibling(struct wl_server *s, int self_id) {
+	if (!s->throttle) {
+		return false; // todavia sin la lista de visibilidad del shell
+	}
+	toplevel *t;
+	wl_list_for_each(t, &s->toplevels, link) {
+		if (t->id == self_id || !t->mapped || !t->visible) {
+			continue;
+		}
+		if (t->output_id == s->primary_output_id || t->output_id == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static bool scanout_candidate(struct wl_server *s, surface_state *st) {
-	if (!s->scanout_enabled || st->surface == NULL || st->id <= 0) {
+	if (!s->scanout_enabled || s->scanout_suspended || st->surface == NULL || st->id <= 0) {
 		return false;
 	}
 	toplevel *t = toplevel_find(s, st->id);
@@ -432,6 +455,12 @@ static bool scanout_candidate(struct wl_server *s, surface_state *st) {
 		return false;
 	}
 	if (t->output_id != s->primary_output_id) {
+		return false;
+	}
+	if (!wl_list_empty(&t->tl->base->popups)) {
+		return false;
+	}
+	if (scanout_has_visible_sibling(s, st->id)) {
 		return false;
 	}
 	return t->tl->current.fullscreen;
@@ -461,6 +490,45 @@ static void scanout_off(surface_state *st) {
 	gdtk_scanout_hide(st->id);
 	scanout_refs_clear(st);
 	st->scanout = false;
+}
+
+// Devuelve la surface raiz que esta en scanout para el toplevel `id` (NULL si no hay).
+static surface_state *scanout_state_for_id(struct wl_server *s, int id) {
+	surface_state *st;
+	wl_list_for_each(st, &s->surfaces, link) {
+		if (st->scanout && st->id == id) {
+			return st;
+		}
+	}
+	return NULL;
+}
+
+// Apaga el scanout de `st` reimportando su ultimo dmabuf como textura de Godot. Es el
+// camino de pausa: sin esto, al ocultar la subsurface del host (overlay del shell,
+// menu del cliente, otra ventana encima) quedaria un hueco hasta el proximo commit
+// del cliente, que en una app quieta puede no llegar nunca.
+static void scanout_off_reimport(struct wl_server *s, surface_state *st) {
+	if (!st->scanout) {
+		return;
+	}
+	struct wlr_buffer *buf = st->scanout_last;
+	struct wlr_dmabuf_attributes attribs;
+	bool import = buf != NULL && s->dmabuf_enabled && wlr_buffer_get_dmabuf(buf, &attribs);
+	if (import && buf != st->buffer) {
+		// Retener el buffer como el vigente ANTES de soltar los refs del scanout.
+		wlr_buffer_lock(buf);
+		if (st->buffer != NULL) {
+			wlr_buffer_unlock(st->buffer);
+		}
+		st->buffer = buf;
+	}
+	gdtk_scanout_hide(st->id);
+	st->scanout = false;
+	scanout_refs_clear(st);
+	if (import && s->cb.dmabuf != NULL) {
+		// Sync implicita (Mesa/Intel) como el import dmabuf normal de wl_server_bind_dmabuf.
+		s->cb.dmabuf(s->cb.ud, st->id, st->key, attribs.width, attribs.height);
+	}
 }
 
 static int surface_state_resolve_id(struct wl_server *s, struct wlr_surface *surface, int depth);
@@ -1509,6 +1577,14 @@ static void handle_new_popup(struct wl_listener *listener, void *data) {
 			}
 		}
 		surface_state_acquire(s, p->base->surface, id);
+		// El popup es un menu del cliente sobre la ventana: apartar ya el scanout para
+		// que la ventana (reimportada) quede debajo y el menu se vea al commitear.
+		if (id > 0) {
+			surface_state *root = scanout_state_for_id(s, id);
+			if (root != NULL) {
+				scanout_off_reimport(s, root);
+			}
+		}
 	}
 }
 
@@ -2406,6 +2482,8 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 	const char *scanout_env = getenv("GDTK_SCANOUT_DIRECT");
 	s->scanout_enabled = scanout_env != NULL && strcmp(scanout_env, "0") != 0 && strcmp(scanout_env, "false") != 0;
 	gdtk_scanout_set_enabled(s->scanout_enabled);
+	// Recreacion del compositor: no dejar subsurfaces del host apuntando a ventanas viejas.
+	gdtk_scanout_reset();
 	gdtk_scanout_set_release_callback(scanout_on_release, s);
 
 	s->display = wl_display_create();
@@ -2679,6 +2757,16 @@ void wl_server_set_visible(wl_server *s, const int *ids, int n) {
 			if (ids[i] == t->id) {
 				t->visible = true;
 				break;
+			}
+		}
+	}
+	// La visibilidad cambio: una ventana en scanout pudo dejar de estar sola (otra
+	// visible encima). Se aparta sin esperar a su proximo commit.
+	if (s->scanout_enabled) {
+		surface_state *st;
+		wl_list_for_each(st, &s->surfaces, link) {
+			if (st->scanout && !scanout_candidate(s, st)) {
+				scanout_off_reimport(s, st);
 			}
 		}
 	}
@@ -3447,6 +3535,31 @@ const char *wl_server_scanout_state(wl_server *s) {
 	return gdtk_scanout_state();
 }
 
+void wl_server_scanout_set_suspended(wl_server *s, int suspended) {
+	if (s == NULL) {
+		return;
+	}
+	bool v = suspended != 0;
+	if (s->scanout_suspended == v) {
+		return;
+	}
+	s->scanout_suspended = v;
+	if (!v) {
+		// La reanudacion es implicita: el proximo commit dmabuf del cliente reengancha.
+		return;
+	}
+	surface_state *st;
+	wl_list_for_each(st, &s->surfaces, link) {
+		if (st->scanout) {
+			scanout_off_reimport(s, st);
+		}
+	}
+}
+
+int wl_server_scanout_suspended(wl_server *s) {
+	return s != NULL && s->scanout_suspended;
+}
+
 void wl_server_destroy(wl_server *s) {
 	if (s == NULL) {
 		return;
@@ -3454,7 +3567,8 @@ void wl_server_destroy(wl_server *s) {
 
 	// Evitar callbacks hacia Godot mientras se desmonta la escena.
 	memset(&s->cb, 0, sizeof(s->cb));
-	// El host ya no debe llamarnos al liberar buffers.
+	// Cerrar el puente y el aviso de liberacion del host.
+	gdtk_scanout_reset();
 	gdtk_scanout_set_release_callback(NULL, NULL);
 
 	if (s->new_toplevel.notify != NULL) {

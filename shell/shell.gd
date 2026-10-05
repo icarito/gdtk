@@ -296,6 +296,11 @@ var eis_cursor = null  # sin cursor propio el host (cage/sway) no lo mueve: se d
 # Volumen/mute/brillo: worker + OSD (ver system_osd.gd).
 var system_osd = null
 
+# Scanout directo (P4): último valor de pausa enviado al compositor. El shell pausa el
+# puente dmabuf mientras dibuja un overlay (Frame/OSD/exposé/Vecindario) para que la
+# subsurface del host no lo tape; se reanuda al desaparecer (SPEC-scanout-directo).
+var _scanout_suspended_sent = false
+
 # Diagnóstico de entrada (ver remote.gd state.input): cuentan eventos que llegan al shell.
 var input_motion_count = 0
 var input_button_count = 0
@@ -1609,6 +1614,7 @@ func _process(_delta):
 	# desvanece (mismo patrón que el resto de los workers).
 	if system_osd != null and system_osd.poll():
 		request_redraw()
+	_scanout_tick()
 	if screenshot_path == "":
 		var busy = now - last_activity <= IDLE_MS or now - last_commit_ms <= COMMIT_ACTIVE_MS
 		var sleep = SLEEP_ACTIVE if busy else SLEEP_IDLE
@@ -1632,6 +1638,32 @@ func _present_commit():
 	if compositor != null and compositor.has_method("send_frame_callbacks"):
 		compositor.send_frame_callbacks()
 	else:
+		request_redraw()
+
+
+# ¿Hay un overlay del shell dibujado encima de la ventana a pantalla completa? Si sí,
+# el scanout directo (P4) debe pausarse: la subsurface del host va arriba de Godot y
+# taparía el overlay. Se reanuda solo cuando no queda ninguno.
+func _scanout_overlay_active():
+	if expose or neighborhood_view:
+		return true
+	if system_osd != null and system_osd.is_active():
+		return true
+	if frame != null and is_instance_valid(frame) and frame.visible:
+		return true
+	return false
+
+
+func _scanout_tick():
+	if compositor == null or not compositor.has_method("set_scanout_suspended"):
+		return
+	var want = _scanout_overlay_active()
+	if want == _scanout_suspended_sent:
+		return
+	_scanout_suspended_sent = want
+	compositor.set_scanout_suspended(want)
+	# Al pausar, la ventana vuelve a dibujarse desde su textura reimportada: pedir frame.
+	if want:
 		request_redraw()
 
 

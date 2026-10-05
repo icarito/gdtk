@@ -152,6 +152,10 @@ void pointer_axis_stop();
 	// Scanout directo (P4 opcion B): diagnostico del puente dmabuf hacia sway.
 	bool scanout_enabled() const;
 	String scanout_state() const;
+	// Pausa/reanuda el scanout directo. El shell lo pausa mientras dibuja un overlay
+	// encima (Frame/OSD/expose/vecindario) para que no quede tapado por el host.
+	void set_scanout_suspended(bool p_suspended);
+	bool scanout_suspended() const;
 
 	// Salidas logicas (multi-output). `p_rect` es la geometria logica global;
 	// `p_scale` se redondea a un entero >=1. add_output devuelve el id (>0) o 0.
