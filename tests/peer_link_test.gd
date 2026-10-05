@@ -81,5 +81,9 @@ func _init():
 		long_t += "a"
 	check("video_meta: título acotado a 200", P.video_meta({"title": long_t}).title.length() == 200)
 
+	check("video_meta: ícono base64 válido pasa", P.video_meta({"icon": "iVBORw0KGgo="}).icon == "iVBORw0KGgo=")
+	check("video_meta: ícono no base64 se descarta", P.video_meta({"title": "a", "icon": "<script>"}).icon == "")
+	check("video_meta: sólo ícono inválido => {}", P.video_meta({"icon": "abc"}).empty())
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

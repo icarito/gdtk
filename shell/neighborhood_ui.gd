@@ -63,7 +63,7 @@ const MENU_REASON_H = 15.0
 const MENU_PAD = 6.0
 const MENU_PAD_X = 8.0
 
-const HOST_FALLBACK_ICONS = ["sugar/network-wired", "sugar/computer-xo", "network-connected"]
+const HOST_FALLBACK_ICONS = ["np/device-desktop", "sugar/network-wired", "network-connected"]
 
 var shell = null
 var model = null
@@ -1292,7 +1292,7 @@ func _host_icon(host):
 		candidates.append(name)
 		candidates.append("sugar/" + name)
 	candidates.append_array(HOST_FALLBACK_ICONS)
-	var resolved = "sugar/computer-xo"
+	var resolved = "np/device-desktop"
 	for n in candidates:
 		if f.file_exists("res://icons/" + n + ".svg") or f.file_exists("res://icons/" + n + ".png"):
 			resolved = n

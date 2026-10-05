@@ -49,6 +49,7 @@ const GVD_SESSION = preload("res://gvd_session.gd")
 # ssh, `--position` del mapa, suspensión del vínculo Deskflow).
 const GVD_LAUNCH = preload("res://gvd_launch.gd")
 const PEER_CALL = preload("res://peer_call.gd")
+const PEER_LINK = preload("res://peer_link.gd")
 const AUDIO_SEND = preload("res://audio_send.gd")
 const MENU_STYLE = preload("res://menu_style.gd")
 const HOST_DISPATCH = preload("res://host_dispatch.gd")
@@ -486,11 +487,9 @@ const EXPOSE_SEL_BRIGHT = 1.13
 const EXPOSE_DRAG_PX = 6.0
 const MOD_KEYS = [KEY_CONTROL, KEY_SHIFT, KEY_ALT, KEY_META, KEY_SUPER_L, KEY_SUPER_R]
 
-# Hogar: fila(s) de favoritos centradas (SPEC-sugar-home-visual). Pareja XO para la
-# insignia de identidad del Frame; íconos de actividad con fill claro + stroke
-# oscuro-medio, y estados por contorno/atenuación además del color (SPEC-resource-ring).
-const XO_FILL = Color(0.78, 0.30, 0.52, 1.0)
-const XO_STROKE = Color(0.34, 0.15, 0.29, 1.0)
+# Hogar: fila(s) de favoritos centradas (SPEC-sugar-home-visual). Íconos de actividad
+# con fill claro + stroke oscuro-medio, y estados por contorno/atenuación además del
+# color (SPEC-resource-ring).
 # Íconos Sugar de actividad: la placa del círculo es oscura, así que el relleno va
 # claro para despegarla y el trazo oscuro-medio para definir la silueta.
 const SUGAR_FILL = Color(0.96, 0.95, 0.90, 1.0)
@@ -547,7 +546,6 @@ const DEVICE_ICONS = {
 const SUGAR_ACTIVITY_ICONS = {
 	"Gears": "emblem-busy",
 	"Deskflow": "network-wired",
-	"Pantalla": "computer-xo",
 	"Configuración": "preferences-system",
 }
 # Notificación de arranque estilo Sugar: pulso ~1.2 s hasta que aparece la ventana.
@@ -1050,13 +1048,13 @@ func local_device_icon_tex():
 
 
 # Ícono por kind de Vecindario (desktop/laptop/tablet/mobile/tv). Cae al ícono de
-# escritorio para "unknown" y al XO de Sugar si el PNG no está.
+# escritorio para "unknown" o si el PNG del kind no está (nunca al XO).
 func device_icon_tex(kind):
 	var name = DEVICE_ICONS.get(String(kind), "device-desktop")
 	var tex = _load_np_icon(name)
 	if tex != null:
 		return tex
-	return _load_sugar_svg("computer-xo", SUGAR_STROKE, SUGAR_FILL)
+	return _load_np_icon("device-desktop")
 
 
 # Ícono del bloque Vecindario del Frame.
@@ -4158,6 +4156,10 @@ func _draw_home(offset = 0.0):
 			var pos = _ring_show(e.name, layout[i], now)
 			var screen = pos + slide
 			var label = e.name
+			# Ventana que llega de otro equipo: «título @equipo» como en el Frame.
+			var rwid = int(wayland_ids.get(e.name, -1))
+			if rwid >= 0 and window_peer_icon(rwid) != null:
+				label = window_title(rwid)
 			if e.activity != null and e.activity.has("service") and _service_running(e.name):
 				label += " *"
 			var clicked = _draw_ring_item(pos, btn_size, _ring_tex(e), label,
@@ -4488,12 +4490,6 @@ func _orbit_layout(vp, n, entries = []):
 	return RING_LAYOUT.orbit_layout(vp, n, entries, grid_unit(vp), frame_bar_h(vp), RING_CIRCLE_MAX)
 
 
-# Insignia de identidad del Frame: figura XO + nombre de usuario, cacheada como
-# cualquier ícono Sugar (el rasterizador vive acá; el Frame la consume).
-func identity_tex():
-	return _load_sugar_svg("computer-xo", XO_STROKE, XO_FILL)
-
-
 # Notificación de arranque: mantiene el pulso mientras la actividad no tenga
 # ventana/estado abierto y lo corta a los STARTING_MAX_MS o al llegar la ventana.
 func _tick_starting(now):
@@ -4746,6 +4742,12 @@ func _draw_ring_item(pos, size, tex, label, state, id, starting_since = -1, appe
 
 # Ícono XDG de una actividad: primero por programa de la ventana, luego por nombre.
 func _activity_tex(activity):
+	# «Pantalla compartida»: el ícono que mandó el equipo de origen.
+	var awid = int(wayland_ids.get(String(activity.get("name", "")), -1))
+	if awid >= 0 and _pantalla_icon != null:
+		var peer_icon = window_peer_icon(awid)
+		if peer_icon != null:
+			return peer_icon
 	if not apps.scanned:
 		apps.scan()
 	var prog = ""
@@ -4782,7 +4784,7 @@ func _window_icon(id, name):
 	var sugar = _sugar_icon_for(name)
 	if sugar != null:
 		return sugar
-	return _load_sugar_svg("computer-xo", SUGAR_STROKE, SUGAR_FILL)
+	return null   # sin ícono: el Frame dibuja la inicial (nunca el XO)
 
 
 func _sugar_icon_for(name):
@@ -6976,7 +6978,28 @@ func _peer_call(peer_host, peer_id, method, params = {}):
 # Equipo que nos está transmitiendo (canal peer `gvd_recv`): si la persona cierra la
 # «Pantalla compartida», se le avisa con share_stop para que deje de emitir.
 var _pantalla_sender = ""
-var _pantalla_meta = {}   # {title, accent} de la ventana que nos comparten (gvd_meta)
+var _pantalla_meta = {}   # {title, accent, icon} de la ventana que nos comparten (gvd_meta)
+var _pantalla_icon = null  # ImageTexture del ícono recibido
+
+
+# PNG en base64 (ya validado por peer_link.video_meta) -> textura de hasta 256 px.
+func _icon_from_b64(b64):
+	if b64 == "":
+		return null
+	var img = Image.new()
+	if img.load_png_from_buffer(Marshalls.base64_to_raw(b64)) != OK or img.is_empty() \
+			or img.get_width() > 256 or img.get_height() > 256:
+		return null
+	var tex = ImageTexture.new()
+	tex.create_from_image(img, Texture.FLAG_FILTER)
+	return tex
+
+
+# Ícono que mandó el equipo de origen para esta «Pantalla compartida», o null.
+func window_peer_icon(id):
+	if _pantalla_icon == null or _pantalla_sender == "" or not _pantalla_window_ids().has(id):
+		return null
+	return _pantalla_icon
 var _pantalla_video = Vector2()   # tamaño anunciado por el emisor (ventana compartida)
 var _pantalla_fitted = {}         # id -> video al que ya se ajustó
 
@@ -7040,6 +7063,8 @@ func _pantalla_fit_poll():
 func _peer_gvd_meta(hid, meta):
 	if String(hid) != _pantalla_sender:
 		return false
+	if String(meta.get("icon", "")) != String(_pantalla_meta.get("icon", "")):
+		_pantalla_icon = _icon_from_b64(String(meta.get("icon", "")))
 	_pantalla_meta = meta
 	request_redraw()
 	return true
@@ -7087,6 +7112,7 @@ func _pantalla_closed_here():
 func _peer_gvd_open(port, _from, hid = "", video = Vector2()):
 	_pantalla_sender = String(hid)
 	_pantalla_meta = {}
+	_pantalla_icon = null
 	_pantalla_video = video
 	_pantalla_fitted = {}
 	var path = _gvd_path_local()
@@ -7469,7 +7495,11 @@ func _group_share_window(hid, wid):
 		activity_error = "compartir: " + ("no se encontró el programa de pantalla" if gvd_path == ""
 			else String(target.get("error", "sin canal peer")))
 		return
-	_group_unshare_window(hid)   # una ventana por equipo: reemplaza la anterior
+	# Una ventana por equipo: reemplaza la anterior. Su gvd_stop no sale en un hilo
+	# aparte (si llegaba después del gvd_recv cerraba el receptor nuevo): va en el mismo
+	# hilo que el gvd_recv, antes (pre_stop).
+	var replacing = _casts.has(hid)
+	_group_unshare_window(hid, false)
 	var dir = OS.get_environment("XDG_RUNTIME_DIR").plus_file("gdtk")
 	Directory.new().make_dir_recursive(dir)
 	var path = dir.plus_file("win-" + AUDIO_SEND.sink_name(hid).replace("gdtk_send_", "") + ".frames")
@@ -7488,13 +7518,13 @@ func _group_share_window(hid, wid):
 	_casts[hid] = {"node": cast, "wid": wid, "sent": cast.size}
 	_queue_gvd_peer_launch(hid, String(target.peer), int(target.port), "gvd_recv",
 		{"port": 0, "from": _local_hostname(), "w": int(cast.size.x), "h": int(cast.size.y)},
-		String(sp.cmd), sp.args, "", _cast_key(hid))
+		String(sp.cmd), sp.args, "", _cast_key(hid), replacing)
 	_share_notify(hid, "screen", "active")
 	print("compartir: ventana ", wid, " -> ", hid)
 
 
 # Corta sólo la parte de ventana (el resto lo hace _stop_gvd_screen, que la llama).
-func _group_unshare_window(hid):
+func _group_unshare_window(hid, notify = true):
 	var c = _casts.get(String(hid))
 	if c == null:
 		return
@@ -7510,7 +7540,7 @@ func _group_unshare_window(hid):
 		c.node.stop()
 		c.node.queue_free()
 	var ep = _peer_endpoint_for(hid)
-	if bool(ep.get("ok", false)):
+	if notify and bool(ep.get("ok", false)):
 		_peer_send_async([{"id": hid, "host": String(ep.peer), "port": int(ep.port),
 			"token": _peer_token_get(hid)}], "gvd_stop", {})
 	print("compartir: dejé de compartir con ", hid)
@@ -7705,12 +7735,37 @@ func _window_input_release_cast(c):
 # Título/acento actuales de la ventana compartida; true (y los guarda en meta_sent) si
 # cambiaron desde el último gvd_meta.
 func _cast_meta_changed(c):
-	var meta = {"title": String(compositor.get_title(int(c.wid))),
-		"accent": "#" + accent.to_html(false)}
+	var wid = int(c.wid)
+	# El ícono (PNG 64 px en base64) se arma una vez por app: sólo se reintenta mientras
+	# todavía no cargó (los íconos se cargan de a poco por frame).
+	var app = String(compositor.get_app_id(wid))
+	if c.get("icon_app", null) != app or String(c.get("icon_b64", "")) == "":
+		c.icon_app = app
+		c.icon_b64 = _icon_png_b64(_window_icon(wid, _window_activity_name(wid)))
+	var meta = {"title": String(compositor.get_title(wid)),
+		"accent": "#" + accent.to_html(false), "icon": String(c.icon_b64)}
 	if c.get("meta_sent", {}) == meta:
 		return false
 	c.meta_sent = meta
 	return true
+
+
+# Textura -> PNG de a lo sumo 64 px en base64 ("" si no hay datos de CPU, p. ej. SVG
+# vectorial). Lo usa gvd_meta para mandar el ícono de la ventana compartida.
+func _icon_png_b64(tex):
+	if tex == null or not tex.has_method("get_data"):
+		return ""
+	var img = tex.get_data()
+	if img == null or img.is_empty():
+		return ""
+	if img.is_compressed():
+		img.decompress()
+	var side = max(img.get_width(), img.get_height())
+	if side > 64:
+		img.resize(int(img.get_width() * 64 / side), int(img.get_height() * 64 / side),
+			Image.INTERPOLATE_BILINEAR)
+	var b64 = Marshalls.raw_to_base64(img.save_png_to_buffer())
+	return b64 if b64.length() <= PEER_LINK.ICON_B64_MAX else ""
 
 
 func _group_casting(wid):
@@ -8083,7 +8138,7 @@ func _apply_capture_ranges():
 
 
 func _queue_gvd_peer_launch(host_id, peer_host, ctl_port, method, params, cmd, args, direction,
-		key = ""):
+		key = "", pre_stop = false):
 	var id = String(host_id)
 	var state = {
 		"done": false,
@@ -8099,6 +8154,7 @@ func _queue_gvd_peer_launch(host_id, peer_host, ctl_port, method, params, cmd, a
 		"cmd": String(cmd),
 		"args": args if typeof(args) == TYPE_ARRAY else [],
 		"direction": String(direction),
+		"pre_stop": bool(pre_stop),
 		"ok": false,
 		"error": "",
 		"response": {},
@@ -8114,6 +8170,10 @@ func _queue_gvd_peer_launch(host_id, peer_host, ctl_port, method, params, cmd, a
 
 func _gvd_peer_work(userdata):
 	var state = userdata.state
+	if bool(state.get("pre_stop", false)):
+		# Reemplazo: cerrar el receptor anterior ANTES de pedir el nuevo, en este hilo.
+		PEER_CALL.request_status(String(state.peer_host), int(state.ctl_port),
+			String(state.local_hid), String(state.token), "gvd_stop", {}, 2000)
 	var r = PEER_CALL.request_status(String(state.peer_host), int(state.ctl_port),
 		String(state.local_hid), String(state.token), String(state.method),
 		state.params, 4500)
@@ -10053,7 +10113,7 @@ func _take_screenshot():
 		return
 	var path = dir.plus_file("Pantallazo-" + _screenshot_stamp() + ".png")
 	if system_osd != null:
-		system_osd.show_message("Pantallazo guardado", "computer-xo")
+		system_osd.show_message("Pantallazo guardado", "")
 	_shot_thread = Thread.new()
 	_shot_thread.start(self, "_write_screenshot", {"image": image, "path": path})
 

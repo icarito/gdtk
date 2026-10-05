@@ -150,7 +150,13 @@ Decisiones tomadas con el usuario:
   resalta con ese mismo color. Se muestra como «<título de la ventana original> @<equipo>»
   (`shell.window_title`, usado por Frame, exposé y decoración). Título y acento los manda el
   emisor por el método peer `gvd_meta` al empezar y cada vez que cambian; el acento del TXT
-  mDNS queda de respaldo.
+  mDNS queda de respaldo. `gvd_meta` lleva también el ícono de la ventana (PNG ≤64 px en
+  base64, ≤64 KiB, decodificado ≤256 px en el receptor), usado en el Frame y el anillo del
+  Hogar junto con «título @equipo».
+- Re-compartir con el mismo equipo manda `gvd_stop` y `gvd_recv` en el MISMO hilo y en ese
+  orden: en hilos separados el stop podía llegar último y cerrar el receptor nuevo.
+- Sin ícono XO en ningún lado: ventanas sin ícono muestran su inicial y equipos sin ícono el
+  monitor (`np/device-desktop`); `computer-xo.svg` ya no está en el repo.
 - `ctl=` sólo se anuncia si el canal peer escucha: vacío invalidaba el TXT y el equipo no se
   anunciaba en absoluto.
 

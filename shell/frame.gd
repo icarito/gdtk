@@ -1871,6 +1871,11 @@ func _emboss_image(ui, tex, pos, size, face):
 # programa de la ventana y, en última instancia, un ícono genérico de ventana Sugar.
 # Fuerza la carga perezosa de a dos íconos por frame como en el Hogar.
 func _item_icon(item):
+	# Ventana que llega de otro equipo: el ícono que mandó el origen.
+	if item.id >= 0 and shell.has_method("window_peer_icon"):
+		var peer_icon = shell.window_peer_icon(item.id)
+		if peer_icon != null:
+			return peer_icon
 	if item.id >= 0:
 		for a in shell.ACTIVITIES:
 			if a.name == item.name:

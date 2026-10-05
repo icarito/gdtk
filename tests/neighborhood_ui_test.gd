@@ -225,7 +225,7 @@ func _init():
 	check("tablet mapea al ícono de tablet",
 		ui._host_icon({"kind": "tablet", "icon": "tablet"}) == "np/device-tablet")
 	check("kind desconocido cae al respaldo",
-		ui._host_icon({"kind": "unknown", "icon": ""}) == "sugar/network-wired")
+		ui._host_icon({"kind": "unknown", "icon": ""}) == "np/device-desktop")
 
 	var hosts = [host]
 	check("_host_by_id encuentra y descarta", ui._host_by_id(hosts, "h1") != null

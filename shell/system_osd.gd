@@ -245,7 +245,7 @@ func _icon_name():
 		"brightness":
 			return "display-brightness"
 		"message":
-			return osd_icon if osd_icon != "" else "computer-xo"
+			return osd_icon   # "" = mensaje sin ícono
 		_:
 			return "audio-volume-high"
 
@@ -291,8 +291,9 @@ func _draw_plate(shell, rect, s, alpha):
 
 	var pad = 18.0 * s
 	var icon_side = rect.size.y - 2.0 * pad
-	var icon_tex = shell._load_sugar_svg(_icon_name(),
-		Color(0.32, 0.30, 0.38, 1.0), Color(0.96, 0.95, 0.90, 1.0))
+	var icon_name = _icon_name()
+	var icon_tex = shell._load_sugar_svg(icon_name,
+		Color(0.32, 0.30, 0.38, 1.0), Color(0.96, 0.95, 0.90, 1.0)) if icon_name != "" else null
 	if icon_tex != null:
 		shell.set_cursor_pos(Vector2(rect.position.x + pad, rect.position.y + (rect.size.y - icon_side) * 0.5))
 		shell.image(icon_tex, Vector2(icon_side, icon_side))

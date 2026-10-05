@@ -78,9 +78,15 @@ static func window_input_events(params):
 	return out
 
 
-# Título y acento de la ventana que se comparte (`gvd_meta`), para que el receptor la
-# muestre como «título @equipo» con el color del origen. Título: texto plano, sin
-# caracteres de control, hasta 200; acento: "#rrggbb" o "". {} si nada es válido. Puro.
+# Título, acento e ícono de la ventana que se comparte (`gvd_meta`), para que el
+# receptor la muestre como «título @equipo» con el color y el ícono del origen. Título:
+# texto plano, sin caracteres de control, hasta 200; acento: "#rrggbb" o ""; ícono: PNG
+# en base64 de hasta ICON_B64_MAX ("" si falta o no es base64). {} si nada es válido.
+# El PNG se decodifica recién en el shell (tamaño acotado ahí). Puro.
+const ICON_B64_MAX = 65536
+const _B64_OK = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
+
+
 static func video_meta(params):
 	var p = params if typeof(params) == TYPE_DICTIONARY else {}
 	var raw = p.get("title", "")
@@ -93,9 +99,17 @@ static func video_meta(params):
 	var acc = String(p.get("accent", "")).strip_edges().to_lower()
 	if acc.length() != 7 or acc[0] != "#" or not acc.substr(1).is_valid_hex_number():
 		acc = ""
-	if title == "" and acc == "":
+	var icon = p.get("icon", "")
+	if typeof(icon) != TYPE_STRING or icon.length() > ICON_B64_MAX or icon.length() % 4 != 0:
+		icon = ""
+	else:
+		for i in range(icon.length()):
+			if _B64_OK.find(icon[i]) < 0:
+				icon = ""
+				break
+	if title == "" and acc == "" and icon == "":
 		return {}
-	return {"title": title, "accent": acc}
+	return {"title": title, "accent": acc, "icon": icon}
 
 
 static func valid_share_params(method, params):
