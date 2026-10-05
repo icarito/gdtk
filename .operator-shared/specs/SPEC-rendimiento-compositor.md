@@ -83,10 +83,12 @@ dmabuf sin regresiones (ningún cliente optó aún por adjuntar puntos).
 - **P3 — warning de subsurfaces**: es bookkeeping de GTK3/Firefox (cliente), no un bug del
   compositor; no se arregla desde acá. Mitigado el ruido propio del shell (`[cursor]`,
   `[osd-key]`, arrastre) con `GDTK_DEBUG_INPUT=1`.
-- **P4 — arquitectural**: separar el compositor a su hilo/proceso, o ceder el scanout directo
-  a la ventana activa (hoy imposible sin output/CRTC; cruzar con `SPEC-embedded-multi-output`).
-- **P5 — medir**: HUD F1 / RPC `state` y `hud_snapshot`, `dmabuf_state`, `dmabuf_commits` vs
-  `shm_commits`; `bench/session_footprint.sh` gdtk vs GNOME.
+- **P4 — arquitectural**: la parte de scanout directo (puente dmabuf→sway, con pausa
+  por overlays) está entregada (`SPEC-scanout-directo.md`, commits `3b1ad32`/`b67fe49`).
+  Queda separar el compositor a su hilo/proceso y, para paridad plena, tomar DRM/KMS.
+- **P5 — medir**: es ahora **F0 bloqueante** del plan `plans/render-parity-gnome.md`.
+  HUD F1 / RPC `state` y `hud_snapshot`, `dmabuf_state`, `dmabuf_commits` vs
+  `shm_commits`; `bench/session_footprint.sh` gdtk vs GNOME, GPU con `intel_gpu_top`.
 
 ## Diagnóstico permanente (hecho)
 

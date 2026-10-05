@@ -138,3 +138,6 @@
 - `HANDOFF-scanout-directo.md`
   - Description: Handoff de P4 (scanout directo): estado, primer paso (medir y resolver si FRT/SDL exponen la wl_surface), anclajes, comandos, gotchas y decisiones.
   - Read If: Se retoma P4 con contexto fresco.
+- `render-parity-gnome.md`
+  - Description: Plan para acercar el rendering de gdtk a GNOME/Mutter (meta: sesión diaria): F0 medición bloqueante, Track A sin KMS (damage, cursor del host, cobertura P4, multi-output) y Track B KMS real.
+  - Read If: Se prioriza rendimiento/paridad de rendering o se decide entre exprimir el anidado y tomar DRM/KMS.
