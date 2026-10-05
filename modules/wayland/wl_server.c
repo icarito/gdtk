@@ -574,6 +574,12 @@ static void handle_surface_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&st->new_subsurface.link);
 	wl_list_remove(&st->destroy.link);
 	wl_list_remove(&st->link);
+	// Si la ventana estaba en scanout y el cliente muere sin un ultimo commit, la
+	// subsurface del host quedaria mostrando el ultimo frame: ocultarla y liberar.
+	if (st->scanout) {
+		gdtk_scanout_hide(st->id);
+		st->scanout = false;
+	}
 	surface_state_release_buffer(st);
 	scanout_refs_clear(st);
 	free(st);
