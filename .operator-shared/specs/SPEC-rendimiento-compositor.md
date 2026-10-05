@@ -80,8 +80,9 @@ dmabuf sin regresiones (ningún cliente optó aún por adjuntar puntos).
 ## Plan pendiente (por impacto)
 
 - ~~**P1 — present-only**~~ y ~~**P2 — explicit sync**~~: hechos.
-- **P3 — map de popups/subsurfaces**: arreglar el parent-mapped y bajar el ruido de Firefox
-  (`wl_server.c`, popup configure/map).
+- **P3 — warning de subsurfaces**: es bookkeeping de GTK3/Firefox (cliente), no un bug del
+  compositor; no se arregla desde acá. Mitigado el ruido propio del shell (`[cursor]`,
+  `[osd-key]`, arrastre) con `GDTK_DEBUG_INPUT=1`.
 - **P4 — arquitectural**: separar el compositor a su hilo/proceso, o ceder el scanout directo
   a la ventana activa (hoy imposible sin output/CRTC; cruzar con `SPEC-embedded-multi-output`).
 - **P5 — medir**: HUD F1 / RPC `state` y `hud_snapshot`, `dmabuf_state`, `dmabuf_commits` vs

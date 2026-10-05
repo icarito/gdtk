@@ -43,9 +43,11 @@ cosas; **B** frena trabajo; **C** higiene.
   implícita el import puede bloquear el hilo principal bajo carga. Salida: `linux-drm-syncobj`.
   **RESUELTO 2026-10-05** (`linux-drm-syncobj-v1` anunciado; espera GPU del acquire y release
   con el buffer; fallback a implicit sync; `GDTK_NO_EXPLICIT_SYNC` para desactivar).
-- **Firefox reintenta subsurfaces y llena el log** (14 150 warnings
-  `Couldn't map window ... as subsurface` en una sesión): timing de map de popups/subsurfaces en
-  `wl_server.c`; cada intento escribe a stderr. Salida: arreglar el parent-mapped y bajar el ruido.
+- **Warning de subsurfaces de Firefox (cliente, no compositor).** `Couldn't map window ... as
+  subsurface` es bookkeeping de GTK3 al mostrar hijos con el toplevel sin mapear
+  (`nsSigHandlers.cpp`); no rompe el render. El compositor no puede arreglarlo. Lo mitigado
+  2026-10-05: el ruido propio del shell (`[cursor]`/`[osd-key]`/arrastre) ahora sólo con
+  `GDTK_DEBUG_INPUT=1`.
 - **Arquitectural: el compositor embebido no tiene CRTC ⇒ sin direct scanout** (`SPEC-compositor.md`
   dec. 3): la ventana activa no puede ir a un plano de hardware, siempre pasa por la textura de
   Godot y la escena del shell. Salida: compositor en hilo/proceso propio o scanout directo (P4).

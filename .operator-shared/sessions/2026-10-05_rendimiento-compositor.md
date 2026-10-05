@@ -35,9 +35,16 @@ y anchors en el spec.
    dmabuf con acquire, espera el fence en la GPU (`sync_file` + `eglWaitSyncKHR`) y libera el
    release con el buffer (helper de wlroots). Fallback a implicit sync; `GDTK_NO_EXPLICIT_SYNC`
    para desactivar. Estado en `shell.log` y RPC `state` (`compositor.explicit_sync`).
+7. **P3 (lo accionable)**: el warning `Couldn't map window ... as subsurface` es **bookkeeping
+   interno de GTK3** al mostrar hijos con el toplevel sin mapear (`firefox:...: Gdk-WARNING`,
+   `nsSigHandlers.cpp`); no es un bug de protocolo del compositor y Firefox pinta bien por
+   dmabuf. Lo que sí tocaba era el ruido de **logs en caliente**: `[cursor]`, `[osd-key]` y el
+   aviso de arrastre Deskflow escribían a `shell.log` en cada evento (miles de líneas). Ahora
+   sólo con `GDTK_DEBUG_INPUT=1` (`shell.gd`, `system_osd.gd`).
 
 Commits: `d4661dd` (frame_done + present-only), `c1fca3f` (diagnóstico dmabuf), `6eabcbf`/
-`350b1a6`/`9e13d2d` (docs), `ac5d938` (fix test), `1fc2431` (métricas present), `874e5b2` (P2).
+`350b1a6`/`9e13d2d` (docs), `ac5d938` (fix test), `1fc2431` (métricas present), `874e5b2` (P2),
+`f85c451` (docs P2), `fa72cad` (gate de logs P3).
 
 ## Prueba en cupid.local (2026-10-05)
 
@@ -87,11 +94,15 @@ Cierre del harness: `sway` headless detenido; `/tmp/kilo/wl` queda como runtime 
 - **`control_test.sh` `gdtk_state view=home`** falla por carrera de arranque de la primera
   llamada (falla con y sin el campo `compositor`); preexistente, ajeno a P1.
 - RPC `state` ahora expone `present:{light,full}` (commit) para medir P1 en la sesión real.
+- **Warning de subsurfaces de Firefox**: es `Gdk-WARNING` de GTK3 (`Couldn't map window ...
+  as subsurface because its parent is not mapped`, `nsSigHandlers.cpp`), bookkeeping del cliente
+  al mostrar hijos con el toplevel sin mapear; ocurre en ráfagas ligadas a `toplevel_removed`
+  y no impide renderizar. No hay fix de protocolo del lado compositor.
 
 ## Cómo retomar
 
-- **P1 y P2: hechos.** Próximo: **P3** map de popups/subsurfaces (ruido de Firefox) y **P4**
-  arquitectural (compositor en otro hilo/proceso o scanout directo).
+- **P1, P2 y lo accionable de P3: hechos.** Próximo: **P4** arquitectural (compositor en otro
+  hilo/proceso o scanout directo) — cambio grande, a planificar aparte.
 - Medir en la sesión gdtk: `shell.log` (`compositor dmabuf:`, `compositor sync explícito:`) y RPC
   `state` (`compositor.dmabuf_commits`/`shm_commits`, `compositor.explicit_sync`, `present`).
 - **Rollback del binario**: `cp ~/gdtk/bin/godot-gdtk.prev ~/gdtk/bin/godot-gdtk` (reinicia la
