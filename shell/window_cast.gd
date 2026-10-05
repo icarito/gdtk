@@ -112,11 +112,17 @@ func _exit_tree():
 
 
 func _process(delta):
+	if _vp == null:
+		return
+	# get_layers en CADA vuelta (no sólo a la cadencia de captura): marca la ventana como
+	# dibujada en este frame, así recibe sus frame callbacks y sus commits mantienen
+	# activo al shell aunque esté oculta (Hogar, minimizada). Antes, oculta, la app y el
+	# shell caían a ~5 capturas/s.
+	_layers = compositor.get_layers(wid)
 	_acc += delta
-	if _vp == null or _acc < 1.0 / fps:
+	if _acc < 1.0 / fps:
 		return
 	_acc = 0.0
-	_layers = compositor.get_layers(wid)
 	var g = compositor.get_geometry(wid)
 	if g.size.x >= 2 and g.size.y >= 2:
 		_geo = g

@@ -119,6 +119,10 @@ Decisiones tomadas con el usuario:
   geometría (el readback es síncrono y frenaba todo el shell); gvd sólo codifica frames
   nuevos y, quieta la ventana, repite el último cada 0,5 s (keepalive). En un X200: shell
   ~12% y x264 ~8% de CPU con htop compartido (antes 50% sólo el encoder).
+  La transmisión sigue con la ventana oculta o minimizada: window_cast la marca como
+  dibujada en cada frame (`get_layers`), así recibe frame callbacks y sus commits mantienen
+  activo al shell. Medido en tengu con es2gears: 18,5 capturas/s visible, 15,5 en Hogar y
+  15,8 minimizada (antes ~5,5 oculta).
   Mientras esa ventana receptora tiene foco, usa el puntero local (el video sigue con
   `--cursor none`) y devuelve movimiento normalizado, botones/rueda y teclado por el
   canal peer autenticado `window_input`. El emisor sólo acepta el lote si ese `hid`
