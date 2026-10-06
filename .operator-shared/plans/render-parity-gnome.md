@@ -151,9 +151,9 @@ interacción; GNOME no se midió en tiled/multi-monitor.
   el layout de la barra superior. Medir en entorno quieto/aislado.
 
   **HECHO 2026-10-05**: `_shared_snapshot` memoizado por versión del Vecindario + 500 ms
-  (`9814b47`) → `frame.draw` **6,6→3,95 ms**, `_imgui_frame` **~7,5→4,86 ms**. Queda el hotspot
-  de la **barra superior** (`top` 3,6 ms, ahora 74% de frame.draw): perfilado interno de
-  `_draw_bar_blocks`/`_draw_windows`/tiles y siguiente optimización.
+  (`9814b47`) → `frame.draw` **6,6→3,95 ms**; `_text_w` memoizado (evita `calc_text_size` en el
+  while de `_truncate_w`) → `_draw_windows` **1,88→1,01 ms** (`50f5536`). Queda **`_draw_bar_blocks`
+  1,95 ms** (no bajó con text_w → es íconos/layout, no medición de texto).
   **Sub-desglose barra superior** (`e43f494`): `_draw_bar_blocks` 1,96 ms + `_draw_windows` 1,88 ms
   + tiles 0,61 ms. Próximo: cachear el trabajo por tesela de `_draw_windows`/`_draw_bar_blocks`
   (íconos/texto) que se rearma cada build.
