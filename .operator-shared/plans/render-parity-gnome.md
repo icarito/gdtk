@@ -150,6 +150,11 @@ interacción; GNOME no se midió en tiled/multi-monitor.
   Próximo (sin KMS): **memoizar `_shared_snapshot`** por `neighborhood.version`/estado, y abaratar
   el layout de la barra superior. Medir en entorno quieto/aislado.
 
+  **HECHO 2026-10-05**: `_shared_snapshot` memoizado por versión del Vecindario + 500 ms
+  (`9814b47`) → `frame.draw` **6,6→3,95 ms**, `_imgui_frame` **~7,5→4,86 ms**. Queda el hotspot
+  de la **barra superior** (`top` 3,6 ms, ahora 74% de frame.draw): perfilado interno de
+  `_draw_bar_blocks`/`_draw_windows`/tiles y siguiente optimización.
+
 
 - **A1 — Damage/partial.** No recomponer la UI entera por commit: daño por
   ventana/región y `_present_commit` extendido. Depende de A-experimento M1
