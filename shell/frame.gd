@@ -1564,6 +1564,11 @@ func _applet_pct(id):
 func _shared_snapshot():
 	if shell == null or shell.neighborhood == null or not shell.has_method("_host_session_state"):
 		return {}
+	# Cache: recomputar a lo sumo cada 500 ms o si cambió la versión del Vecindario.
+	var _ver = int(shell.neighborhood.version)
+	var _now = OS.get_ticks_msec()
+	if not _shared_cache.empty() and _ver == _shared_cache_ver and _now - _shared_cache_ms < 500:
+		return _shared_cache
 	var hosts = shell.neighborhood.get("hosts")
 	if typeof(hosts) != TYPE_ARRAY:
 		hosts = []
@@ -1624,7 +1629,11 @@ func _shared_snapshot():
 	var focus = {"capturing": false}
 	if shell.get("remote_input") != null and shell.remote_input.has_method("is_capturing"):
 		focus.capturing = bool(shell.remote_input.is_capturing())
-	return SHARED_BLOCK.diagram(sessions, remote, windows, placements, focus)
+	var _res = SHARED_BLOCK.diagram(sessions, remote, windows, placements, focus)
+	_shared_cache = _res
+	_shared_cache_ver = _ver
+	_shared_cache_ms = _now
+	return _res
 
 
 # Nombre visible del equipo: el que ya resuelve el Vecindario (nunca el id opaco
@@ -4116,6 +4125,11 @@ var _f_shared = 0
 var _f_top = 0
 var _f_app = 0
 var _f_tail = 0
+# A1: cache de _shared_snapshot (2,9 ms por build). Se recomputa por versión del
+# Vecindario o cada 500 ms; el indicador de pantallas no necesita más frescura.
+var _shared_cache = {}
+var _shared_cache_ver = -999999
+var _shared_cache_ms = 0
 
 func draw(ui):
 	var _f0 = OS.get_ticks_usec()
