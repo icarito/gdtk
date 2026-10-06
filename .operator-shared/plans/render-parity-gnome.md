@@ -130,12 +130,15 @@ interacción; GNOME no se midió en tiled/multi-monitor.
   fullscreen ya compone a ~5% de un core. Se deja el `scanout_reason` como diagnóstico permanente
   y se prioriza A5.
 - Luego **A5** (multi-output / `GDTK_SPAN`) — requiere validación con 2 monitores reales.
-- **A1 (perfilado de interacción, 2026-10-05)**: con 2 tiled, inyectando `move` por RPC a 60 Hz
-  la shell pasa de **11%→25%** de un core (otra corrida 14%→45%), con `render` plano (~0,5–1,2 ms)
-  → el costo está en el **bucle por evento/redraw**, no en el dibujo. El loop corre a **130–570 fps**
-  pese a `low_processor_mode` y a `Engine.target_fps` (probado, no capa en FRT) → **bug de pacing
-  del loop** en el path FRT/nested (revisar `OS::add_frame_delay`/`dynamic_delay`/`delay_usec`).
-  Próximo paso de motor: instrumentar el pacing y capar a la tasa objetivo.
+- **A1 (perfilado, 2026-10-05)**: con 2 tiled, motion por RPC sube el CPU de la shell
+  (**11–14% → 25–50%**). Aclaración importante: el `fps` del profiler **no** es la tasa del loop —
+  `frame_time` excluye el sleep de `add_frame_delay` (`main.cpp:2843`) y es 1/tiempo-de-trabajo—;
+  el loop **sí está paeado (~60)**. Lo que sube es el **trabajo por frame**.
+  Y **no escala con la tasa de eventos** (15 vs 60 Hz ≈ igual): no es costo por-evento, parece que
+  la shell entra en un **redraw/re-arm a 60 fps mientras hay actividad reciente**. Próximo: hallar
+  qué mantiene alto el trabajo con actividad (`View.update`/re-arm de ImGui, `last_activity`) y
+  redibujar sólo cuando cambia algo. Medir en entorno **quieto/aislado** (las corridas en vivo con
+  otras apps dieron mucha varianza).
 
 
 - **A1 — Damage/partial.** No recomponer la UI entera por commit: daño por
