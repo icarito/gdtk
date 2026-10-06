@@ -39,7 +39,10 @@ const RING_LAYOUT = preload("res://ring_layout.gd")
 const LAYOUT_MODEL = preload("res://deskflow_layout.gd")
 const CONF_MODEL = preload("res://deskflow_conf.gd")
 const DESKFLOW_SETTINGS = preload("res://deskflow_settings.gd")
-const SCREEN_LAYOUT = preload("res://screen_layout.gd")
+# Este también va por Host.sc: el popup de revisión (##layout_confirm) llama
+# mini_map, y una recarga transaccional reusa el preload cacheado (viejo) en
+# lugar de releer el fuente — "nonexistent function 'mini_map'". 
+var SCREEN_LAYOUT = Host.sc("res://screen_layout.gd")
 const DESKFLOW_WATCH = preload("res://deskflow_watch.gd")
 const SERVICE_STATE = preload("res://service_state.gd")
 # Sesión de pantalla gvd (Kilo F2): modelo puro de estados/planes/clasificación que
@@ -51,6 +54,9 @@ const GVD_LAUNCH = preload("res://gvd_launch.gd")
 # Host.sc (no preload): la recarga transaccional conserva los preload cacheados y los
 # métodos nuevos de peer_call.gd no se verían hasta el próximo login.
 var PEER_CALL = Host.sc("res://peer_call.gd")
+# Igual que PEER_CALL: modelo nuevo junto al pulido de Grupo; Host.sc relee el
+# fuente en recargas transaccionales en vez de quedarse con el preload cacheado.
+var LAYOUT_CONFIRM = Host.sc("res://layout_confirm.gd")
 const PEER_LINK = preload("res://peer_link.gd")
 const AUDIO_SEND = preload("res://audio_send.gd")
 const MENU_STYLE = preload("res://menu_style.gd")
@@ -214,7 +220,31 @@ var wifi_psk_mode = ""
 var wifi_psk_ssid = ""
 var wifi_psk_text = ""
 var wifi_psk_error = ""
+# Popup de revisión del layout (##layout_confirm): mover un equipo en Grupo aplica
+# el layout al toque y deja 10 s para Aceptar (default) / Editar / Revertir; la
+# decisión vive en layout_confirm.gd (puro) y el dibujo en _draw_layout_confirm_popup.
+var _layout_confirm = null       # instancia perezosa de LAYOUT_CONFIRM (baseline)
+var layout_confirm_open = false  # el popup vive (begin_popup cada frame)
+var layout_confirm_want = false  # pide abrirlo en el próximo frame ImGui
+var layout_confirm_host = ""     # id del equipo acomodado (resaltado en la vista)
+var layout_confirm_pos = Vector2.ZERO  # posición clavada del hud (no se arrastra)
+var layout_confirm_rect = Rect2()      # rect del hud (px viewport) para bloquear el gesto
+var layout_confirm_canvas = Rect2()    # canvas mini dentro del hud (o + vsz)
+var _lc_dbg_at = 0              # prints de diagnóstico (rate ~200 ms)
+
+# Diagnóstico del popup (BAIXO volumen, recortado a frames cuando está vivo).
+func _lc_dbg(msg):
+	print("LC " + msg)
+# Arrastre dentro del popup: preview en vivo (sin escribir) y al soltar snap +
+# misma ruta de commit que el acomodo del mapa. La local no se arrastra
+# (pantallas.png lo ignora): el plano es relativo a ella.
+var _layout_drag_id = ""
+var _layout_drag_grab = Vector2.ZERO  # mm entre el origen de la pantalla y el click
+var _layout_drag_edge = ""       # no vacío = resize por ese borde (east/west/north/south)
+var _layout_drag_lay = null      # layout copiado que sigue al mouse durante el drag
+var _layout_drag_tform = {}      # mini_map_transform congelada al agarrar
 var _df_watch_at = 0       # próximo chequeo del vigía de Deskflow (ms)
+const DESKFLOW_WATCH_COOLDOWN_MS = 6000  # tras soltar la captura, no volver a soltar seguido
 var _df_mismatch = 0       # chequeos seguidos con captura activa y servidor "en local"
 var group_placements = {}   # hid -> grados alrededor del equipo local (de host_directions)
 const ZOOM_MS = 220.0
@@ -284,6 +314,14 @@ var host_deskflow = {}        # host_id -> bool (intención; la actividad es glo
 var remote_shares = []
 var _deskflow_settings_key = ""
 var _deskflow_auto_key = ""
+# Reinicio del server con debounce: el popup escribe el layout en cada release
+# y un restart por release cortaba el teclado en plena escritura. El conf se
+# escribe al toque; el server se reinicia una sola vez tras el silencio.
+const DESKFLOW_RELOAD_DEBOUNCE_MS = 2500
+var _deskflow_reload_pending = false
+var _deskflow_reload_at = 0
+var _deskflow_reload_key = ""
+var _deskflow_loaded_key = ""
 var _deskflow_role = "client"
 # Autoarranque por defecto: el portal de la sesión se reinicia al arrancar y tumba una
 # sesión InputCapture recién abierta; el primer arranque se difiere y, si el proceso
@@ -1570,6 +1608,8 @@ var win_out_local = {}
 var span_out_layout = {}
 var out_mod = null
 const OUT_MOD_PATH = "res://output_layout.gd"
+const LOW_SLEEP_VIDEO_USEC = 2000
+const VIDEO_COOLDOWN_MS = 1500
 
 
 # Un commit Wayland puede traer capas/texturas nuevas (y con dmabuf el VisualServer
@@ -1602,8 +1642,15 @@ func _process(_delta):
 		last_commits = compositor.commit_count
 		last_commit_ms = now
 		_present_commit()
-	if activity_instance != null and activity_instance.get("animate"):
-		last_activity = now
+	# El sleep del loop decide cuánto del video llega a la pantalla: con el
+	# sleep de reposo (16 ms) cada draw entra en phase-slip contra el vblank
+	# y se presenta a la mitad de la tasa de commits. Con commits frescos se
+	# afloja a 2 ms; al callar el commit, vuelve el presupuesto de reposo.
+	var idle_sleep = int(ProjectSettings.get_setting("application/run/low_processor_mode_sleep_usec"))
+	var want_sleep = LOW_SLEEP_VIDEO_USEC if (now - last_commit_ms) < VIDEO_COOLDOWN_MS else idle_sleep
+	if OS.get_low_processor_usage_mode_sleep_usec() != want_sleep:
+		OS.set_low_processor_usage_mode_sleep_usec(want_sleep)
+	if activity_instance != null and activity_instance.get("animate"):		last_activity = now
 	# Vecindario: el hilo deja el último resultado; si cambió y la vista está a la
 	# vista, se pide un frame (sin sondeo periódico en reposo).
 	if neighborhood != null and neighborhood.running():
@@ -1806,6 +1853,7 @@ func _imgui_frame():
 	if not expose:
 		_draw_window_menu()
 		_draw_wifi_psk_popup()
+		_draw_layout_confirm_popup()
 	_update_ghosts(OS.get_ticks_msec())
 	var _m5 = OS.get_ticks_usec()
 
@@ -6206,11 +6254,6 @@ func _apply_deskflow_settings():
 	if settings_bridge == null or settings_bridge.model == null:
 		return
 	var cfg = settings_bridge.model.deskflow(settings_bridge.settings.get("deskflow", {}))
-	# Portal InputCapture: publica los rangos parciales por borde (ver
-	# eis_server.c::barrier_crossed). El binario sin este método se ignora por
-	# has_method; el rango por defecto (0..100) queda inerte.
-	if Host.remote_input != null and Host.remote_input.has_method("set_capture_ranges"):
-		Host.remote_input.set_capture_ranges(_deskflow_capture_ranges())
 	var mode = String(cfg.get("mode", "off"))
 	var effective_mode = mode
 	# El gate se pregunta en cada aplicación de settings, pero el resultado se cachea
@@ -6256,6 +6299,12 @@ func _apply_deskflow_settings():
 			_deskflow_want = false
 		return
 	_deskflow_settings_key = key
+	# Portal InputCapture: publica los rangos parciales por borde (ver
+	# eis_server.c::barrier_crossed). Sólo al cambiar el acomodo: publicarlos en
+	# cada release del popup flapeaba la captura. El binario sin este método se
+	# ignora por has_method; el rango por defecto (0..100) queda inerte.
+	if Host.remote_input != null and Host.remote_input.has_method("set_capture_ranges"):
+		Host.remote_input.set_capture_ranges(_deskflow_capture_ranges())
 	if auto:
 		if auto_key != _deskflow_auto_key:
 			_deskflow_auto_key = auto_key
@@ -6266,6 +6315,13 @@ func _apply_deskflow_settings():
 	# pero su cache de configuración empieza vacío. También debe releer el archivo.
 	var reload_running = _service_running("Deskflow") \
 		and (config_changed or not deskflow_was_configured)
+	if reload_running:
+		_deskflow_reload_key = key
+		_deskflow_reload_at = OS.get_ticks_msec() + DESKFLOW_RELOAD_DEBOUNCE_MS
+		_deskflow_reload_pending = true
+		reload_running = false
+	elif not _service_running("Deskflow"):
+		_deskflow_loaded_key = key   # arrancara con este conf
 	_write_texts_async(writes, "", null, reload_running)
 
 
@@ -6291,6 +6347,13 @@ func _deskflow_tick(now):
 				_deskflow_arm()
 		else:
 			_deskflow_want = false
+	if _deskflow_reload_pending and now >= _deskflow_reload_at:
+		_deskflow_reload_pending = false
+		if _deskflow_reload_key != _deskflow_loaded_key and _service_running("Deskflow"):
+			# Reusa el ciclo de vida: parar y arrancar (igual que _plan_poll).
+			_deskflow_loaded_key = _deskflow_reload_key
+			_toggle_service_by_name("Deskflow")
+			_toggle_service_by_name("Deskflow")
 	if not _deskflow_want:
 		return
 	if _service_running("Deskflow"):
@@ -6343,7 +6406,7 @@ func deskflow_input_sessions():
 func _deskflow_watch(now):
 	if remote_input == null or not remote_input.has_method("release_capture") or now < _df_watch_at:
 		return
-	_df_watch_at = now + 300  # rescate en < 1 s (dos chequeos seguidos)
+	_df_watch_at = now + 300  # rescate en < 1 s (tres chequeos seguidos)
 	if not remote_input.is_capturing():
 		_df_mismatch = 0
 		return
@@ -6360,18 +6423,21 @@ func _deskflow_watch(now):
 	var local = _deskflow_local_name(name)
 	var gone = DESKFLOW_WATCH.stuck_on(tail, local)
 	# Discordancia: el servidor ya volvió al local pero la captura sigue activa. Se exige
-	# en dos chequeos seguidos (~1 s): al cruzar, la línea "switch" llega ms después.
+	# en tres chequeos seguidos (~1 s): al cruzar, la línea "switch" llega ms después.
+	# Si Deskflow re-captura al instante, soltar en bucle corta el teclado en plena
+	# escritura (y deja teclas pegadas en el cliente): tras soltar, enfriar 6 s.
 	var mismatch = DESKFLOW_WATCH.server_local(tail, local)
 	_df_mismatch = _df_mismatch + 1 if mismatch else 0
 	var why = ""
 	if gone != "":
 		why = gone + " se cayó con el puntero allá"
-	elif _df_mismatch >= 2:
+	elif _df_mismatch >= 3:
 		why = "Deskflow volvió a este equipo sin soltar la captura"
 	if why != "" and remote_input.release_capture():
 		var t = OS.get_time()
 		print("[deskflow] %02d:%02d:%02d " % [t.hour, t.minute, t.second], why, ": suelto la captura")
 		_df_mismatch = 0
+		_df_watch_at = now + DESKFLOW_WATCH_COOLDOWN_MS
 		_set_capture_cursor(false)
 		request_redraw()
 
@@ -6790,6 +6856,7 @@ func _set_host_placement(host_id, side, along):
 	var d = String(side)
 	if sc == null or not SCREEN_LAYOUT.valid_direction(d) or d == "none":
 		return
+	var before = SCREEN_LAYOUT.to_json(lay)
 	var off = SCREEN_LAYOUT.offset_px(d, clamp(float(along), 0.0, 1.0), lay.local, sc)
 	lay = SCREEN_LAYOUT.place_direction(lay, id, d, off)
 	_write_screen_layout(lay)
@@ -6799,6 +6866,162 @@ func _set_host_placement(host_id, side, along):
 	# servicio con la topología que acaba de dibujar Grupo.
 	_apply_deskflow_settings()
 	request_redraw()
+	# Revisión de 10 s del acomodo (SPEC-sugar-group-2026-10): el layout ya está
+	# aplicado; el popup deja Aceptar (default) / Editar / Revertir al layout previo.
+	if SCREEN_LAYOUT.to_json(lay) != before:
+		_open_layout_confirm(found.layout, id)
+
+
+# --- Revisión del layout (popup ##layout_confirm) ------------------------------
+
+func _open_layout_confirm(baseline_layout, host_id):
+	_layout_drag_reset()
+	if _layout_confirm == null:
+		_layout_confirm = LAYOUT_CONFIRM.new()
+	_layout_confirm.propose(baseline_layout, OS.get_ticks_msec())
+	layout_confirm_host = String(host_id)
+	layout_confirm_open = true
+	layout_confirm_want = true
+	request_redraw()
+
+
+func _layout_confirm_close():
+	if _layout_confirm != null:
+		_layout_confirm.open = false
+	layout_confirm_host = ""
+	layout_confirm_open = false
+	layout_confirm_want = false
+	request_redraw()
+
+
+func _layout_confirm_accept():
+	_layout_confirm_close()
+
+
+# Agarrar una pantalla del popup: borde a <= tol px = resize (con la local también
+# se puede); interior = mover (la local no: el plano es relativo a ella).
+func _layout_drag_begin(local, target, live):
+	_lc_dbg("begin entra live_keys=%s" % str(live.keys() if typeof(live) == TYPE_DICTIONARY else "no-dict"))
+	var marks = SCREEN_LAYOUT.mini_map(live, target)
+	var zone = SCREEN_LAYOUT.mini_map_edge(marks, local)
+	var hit = String(zone.get("id", "")) if not zone.empty() else ""
+	var edge = String(zone.get("edge", "")) if not zone.empty() else ""
+	_lc_dbg("begin edge_zone=%s marks=%d" % [str(zone), marks.size()])
+	if hit == "" or edge == "":
+		var pick = SCREEN_LAYOUT.mini_map_pick(marks, local)
+		hit = String(pick.get("id", ""))
+	if hit == "":
+		var near = SCREEN_LAYOUT.mini_map_pick_near(marks, local)
+		hit = String(near.get("id", ""))
+	if hit == "":
+		_lc_dbg("begin aborta hit=%s edge=%s" % [str(hit), str(edge)])
+		return
+	_layout_drag_lay = SCREEN_LAYOUT.normalize_layout({
+		"version": SCREEN_LAYOUT.VERSION, "unit": "mm",
+		"local": live.get("local", {}), "screens": live.get("screens", []),
+	})
+	var sc = SCREEN_LAYOUT.screen_by_id(_layout_drag_lay, hit)
+	if sc == null:
+		_layout_drag_reset()
+		return
+	_layout_drag_tform = SCREEN_LAYOUT.mini_map_transform(_layout_drag_lay, target)
+	if _layout_drag_tform.empty():
+		_layout_drag_reset()
+		return
+	_layout_drag_id = hit
+	_layout_drag_edge = edge
+	_layout_drag_grab = Vector2.ZERO if edge != "" \
+		else SCREEN_LAYOUT.mm_pos(_layout_drag_tform, local) - Vector2(sc.x, sc.y)
+	# Mano sobre el popup: la revisión sigue viva mientras se arrastra.
+	_layout_confirm.propose(_layout_confirm.baseline, OS.get_ticks_msec())
+
+
+func _layout_drag_follow(local, target):
+	if _layout_drag_lay == null or _layout_drag_tform.empty() or _layout_drag_id == "":
+		return
+	var sc = SCREEN_LAYOUT.screen_by_id(_layout_drag_lay, _layout_drag_id)
+	if sc == null:
+		return
+	var mm = SCREEN_LAYOUT.mm_pos(_layout_drag_tform, local)
+	var local_drag = String(_layout_drag_id) == SCREEN_LAYOUT.LOCAL_ID and _layout_drag_edge == ""
+	if local_drag:
+		# La local arrastra el plano completo: el acomodo es relativo a ella
+		# (mismo gesto que GNOME al mover el monitor principal).
+		var dx = (mm.x - _layout_drag_grab.x) - float(sc.x)
+		var dy = (mm.y - _layout_drag_grab.y) - float(sc.y)
+		sc.x = float(sc.x) + dx
+		sc.y = float(sc.y) + dy
+		for s in _layout_drag_lay.screens:
+			s.x = float(s.x) + dx
+			s.y = float(s.y) + dy
+	elif _layout_drag_edge != "":
+		var nx = SCREEN_LAYOUT.resize_edge(sc, _layout_drag_edge, mm)
+		sc.x = float(nx.x)
+		sc.y = float(nx.y)
+		sc.w = float(nx.w)
+		sc.h = float(nx.h)
+	else:
+		sc.x = mm.x - _layout_drag_grab.x
+		sc.y = mm.y - _layout_drag_grab.y
+	# Por lo menos media pantalla queda dentro del canvas: el drag nunca se
+	# pierde de vista, pero el recorrido no se corta de golpe.
+	var lo = SCREEN_LAYOUT.mm_pos(_layout_drag_tform, Vector2(12.0, 12.0))
+	var hi = SCREEN_LAYOUT.mm_pos(_layout_drag_tform, target.size - Vector2(12.0, 12.0))
+	var cx = clamp(sc.x + sc.w * 0.5, lo.x - sc.w * 0.5, hi.x + sc.w * 0.5)
+	var cy = clamp(sc.y + sc.h * 0.5, lo.y - sc.h * 0.5, hi.y + sc.h * 0.5)
+	var shift = Vector2(cx - (sc.x + sc.w * 0.5), cy - (sc.y + sc.h * 0.5))
+	sc.x = float(sc.x) + shift.x
+	sc.y = float(sc.y) + shift.y
+	if local_drag:
+		for s in _layout_drag_lay.screens:
+			s.x = float(s.x) + shift.x
+			s.y = float(s.y) + shift.y
+	_layout_confirm.propose(_layout_confirm.baseline, OS.get_ticks_msec())
+
+
+# Soltar: snap (pegada por un borde, contacto mínimo, sin solapar) y commit por
+# la misma ruta que el acomodo del mapa; rearma la revisión de 10 s.
+func _layout_drag_release():
+	if _layout_drag_id == "" or _layout_confirm == null or _layout_drag_lay == null:
+		_layout_drag_reset()
+		return
+	var lay = _layout_drag_lay
+	var id = String(_layout_drag_id)
+	_layout_drag_reset()
+	var sc = SCREEN_LAYOUT.screen_by_id(lay, id)
+	if sc == null:
+		return
+	var was_local = String(id) == SCREEN_LAYOUT.LOCAL_ID
+	var sn = {"x": sc.x, "y": sc.y, "snapped": false} if was_local \
+		else SCREEN_LAYOUT.snap(SCREEN_LAYOUT.all_screens(lay), id, sc.x, sc.y)
+	_lc_dbg("release id=%s de=(%s,%s) a=(%s,%s) snap=%s" % [str(id), str(sc.x), str(sc.y), str(sn.x), str(sn.y), str(sn.get("snapped", false))])
+	sc.x = float(sn.x)
+	sc.y = float(sn.y)
+	_write_screen_layout({"version": SCREEN_LAYOUT.VERSION, "unit": "mm",
+		"local": lay.local, "screens": lay.screens})
+	_sync_directions_from_screen_layout()
+	_apply_deskflow_settings()
+	layout_confirm_host = id
+	_layout_confirm.propose(_layout_confirm.baseline, OS.get_ticks_msec())
+	request_redraw()
+
+
+func _layout_drag_reset():
+	_layout_drag_id = ""
+	_layout_drag_grab = Vector2.ZERO
+	_layout_drag_edge = ""
+	_layout_drag_lay = null
+	_layout_drag_tform = {}
+
+
+func _layout_confirm_revert():
+	if _layout_confirm != null and _layout_confirm.revert() == "revert" \
+			and typeof(_layout_confirm.baseline) == TYPE_DICTIONARY \
+			and not _layout_confirm.baseline.empty():
+		_write_screen_layout(_layout_confirm.baseline)
+		_sync_directions_from_screen_layout()
+		_apply_deskflow_settings()
+	_layout_confirm_close()
 
 
 # Vuelca el estado ya disponible a la vista (nunca consulta red/procesos/disco).
@@ -9444,6 +9667,146 @@ func _draw_wifi_psk_popup():
 		_wifi_psk_confirm()
 
 
+# Popup de revisión del layout (##layout_confirm, mismo patrón que ##clave_wifi).
+# Muestra la distribución propuesta (mini_map, la vista de Configuración >
+# Pantallas en chico), resalta el equipo acomodado y da Aceptar (con countdown;
+# es el default también al vencer, al clic afuera o Esc), Editar en Pantallas y
+# Revertir al layout previo.
+# Popup de revisión del layout (##layout_confirm, mismo patrón que ##clave_wifi).
+# Muestra la distribución (vista de Configuración > Pantallas en chico) y es
+# EDITABLE al toque: arrastrar mueve una pantalla, los bordes redimensionan con
+# su aspecto original; al soltar se imanta y aplica (rearma los 10 s).
+# Aceptar es el default también al vencer, al clic afuera o Esc.
+# Popup-hud fijo de revisión del layout (ventana regular ImGui, NoMove: un
+# popup de menú se ARRASTRA por su zona vacía y para editarlo no sirve). Con
+# posición clavada al abrir, el drag/resize queda dentro y el clic afuera
+# dispara el default (aceptar), igual que el vencimiento de la cuenta.
+func _draw_layout_confirm_popup():
+	if _layout_confirm == null:
+		return
+	if _layout_confirm.open and _layout_confirm.tick(OS.get_ticks_msec()) == "accept":
+		# Countdown vencido: default aceptar (el layout ya está aplicado).
+		layout_confirm_open = false
+	if layout_confirm_want:
+		layout_confirm_pos = _layout_confirm_place()
+		layout_confirm_want = false
+	if not layout_confirm_open:
+		return
+	# El gesto vive en eventos de _input; si el loop se duerme (nadie pide
+	# redraw) los eventos no se despachan y el drag muere en seco. Mientras el
+	# hud está abierto, pedir redraw es lo que mantiene vivo el dispatch.
+	request_redraw()
+	var accepted = false
+	var edited = false
+	var reverted = false
+	var s = get_imgui_scale()
+	var vsz = Vector2(300.0, 150.0) * s
+	var live = settings_bridge.settings.get("screens", {}) if settings_bridge != null else {}
+	MENU_STYLE.begin(self)
+	set_next_window_pos(layout_confirm_pos, true)
+	var shown = begin("Distribución propuesta##layout_confirm",
+		WINDOW_NO_DECORATION | WINDOW_NO_BACKGROUND | WINDOW_NO_MOVE
+		| WINDOW_NO_RESIZE | WINDOW_NO_SAVED_SETTINGS | WINDOW_NO_BRING_TO_FRONT_ON_FOCUS)
+	if shown:
+		MENU_STYLE.chrome(self, "Distribución propuesta")
+		text("Arrastrá: mover · bordes: tamaño (aspecto fijo)")
+		var o = get_cursor_screen_pos()
+		dummy(vsz)
+		# Rects del hud publicados para _input (el gesto se maneja por eventos).
+		layout_confirm_rect = Rect2(get_window_pos(), get_window_size())
+		layout_confirm_canvas = Rect2(o, vsz)
+		set_cursor_pos(Vector2.ZERO)
+		var origin = get_cursor_screen_pos()
+		set_cursor_pos(o - origin)
+		# Preview: el layout que sigue al mouse (drag) o el aplicado; con la
+		# transform congelada mientras se arrastra el resto no se reacomoda.
+		var preview = _layout_drag_lay if (_layout_drag_id != "" and _layout_drag_lay != null) else live
+		var tform = _layout_drag_tform if _layout_drag_id != "" \
+			else SCREEN_LAYOUT.mini_map_transform(preview, Rect2(Vector2.ZERO, vsz))
+		var hot = _layout_drag_id if _layout_drag_id != "" else layout_confirm_host
+		if not tform.empty():
+			for sc in SCREEN_LAYOUT.all_screens(preview):
+				var r = SCREEN_LAYOUT.mm_rect(tform, sc)
+				var sid = String(sc.get("id", ""))
+				var is_local = bool(sc.get("local", false))
+				var border = Color(1.0, 0.84, 0.43, 1.0) if sid == hot else Color(0.55, 0.58, 0.66, 1.0)
+				var fill = Color(0.22, 0.31, 0.45, 1.0) if is_local else Color(0.14, 0.17, 0.24, 1.0)
+				imgui_draw_rect_filled(Rect2(o + r.position, r.size), border, 0.0)
+				imgui_draw_rect_filled(Rect2(o + r.position + Vector2(1.0, 1.0), r.size - Vector2(2.0, 2.0)), fill, 0.0)
+				var lbl = String(sc.get("label", ""))
+				if lbl == "":
+					lbl = sid
+				var maxch = int((r.size.x - 6.0 * s) / (7.0 * s))
+				if maxch >= 2 and lbl.length() > maxch:
+					lbl = lbl.substr(0, maxch)
+				set_cursor_pos(o + r.position - origin + Vector2(3.0, 2.0) * s)
+				text_colored(Color(0.93, 0.95, 0.99, 1.0), lbl)
+		set_cursor_pos(o + vsz - origin)
+		separator()
+		var secs = _layout_confirm.seconds_left(OS.get_ticks_msec())
+		if MENU_STYLE.item(self, "Aceptar — se confirma en %d s" % max(0, secs)):
+			accepted = true
+		if MENU_STYLE.item(self, "Editar en Pantallas"):
+			edited = true
+		if MENU_STYLE.item(self, "Revertir"):
+			reverted = true
+		if is_key_pressed(KEY_ESCAPE):
+			accepted = true
+		end()
+	MENU_STYLE.end(self)
+	if not shown:
+		_layout_drag_reset()
+		accepted = true   # sin decisión explícita: default aceptar
+	if reverted:
+		_layout_confirm_revert()
+	elif edited:
+		_layout_confirm_accept()
+		_open_by_name("Configuración")
+	elif accepted:
+		_layout_confirm_accept()
+
+
+# Botón del gesto del hud: press agarra (hit por px) o cierra afuera (default
+# aceptar); release suelta e imanta. Eventos reales de _input, no polling.
+func _lc_event_button(pos, pressed, in_window):
+	if not pressed:
+		if _layout_drag_id != "":
+			_layout_drag_release()
+		return
+	if not in_window:
+		_layout_drag_reset()
+		_layout_confirm_accept()   # clic afuera: default aceptar
+		return
+	if layout_confirm_canvas.size.x <= 0.0:
+		return
+	var local = pos - layout_confirm_canvas.position
+	var live = settings_bridge.settings.get("screens", {}) if settings_bridge != null else {}
+	_layout_drag_begin(local, Rect2(Vector2.ZERO, layout_confirm_canvas.size), live)
+
+
+# Motion del gesto: el preview sigue al mouse por eventos (no io de ImGui,
+# que se congela cuando el mapa tiene mouse_focus).
+func _lc_event_motion(pos):
+	if layout_confirm_canvas.size.x <= 0.0:
+		return
+	var move = _layout_drag_id != ""
+	if move:
+		var now4 = OS.get_ticks_msec()
+		if now4 - _lc_dbg_at >= 200:
+			_lc_dbg_at = now4
+			_lc_dbg("motion drag=%s pos=%s" % [str(_layout_drag_id), str(pos)])
+		_layout_drag_follow(pos - layout_confirm_canvas.position, layout_confirm_canvas)
+		request_redraw()
+
+
+# Posición del popup-hud: cerca del puntero (offset abajo-derecha), recortado
+# al viewport. Elpopup no se arrastra; el acomodo es del contenido.
+func _layout_confirm_place():
+	var vp = get_viewport_rect().size
+	var ms = Vector2(get_mouse_pos())
+	return Vector2(
+		clamp(ms.x + 18.0, 8.0, max(8.0, vp.x - 330.0)),
+		clamp(ms.y + 18.0, 8.0, max(8.0, vp.y - 330.0)))
 func _wifi_psk_confirm():
 	var psk = String(wifi_psk_text)
 	if not HOTSPOT.valid_psk(psk):
@@ -9873,6 +10236,17 @@ func _add_dialog(id):
 # si no "Ventana <id>". Se crea la actividad, se le asigna el id y se abre
 # (una ventana nueva pasa al frente). El nombre debe ser unico en el anillo.
 func _process_unmanaged():
+	# Actividades dinamicas cuya ventana ya no vive: se limpian. El toplevel
+	# puede morir sin que se vea su `removed` (id resucitado en get_ids por un
+	# commit tardio de subsurfaces/popups) y sin este barrido quedan de
+	# fantasma en el anillo y en el strip del Frame.
+	for act in ACTIVITIES.duplicate():
+		if not act.get("dynamic", false):
+			continue
+		var name = str(act.get("name", ""))
+		var id = int(wayland_ids.get(name, -1))
+		if id >= 0 and not _id_alive(id):
+			_on_toplevel_removed(id)
 	for i in range(unmanaged.size() - 1, -1, -1):
 		var id = unmanaged[i]
 		if not _id_alive(id):
@@ -9902,6 +10276,10 @@ func _process_unmanaged():
 
 
 func _open_unmanaged_window(id):
+	# Sin ventana viva no se crea nada (id muerto en el strip del Frame: el
+	# clic o el ciclo teclado crearian una actividad para siempre vacia).
+	if not _id_alive(id):
+		return
 	var name = _unique_activity_name(_window_activity_name(id))
 	var cmd = compositor.get_app_id(id)
 	if cmd == "":
@@ -11091,6 +11469,23 @@ func _capture_remote_input_event(event):
 
 func _input(event):
 	last_activity = OS.get_ticks_msec()
+	# Revisión del layout (hud ##layout_confirm): el gesto es SUYO. Va primero
+	# porque el mapa de Grupo (Control con STOP) secuestra el press y el motion
+	# (mouse_focus) y el drag del popup muere sin mover nada. Eventos reales:
+	# ni polling ni hover de ítems de ImGui, que en esta vista no llegan.
+	if layout_confirm_open and _layout_confirm != null:
+		var lc_mb = event as InputEventMouseButton
+		var lc_mm = event as InputEventMouseMotion
+		if lc_mb != null or lc_mm != null:
+			var lc_pos = Vector2(event.position)
+			var lc_inside = layout_confirm_rect.has_point(lc_pos) or _layout_drag_id != ""
+			if lc_mb != null:
+				_lc_event_button(lc_pos, bool(lc_mb.pressed), lc_inside)
+			else:
+				_lc_event_motion(lc_pos)
+			if lc_inside:
+				get_tree().set_input_as_handled()
+				return
 	# Sobre una «Pantalla compartida» el evento va por el canal peer, no por Deskflow:
 	# no se le da la captura (si no, Deskflow se lo lleva y el canal no lo ve).
 	if not _pantalla_input_priority(event) and _capture_remote_input_event(event):

@@ -298,24 +298,34 @@ static func snap(screens, id, px, py, min_contact = -1.0):
 			moving = s
 	if moving == null:
 		return {"x": float(px), "y": float(py), "snapped": false, "target": "", "side": ""}
+	var probe = {"x": float(px), "y": float(py), "w": moving.w, "h": moving.h}
 	var best = null
-	for oi in range(clean.size()):
-		var o = clean[oi]
-		if o.id == moving.id:
-			continue
-		for si in range(SIDE_ORDER.size()):
-			var cand = _candidate(moving, o, SIDE_ORDER[si], float(px), float(py), mc)
-			if cand == null:
+	# Primera pasada: sólo las pantallas que el rect soltado SOLAPA. Soltar
+	# encima de una pantalla significa pegar contra ESA (y por su lado solapado);
+	# sin esto, el candidato más barato podía ser otra pantalla y la movida
+	# terminaba lejos ("se la llevaba para abajo"). Segunda pasada: todo.
+	for pass_i in range(2):
+		for oi in range(clean.size()):
+			var o = clean[oi]
+			if o.id == moving.id:
 				continue
-			if _overlaps_any(cand, clean, moving.id):
+			if pass_i == 0 and not overlaps(probe, o):
 				continue
-			var cost = abs(cand.x - float(px)) + abs(cand.y - float(py))
-			var better = best == null or cost < best.cost - 0.0001
-			if not better and best != null and abs(cost - best.cost) <= 0.0001:
-				better = oi < best.oi or (oi == best.oi and si < best.si)
-			if better:
-				best = {"x": cand.x, "y": cand.y, "cost": cost, "oi": oi, "si": si,
-					"target": o.id, "side": SIDE_ORDER[si]}
+			for si in range(SIDE_ORDER.size()):
+				var cand = _candidate(moving, o, SIDE_ORDER[si], float(px), float(py), mc)
+				if cand == null:
+					continue
+				if _overlaps_any(cand, clean, moving.id):
+					continue
+				var cost = abs(cand.x - float(px)) + abs(cand.y - float(py))
+				var better = best == null or cost < best.cost - 0.0001
+				if not better and best != null and abs(cost - best.cost) <= 0.0001:
+					better = oi < best.oi or (oi == best.oi and si < best.si)
+				if better:
+					best = {"x": cand.x, "y": cand.y, "cost": cost, "oi": oi, "si": si,
+						"target": o.id, "side": SIDE_ORDER[si]}
+		if best != null:
+			break
 	if best == null:
 		return {"x": float(px), "y": float(py), "snapped": false, "target": "", "side": ""}
 	return {"x": best.x, "y": best.y, "snapped": true, "target": best.target, "side": best.side}
@@ -466,6 +476,164 @@ static func _detach(lay, id):
 	moving.x = max_x + MIN_CONTACT
 	_store_screen(lay, moving)
 	return lay
+
+
+# --- Vista mini ----------------------------------------------------------------
+
+# Transform fija de la vista mini (mismo criterio que el canvas de Configuración
+# > Pantallas: preservar proporción y centrar). Mientras se arrastra una
+# pantalla el bbox cambia; con la transform CONGELADA en el inicio del arrastre
+# el resto no se reacomoda y va a parar al mouse. {} si no se puede mapear.
+static func mini_map_transform(layout, target):
+	var lay = normalize_layout(layout)
+	var items = all_screens(lay)
+	if items.empty() or target.size.x <= 0.0 or target.size.y <= 0.0:
+		return {}
+	var bbox = Rect2(items[0].x, items[0].y, items[0].w, items[0].h)
+	for i in range(1, items.size()):
+		bbox = bbox.merge(Rect2(items[i].x, items[i].y, items[i].w, items[i].h))
+	if bbox.size.x <= 0.0 or bbox.size.y <= 0.0:
+		return {}
+	var k = min(target.size.x / bbox.size.x, target.size.y / bbox.size.y)
+	return {"k": k,
+		"off": target.position + (target.size - bbox.size * k) * 0.5,
+		"bbox": bbox}
+
+
+# Plano (px local del rect destino) -> posición en mm.
+static func mm_pos(transform, local_pos):
+	if typeof(transform) != TYPE_DICTIONARY or transform.empty():
+		return Vector2.ZERO
+	return (Vector2(local_pos) - Vector2(transform.off)) / float(transform.k) \
+		+ Vector2(transform.bbox.position)
+
+
+# Pantalla en mm -> rect px dentro del rect destino de la vista mini.
+static func mm_rect(transform, screen):
+	if typeof(transform) != TYPE_DICTIONARY or transform.empty():
+		return Rect2()
+	var k = float(transform.k)
+	var off = Vector2(transform.off)
+	var bp = Vector2(transform.bbox.position)
+	return Rect2(
+		off.x + (float(screen.x) - bp.x) * k,
+		off.y + (float(screen.y) - bp.y) * k,
+		max(1.0, float(screen.w) * k), max(1.0, float(screen.h) * k))
+
+
+# Vista mini de la distribución (SPEC-sugar-group-2026-10, popup de Grupo): mapea
+# cada pantalla al rect destino preservando proporción y centrando. Devuelve
+# [{id, label, is_local, rect, moved}] con `rect` local al rect destino, en px,
+# orden local -> resto.
+static func mini_map(layout, target, moved_id = ""):
+	var t = mini_map_transform(layout, target)
+	if t.empty():
+		return []
+	var out = []
+	for s in all_screens(layout):
+		out.append({
+			"id": String(s.id),
+			"label": String(s.label),
+			"is_local": bool(s.local),
+			"rect": mm_rect(t, s),
+			"moved": String(s.id) == String(moved_id),
+		})
+	return out
+
+
+# Elegir la pantalla mini bajo `local_pos` (px del rect destino): la última
+# dibujada que la contenga (el orden local->resto dibuja los pares encima).
+# Sin hit: {}.
+static func mini_map_pick(marks, local_pos):
+	var p = Vector2(local_pos)
+	for i in range(marks.size() - 1, -1, -1):
+		if marks[i].rect.has_point(p):
+			return marks[i]
+	return {}
+
+
+# Igual que mini_map_pick pero con margen: la más cercana cuyo rect crecido
+# `margin` px contenga al punto (las pantallas quedan chicas en el canvas del
+# popup; un agarrón imperfecto tiene que pegar igual). Sin hit: {}.
+static func mini_map_pick_near(marks, local_pos, margin = 12.0):
+	var p = Vector2(local_pos)
+	var best = {}
+	var best_d = -1.0
+	for i in range(marks.size() - 1, -1, -1):
+		var r = marks[i].rect
+		if not r.grow(float(margin)).has_point(p):
+			continue
+		var cp = Vector2(
+			clamp(p.x, r.position.x, r.end.x),
+			clamp(p.y, r.position.y, r.end.y))
+		var d = p.distance_to(cp)
+		if best_d < 0.0 or d < best_d:
+			best_d = d
+			best = marks[i]
+	return best
+
+
+# Zona de borde de una pantalla mini para el resize con drag (popup): la última
+# dibujada que contenga al punto y cuyo borde quede a <= tol px. "edge" es
+# este/west/north/south o "" (interior; muevo). Espejo de mini_map_pick.
+static func mini_map_edge(marks, local_pos, tol_px = 6.0):
+	var p = Vector2(local_pos)
+	var tol = max(2.0, float(tol_px))
+	for i in range(marks.size() - 1, -1, -1):
+		var r = marks[i].rect
+		if not r.has_point(p):
+			continue
+		var ds = {
+			"east": abs(r.end.x - p.x),
+			"west": abs(p.x - r.position.x),
+			"south": abs(r.end.y - p.y),
+			"north": abs(p.y - r.position.y),
+		}
+		var edge = ""
+		var dist = tol
+		for k in ["east", "west", "south", "north"]:
+			if float(ds[k]) <= tol and (edge == "" or float(ds[k]) < dist):
+				edge = k
+				dist = float(ds[k])
+		if edge != "":
+			return {"id": String(marks[i].id), "edge": edge}
+	return {}
+
+
+# Redimensionar una pantalla arrastrando un borde, conservando el aspecto
+# (relación w/h de la pantalla al agarrar). Devuelve {x, y, w, h}; el borde del
+# lado contrario queda clavado y el centro del eje perpendicular no se mueve.
+# Límites: MIN/MAX del panel de dimensiones (50..3000 mm).
+static func resize_edge(screen, edge, mm, min_dim = 50.0, max_dim = 3000.0):
+	var w = max(float(min_dim), float(screen.w))
+	var h = max(float(min_dim), float(screen.h))
+	var w0 = w
+	var h0 = h
+	var ratio = w / max(1.0, h)
+	var x = float(screen.x)
+	var y = float(screen.y)
+	var d = String(edge)
+	if d == "east" or d == "west":
+		var nw = clamp(float(mm.x) - x, min_dim, max_dim) if d == "east" \
+			else clamp(x + w - float(mm.x), min_dim, max_dim)
+		var nh = nw / ratio
+		var cy = y + h * 0.5
+		w = nw
+		h = nh
+		y = cy - h * 0.5
+		if d == "west":
+			x = x + w0 - nw   # el borde este clavado
+	elif d == "north" or d == "south":
+		var nh2 = clamp(float(mm.y) - y, min_dim, max_dim) if d == "south" \
+			else clamp(y + h - float(mm.y), min_dim, max_dim)
+		var nw2 = nh2 * ratio
+		var cx = x + w * 0.5
+		h = nh2
+		w = nw2
+		x = cx - w * 0.5
+		if d == "north":
+			y = y + h0 - nh2  # el borde sur clavado
+	return {"x": x, "y": y, "w": w, "h": h}
 
 
 # --- Salida --------------------------------------------------------------------
