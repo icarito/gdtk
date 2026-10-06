@@ -114,6 +114,19 @@ interacción; GNOME no se midió en tiled/multi-monitor.
 
 ## Track A — sin KMS (por impacto)
 
+**Estado 2026-10-05**: A1 (commit path) y A2 (cursor) ya están mayormente cubiertos.
+- **A1** — el commit de una ventana ya usa `_present_commit` (present-only, P1): no rearma
+  ImGui salvo UI viva (`shell.gd:1579-1582`, `1632`). Lo que queda es interacción/hover, que
+  rearma por ser ImGui immediate-mode; damage fino dentro de ImGui es caro y de bajo retorno.
+- **A2** — el cursor **ya lo dibuja el host** (SDL → sway); `eis_cursor` sólo es fallback
+  X11/remoto y queda invisible en Wayland (`shell.gd:11298`, `_move_eis_cursor`). Bug corregido:
+  el reset por cambio de surface del mismo toplevel (`c1b594e`) hacía reaparecer el cursor en
+  video fullscreen (Firefox subsurface).
+- **Siguiente concreto**: **A3** — P4/scanout no engancha en el video fullscreen real de Firefox
+  (F0): diagnosticar si es subsurface de contenido o popup y decidir cobertura. Luego **A5**
+  (multi-output / `GDTK_SPAN`).
+
+
 - **A1 — Damage/partial.** No recomponer la UI entera por commit: daño por
   ventana/región y `_present_commit` extendido. Depende de A-experimento M1
   (`wl_surface_damage_buffer` en FRT). anchors: `shell.gd` `_present_commit`,
