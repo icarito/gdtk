@@ -66,6 +66,9 @@
 - `SPEC-sugar-journal-neighborhood.md`, `SPEC-sugar-neighborhood-host-actions.md`
   - Description: Dirección de producto Diario/Vecindario; hosts descubiertos y acciones compartidas (Wi-Fi ≠ presencia, host ≠ persona).
   - Read If: Vecindario, mDNS, acciones por host, Diario.
+- `SPEC-sugar-senal-wifi.md`
+  - Description: Vecindario: señal Wi-Fi que comparte Internet (perfil `Hotspot`, WPA, `ipv4.method shared`) y asociarse a APs con clave por popup ImGui; modelo puro `neighborhood_hotspot.gd`, estado en el worker y experimento STA+AP.
+  - Read If: Señal Wi-Fi del Vecindario, `neighborhood_hotspot.gd`, popup de clave, hotspot/AP.
 - `SPEC-screen-share-compass.md`
   - Description: Brújula de pantalla compartida: direcciones N/S/E/O, gvd (extender) vs Deskflow (controlar), receptor 1:1 sin escalar.
   - Read If: gvd, Deskflow, layout de pantallas entre hosts.
@@ -141,3 +144,6 @@
 - `render-parity-gnome.md`
   - Description: Plan para acercar el rendering de gdtk a GNOME/Mutter (meta: sesión diaria): F0 medición bloqueante, Track A sin KMS (damage, cursor del host, cobertura P4, multi-output) y Track B KMS real.
   - Read If: Se prioriza rendimiento/paridad de rendering o se decide entre exprimir el anidado y tomar DRM/KMS.
+- `HANDOFF-a1-interaccion.md`
+  - Description: Handoff de Track A1 (costo de interacción): diagnóstico del armado de ImGui, optimizaciones entregadas (_shared_snapshot, _text_w), hotspot pendiente (_draw_bar_blocks/_item_icon), cómo medir (probe, flags, RPC) y gotchas (reload tumba RPC ~20 s).
+  - Read If: Se retoma la optimización del CPU de la shell bajo interacción en sesión nueva.
