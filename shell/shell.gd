@@ -303,6 +303,12 @@ var _scanout_suspended_sent = false
 # Perfilado A1: tiempo de `_imgui_frame` (armado de la UI). Gate por flag archivo.
 var _imgui_us = 0
 var _imgui_n = 0
+var _p_setup_us = 0
+var _p_home_us = 0
+var _p_tiles_us = 0
+var _p_deco_us = 0
+var _p_frame_us = 0
+var _p_tail_us = 0
 
 # Diagnóstico de entrada (ver remote.gd state.input): cuentan eventos que llegan al shell.
 var input_motion_count = 0
@@ -1709,6 +1715,7 @@ func _imgui_frame():
 	if swipe_mode == "vchain" and swipe_live == SWIPE_SEG:
 		_swipe_scrub(swipe_k, OS.get_ticks_msec())
 	_tick_home_slide()
+	var _m1 = OS.get_ticks_usec()
 	# Fundido al cambiar de vista (ver frame.transition); 0 = ImGuiStyleVar_Alpha.
 	# Si el Frame no cargó (p. ej. frame.gd no compila), no hay transición que
 	# aplicar: se dibuja opaco en vez de reventar cada frame.
@@ -1735,6 +1742,7 @@ func _imgui_frame():
 				_draw_home_alpha(fade * home_a)
 	if fade < 1.0:
 		pop_style_var()
+	var _m2 = OS.get_ticks_usec()
 
 	# Tiling: con alguna ventana abierta y una actividad wayland activa se muestran todos
 	# los tiles a la vez; en Home o en una actividad de script, la vista se oculta. La
@@ -1765,11 +1773,13 @@ func _imgui_frame():
 	if tiles_ui != null:
 		tiles_ui.rect_size = _desktop_rect().size
 		tiles_ui.refresh()
+	var _m3 = OS.get_ticks_usec()
 	# Decoración por ventana (OpenStep): se redibuja con el tamaño de la vista.
 	for did in deco_nodes.keys():
 		var dnode = deco_nodes.get(did)
 		if dnode != null and is_instance_valid(dnode):
 			dnode.refresh(view.rect_size)
+	var _m4 = OS.get_ticks_usec()
 	if expose_bg != null:
 		expose_bg.rect_size = _screen_size()
 		expose_bg.visible = expose
@@ -1781,6 +1791,7 @@ func _imgui_frame():
 	if not expose:
 		_draw_window_menu()
 	_update_ghosts(OS.get_ticks_msec())
+	var _m5 = OS.get_ticks_usec()
 
 	_draw_input_requests()
 	# HUD de debug global (autoload DebugHud): Super+F6 lo abre en cualquier actividad (frame.gd).
@@ -1788,18 +1799,36 @@ func _imgui_frame():
 	# OSD de volumen/brillo, por encima de todo y efímero.
 	if system_osd != null:
 		system_osd.draw(self)
+	var _m6 = OS.get_ticks_usec()
 
 	frame_count += 1
 	_run_test_logic()
 	# Perfilado A1: costo de armar la UI ImGui (promedio cada 120 armados).
-	_imgui_us += OS.get_ticks_usec() - _it0
+	_imgui_us += _m6 - _it0
+	_p_setup_us += _m1 - _it0
+	_p_home_us += _m2 - _m1
+	_p_tiles_us += _m3 - _m2
+	_p_deco_us += _m4 - _m3
+	_p_frame_us += _m5 - _m4
+	_p_tail_us += _m6 - _m5
 	_imgui_n += 1
 	if _imgui_n >= 120:
 		if File.new().file_exists(OS.get_environment("HOME") + "/.gdtk-imgui-time") \
 				or OS.get_environment("GDTK_IMGUI_TIME") != "":
-			print("[IMGUI] avg=%.2fms n=%d" % [float(_imgui_us) / float(_imgui_n) / 1000.0, _imgui_n])
+			var nn = float(_imgui_n)
+			print("[IMGUI] avg=%.2fms n=%d | setup=%.2f home=%.2f tiles=%.2f deco=%.2f frame=%.2f tail=%.2f" % [
+				float(_imgui_us) / nn / 1000.0, _imgui_n,
+				float(_p_setup_us) / nn / 1000.0, float(_p_home_us) / nn / 1000.0,
+				float(_p_tiles_us) / nn / 1000.0, float(_p_deco_us) / nn / 1000.0,
+				float(_p_frame_us) / nn / 1000.0, float(_p_tail_us) / nn / 1000.0])
 		_imgui_us = 0
 		_imgui_n = 0
+		_p_setup_us = 0
+		_p_home_us = 0
+		_p_tiles_us = 0
+		_p_deco_us = 0
+		_p_frame_us = 0
+		_p_tail_us = 0
 
 
 # --- Pantallas: una fila horizontal; cada pantalla puede tener varias apps ---
