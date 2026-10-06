@@ -11,7 +11,7 @@ var ACTIVITIES = [
 	# hardcodear una sola ubicación.
 	# K18: el receptor usa un título fijo ("Pantalla compartida") y se trata como
 	# una ventana normal; `match` lo asocia por ese título aunque el comando sea `python3`.
-	{"name": "Pantalla", "match": ["Pantalla compartida"], "wayland": ["sh", "-c", "for c in \"$HOME/gdtk/tools/gvd/gvd.py\" \"$HOME/Proyectos/gvd/gvd.py\" \"$HOME/gvd/gvd.py\" \"$(command -v gvd 2>/dev/null)\"; do [ -n \"$c\" ] && [ -f \"$c\" ] && exec python3 \"$c\" recv --sink auto --cursor none; done; echo 'vecindario: gvd no encontrado (recv)' >&2"]},
+	{"name": "Pantalla", "match": ["Pantalla compartida"], "wayland": ["sh", "-c", "for c in \"$HOME/gdtk/tools/gvd/gvd.py\" \"$HOME/Proyectos/gvd/gvd.py\" \"$HOME/gvd/gvd.py\" \"$(command -v gvd 2>/dev/null)\"; do [ -n \"$c\" ] && [ -f \"$c\" ] && exec python3 \"$c\" recv --sink auto --cursor none --jitter-ms 120; done; echo 'vecindario: gvd no encontrado (recv)' >&2"]},
 	# 'Salir' ya no es una actividad del anillo: es una acción de sesión del ícono central
 	# del Hogar (ver _draw_home / popup ##home_session).
 ]
@@ -1576,6 +1576,7 @@ const OUT_MOD_PATH = "res://output_layout.gd"
 # no se entera de que cambió el contenido): se rearma el frame siguiente.
 func _process(_delta):
 	var now = OS.get_ticks_msec()
+	_poll_force_close(now)
 	_sync_capture_cursor()
 	# Asa de mover CSD: deslizamiento de entrada/salida (pide frames mientras anima).
 	_tick_csd_grip(now)
@@ -3919,6 +3920,31 @@ func _close_window_id(id):
 		# (gvd recv por sí solo reinicia su ventana, así que también se lo termina.)
 		if _pantalla_sender != "" and _pantalla_window_ids().has(id):
 			_pantalla_closed_here()
+		compositor.close(id)
+		# Si el cliente no responde (ventana residual), forzar en ~700 ms.
+		_force_close_at[int(id)] = OS.get_ticks_msec() + 700
+	request_redraw()
+
+
+# Avanza los cierres que quedaron pendientes: si el id sigue vivo, se saca a la
+# fuerza (cliente muerto que nunca procesó el close).
+func _poll_force_close(now):
+	for id in _force_close_at.keys():
+		if now < int(_force_close_at[id]):
+			continue
+		_force_close_at.erase(id)
+		if _id_alive(int(id)):
+			_force_close_window_id(int(id))
+
+
+func _force_close_window_id(id):
+	if id < 0 or not _id_alive(id):
+		return
+	if _pantalla_sender != "" and _pantalla_window_ids().has(id):
+		_pantalla_closed_here()
+	if compositor.has_method("forget"):
+		compositor.forget(id)
+	else:
 		compositor.close(id)
 	request_redraw()
 
@@ -7539,9 +7565,10 @@ func _pantalla_window_ids():
 		if not _id_alive(id):
 			continue
 		# gvd recv recrea su ventana al cambiar el tamaño: vuelve como actividad dinámica
-		# con el título («Pantalla compartida»), no como «Pantalla».
-		if String(name) == "Pantalla" or String(name) == "Pantalla compartida" \
-				or _is_pantalla_window(id):
+		# con el título («Pantalla compartida»), no como «Pantalla». Si quedara un
+		# receptor viejo, la nueva ventana se llama «Pantalla compartida 2», etc.; el
+		# prefijo cubre ambos para que el canal de input encuentre la ventana viva.
+		if String(name).begins_with("Pantalla") or _is_pantalla_window(id):
 			out.append(id)
 	for id in compositor.get_ids():
 		if compositor.get_parent_id(id) > 0 or out.has(id):
@@ -7554,6 +7581,31 @@ func _pantalla_window_ids():
 func _is_pantalla_window(id):
 	return String(compositor.get_title(id)) == "Pantalla compartida" \
 		or String(compositor.get_app_id(id)) == "gvd.SharedScreen"
+
+
+# ¿El evento debe ir al canal de la «Pantalla compartida» en vez de a Deskflow?
+# Teclas: el tile enfocado; mouse: bajo el puntero. false si no hay receptor activo.
+func _pantalla_input_priority(event):
+	if _pantalla_sender == "" or _pantalla_window_ids().empty():
+		return false
+	var ids = _pantalla_window_ids()
+	if event is InputEventMouse:
+		return ids.has(int(_view_hit_test(event.position).get("id", -1)))
+	if event is InputEventKey:
+		var id = _current_wayland_id()
+		if id < 0:
+			id = focused_tile
+		return ids.has(id)
+	return false
+
+
+# Pide a RemoteInput que el puntero entrante pase por el pipeline Godot (en vez del
+# wlr_virtual_pointer del host) mientras hay una pantalla compartida; así el shell lo
+# puede interceptar sobre la ventana y reenviarlo. has_method conserva compatibilidad
+# con binarios viejos (sin el toggle).
+func _set_pointer_to_godot(on):
+	if Host.remote_input != null and Host.remote_input.has_method("set_pointer_to_godot"):
+		Host.remote_input.set_pointer_to_godot(bool(on))
 
 
 func _kill_pantalla_receivers():
@@ -7814,6 +7866,7 @@ func _pantalla_closed_here():
 	var hid = _pantalla_sender
 	_window_input_reset()
 	_pantalla_sender = ""
+	_set_pointer_to_godot(false)
 	var ep = _peer_endpoint_for(hid)
 	if bool(ep.get("ok", false)):
 		_peer_send_async([{"id": hid, "host": String(ep.peer), "port": int(ep.port),
@@ -7823,6 +7876,11 @@ func _pantalla_closed_here():
 
 
 func _peer_gvd_open(port, _from, hid = "", video = Vector2()):
+	# Un solo receptor de pantalla compartida: cerrar el anterior antes de abrir el
+	# nuevo. Si no, cada compartida deja un `gvd recv` vivo y una ventana extra
+	# («Pantalla compartida 2», …); el input termina apuntando a la ventana vieja.
+	if not _pantalla_window_ids().empty() or _pantalla_sender != "":
+		_close_pantalla_window()
 	_pantalla_sender = String(hid)
 	_pantalla_meta = {}
 	_pantalla_icon = null
@@ -7841,6 +7899,7 @@ func _peer_gvd_open(port, _from, hid = "", video = Vector2()):
 func _peer_gvd_stop():
 	_window_input_reset()
 	_pantalla_sender = ""   # lo cortó el emisor: no hay que avisarle
+	_set_pointer_to_godot(false)
 	_close_pantalla_window()
 	return true
 
@@ -8247,6 +8306,8 @@ var _window_input_buttons = {}
 var _window_input_keys = {}
 var _window_input_last_send = 0
 var _window_input_last_keepalive = 0
+# Cierres a forzar si el cliente no responde (ventana residual): id -> ticks límite.
+var _force_close_at = {}
 # Stream persistente cliente→emisor (un solo lote en vuelo, igual que antes). El
 # peer vive entre lotes y se cierra por idle o al caer; lo usa sólo el Thread worker.
 var _window_input_stream_peer = null
@@ -10120,6 +10181,11 @@ func _on_view_input(event):
 	if client_pointer_locked:
 		# El lock del cliente ya consume el mouse en _input (CaptureInput).
 		return
+	# Sobre una «Pantalla compartida» el mouse va directo por el canal peer: tiene
+	# prioridad sobre Deskflow y sobre el resto de la vista.
+	if _pantalla_input_priority(event) and _window_input_pointer(event):
+		get_tree().set_input_as_handled()
+		return
 	if _capture_remote_input_event(event):
 		return
 	# K13: en modo flotante, la barra de título y los botones de la ventana se
@@ -11018,7 +11084,9 @@ func _capture_remote_input_event(event):
 
 func _input(event):
 	last_activity = OS.get_ticks_msec()
-	if _capture_remote_input_event(event):
+	# Sobre una «Pantalla compartida» el evento va por el canal peer, no por Deskflow:
+	# no se le da la captura (si no, Deskflow se lo lleva y el canal no lo ve).
+	if not _pantalla_input_priority(event) and _capture_remote_input_event(event):
 		return
 	if event is InputEventPanGesture and event.device >= SWIPE_DEVICE:
 		_on_swipe(event)
@@ -11080,6 +11148,13 @@ func _unhandled_input(event):
 	var id = _current_wayland_id()
 	if id < 0:
 		id = last_key_target  # última ventana que recibió teclas (exposé/Home incluidos)
+	# La «Pantalla compartida» es una actividad dinámica que puede no tener el flag
+	# "wayland": _current_wayland_id()/last_key_target quedan en -1 y la tecla se
+	# perdía en el return de abajo, antes de llegar al canal de input. Si el tile
+	# enfocado es una pantalla compartida, se usa como destino.
+	if id < 0 and _pantalla_sender != "" and focused_tile >= 0 \
+			and _pantalla_window_ids().has(focused_tile):
+		id = focused_tile
 	if id < 0:
 		return
 	if _pantalla_sender != "" and _pantalla_window_ids().has(id):

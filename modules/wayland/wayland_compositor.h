@@ -127,6 +127,8 @@ public:
 	void set_popup_bounds(int p_id, const Rect2 &p_box);
 	void set_fullscreen(int p_id, bool p_fullscreen);
 	void close(int p_id);
+	// Saca el toplevel a la fuerza (ventana residual sin cliente que responda).
+	void forget(int p_id);
 	void focus(int p_id, bool p_raise = true);
 	void pointer_motion(int p_id, const Vector2 &p_pos);
 	void pointer_motion_relative(const Vector2 &p_delta);

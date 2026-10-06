@@ -48,7 +48,7 @@ Vector2 RemoteInput::_pointer() {
 void RemoteInput::_cb_motion(void *p_ud, double p_x, double p_y, int p_absolute) {
 	RemoteInput *self = static_cast<RemoteInput *>(p_ud);
 	Size2 size = OS::get_singleton()->get_window_size();
-	if (remote_pointer_ready(self->host)) {
+	if (remote_pointer_ready(self->host) && !self->pointer_to_godot) {
 		// El host mueve su cursor nativo y entrega el evento al shell como local;
 		// no se inyecta nada (y no hay cursor dibujado: es el mismo del host).
 		Vector2 pos = self->_pointer();
@@ -79,7 +79,7 @@ void RemoteInput::_cb_motion(void *p_ud, double p_x, double p_y, int p_absolute)
 
 void RemoteInput::_cb_button(void *p_ud, uint32_t p_button, int p_pressed) {
 	RemoteInput *self = static_cast<RemoteInput *>(p_ud);
-	if (remote_pointer_ready(self->host)) {
+	if (remote_pointer_ready(self->host) && !self->pointer_to_godot) {
 		remote_pointer_button(self->host, p_button, p_pressed);
 		return;
 	}
@@ -138,7 +138,7 @@ void RemoteInput::_cb_scroll(void *p_ud, double p_dx, double p_dy, int p_discret
 	int sx = (int)self->scroll_acc.x;
 	int sy = (int)self->scroll_acc.y;
 	self->scroll_acc -= Vector2(sx, sy);
-	if (remote_pointer_ready(self->host)) {
+	if (remote_pointer_ready(self->host) && !self->pointer_to_godot) {
 		if (sx != 0 || sy != 0) {
 			remote_pointer_scroll(self->host, sx, sy);
 		}
@@ -243,6 +243,7 @@ void RemoteInput::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_capturing"), &RemoteInput::is_capturing);
 	ClassDB::bind_method(D_METHOD("release_capture"), &RemoteInput::release_capture);
 	ClassDB::bind_method(D_METHOD("set_capture_ranges", "ranges"), &RemoteInput::set_capture_ranges);
+	ClassDB::bind_method(D_METHOD("set_pointer_to_godot", "enabled"), &RemoteInput::set_pointer_to_godot);
 	ClassDB::bind_method(D_METHOD("capture_motion", "position", "relative", "time"), &RemoteInput::capture_motion);
 	ClassDB::bind_method(D_METHOD("capture_button", "button", "pressed", "time"), &RemoteInput::capture_button);
 	ClassDB::bind_method(D_METHOD("capture_scroll", "x", "y", "time"), &RemoteInput::capture_scroll);
@@ -360,6 +361,10 @@ bool RemoteInput::set_capture_ranges(const PoolRealArray &p_ranges) {
 	return true;
 }
 
+void RemoteInput::set_pointer_to_godot(bool p_enabled) {
+	pointer_to_godot = p_enabled;
+}
+
 bool RemoteInput::capture_motion(const Vector2 &p_pos, const Vector2 &p_relative, uint64_t p_time) {
 	return server != NULL && eis_server_capture_motion(server, p_pos.x, p_pos.y, p_relative.x, p_relative.y, p_time);
 }
@@ -389,6 +394,7 @@ bool RemoteInput::capture_key(uint32_t p_scancode, bool p_pressed, uint64_t p_ti
 RemoteInput::RemoteInput() {
 	server = NULL;
 	host = NULL;
+	pointer_to_godot = false;
 	xkb = NULL;
 	keymap = NULL;
 	state = NULL;

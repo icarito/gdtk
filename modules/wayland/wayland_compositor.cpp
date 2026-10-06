@@ -692,6 +692,7 @@ void WaylandCompositor::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_popup_bounds", "id", "box"), &WaylandCompositor::set_popup_bounds);
 	ClassDB::bind_method(D_METHOD("set_fullscreen", "id", "fullscreen"), &WaylandCompositor::set_fullscreen);
 	ClassDB::bind_method(D_METHOD("close", "id"), &WaylandCompositor::close);
+	ClassDB::bind_method(D_METHOD("forget", "id"), &WaylandCompositor::forget);
 	ClassDB::bind_method(D_METHOD("focus", "id", "raise"), &WaylandCompositor::focus, DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("pointer_motion", "id", "pos"), &WaylandCompositor::pointer_motion);
 	ClassDB::bind_method(D_METHOD("pointer_motion_relative", "delta"), &WaylandCompositor::pointer_motion_relative);
@@ -1094,6 +1095,13 @@ void WaylandCompositor::set_fullscreen(int p_id, bool p_fullscreen) {
 void WaylandCompositor::close(int p_id) {
 	if (server != NULL) {
 		wl_server_close(server, p_id);
+	}
+}
+
+// Cierre forzado de una ventana residual (cliente que ya no responde al close).
+void WaylandCompositor::forget(int p_id) {
+	if (server != NULL) {
+		wl_server_forget(server, p_id);
 	}
 }
 

@@ -3061,6 +3061,37 @@ void wl_server_close(wl_server *s, int id) {
 	}
 }
 
+// Cierre forzado: saca el toplevel del compositor aunque el cliente no responda al
+// close (ventana residual de un cliente que murio sin cerrar su surface). Se
+// desenganchan los listeners y se libera el registro; wlroots deja de dibujarlo. El
+// cliente, si siguiera vivo, conserva su surface pero el shell ya no lo muestra.
+void wl_server_forget(wl_server *s, int id) {
+	if (s == NULL) {
+		return;
+	}
+	toplevel *t = toplevel_find(s, id);
+	if (t == NULL) {
+		return;
+	}
+	toplevel_unlink(t);
+	if (t->xs != NULL) {
+		xsurface_orphan(s, t->xs->surface);
+	}
+	if (s->pointer_id == t->id) {
+		s->pointer_id = 0;
+		s->pointer_surface = NULL;
+	}
+	if (s->x_focus_id == t->id) {
+		s->x_focus_id = 0;
+	}
+	int tid = t->id;
+	bool added = t->added;
+	free(t);
+	if (added && s->cb.removed != NULL) {
+		s->cb.removed(s->cb.ud, tid);
+	}
+}
+
 void wl_server_focus(wl_server *s, int id, int raise) {
 	if (s == NULL) {
 		return;

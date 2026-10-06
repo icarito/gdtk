@@ -33,6 +33,10 @@ class RemoteInput : public Node {
 	// (fin de vuelta), y varios eventos EIS llegan en la misma vuelta.
 	Vector2 pointer, seen;
 	int buttons;
+	// Si true, el puntero entrante se inyecta al pipeline Godot aunque el compositor
+	// exponga wlr_virtual_pointer. Lo pide el shell mientras hay una «Pantalla
+	// compartida» activa: necesita ver el mouse para reenviarlo a la ventana.
+	bool pointer_to_godot;
 
 	static void _cb_motion(void *p_ud, double p_x, double p_y, int p_absolute);
 	static void _cb_button(void *p_ud, uint32_t p_button, int p_pressed);
@@ -67,6 +71,9 @@ public:
 	// [left_lo,left_hi, right_lo,right_hi, top_lo,top_hi, bottom_lo,bottom_hi].
 	// Debe venir del layout de Deskflow (down(0,67) etc.); si no, NULL/[] = 0..100.
 	bool set_capture_ranges(const PoolRealArray &p_ranges);
+	// Puntero entrante al pipeline Godot (en vez del wlr_virtual_pointer del host):
+	// necesario para que el shell pueda interceptarlo sobre una ventana compartida.
+	void set_pointer_to_godot(bool p_enabled);
 	// Eventos locales para el portal InputCapture. DEVICE_ID se filtra en GDScript.
 	bool capture_motion(const Vector2 &p_pos, const Vector2 &p_relative, uint64_t p_time);
 	bool capture_button(int p_button, bool p_pressed, uint64_t p_time);

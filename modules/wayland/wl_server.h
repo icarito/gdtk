@@ -147,6 +147,8 @@ int wl_server_outputs(wl_server *s, int *ids, int max);
 // Devuelve 1 y llena `out` si `output_id` existe; 0 si no.
 int wl_server_output_get(wl_server *s, int output_id, wl_server_output_info *out);
 void wl_server_close(wl_server *s, int id);
+// Cierre forzado (ventana residual de un cliente que murio sin cerrar su surface).
+void wl_server_forget(wl_server *s, int id);
 // Enfoca el teclado. `raise` controla por separado si una ventana XWayland se
 // reordena arriba; el foco lazy del shell usa 0 para conservar el z-order.
 void wl_server_focus(wl_server *s, int id, int raise);

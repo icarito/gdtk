@@ -336,6 +336,10 @@ func _handle_line(conn, line):
 		"close_window":
 			shell._close_window_id(int(params.get("id", -1)))
 			_reply(conn, id, true)
+		"force_close_window":
+			# Cierre forzado: saca una ventana residual aunque el cliente no responda.
+			shell._force_close_window_id(int(params.get("id", -1)))
+			_reply(conn, id, true)
 		"screenshot":
 			_reply(conn, id, _screenshot(params))
 		"peers":
@@ -399,6 +403,7 @@ func _state():
 		windows.append({
 			"id": window_id,
 			"title": shell.compositor.get_title(window_id),
+			"app_id": shell.compositor.get_app_id(window_id),
 			"activity": activity,
 			"parent": shell.compositor.get_parent_id(window_id),
 			"mode": shell.hybrid.mode(window_id),
