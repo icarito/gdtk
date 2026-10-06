@@ -130,6 +130,12 @@ interacción; GNOME no se midió en tiled/multi-monitor.
   fullscreen ya compone a ~5% de un core. Se deja el `scanout_reason` como diagnóstico permanente
   y se prioriza A5.
 - Luego **A5** (multi-output / `GDTK_SPAN`) — requiere validación con 2 monitores reales.
+- **A1 (perfilado de interacción, 2026-10-05)**: con 2 tiled, inyectando `move` por RPC a 60 Hz
+  la shell pasa de **11%→25%** de un core (otra corrida 14%→45%), con `render` plano (~0,5–1,2 ms)
+  → el costo está en el **bucle por evento/redraw**, no en el dibujo. El loop corre a **130–570 fps**
+  pese a `low_processor_mode` y a `Engine.target_fps` (probado, no capa en FRT) → **bug de pacing
+  del loop** en el path FRT/nested (revisar `OS::add_frame_delay`/`dynamic_delay`/`delay_usec`).
+  Próximo paso de motor: instrumentar el pacing y capar a la tasa objetivo.
 
 
 - **A1 — Damage/partial.** No recomponer la UI entera por commit: daño por
