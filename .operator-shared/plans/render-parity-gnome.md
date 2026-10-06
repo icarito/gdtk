@@ -140,9 +140,11 @@ interacción; GNOME no se midió en tiled/multi-monitor.
     sí está paeado (~60).
   - Bajar `input_hz` 60→30 dio poco (48→40 builds/s) porque `requested_redraw` manda igual.
   - `input_hz`/`update_hz` **sí** se consumen (en el módulo C++), no eran variables muertas.
-  Próximo (motor, sin KMS): (a) **abaratir el build** de `_imgui_frame` (7,6 ms es mucho), y/o
-  (b) no marcar `requested_redraw` por hover-motion (que el cursor ya lo dibuja el host).
-  Medir en entorno **quieto/aislado** (en vivo dio mucha varianza).
+  - **Desglose por sección** (medido, tiled): `frame.draw()` = **6,6 ms (88%)**, `tiles` 0,7,
+    `setup` 0,1, `home` 0,03, `tail` 0,02, `deco` 0,002. En **fullscreen** `frame.draw` early-returnea
+    (`frame.gd:4117`, no hay Frame) → por eso el video fullscreen era barato.
+  Próximo (sin KMS): **abaratir `frame.draw`** (`frame.gd:4112`, 4.576 líneas — perfilado interno de
+  applets/layout) y/o no marcar `requested_redraw` por hover-motion. Medir en entorno quieto/aislado.
 
 
 - **A1 — Damage/partial.** No recomponer la UI entera por commit: daño por
