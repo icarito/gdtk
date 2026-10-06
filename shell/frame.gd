@@ -2315,6 +2315,8 @@ func switch_to(item, keep_frame := false):
 		shell._open_by_name(item.name)
 	else:
 		# Toplevel que todavía no tiene actividad dinámica: se la crea ya.
+		if item.id >= 0 and not shell._id_alive(item.id):
+			return
 		shell.unmanaged.erase(item.id)
 		shell._open_unmanaged_window(item.id)
 

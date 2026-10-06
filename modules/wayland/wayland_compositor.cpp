@@ -465,12 +465,7 @@ void WaylandCompositor::_on_removed(int p_id) {
 }
 
 Map<int, WaylandCompositor::Toplevel>::Element *WaylandCompositor::_toplevel_entry(int p_id) {
-	Map<int, Toplevel>::Element *e = toplevels.find(p_id);
-	if (e == NULL) {
-		Toplevel t;
-		e = toplevels.insert(p_id, t);
-	}
-	return e;
+	return toplevels.find(p_id);
 }
 
 void WaylandCompositor::_on_frame(int p_id, uint64_t p_key, const unsigned char *p_data, int p_w, int p_h, uint32_t p_format, int p_stride) {
@@ -516,6 +511,9 @@ void WaylandCompositor::_on_frame(int p_id, uint64_t p_key, const unsigned char 
 	Ref<Image> img = memnew(Image(p_w, p_h, false, Image::FORMAT_RGBA8, data));
 
 	Map<int, Toplevel>::Element *e = _toplevel_entry(p_id);
+	if (e == NULL) {
+		return; // toplevel removido: no resucitar su id
+	}
 	Variant vkey((int64_t)p_key);
 	Ref<ImageTexture> tex = e->get().textures[vkey];
 	if (tex.is_null() || tex->get_width() != p_w || tex->get_height() != p_h) {
@@ -535,6 +533,9 @@ void WaylandCompositor::_on_dmabuf(int p_id, uint64_t p_key, int p_w, int p_h) {
 	}
 
 	Map<int, Toplevel>::Element *e = _toplevel_entry(p_id);
+	if (e == NULL) {
+		return; // toplevel removido: no resucitar su id
+	}
 	Variant vkey((int64_t)p_key);
 	Ref<ImageTexture> tex = e->get().textures[vkey];
 	if (tex.is_null() || tex->get_width() != p_w || tex->get_height() != p_h) {
@@ -662,10 +663,10 @@ void WaylandCompositor::_on_cursor_image(const unsigned char *p_data, int p_w, i
 }
 
 void WaylandCompositor::_on_title(int p_id, const char *p_title) {
+	// Sin re-insertar: un title tardio no debe resucitar un toplevel removido.
 	Map<int, Toplevel>::Element *e = toplevels.find(p_id);
 	if (e == NULL) {
-		Toplevel t;
-		e = toplevels.insert(p_id, t);
+		return;
 	}
 	e->get().title = String::utf8(p_title != NULL ? p_title : "");
 }

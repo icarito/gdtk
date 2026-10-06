@@ -1500,6 +1500,20 @@ static void handle_toplevel_destroy(struct wl_listener *listener, void *data) {
 		xsurface_orphan(s, t->xs->surface);
 	}
 
+	// Quedar sin id: subsurfaces/popups del arbol pueden seguir commiteando
+	// (el toplevel murio, no el cliente). Sin esto su proximo commit/import
+	// reintroduce el id muerto en get_ids y el shell lo recicla (ventanas
+	// fantasma). Primero el scanout desta apagar con el id todavía puesto
+	// (gdtk_scanout_hide busca por id); recien ahi quedar sin id: con
+	// st->id <= 0 el import no avisa nada.
+	surface_state *st;
+	wl_list_for_each(st, &s->surfaces, link) {
+		if (st->id == t->id) {
+			scanout_off(st);
+			st->id = 0;
+		}
+	}
+
 	if (s->pointer_id == t->id) {
 		s->pointer_id = 0;
 		s->pointer_surface = NULL;
@@ -2751,7 +2765,12 @@ void wl_server_frame_done(wl_server *s) {
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	toplevel *t;
 	wl_list_for_each(t, &s->toplevels, link) {
-		if (t->mapped && (t->visible || !s->throttle)) {
+		// Toda ventana mapeada recibe frame_done, visible o no. Oculta, el cliente
+		// queda con frame requests sin respuesta: al volver a verse GTK3 (Firefox)
+		// carga con configures pendientes y el mapeo de subsurfaces sale roto
+		// ("parent is not mapped" y crasheos UAF en su camino EGL de video). El
+		// costo es bajo: una app quieta no pide frames.
+		if (t->mapped) {
 			// Todo el árbol (subsurfaces y popups): un frame callback sin respuesta
 			// en cualquiera de ellos congela el frame clock de GTK4.
 			if (t->tl != NULL) {
