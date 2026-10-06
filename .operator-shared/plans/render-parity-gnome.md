@@ -122,9 +122,14 @@ interacción; GNOME no se midió en tiled/multi-monitor.
   X11/remoto y queda invisible en Wayland (`shell.gd:11298`, `_move_eis_cursor`). Bug corregido:
   el reset por cambio de surface del mismo toplevel (`c1b594e`) hacía reaparecer el cursor en
   video fullscreen (Firefox subsurface).
-- **Siguiente concreto**: **A3** — P4/scanout no engancha en el video fullscreen real de Firefox
-  (F0): diagnosticar si es subsurface de contenido o popup y decidir cobertura. Luego **A5**
-  (multi-output / `GDTK_SPAN`).
+- **A3 — DIFERIDO (bajo retorno)**. Diagnóstico con `state.compositor.scanout_reason` (root-only):
+  con el video fullscreen de Firefox el motivo queda **"sin commit del root (aun)"**, o sea el
+  toplevel **nunca commitea la surface raíz con dmabuf** (el video va por **subsurface**). P4 sólo
+  evalúa candidato en el commit del root ⇒ no puede enganchar. Soportarlo requiere scanout de
+  **subsurface con contenido** (posición/stacking/daño) — complejo y riesgoso, y con GLES3 el
+  fullscreen ya compone a ~5% de un core. Se deja el `scanout_reason` como diagnóstico permanente
+  y se prioriza A5.
+- Luego **A5** (multi-output / `GDTK_SPAN`) — requiere validación con 2 monitores reales.
 
 
 - **A1 — Damage/partial.** No recomponer la UI entera por commit: daño por
