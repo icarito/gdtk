@@ -4125,6 +4125,9 @@ var _f_shared = 0
 var _f_top = 0
 var _f_app = 0
 var _f_tail = 0
+var _f_tiles_top = 0
+var _f_bb = 0
+var _f_wd = 0
 # A1: cache de _shared_snapshot (2,9 ms por build). Se recomputa por versión del
 # Vecindario o cada 500 ms; el indicador de pantallas no necesita más frescura.
 var _shared_cache = {}
@@ -4133,6 +4136,12 @@ var _shared_cache_ms = 0
 
 func draw(ui):
 	var _f0 = OS.get_ticks_usec()
+	var _tt0 = 0
+	var _tt1 = 0
+	var _tb0 = 0
+	var _tb1 = 0
+	var _tw0 = 0
+	var _tw1 = 0
 	# Otra vez tras dibujar la vista: lo que cambió en este frame (un clic que abre
 	# una app, la primera textura) arranca el fundido ya, sin un frame a opacidad plena.
 	transition()
@@ -4258,6 +4267,7 @@ func draw(ui):
 			# bloques de contenido arrancan en la celda 4 (`bar_base_origin`).
 			for k in [1.0, 2.0, 3.0]:
 				place_rects.append(Rect2(Vector2(margin + k * pitch, off_top + y), Vector2(side, side)))
+			_tt0 = OS.get_ticks_usec()
 			if _draw_neighborhood_tile(ui, Vector2(margin + pitch, y), side):
 				set_visible(false)
 				shell._go_neighborhood()
@@ -4267,7 +4277,10 @@ func draw(ui):
 			if _draw_home_tile(ui, Vector2(margin + 3.0 * pitch, y), side):
 				set_visible(false)
 				shell._go_home()
+			_tt1 = OS.get_ticks_usec()
+			_tb0 = _tt1
 			_draw_bar_blocks(ui, "top", bar_base_origin("top", grid), y, grid, mouse)
+			_tb1 = OS.get_ticks_usec()
 			applets_drawn = true
 
 			var items = running()
@@ -4283,8 +4296,10 @@ func draw(ui):
 			# Las teselas de ventana se dibujan en el tramo del DockApp "w:windows"
 			# SIEMPRE que su token viva en esta barra (no sólo si está arriba).
 			if bar_order["top"].has(WINDOW_TOKEN) and not items.empty():
+				_tw0 = OS.get_ticks_usec()
 				_draw_windows(ui, "top", side, y, off_top, mouse)
 				_draw_window_grip(ui, "top", mouse)
+				_tw1 = OS.get_ticks_usec()
 			# Durante el drag viaja la tesela completa, no un label/tooltip separado.
 			_draw_window_drag_tile(ui, items, side)
 			# Esquina derecha reservada para el pin chico (última celda de la grilla).
@@ -4333,19 +4348,26 @@ func draw(ui):
 	_f_top += _f2 - _f1
 	_f_app += _f3 - _f2
 	_f_tail += _f4 - _f3
+	_f_tiles_top += _tt1 - _tt0
+	_f_bb += _tb1 - _tb0
+	_f_wd += _tw1 - _tw0
 	_f_n += 1
 	if _f_n >= 120:
 		if File.new().file_exists(OS.get_environment("HOME") + "/.gdtk-imgui-time"):
 			var fn = float(_f_n)
-			print("[FRAME] avg=%.2fms n=%d | shared=%.2f top=%.2f applets=%.2f tail=%.2f" % [
+			print("[FRAME] avg=%.2fms n=%d | shared=%.2f top=%.2f applets=%.2f tail=%.2f || tilesTop=%.2f bb=%.2f win=%.2f" % [
 				float(_f_us) / fn / 1000.0, _f_n, float(_f_shared) / fn / 1000.0,
-				float(_f_top) / fn / 1000.0, float(_f_app) / fn / 1000.0, float(_f_tail) / fn / 1000.0])
+				float(_f_top) / fn / 1000.0, float(_f_app) / fn / 1000.0, float(_f_tail) / fn / 1000.0,
+				float(_f_tiles_top) / fn / 1000.0, float(_f_bb) / fn / 1000.0, float(_f_wd) / fn / 1000.0])
 		_f_us = 0
 		_f_n = 0
 		_f_shared = 0
 		_f_top = 0
 		_f_app = 0
 		_f_tail = 0
+		_f_tiles_top = 0
+		_f_bb = 0
+		_f_wd = 0
 
 
 # Botón de pin de una barra (K19): control redondo, chico y sutil en la esquina
