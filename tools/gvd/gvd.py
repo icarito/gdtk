@@ -49,7 +49,11 @@ DEFAULT_PORT = 5600
 DEFAULT_SIZE = "1280x800"
 DEFAULT_FPS = 30
 DEFAULT_BITRATE = 8000
-DEFAULT_JITTER_MS = 30
+# Buffer RTP por defecto: holgado para Wi-Fi (jitter 2.4G medido hasta cientos de ms).
+# Con 30 ms casi todo paquete llegaba tarde y `drop-on-latency` los tiraba (0 frames);
+# 120 ms absorbe la ráfaga sin volver la latencia inaceptable. Ajustable con
+# `--jitter-ms` (0 = sin reordenamiento, LAN estable).
+DEFAULT_JITTER_MS = 120
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
@@ -941,7 +945,7 @@ def recv_pipeline(args, sink, stats):
         e = [GST, "-q", "udpsrc", f"port={args.port}", "buffer-size=4194304",
              f"caps={rtp_caps}", "!",
              "rtpjitterbuffer", f"latency={args.jitter_ms}",
-             "drop-on-latency=true", "do-lost=true", "!",
+             "drop-on-latency=true", "do-lost=true", "do-retransmission=false", "!",
              # No RTCP feedback channel: recovery relies on periodic sender IDRs.
              "rtph264depay", "wait-for-keyframe=true", "!",
              "video/x-h264,alignment=au", "!", "h264parse", "!",
@@ -1772,7 +1776,7 @@ def build_parser():
                    choices=["auto", "ffplay", "gl", "xv", "wayland"])
     r.add_argument("--stats", action="store_true")
     r.add_argument("--jitter-ms", type=int, default=DEFAULT_JITTER_MS,
-                   help="margen de reordenamiento RTP en ms (default: 30; 0 para LAN estable)")
+                   help="margen de reordenamiento RTP en ms (default: 120; 0 para LAN estable)")
     r.add_argument("--max-seconds", type=float, default=0,
                    help="detener tras N segundos (0 = infinito)")
     r.add_argument("--cursor", default="sway", choices=["none", "sway"],

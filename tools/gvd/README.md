@@ -8,7 +8,7 @@ gdtk / Vecindario, pero no depende de él.
 `gvd.py` es un solo archivo (Python 3 + PyGObject/Gio + `gst-launch-1.0`, sin pip ni root) con tres subcomandos:
 
 - **`send`** (host con GNOME Wayland): pide a Mutter un monitor virtual, lo coloca en el layout, captura su stream de PipeWire, lo codifica y lo manda.
-- **`recv`** (Linux con GStreamer; ffplay opcional para TCP): recibe, decodifica y muestra. En UDP reordena RTP con un margen de 30 ms.
+- **`recv`** (Linux con GStreamer; ffplay opcional para TCP): recibe, decodifica y muestra. En UDP reordena RTP con un margen de 120 ms (tolerante a Wi-Fi).
 - **`caps --json`**: reporta capacidades locales (`schema=gvd.caps.v1`) para que un integrador decida sin abrir streams.
 
 ## Inicio rápido
@@ -65,16 +65,16 @@ python3 gvd.py send --local --size 1280x800 --stats            # prueba local (e
 python3 gvd.py send --host tengu.local --cursor-mode embedded  # cursor dentro del video
 ```
 `send`: `--host --port 5600 --transport {udp,tcp} --size --fps 30 --bitrate 8000 --quality {balanced,speed} --refresh --position --encoder {auto,va,x264} --local --stats --cursor-mode {separate,embedded}`
-`recv`: `--port 5600 --transport {udp,tcp} --sink {auto,ffplay,gl,xv,wayland} --jitter-ms 30 --stats --max-seconds --cursor {sway,none} --video-size 1280x800`
+`recv`: `--port 5600 --transport {udp,tcp} --sink {auto,ffplay,gl,xv,wayland} --jitter-ms 120 --stats --max-seconds --cursor {sway,none} --video-size 1280x800`
 `caps`: `--json` para que un integrador detecte capacidades sin abrir streams.
 
-Para video por Wi-Fi, empezar con `send --fps 30 --bitrate 6000 --quality balanced`
-y `recv --jitter-ms 30`. Si hay paquetes tardios, probar `--jitter-ms 60`;
-en una LAN estable se puede probar `0`. Este margen agrega latencia para tolerar
-reordenamiento, no retransmite paquetes. Tras una perdida, el receptor descarta
-cuadros dependientes hasta el siguiente keyframe: puede congelarse brevemente en
-vez de mostrar referencias corruptas. Ambos extremos deben actualizarse para
-que la recuperacion de x264 funcione con keyframes completos.
+Para video por Wi-Fi, empezar con `send --fps 24 --bitrate 6000 --quality balanced`
+y `recv --jitter-ms 120` (default actual). Si hay paquetes tardios, subir el margen
+(p. ej. `--jitter-ms 300`); en una LAN estable se puede bajar a `0`. Este margen agrega
+latencia para tolerar reordenamiento, no retransmite paquetes. Tras una perdida, el
+receptor descarta cuadros dependientes hasta el siguiente keyframe: puede congelarse
+brevemente en vez de mostrar referencias corruptas. Ambos extremos deben actualizarse
+para que la recuperacion de x264 funcione con keyframes completos.
 
 Si los artefactos persisten por perdida de paquetes Wi-Fi o problemas con RTP,
 usar `--transport tcp` en ambos extremos. TCP retransmite los datos perdidos y

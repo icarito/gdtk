@@ -157,6 +157,8 @@ static func local_send_argv(gvd_path, peer, port = 0, position = "", wlr_virtual
 	var opts = {}
 	if pos != "":
 		opts["position"] = pos
+	opts["fps"] = ACTIONS.GVD_SEND_FPS
+	opts["bitrate"] = ACTIONS.GVD_SEND_BITRATE
 	var plan = ACTIONS.gvd_send_plan(gvd_path, peer, port, opts)
 	if not bool(plan.get("ok", false)) \
 			or typeof(plan.get("args", [])) != TYPE_ARRAY:
@@ -180,7 +182,8 @@ static func local_send_argv(gvd_path, peer, port = 0, position = "", wlr_virtual
 # el video (--overlay-cursor 0); se usa el puntero propio de este equipo, así que
 # se desactiva el cursor separado (no hay que mover el cursor de sway por red).
 static func local_recv_argv(gvd_path, has_sway = false, port = 0, video = Vector2()):
-	var plan = ACTIONS.gvd_recv_plan(gvd_path, {"sink": "auto", "port": int(port)})
+	var plan = ACTIONS.gvd_recv_plan(gvd_path, {"sink": "auto", "port": int(port),
+		"jitter_ms": ACTIONS.GVD_JITTER_MS})
 	if bool(plan.get("ok", false)) and typeof(plan.get("args", [])) == TYPE_ARRAY:
 		plan["args"].append_array(["--cursor", "none"])
 		if video.x >= 2.0 and video.y >= 2.0:
@@ -192,7 +195,7 @@ static func local_recv_argv(gvd_path, has_sway = false, port = 0, video = Vector
 # resuelve gvd por candidatos y no interpola nada no confiable: `has_sway` sólo
 # elige una variante fija.
 static func remote_recv_argv(peer, has_sway = false):
-	var cmd = _remote_loop() + " recv --sink auto"
+	var cmd = _remote_loop() + " recv --sink auto --jitter-ms " + str(ACTIONS.GVD_JITTER_MS)
 	if bool(has_sway):
 		cmd += " --cursor sway"
 	cmd += "; done; echo 'vecindario: gvd no encontrado (recv)' >&2"
@@ -215,6 +218,7 @@ static func remote_send_argv(peer, target_host, port = 0, position = ""):
 		cmd += " --port " + str(n)
 	if pos != "":
 		cmd += " --position " + pos
+	cmd += " --fps " + str(ACTIONS.GVD_SEND_FPS) + " --bitrate " + str(ACTIONS.GVD_SEND_BITRATE)
 	cmd += "; done; echo 'vecindario: gvd no encontrado (send)' >&2"
 	return _ssh_argv(peer, cmd)
 
@@ -502,7 +506,8 @@ static func window_send_argv(gvd_path, peer, shm_path, fps = 20, port = 0):
 	var plan = ACTIONS.gvd_send_plan(gvd_path, peer, port, {})
 	if bool(plan.get("ok", false)) and typeof(plan.get("args", [])) == TYPE_ARRAY:
 		plan["args"].append_array(["--capture", "shm", "--shm", p,
-			"--fps", str(int(clamp(int(fps), 1, 60)))])
+			"--fps", str(int(clamp(int(fps), 1, 60))),
+			"--bitrate", str(int(ACTIONS.GVD_SEND_BITRATE))])
 	return plan
 
 

@@ -51,6 +51,13 @@ extends Reference
 
 const DEFAULT_GVD_PORT = 5600
 const DEFAULT_DESKFLOW_PORT = 24800
+# Anti-jitter sobre Wi-Fi (medido 2026-10-06: 2.4G con mdev 30-166 ms, máx hasta
+# 858 ms y 2% de pérdida). Buffer RTP holgado en el receptor y emisión algo más
+# liviana para bajar aire/cola en la radio. Son los defaults que el shell pasa a
+# gvd; quedan centralizados acá porque los comparten gvd_launch y gvd_session.
+const GVD_JITTER_MS = 120
+const GVD_SEND_FPS = 24
+const GVD_SEND_BITRATE = 6000
 # Modelo puro de la brujula (direccion N/S/E/O), generador puro de links Deskflow
 # (compas) y los dos formatos reales de Deskflow: layout barrier y ajustes QSettings.
 const DIRECTIONS = preload("res://neighborhood_directions.gd")
@@ -150,6 +157,18 @@ static func gvd_send_plan(gvd_path, target_host, port = 0, opts = {}):
 		if not POSITIONS.has(pos):
 			return _bad("posición inválida: " + pos)
 		args.append_array(["--position", pos])
+	# Ritmo de emisión (anti-jitter sobre Wi-Fi): se omiten si no vienen, para no
+	# cambiar el argv histórico. fps 1..60; bitrate 100..100000 kbps.
+	var fps = int(opts.get("fps", 0))
+	if fps != 0:
+		if fps < 1 or fps > 60:
+			return _bad("fps inválido: " + str(opts.get("fps")))
+		args.append_array(["--fps", str(fps)])
+	var br = int(opts.get("bitrate", 0))
+	if br != 0:
+		if br < 100 or br > 100000:
+			return _bad("bitrate inválido: " + str(opts.get("bitrate")))
+		args.append_array(["--bitrate", str(br)])
 	return {"ok": true, "kind": "process", "cmd": cmd, "args": args, "error": ""}
 
 
@@ -173,6 +192,13 @@ static func gvd_recv_plan(gvd_path, opts = {}):
 	args.append_array(["recv", "--sink", sink])
 	if n > 0 and n != DEFAULT_GVD_PORT:
 		args.append_array(["--port", str(n)])
+	# Margen de reordenamiento RTP (anti-jitter): 0 = LAN estable; ausente = default
+	# del gvd. Rango sano 0..5000 ms.
+	var jitter = int(opts.get("jitter_ms", -1))
+	if jitter >= 0:
+		if jitter > 5000:
+			return _bad("jitter_ms inválido: " + str(opts.get("jitter_ms")))
+		args.append_array(["--jitter-ms", str(jitter)])
 	return {"ok": true, "kind": "process", "cmd": cmd, "args": args, "error": ""}
 
 
@@ -260,6 +286,8 @@ static func _screen_action(gvd, local, id, label):
 		var opts = {}
 		if position != "":
 			opts["position"] = position
+		opts["fps"] = GVD_SEND_FPS
+		opts["bitrate"] = GVD_SEND_BITRATE
 		plan = gvd_send_plan(gpath, _peer_target(gvd), int(gvd.get("port", 0)), opts)
 		if not plan.ok:
 			enabled = false

@@ -141,6 +141,27 @@ Decisiones tomadas con el usuario:
 - Métodos peer `audio_recv`/`audio_stop`. Como todo cambio de `peer_link.METHODS` o de un `preload`
   (p. ej. `gvd_launch.gd`), entra con el reinicio del proceso del shell; una recarga no alcanza.
 
+#### Medición de latencia audio/gvd (2026-10-06)
+
+Banco bastion↔cupid, dos rutas: LAN (ambos clientes de Alvitos_Govista, vía router) y enlace
+directo AP (cupid AP + dongle USB MT7601U de bastion). `ping` 50×0.2 s:
+
+- LAN: RTT avg **20.7 ms** (bastion→cupid) / **59.3 ms** (cupid→bastion), mdev **30/58 ms**,
+  máx **133/331 ms**, 0% pérdida.
+- AP: RTT avg **17/64.7 ms**, mdev **31/166 ms**, máx **126/858 ms**, **2% pérdida** (ch5 y ch11
+  similares). El enlace directo **no mejora**; peor jitter y pérdida (radio única + dongle 1×1 +
+  co-canal con Alvitos en 2.4G).
+
+Audio (tono 440 Hz por `module-tunnel-sink` → captura del `.monitor` en el receptor; ventanas de
+100 ms con RMS≈0 dentro del tono): **LAN 7%** de cortes; **AP 54%** (patrón ~2 s con sonido / ~2 s
+mudo). El túnel TCP amortigua el jitter de LAN pero se quiebra con la pérdida/jitter del AP.
+
+gvd (H.264 RTP/UDP, `--jitter-ms 30`, `drop-on-latency=true`): **LAN decodifica** (fps máx ~19,
+mín ~1-4, objetivo 30: fluido a rachas); **AP cero frames** (todo paquete llega fuera del buffer y
+`wait-for-keyframe` nunca arma). El cuello es la red 2.4G, no el códec. Mitigaciones: subir
+`--jitter-ms` (300-500) y/o bajar `--fps`/`--bitrate` para gvd; el AP directo no ayuda aquí.
+
+
 ### Disposición física y preferencias persistentes (2026-10-04)
 - `settings.json:screens` (schema v2) es la única fuente de verdad. Cada vecino usa
   su `hid`; `label`/`peer` son nombres mutables. `x/y/w/h` están en milímetros y la

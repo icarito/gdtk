@@ -89,13 +89,20 @@ static func send_plan(gvd_path, peer_host, port, direction, opts = {}):
 	var pos = DIRECTIONS.to_gvd_position(String(direction).strip_edges())
 	if pos != "":
 		o["position"] = pos
+	# Defaults anti-jitter (Wi-Fi); el caller puede sobreescribirlos vía opts.
+	if not o.has("fps"):
+		o["fps"] = ACTIONS.GVD_SEND_FPS
+	if not o.has("bitrate"):
+		o["bitrate"] = ACTIONS.GVD_SEND_BITRATE
 	return ACTIONS.gvd_send_plan(gvd_path, peer_host, port, o)
 
 
 # Plan del receptor local: `gvd recv --sink <sink>` (default auto; waylandsink
-# aborta en el compositor embebido, así que se prefiere gl/xv).
+# aborta en el compositor embebido, así que se prefiere gl/xv) con buffer RTP
+# holgado para Wi-Fi.
 static func recv_plan(gvd_path, sink = "auto"):
-	return ACTIONS.gvd_recv_plan(gvd_path, {"sink": sink})
+	return ACTIONS.gvd_recv_plan(gvd_path, {"sink": sink,
+		"jitter_ms": ACTIONS.GVD_JITTER_MS})
 
 
 # Clasifica una accion por su tipo de ejecucion.
