@@ -3156,11 +3156,17 @@ void wl_server_pointer_motion(wl_server *s, int id, double x, double y, uint32_t
 		return;
 	}
 	if (s->pointer_surface != surface) {
+		int prev_id = s->pointer_id;
 		s->pointer_surface = surface;
 		s->pointer_id = id;
-		// Otro cliente paso a tener el foco: su cursor arranca visible hasta que
-		// pida lo contrario (set_cursor). Evita heredar un cursor oculto ajeno.
-		client_cursor_reset(s);
+		// El cursor de wl_pointer es por cliente, no por surface: moverse entre
+		// subsurfaces del MISMO toplevel no debe resetearlo. Si no, el set_cursor(NULL)
+		// de un video fullscreen (Firefox renderiza en subsurface) se perdia al cruzar
+		// root <-> subsurface y el cursor reaparecia. Reset solo al cambiar de
+		// toplevel/cliente (o al limpiarse el foco, mas arriba).
+		if (id != prev_id) {
+			client_cursor_reset(s);
+		}
 		wlr_seat_pointer_notify_enter(s->seat, surface, sub_x, sub_y);
 		update_pointer_constraint(s);
 	}
