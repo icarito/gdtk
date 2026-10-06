@@ -581,11 +581,19 @@ static void surface_state_import(surface_state *st) {
 
 	// Scanout directo: el dmabuf va al compositor anfitrion en vez de a una textura
 	// de Godot. Si deja de ser candidato, se apaga y sigue el camino actual.
+	// `scanout_reason` se conserva sólo de la surface RAÍZ: los commits de subsurfaces
+	// (Firefox video) lo pisarían con "no raiz" y taparían el motivo real del root.
+	toplevel *rt = toplevel_find(s, st->id);
+	bool is_root = (rt != NULL && rt->tl != NULL && rt->tl->base->surface == st->surface);
+	const char *saved_reason = s->scanout_reason;
 	if (has_dmabuf && scanout_candidate(s, st)) {
 		if (buf != st->scanout_last) {
 			scanout_buffer(st, buf, &attribs);
 		}
 		return;
+	}
+	if (!is_root) {
+		s->scanout_reason = saved_reason;
 	}
 	if (st->scanout) {
 		scanout_off(st);
@@ -3589,7 +3597,7 @@ int wl_server_scanout_suspended(wl_server *s) {
 }
 
 const char *wl_server_scanout_reason(wl_server *s) {
-	return (s != NULL && s->scanout_reason != NULL) ? s->scanout_reason : "?";
+	return (s != NULL && s->scanout_reason != NULL) ? s->scanout_reason : "sin commit del root (aun)";
 }
 
 void wl_server_destroy(wl_server *s) {
