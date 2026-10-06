@@ -8454,12 +8454,15 @@ func _window_input_pointer(event):
 		var video = _pantalla_video
 		if video.x < 2.0 or video.y < 2.0:
 			return false
-		# _view_hit_test devuelve coords del BUFFER (incluyen la geo.position de esta
-		# ventana receptora); el video es el contenido. Restar la geometría acá evita
-		# el doble offset (el emisor vuelve a sumar la suya al inyectar en el buffer).
+		# _view_hit_test devuelve coords de ESTA ventana (su tamaño en pantalla, p.ej.
+		# 1280x648), mientras el video puede ser mayor (1920x972). Además incluye la
+		# geo.position de la ventana. Se normaliza por el tamaño de la ventana, no por
+		# el del video: si no, el clic mapea a una fracción menor (offset).
 		var rgeo = compositor.get_geometry(int(hit.id))
-		var x = clamp((float(hit.pos.x) - rgeo.position.x) / video.x, 0.0, 1.0)
-		var y = clamp((float(hit.pos.y) - rgeo.position.y) / video.y, 0.0, 1.0)
+		if rgeo.size.x < 2.0 or rgeo.size.y < 2.0:
+			return false
+		var x = clamp((float(hit.pos.x) - rgeo.position.x) / rgeo.size.x, 0.0, 1.0)
+		var y = clamp((float(hit.pos.y) - rgeo.position.y) / rgeo.size.y, 0.0, 1.0)
 		_window_input_enqueue({"kind": "motion", "x": x, "y": y})
 		return true
 	var button = int(event.button_index)
