@@ -7882,11 +7882,6 @@ func _peer_gvd_open(port, _from, hid = "", video = Vector2()):
 	if not _pantalla_window_ids().empty() or _pantalla_sender != "":
 		_close_pantalla_window()
 	_pantalla_sender = String(hid)
-	# El puntero que Deskflow inyecta (wlr_virtual_pointer) no entra al shell; para
-	# poder reenviarlo sobre la ventana compartida se pide que pase por el pipeline
-	# Godot mientras hay un cast. Fuera de la ventana el shell lo reenvía al compositor
-	# local, así el cursor sigue funcionando.
-	_set_pointer_to_godot(true)
 	_pantalla_meta = {}
 	_pantalla_icon = null
 	_pantalla_video = video
@@ -8468,9 +8463,6 @@ func _window_input_pointer(event):
 			return false
 		var x = clamp((float(hit.pos.x) - rgeo.position.x) / rgeo.size.x, 0.0, 1.0)
 		var y = clamp((float(hit.pos.y) - rgeo.position.y) / rgeo.size.y, 0.0, 1.0)
-		# Con el toggle activo el puntero entrante viene por el pipeline Godot y no mueve
-		# el cursor del compositor; lo movemos acá para que se vea sobre la ventana.
-		compositor.pointer_motion(int(hit.id), hit.pos)
 		_window_input_enqueue({"kind": "motion", "x": x, "y": y})
 		return true
 	var button = int(event.button_index)
