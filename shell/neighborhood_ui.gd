@@ -19,6 +19,7 @@ extends Control
 # neighborhood.gd (Thread) y de las cachés del shell.
 
 const MAP = preload("res://neighborhood_map.gd")
+const HOTSPOT = preload("res://neighborhood_hotspot.gd")  # modelo puro de la señal Wi-Fi
 # group_model cambia junto con esta vista durante el pulido. Cargarlo desde texto
 # evita que una recarga transaccional conserve la versión cacheada por preload.
 var GROUP = Host.sc("res://group_model.gd") if Host != null else load("res://group_model.gd")   # sin autoload (tests)
@@ -110,6 +111,7 @@ var _menu_bt = null          # dispositivo Bluetooth del menú
 var _menu_title = ""         # título propio del menú (Grupo); "" = según el tipo
 var _menu_is_group = false   # true = popup de un miembro del Grupo
 var _menu_group_member = null
+var _menu_is_self = false    # true = menú de «Este equipo» (señal Wi-Fi)
 
 # Vista Grupo (mode == "group"): fichas y layout puros de group_model.gd.
 var _group_members = []
@@ -390,6 +392,7 @@ func _open_group_menu(member, at, include_remove):
 	_menu_bt = null
 	_menu_is_group = true
 	_menu_group_member = member
+	_menu_is_self = false
 	var host = member.get("host", {})
 	if typeof(host) != TYPE_DICTIONARY or host.empty():
 		host = {"id": String(member.get("id", "")), "label": String(member.get("name", ""))}
@@ -657,6 +660,12 @@ func _on_mouse_button(event):
 	if event.button_index == BUTTON_RIGHT and event.pressed:
 		if _menu_host != null and _menu_rect.has_point(pos):
 			return
+		# Placa central («Este equipo»): menú de la señal Wi-Fi. Sólo en Vecindario;
+		# en Grupo el centro es propio y no ofrece este menú.
+		if mode == "neighborhood" and draw_center and MAP.hit_center(pos, center):
+			_open_self_menu(pos)
+			accept_event()
+			return
 		var wifi = MAP.hit_wifi(pos, wifi_points)
 		if wifi != null:
 			_open_wifi_menu(wifi, pos)
@@ -693,6 +702,11 @@ func _on_mouse_button(event):
 			update()
 			return
 	if event.pressed:
+		if mode == "neighborhood" and draw_center and MAP.hit_center(pos, center):
+			_open_self_menu(pos)
+			accept_event()
+			update()
+			return
 		var wifi_hit = MAP.hit_wifi(pos, wifi_points)
 		if wifi_hit != null:
 			_open_wifi_menu(wifi_hit, pos)
@@ -843,6 +857,7 @@ func _open_menu(host, at):
 	_menu_bt = null
 	_menu_is_group = false
 	_menu_group_member = null
+	_menu_is_self = false
 	_menu_title = ""
 	var acts = []
 	for a in _host_actions(host):
@@ -856,6 +871,56 @@ func _open_menu(host, at):
 	update()
 
 
+# Menú de «Este equipo» (esta placa central): crear/apagar la señal Wi-Fi que
+# comparte Internet. La ejecución la hace el shell (nmcli); acá sólo se arman
+# filas honestas según el estado que publica el worker del Vecindario.
+func _open_self_menu(at):
+	_menu_is_wifi = false
+	_menu_wifi = null
+	_menu_is_bt = false
+	_menu_bt = null
+	_menu_is_group = false
+	_menu_group_member = null
+	_menu_is_self = true
+	_menu_title = MAP.CENTER_TITLE
+	_menu_host = {}
+	_menu_items = _self_menu_items()
+	_menu_open_pos = Vector2(at)
+	_menu_hover = -1
+	_build_menu_rows()
+	update()
+
+
+func _self_menu_items():
+	var st = String(model.status) if model != null and model.get("status") != null else ""
+	var hs = model.hotspot if model != null and model.get("hotspot") != null else {}
+	if typeof(hs) != TYPE_DICTIONARY:
+		hs = {}
+	var active = bool(hs.get("active", false))
+	var rows = []
+	var reason = ""
+	if st == "no_nmcli":
+		reason = "nmcli no disponible"
+	elif st == "off":
+		reason = "Wi-Fi apagado"
+	elif active:
+		reason = "ya está encendida"
+	rows.append({"kind": "hotspot_up", "id": "hotspot_up",
+		"label": "Crear señal Wi-Fi (comparte Internet)",
+		"enabled": reason == "", "reason": reason})
+	if active:
+		rows.append({"kind": "hotspot_down", "id": "hotspot_down",
+			"label": "Apagar señal", "enabled": true, "reason": ""})
+	# Fila informativa (sin acción): nombre visible + estado de Internet honesto.
+	var info = "Señal apagada"
+	if active:
+		info = "Señal de " + local_name() + " · Internet: " \
+			+ HOTSPOT.internet_state(String(hs.get("connectivity", "sin_dato")))
+	rows.append({"kind": "info", "id": "hotspot_info", "label": info,
+		"enabled": false, "reason": ""})
+	return rows
+
+
 # Menú de una red Wi-Fi (infraestructura, no presencia social): conectar /
 # desconectar / encender la radio. La ejecución la hace el shell (nmcli/nmtui).
 func _open_wifi_menu(w, at):
@@ -867,6 +932,7 @@ func _open_wifi_menu(w, at):
 	_menu_bt = null
 	_menu_is_group = false
 	_menu_group_member = null
+	_menu_is_self = false
 	_menu_title = ""
 	_menu_host = {}  # no-null: hay menú abierto (los huéspedes del menú son de host)
 	_menu_items = _wifi_menu_items(w)
@@ -879,13 +945,16 @@ func _open_wifi_menu(w, at):
 func _wifi_menu_items(w):
 	var ssid = String(w.get("ssid", "")).strip_edges()
 	var in_use = bool(w.get("in_use", false))
+	var sec = String(w.get("security", "")).strip_edges()
+	var secured = not (sec == "" or sec == "--")
 	var out = []
 	if ssid == "":
 		return out
-	out.append({"kind": "wifi_connect", "id": "wifi_connect",
+	out.append({"kind": ("wifi_connect_psk" if secured else "wifi_connect"),
+		"id": ("wifi_connect_psk" if secured else "wifi_connect"),
 		"label": "Conectar a " + ssid, "enabled": not in_use,
 		"reason": "ya está conectada" if in_use else "",
-		"ssid": ssid, "security": String(w.get("security", ""))})
+		"ssid": ssid, "security": sec})
 	if in_use:
 		out.append({"kind": "wifi_disconnect", "id": "wifi_disconnect",
 			"label": "Desconectar", "enabled": true, "reason": "", "ssid": ssid})
@@ -906,6 +975,7 @@ func _open_bt_menu(d, at):
 	_menu_wifi = null
 	_menu_is_group = false
 	_menu_group_member = null
+	_menu_is_self = false
 	_menu_title = ""
 	_menu_host = {}
 	_menu_items = _bt_menu_items(d)
@@ -949,6 +1019,7 @@ func _close_menu():
 	_menu_bt = null
 	_menu_is_group = false
 	_menu_group_member = null
+	_menu_is_self = false
 	_menu_title = ""
 	_menu_items = []
 	_menu_rows = []
@@ -1009,6 +1080,14 @@ func _activate_row(row):
 		_close_menu()
 		update()
 		return
+	if _menu_is_self:
+		if kind == "hotspot_up" and shell != null and shell.has_method("_wifi_share_create"):
+			shell._wifi_share_create()
+		elif kind == "hotspot_down" and shell != null and shell.has_method("_wifi_share_stop"):
+			shell._wifi_share_stop()
+		_close_menu()
+		update()
+		return
 	if _menu_is_bt:
 		var addr = String(item.get("address", ""))
 		if kind == "bt_connect" and shell != null and shell.has_method("_bt_connect"):
@@ -1028,6 +1107,9 @@ func _activate_row(row):
 		if kind == "wifi_connect":
 			if shell != null and shell.has_method("_wifi_connect"):
 				shell._wifi_connect(String(item.get("ssid", "")), String(item.get("security", "")))
+		elif kind == "wifi_connect_psk":
+			if shell != null and shell.has_method("_wifi_psk_request"):
+				shell._wifi_psk_request(String(item.get("ssid", "")))
 		elif kind == "wifi_disconnect":
 			if shell != null and shell.has_method("_wifi_disconnect"):
 				shell._wifi_disconnect(String(item.get("ssid", "")))

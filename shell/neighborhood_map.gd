@@ -53,6 +53,9 @@ const BT_FRACTION_MAX = 0.98
 
 const NODE_SIZE = 56.0
 const NODE_MARGIN = 12.0
+# Placa de «Este equipo»: radio del dibujo (28) más un margen de impacto. El menú
+# del equipo local (señal Wi-Fi) se abre con clic sobre esta área.
+const CENTER_HIT_RADIUS = 34.0
 # Separación angular entre vecinos que comparten la misma dirección.
 const SPREAD_STEP = 0.30
 # Radio (px) bajo el cual un arrastre no imanta a ningún lado.
@@ -260,6 +263,12 @@ static func hit_wifi(point, points, radius = WIFI_ICON_SIZE * 0.5 + WIFI_HIT_EXT
 		if p.distance_to(Vector2(w.get("pos", Vector2.ZERO))) <= float(radius):
 			return w
 	return null
+
+
+# ¿El clic cae sobre la placa de «Este equipo»? Puro; el llamador restringe a la
+# vista Vecindario (en Grupo el centro es propio y no abre este menú).
+static func hit_center(point, center, radius = CENTER_HIT_RADIUS):
+	return Vector2(point).distance_to(Vector2(center)) <= float(radius)
 
 
 # Dispositivos Bluetooth sobre anillos simbólicos (mismo esquema que el Wi-Fi).

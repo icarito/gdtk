@@ -150,6 +150,25 @@ virtual `ap0` (`iw dev wlan0 interface add ap0 type __ap` + perfil `ifname ap0`)
 acción PolicyKit; (c) aceptar solo-LAN. Rollback del experimento: `nmcli con up
 "Alvitos_Govista"` (verificado, conectividad `full` restaurada).
 
+## E2E real (2026-10-06) — cupid=AP, cliente real
+
+Con la secuencia exacta que usa el shell (`create_plan` + `channel_plan` + `con up
+passwd-file`):
+- **cupid** (`mlan0`, AP:yes) levantó el perfil `Hotspot`: mode `ap`, band `bg`,
+  channel 5, `ipv4.method shared`, `10.42.0.1/24`; `nmcli passwd-file` aceptó el
+  archivo `802-11-wireless-security.psk:<clave>` (formato del modelo). Estado
+  honesto `CONNECTIVITY: limited` (sin uplink: radio única, la STA cae al subir el AP).
+- **bastion** con el dongle USB **MT7601U** (`wlan1`, STA-only) se asoció al SSID
+  `cupid` (ch5, WPA, -49 dBm), obtuvo `10.42.0.103/24`, hizo ping a `10.42.0.1` y SSH
+  a cupid por la red compartida. Prueba el AP + un cliente real.
+- **Limitación operativa de bastion/cupid**: `nmcli` sobre SSH no local lo bloquea
+  polkit (`settings.modify.system: auth`); desde la **sesión local activa** (la del
+  shell gdtk) sí se permite. En cupid se usó `sudo -n` para el test; el shell usa
+  `nmcli` como usuario y requiere esa sesión local.
+- **Rollback verificado**: subir/caer el AP se revierte con
+  `nmcli con up Alvitos_Govista` (o autoconnect al borrar `Hotspot`); cupid volvió a
+  `full`. Clave efímera 0600, nunca por argv; restos y perfil `Hotspot` eliminados.
+
 ## Fuera de alcance
 
 Editor de SSID/canal desde la UI; conteo de clientes; IBSS/Sugar-mesh real; gesto
@@ -172,6 +191,11 @@ en el Frame; autoconnect; IPv6 finetuning; GNOME hotspot con `--ask` manual.
 AP-capable: AR9271/`ath9k_htc`, RT5370/`rt2800usb`, MT7610U/MT7612U/`mt76`, RTL8812AU/DKMS).
 “Compartir Internet” requiere que el host del AP tenga **uplink no-Wi-Fi** (o NAT hacia su STA).
 
-**Pendiente de código**: en `shell/shell.gd` **no existen** `_wifi_share_create`, `_wifi_share_stop`
-ni `_wifi_psk_request` (ni el popup `##clave_wifi`); la UI del menú «Este equipo» es **inerte** hoy
-(las llamadas están guardadas con `has_method`). El spec/sesión los dan por hechos: corregir.
+**Cableado del shell (resuelto 2026-10-06)**: `shell/shell.gd` ya implementa
+`_wifi_share_create`/`_wifi_share_stop`/`_wifi_psk_request`, el popup `##clave_wifi`
+(`input_text_enter`), `_write_psk_file` (0600 en `$XDG_RUNTIME_DIR/gdtk/wifi-psk`) y
+la activación `nmcli ... passwd-file "$1"; rm -f "$1"` (clave nunca en argv), armando
+las líneas desde los planes del modelo `HOTSPOT` (incluye `connect_plan` para la
+estación). La UI del menú «Este equipo» dejó de ser inerte. Aplicado al shell vivo
+con recarga transaccional (mismo PID y ventanas). Hito pendiente: e2e real de AP en
+cupid (acceso local).

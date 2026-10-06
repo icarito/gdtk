@@ -23,6 +23,7 @@ const HOSTS_SCRIPT = preload("res://neighborhood_hosts.gd")
 const PUBLISH_PLAN = preload("res://neighborhood_publish_plan.gd")
 const BT_APPLET = preload("res://applet_bluetooth.gd")  # reutiliza su parser puro
 const MAP = preload("res://neighborhood_map.gd")        # geometría pura (anti-solape)
+const HOTSPOT = preload("res://neighborhood_hotspot.gd")  # modelo puro de la señal Wi-Fi
 const GDTK_SERVICES = ["_gdtk-gvd._udp", "_gdtk-deskflow._tcp", "_gdtk-clip._tcp"]
 
 # Cápsula de un nodo en la vista: el disco del AP más el alto de su etiqueta
@@ -35,6 +36,7 @@ const LABEL_TAIL = 18.0       # alto extra bajo el disco ocupado por el texto
 var networks = []             # lista de nodos "red" (ESS), copiada por poll()
 var hosts = []                # hosts DNS-SD de gdtk, copiada por poll()
 var bt_devices = []           # dispositivos Bluetooth conocidos, copiada por poll()
+var hotspot = {}              # estado de la señal Wi-Fi («Este equipo»), copiada por poll()
 var status = ""               # "", "ok", "empty", "off", "no_nmcli", "error"
 var version = 0               # sube cuando el hilo escribió un resultado nuevo
 
@@ -46,6 +48,7 @@ var _hosts_model = null        # instancia diferida de HOSTS_SCRIPT (sólo hilo)
 var _nets = []
 var _hosts = []
 var _bt = []
+var _share = {}
 var _status = ""
 var _version = 0
 var _rescan_at = -RESCAN_MS
@@ -85,6 +88,7 @@ func poll():
 	networks = _nets
 	hosts = _hosts
 	bt_devices = _bt
+	hotspot = _share
 	status = _status
 	version = _version
 	_mutex.unlock()
@@ -120,6 +124,19 @@ func status_line():
 	return "Leyendo Wi-Fi..."
 
 
+# Estado honesto de la señal que comparte Internet (menú de «Este equipo»).
+func share_line():
+	var h = hotspot
+	if typeof(h) != TYPE_DICTIONARY or h.empty():
+		return "Señal Wi-Fi: leyendo…"
+	if not bool(h.get("available", false)):
+		return "Señal Wi-Fi: NetworkManager no disponible"
+	if not bool(h.get("active", false)):
+		return "Señal Wi-Fi apagada"
+	return "Señal Wi-Fi activa · Internet: " \
+		+ HOTSPOT.internet_state(String(h.get("connectivity", "sin_dato")))
+
+
 # --- hilo de fondo -----------------------------------------------------------
 
 func _stopped():
@@ -141,6 +158,7 @@ func _work(_userdata):
 		_nets = res.get("nets", [])
 		_hosts = res.get("hosts", [])
 		_bt = res.get("bt", [])
+		_share = res.get("share", {})
 		_status = res.get("status", "")
 		_version += 1
 		_mutex.unlock()
@@ -159,12 +177,17 @@ func _scan():
 	var hosts = _read_hosts()
 	var bt = _read_bt()
 	if OS.execute("sh", ["-c", "command -v nmcli >/dev/null 2>&1"]) != 0:
-		return {"status": "no_nmcli", "nets": [], "hosts": hosts, "bt": bt}
+		return {"status": "no_nmcli", "nets": [], "hosts": hosts, "bt": bt,
+			"share": {"available": false, "active": false, "connectivity": "sin_dato", "saved": []}}
+	# Estado de la señal (perfil activo + conectividad + perfiles guardados): es
+	# independiente del listado y se publica aunque la radio esté apagada.
+	var share = _read_share()
 	# Radio: si está apagada no se lista (y no se enciende en silencio).
 	var code = OS.execute("nmcli", ["radio", "wifi"], true, out)
 	var radio = str(out[0]).strip_edges() if out.size() > 0 else ""
 	if code != 0 or radio != "enabled":
-		return {"status": ("off" if code == 0 else "error"), "nets": [], "hosts": hosts, "bt": bt}
+		return {"status": ("off" if code == 0 else "error"), "nets": [], "hosts": hosts,
+			"bt": bt, "share": share}
 	# Rescan best-effort una vez por minuto: el error de permisos se ignora.
 	var now = OS.get_ticks_msec()
 	if now - _rescan_at >= RESCAN_MS:
@@ -175,13 +198,53 @@ func _scan():
 		["-t", "-f", "IN-USE,SSID,BSSID,CHAN,FREQ,SIGNAL,SECURITY", "device", "wifi", "list"],
 		true, out)
 	if code != 0:
-		return {"status": "error", "nets": [], "hosts": hosts, "bt": bt}
+		return {"status": "error", "nets": [], "hosts": hosts, "bt": bt, "share": share}
 	var text = ""
 	for line in out:
 		text += str(line) + "\n"
 	var nets = parse_nmcli(text)
+	# Canal de la STA: mientras haya uplink Wi-Fi el AP debe compartir canal.
+	share["sta_chan"] = _in_use_chan(nets)
+	share["sta_band"] = _in_use_band(nets)
 	return {"status": ("ok" if not nets.empty() else "empty"),
-		"nets": nets, "hosts": hosts, "bt": bt}
+		"nets": nets, "hosts": hosts, "bt": bt, "share": share}
+
+
+# Estado de la señal Wi-Fi («Este equipo»): las 2 consultas acotadas de nmcli más
+# los perfiles guardados (para no pedir la clave si NM ya la tiene). Sólo lectura;
+# sin salida cruda ni secretos.
+func _read_share():
+	var res = {"available": true, "active": false, "device": "",
+		"connectivity": "sin_dato", "saved": [], "sta_chan": 0, "sta_band": ""}
+	var out = []
+	if OS.execute("nmcli", ["-t", "-f", "NAME,DEVICE,TYPE", "connection", "show", "--active"],
+			true, out) == 0:
+		var active = HOTSPOT.parse_active(_join(out))
+		res["active"] = bool(active.get("active", false))
+		res["device"] = String(active.get("device", ""))
+	out = []
+	if OS.execute("nmcli", ["-t", "-f", "CONNECTIVITY", "general"], true, out) == 0:
+		res["connectivity"] = HOTSPOT.parse_connectivity(_join(out))
+	out = []
+	if OS.execute("nmcli", ["-t", "-f", "NAME", "connection", "show"], true, out) == 0:
+		res["saved"] = HOTSPOT.parse_saved(_join(out))
+	return res
+
+
+# Canal de la red en uso (STA) entre los nodos Wi-Fi, o 0 si no hay.
+static func _in_use_chan(nets):
+	for n in nets:
+		if typeof(n) == TYPE_DICTIONARY and bool(n.get("in_use", false)):
+			return int(n.get("chan", 0))
+	return 0
+
+
+# Banda ("2.4"/"5") de la red en uso (STA), o "" si no hay.
+static func _in_use_band(nets):
+	for n in nets:
+		if typeof(n) == TYPE_DICTIONARY and bool(n.get("in_use", false)):
+			return String(n.get("band", ""))
+	return ""
 
 
 # Hosts del Vecindario: servicios DNS-SD de gdtk resueltos con avahi-browse

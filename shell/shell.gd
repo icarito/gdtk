@@ -62,6 +62,10 @@ const GROUP_MODEL = preload("res://group_model.gd")
 # resuelve avahi una vez y lanza cada anuncio sin bloquear el frame (§2/§14).
 const PUBLISH_MODEL = preload("res://neighborhood_publish.gd")
 const PUBLISH_PLAN = preload("res://neighborhood_publish_plan.gd")
+# Señal Wi-Fi del Vecindario (SPEC-sugar-senal-wifi.md): planes argv puros del AP
+# que comparte Internet y de la conexión a APs con clave (la clave nunca va por
+# argv: se pasa por archivo 0600 con `passwd-file`).
+const HOTSPOT = preload("res://neighborhood_hotspot.gd")
 # Buzón del handshake de dirección (K3): transporte puro por ssh (rutas, argv sin
 # shell-injection, decisión por archivo) + modelo puro del DTO. El shell sólo hace
 # el I/O en Threads y aplica el snapshot con `apply` (SPEC §6/§9/§14).
@@ -200,6 +204,16 @@ var neighborhood_ui = null
 var zoom_level = 0
 var zoom_f = 0.0
 var neighborhood_view = false
+# Popup de clave WPA del Vecindario (##clave_wifi): el secreto se escribe a un
+# archivo 0600 efímero y se pasa a nmcli con `passwd-file`; nunca va por argv ni
+# logs. `mode` es "connect" (asociarse a un AP) o "share" (crear la señal Wi-Fi).
+var wifi_psk_open = false
+var wifi_psk_want = false     # pide abrir el popup en el próximo frame ImGui
+var wifi_psk_focus = false    # enfoca el campo una sola vez al abrir
+var wifi_psk_mode = ""
+var wifi_psk_ssid = ""
+var wifi_psk_text = ""
+var wifi_psk_error = ""
 var _df_watch_at = 0       # próximo chequeo del vigía de Deskflow (ms)
 var _df_mismatch = 0       # chequeos seguidos con captura activa y servidor "en local"
 var group_placements = {}   # hid -> grados alrededor del equipo local (de host_directions)
@@ -1790,6 +1804,7 @@ func _imgui_frame():
 	frame.draw(self)
 	if not expose:
 		_draw_window_menu()
+		_draw_wifi_psk_popup()
 	_update_ghosts(OS.get_ticks_msec())
 	var _m5 = OS.get_ticks_usec()
 
@@ -9241,6 +9256,229 @@ func _wifi_disconnect(ssid):
 	if _which("nmcli") == "":
 		return
 	OS.execute("nmcli", ["connection", "down", "id", s], false)
+
+
+# --- Señal Wi-Fi del Vecindario (SPEC-sugar-senal-wifi.md) --------------------
+# La UI (neighborhood_ui) sólo arma las filas; acá vive la ejecución: nmcli con
+# planes del modelo puro HOTSPOT, no bloqueante. La clave WPA se pide en el popup
+# ##clave_wifi y viaja SIEMPRE por un archivo 0600 efímero (`passwd-file`); nunca
+# por argv, logs ni estado. Tras cada acción el worker relee el estado real.
+
+# Crear la señal (AP con `ipv4.method shared`): pide la clave en el popup y, al
+# confirmar, recrea el perfil `Hotspot` (NM no deja borrar un psk guardado) y lo
+# activa con el archivo. El SSID es el hostname local.
+func _wifi_share_create():
+	if _which("nmcli") == "":
+		return
+	if not HOTSPOT.valid_ssid(_local_hostname()):
+		return
+	_open_wifi_psk("share", _local_hostname())
+
+
+# Apagar la señal (baja el perfil). Idempotente; el estado lo refleja el worker.
+func _wifi_share_stop():
+	if _which("nmcli") == "":
+		return
+	OS.execute("nmcli", HOTSPOT.down_plan(), false)
+	_wifi_after()
+
+
+# Asociarse a una red protegida: si NM ya tiene el perfil guardado se activa sin
+# pedir nada; si no, se abre el popup de clave.
+func _wifi_psk_request(ssid):
+	var s = String(ssid).strip_edges()
+	if s == "" or s.begins_with("-"):
+		return
+	if _which("nmcli") == "":
+		_open_nmtui()
+		return
+	if _wifi_profile_saved(s):
+		OS.execute("nmcli", ["connection", "up", "id", s], false)
+		_wifi_after()
+		return
+	_open_wifi_psk("connect", s)
+
+
+func _wifi_profile_saved(name):
+	if neighborhood == null:
+		return false
+	var hs = neighborhood.hotspot
+	if typeof(hs) != TYPE_DICTIONARY:
+		return false
+	for n in hs.get("saved", []):
+		if String(n) == String(name):
+			return true
+	return false
+
+
+func _open_wifi_psk(mode, ssid):
+	wifi_psk_mode = String(mode)
+	wifi_psk_ssid = String(ssid)
+	wifi_psk_text = ""
+	wifi_psk_error = ""
+	wifi_psk_focus = true
+	wifi_psk_open = true
+	wifi_psk_want = true
+	request_redraw()
+
+
+func _close_wifi_psk():
+	wifi_psk_open = false
+	wifi_psk_want = false
+	wifi_psk_focus = false
+	wifi_psk_mode = ""
+	wifi_psk_ssid = ""
+	wifi_psk_text = ""
+	wifi_psk_error = ""
+	request_redraw()
+
+
+# Popup ImGui de la clave (mismo patrón que ##home_session/##wm_menu). Se dibuja
+# cada frame; al cerrarse por clic afuera se limpia el estado (no queda colgado).
+func _draw_wifi_psk_popup():
+	if wifi_psk_want:
+		open_popup("##clave_wifi")
+		wifi_psk_want = false
+	if not wifi_psk_open:
+		return
+	var submitted = false
+	var cancelled = false
+	MENU_STYLE.begin(self)
+	var shown = begin_popup("##clave_wifi")
+	if shown:
+		MENU_STYLE.chrome(self, "Clave Wi-Fi")
+		var line = "Clave de " + wifi_psk_ssid
+		if wifi_psk_mode == "share":
+			line = "Clave para la señal " + wifi_psk_ssid
+		text(line)
+		if wifi_psk_focus:
+			set_keyboard_focus_here()
+			wifi_psk_focus = false
+		push_item_width(220.0 * get_imgui_scale())
+		var res = input_text_enter("##clave_wifi_text", wifi_psk_text)
+		wifi_psk_text = String(res.get("text", wifi_psk_text))
+		pop_item_width()
+		if wifi_psk_error != "":
+			text_colored(Color(1.0, 0.35, 0.35, 1.0), wifi_psk_error)
+		submitted = bool(res.get("submitted", false))
+		if MENU_STYLE.item(self, "Confirmar"):
+			submitted = true
+		same_line()
+		if MENU_STYLE.item(self, "Cancelar"):
+			cancelled = true
+		if is_key_pressed(KEY_ESCAPE):
+			cancelled = true
+		end_popup()
+	MENU_STYLE.end(self)
+	if not shown or cancelled:
+		_close_wifi_psk()
+	elif submitted:
+		_wifi_psk_confirm()
+
+
+func _wifi_psk_confirm():
+	var psk = String(wifi_psk_text)
+	if not HOTSPOT.valid_psk(psk):
+		wifi_psk_error = "La clave debe tener 8 a 63 caracteres"
+		return
+	var path = _write_psk_file(psk)
+	if path == "":
+		wifi_psk_error = "No se pudo preparar la clave"
+		return
+	if wifi_psk_mode == "share":
+		_wifi_share_activate(path)
+	else:
+		_wifi_connect_activate(wifi_psk_ssid, path)
+	_close_wifi_psk()
+	_wifi_after()
+
+
+# Crea el perfil AP (recreado para que la clave tipeada sea la autoritativa), fija
+# banda+canal de la STA (radio única) y lo activa con el archivo de clave; `rm` del
+# archivo en el mismo sh. La ruta va por argv; la clave nunca.
+func _wifi_share_activate(psk_path):
+	var plan = HOTSPOT.create_plan(_local_hostname())
+	if plan.empty():
+		return
+	var chan = 0
+	var band = "bg"
+	if neighborhood != null:
+		var hs = neighborhood.hotspot
+		if typeof(hs) == TYPE_DICTIONARY:
+			chan = int(hs.get("sta_chan", 0))
+			var b = HOTSPOT.band_arg(String(hs.get("sta_band", "")))
+			if b != "":
+				band = b
+	var cmd = _wifi_nmcli_line(["connection", "delete", HOTSPOT.PROFILE]) + " >/dev/null 2>&1; "
+	cmd += _wifi_nmcli_line(plan) + " >/dev/null 2>&1; "
+	var cplan = HOTSPOT.channel_plan(HOTSPOT.PROFILE, chan, band)
+	if not cplan.empty():
+		cmd += _wifi_nmcli_line(cplan) + " >/dev/null 2>&1; "
+	cmd += _wifi_nmcli_line(["connection", "up", "id", HOTSPOT.PROFILE]) \
+		+ " passwd-file \"$1\"; rc=$?; rm -f \"$1\"; exit $rc"
+	OS.execute("sh", ["-c", cmd, "gdtk-wifi-share", String(psk_path)], false)
+
+
+# Crea el perfil de estación de la red y lo activa con el archivo de clave.
+func _wifi_connect_activate(ssid, psk_path):
+	var s = String(ssid).strip_edges()
+	var plan = HOTSPOT.connect_plan(s)
+	if plan.empty():
+		return
+	var cmd = _wifi_nmcli_line(["connection", "delete", s]) + " >/dev/null 2>&1; "
+	cmd += _wifi_nmcli_line(plan) + " >/dev/null 2>&1; "
+	cmd += _wifi_nmcli_line(["connection", "up", "id", s]) \
+		+ " passwd-file \"$1\"; rc=$?; rm -f \"$1\"; exit $rc"
+	OS.execute("sh", ["-c", cmd, "gdtk-wifi-connect", String(psk_path)], false)
+
+
+# Escribe la clave en $XDG_RUNTIME_DIR/gdtk/wifi-psk (0600) y devuelve la ruta, o
+# "" si la clave es inválida o no se pudo escribir. Sin secretos en argv ni logs.
+func _write_psk_file(psk):
+	var text = HOTSPOT.passwd_file_text(psk)
+	if text == "":
+		return ""
+	var dir = _wifi_runtime_dir()
+	var d = Directory.new()
+	d.make_dir_recursive(dir)
+	if not d.dir_exists(dir):
+		return ""
+	OS.execute("chmod", ["700", dir], true)
+	var path = dir + "/wifi-psk"
+	var f = File.new()
+	if f.open(path, File.WRITE) != OK:
+		return ""
+	f.store_string(text)
+	f.close()
+	OS.execute("chmod", ["600", path], true)
+	return path
+
+
+func _wifi_runtime_dir():
+	var d = OS.get_environment("XDG_RUNTIME_DIR").strip_edges()
+	if d == "":
+		d = "/tmp"
+	return d + "/gdtk"
+
+
+# Línea nmcli con cada argumento entrecomillado para `sh -c` (los planes del
+# modelo no llevan secretos; el archivo de clave sí va por `"$1"`).
+func _wifi_nmcli_line(argv):
+	var out = "nmcli"
+	for a in argv:
+		out += " " + _sh_quote(a)
+	return out
+
+
+func _sh_quote(s):
+	return "'" + String(s).replace("'", "'\\''") + "'"
+
+
+# Pide al worker del Vecindario un refresco y repinta (mismo patrón que Bluetooth).
+func _wifi_after():
+	if neighborhood != null and neighborhood.has_method("request_refresh"):
+		neighborhood.request_refresh()
+	request_redraw()
 
 
 # --- Bluetooth (proveedor del Vecindario) ------------------------------------

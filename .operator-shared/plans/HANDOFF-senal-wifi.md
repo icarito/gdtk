@@ -8,7 +8,12 @@ Desde el Vecindario (placa «Este equipo»): crear una señal Wi-Fi (AP con NM, 
 shared`) que comparte el Internet del host con clave WPA; y asociarse a APs (abiertos directo,
 protegidos pidiendo clave).
 
-## BLOQUEANTE REAL (código incompleto)
+## BLOQUEANTE REAL (código incompleto) — **RESUELTO 2026-10-06**
+`shell.gd` ya implementa `_wifi_share_create`, `_wifi_share_stop`, `_wifi_psk_request`
+y el popup `##clave_wifi` (archivo 0600 en `$XDG_RUNTIME_DIR/gdtk/wifi-psk`, activación
+`nmcli ... passwd-file`, `rm`), armando nmcli desde los planes del modelo (se agregó
+`connect_plan`). Tests 38 ok, preflight 71/0, sincronizado y activado con recarga
+transaccional (mismo PID/ventanas). Texto original del bloqueante, por historia:
 `shell.gd` **no tiene** la API que la UI invoca:
 - Faltan: `_wifi_share_create`, `_wifi_share_stop`, `_wifi_psk_request`, popup `##clave_wifi`
   (archivo psk 0600 en `$XDG_RUNTIME_DIR/gdtk/wifi-psk`, activación `nmcli ... passwd-file`, `rm`).
