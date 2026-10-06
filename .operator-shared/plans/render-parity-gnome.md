@@ -143,8 +143,12 @@ interacción; GNOME no se midió en tiled/multi-monitor.
   - **Desglose por sección** (medido, tiled): `frame.draw()` = **6,6 ms (88%)**, `tiles` 0,7,
     `setup` 0,1, `home` 0,03, `tail` 0,02, `deco` 0,002. En **fullscreen** `frame.draw` early-returnea
     (`frame.gd:4117`, no hay Frame) → por eso el video fullscreen era barato.
-  Próximo (sin KMS): **abaratir `frame.draw`** (`frame.gd:4112`, 4.576 líneas — perfilado interno de
-  applets/layout) y/o no marcar `requested_redraw` por hover-motion. Medir en entorno quieto/aislado.
+  - **Dentro de `frame.draw`**: `_sync_shared_token`→**`_shared_snapshot` 2,9 ms (44%)** (recorre
+    hosts y llama `_host_session_state`/`_shared_host_label`/`_direction_for`/`_gvd_has_session` +
+    `_share_windows`/`deskflow_input_sessions`/`SHARED_BLOCK.diagram` **cada build**) y **barra
+    superior 3,6 ms (55%)** (`_draw_bar_blocks`/`_draw_windows`); applets ~0.
+  Próximo (sin KMS): **memoizar `_shared_snapshot`** por `neighborhood.version`/estado, y abaratar
+  el layout de la barra superior. Medir en entorno quieto/aislado.
 
 
 - **A1 — Damage/partial.** No recomponer la UI entera por commit: daño por
