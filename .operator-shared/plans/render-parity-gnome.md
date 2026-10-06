@@ -130,15 +130,19 @@ interacción; GNOME no se midió en tiled/multi-monitor.
   fullscreen ya compone a ~5% de un core. Se deja el `scanout_reason` como diagnóstico permanente
   y se prioriza A5.
 - Luego **A5** (multi-output / `GDTK_SPAN`) — requiere validación con 2 monitores reales.
-- **A1 (perfilado, 2026-10-05)**: con 2 tiled, motion por RPC sube el CPU de la shell
-  (**11–14% → 25–50%**). Aclaración importante: el `fps` del profiler **no** es la tasa del loop —
-  `frame_time` excluye el sleep de `add_frame_delay` (`main.cpp:2843`) y es 1/tiempo-de-trabajo—;
-  el loop **sí está paeado (~60)**. Lo que sube es el **trabajo por frame**.
-  Y **no escala con la tasa de eventos** (15 vs 60 Hz ≈ igual): no es costo por-evento, parece que
-  la shell entra en un **redraw/re-arm a 60 fps mientras hay actividad reciente**. Próximo: hallar
-  qué mantiene alto el trabajo con actividad (`View.update`/re-arm de ImGui, `last_activity`) y
-  redibujar sólo cuando cambia algo. Medir en entorno **quieto/aislado** (las corridas en vivo con
-  otras apps dieron mucha varianza).
+- **A1 (perfilado, 2026-10-05)**: el costo está en **armar la UI ImGui**. `_imgui_frame`
+  (GDScript) mide **~7,6 ms por build** y se invoca **24/s idle** y **48/s con motion** →
+  ~18% / ~36% de un core (calza con lo medido). El ritmo lo decide `ImGuiCanvas::_notification`
+  (`godot-box3d-3-gdtk/imgui/imgui_canvas.cpp:655`): arma a `update_hz`(4) por tiempo, a
+  `input_hz`(60) mientras hay input reciente (≤250 ms), y **siempre** con `requested_redraw`
+  (que el motion/hover dispara). Notas:
+  - El `fps` del profiler **no** es la tasa del loop (`frame_time` excluye el sleep); el loop
+    sí está paeado (~60).
+  - Bajar `input_hz` 60→30 dio poco (48→40 builds/s) porque `requested_redraw` manda igual.
+  - `input_hz`/`update_hz` **sí** se consumen (en el módulo C++), no eran variables muertas.
+  Próximo (motor, sin KMS): (a) **abaratir el build** de `_imgui_frame` (7,6 ms es mucho), y/o
+  (b) no marcar `requested_redraw` por hover-motion (que el cursor ya lo dibuja el host).
+  Medir en entorno **quieto/aislado** (en vivo dio mucha varianza).
 
 
 - **A1 — Damage/partial.** No recomponer la UI entera por commit: daño por
