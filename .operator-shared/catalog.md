@@ -147,3 +147,6 @@
 - `HANDOFF-a1-interaccion.md`
   - Description: Handoff de Track A1 (costo de interacción): diagnóstico del armado de ImGui, optimizaciones entregadas (_shared_snapshot, _text_w), hotspot pendiente (_draw_bar_blocks/_item_icon), cómo medir (probe, flags, RPC) y gotchas (reload tumba RPC ~20 s).
   - Read If: Se retoma la optimización del CPU de la shell bajo interacción en sesión nueva.
+- `HANDOFF-senal-wifi.md`
+  - Description: Handoff de la Señal Wi-Fi (AP que comparte Internet + asociarse a APs): bloqueante real (falta el cableado en shell.gd), capacidad HW por host (AX201/MT7601U/cupid/tengu), topología viable (cupid=AP) y riesgo de perder SSH por radio única.
+  - Read If: Se retoma la feature de señal Wi-Fi o hay que probar/terminar el AP+clientes.
