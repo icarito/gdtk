@@ -154,6 +154,11 @@ interacción; GNOME no se midió en tiled/multi-monitor.
   (`9814b47`) → `frame.draw` **6,6→3,95 ms**, `_imgui_frame` **~7,5→4,86 ms**. Queda el hotspot
   de la **barra superior** (`top` 3,6 ms, ahora 74% de frame.draw): perfilado interno de
   `_draw_bar_blocks`/`_draw_windows`/tiles y siguiente optimización.
+  **Sub-desglose barra superior** (`e43f494`): `_draw_bar_blocks` 1,96 ms + `_draw_windows` 1,88 ms
+  + tiles 0,61 ms. Próximo: cachear el trabajo por tesela de `_draw_windows`/`_draw_bar_blocks`
+  (íconos/texto) que se rearma cada build.
+  **Gotcha de medición**: `reload_shell` tumba el listener RPC ~20 s; reintentar el `move` tras
+  esperar. Las corridas en vivo tienen mucha varianza (mejor en entorno quieto/aislado).
 
 
 - **A1 — Damage/partial.** No recomponer la UI entera por commit: daño por
