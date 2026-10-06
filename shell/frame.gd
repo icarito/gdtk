@@ -4109,7 +4109,16 @@ func _window_scroll_at(pos, dir):
 
 
 # Llamado en cada imgui_frame del shell, después de la vista.
+# Perfilado A1: desglose de frame.draw (gateado por ~/.gdtk-imgui-time).
+var _f_us = 0
+var _f_n = 0
+var _f_shared = 0
+var _f_top = 0
+var _f_app = 0
+var _f_tail = 0
+
 func draw(ui):
+	var _f0 = OS.get_ticks_usec()
 	# Otra vez tras dibujar la vista: lo que cambió en este frame (un clic que abre
 	# una app, la primera textura) arranca el fundido ya, sin un frame a opacidad plena.
 	transition()
@@ -4209,6 +4218,7 @@ func draw(ui):
 	bar_grid_state["top"] = grid
 	bar_grid_state["dock"] = grid
 	_sync_shared_token()
+	var _f1 = OS.get_ticks_usec()
 	var side = float(grid.side)
 	var pitch = float(grid.pitch)
 	var margin = float(grid.margin)
@@ -4274,8 +4284,10 @@ func draw(ui):
 		ui.end()
 		ui.pop_style_var()
 
+	var _f2 = OS.get_ticks_usec()
 	if bottom_drawn:
 		_draw_applets(ui, vp, off_bottom, mouse, grid)
+	var _f3 = OS.get_ticks_usec()
 	# Lo elegido en cualquier barra (las teselas de ventana pueden vivir en la inferior).
 	if _win_close != null:
 		to_close = _win_close
@@ -4289,6 +4301,7 @@ func draw(ui):
 	_draw_explosions(ui)
 	# Menús del Frame al final, sobre todo lo demás (barras, drag y estallidos).
 	_draw_frame_popups(ui, mouse, side)
+	var _f4 = OS.get_ticks_usec()
 
 	# Cerrar tiene prioridad sobre alternar/minimizar y sobre cambiar: la mini-tesela
 	# 'x' va encima del bloque cuadrado y puede compartir el clic en la esquina.
@@ -4300,6 +4313,25 @@ func draw(ui):
 	elif chosen != null:
 		switch_to(chosen)
 	suppress_pinned_click = ""
+	# Perfilado A1: desglose de frame.draw.
+	_f_us += _f4 - _f0
+	_f_shared += _f1 - _f0
+	_f_top += _f2 - _f1
+	_f_app += _f3 - _f2
+	_f_tail += _f4 - _f3
+	_f_n += 1
+	if _f_n >= 120:
+		if File.new().file_exists(OS.get_environment("HOME") + "/.gdtk-imgui-time"):
+			var fn = float(_f_n)
+			print("[FRAME] avg=%.2fms n=%d | shared=%.2f top=%.2f applets=%.2f tail=%.2f" % [
+				float(_f_us) / fn / 1000.0, _f_n, float(_f_shared) / fn / 1000.0,
+				float(_f_top) / fn / 1000.0, float(_f_app) / fn / 1000.0, float(_f_tail) / fn / 1000.0])
+		_f_us = 0
+		_f_n = 0
+		_f_shared = 0
+		_f_top = 0
+		_f_app = 0
+		_f_tail = 0
 
 
 # Botón de pin de una barra (K19): control redondo, chico y sutil en la esquina
