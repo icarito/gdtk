@@ -2123,9 +2123,21 @@ func _push_label_font(ui):
 # Ancho real del texto con la fuente activa (proporcional): centrar estimando
 # chars*7 desalineaba con el TTF. Fallback si el binario no trae calc_text_size.
 func _text_w(ui, s):
-	if ui.has_method("calc_text_size"):
-		return ui.calc_text_size(s).x
-	return s.length() * 7.0 * ui.get_imgui_scale()
+	# Memoizado: `calc_text_size` es nativo y `_truncate_w` lo llama en un while por
+	# carácter; los labels de la barra se repiten frame a frame. Se limpia al cambiar
+	# la escala y si el cache crece demasiado (strings dinámicos: reloj, contadores).
+	var sc = ui.get_imgui_scale()
+	if sc != _tw_scale:
+		_tw_cache = {}
+		_tw_scale = sc
+	var hit = _tw_cache.get(s)
+	if hit != null:
+		return hit
+	var w = ui.calc_text_size(s).x if ui.has_method("calc_text_size") else s.length() * 7.0 * sc
+	if _tw_cache.size() > 4000:
+		_tw_cache = {}
+	_tw_cache[s] = w
+	return w
 
 
 # Recorta `s` a lo sumo `max_w` px agregando "…" si hace falta.
@@ -4133,6 +4145,9 @@ var _f_wd = 0
 var _shared_cache = {}
 var _shared_cache_ver = -999999
 var _shared_cache_ms = 0
+# A1: cache de _text_w (calc_text_size nativo, llamado en loops de truncado).
+var _tw_cache = {}
+var _tw_scale = 0.0
 
 func draw(ui):
 	var _f0 = OS.get_ticks_usec()
