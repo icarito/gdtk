@@ -730,6 +730,7 @@ void WaylandCompositor::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("scanout_state"), &WaylandCompositor::scanout_state);
 	ClassDB::bind_method(D_METHOD("set_scanout_suspended", "suspended"), &WaylandCompositor::set_scanout_suspended);
 	ClassDB::bind_method(D_METHOD("scanout_suspended"), &WaylandCompositor::scanout_suspended);
+	ClassDB::bind_method(D_METHOD("scanout_reason"), &WaylandCompositor::scanout_reason);
 
 	ClassDB::bind_method(D_METHOD("add_output", "name", "rect", "scale", "primary"), &WaylandCompositor::add_output, DEFVAL(1.0), DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("configure_output", "id", "rect", "scale"), &WaylandCompositor::configure_output, DEFVAL(1.0));
@@ -1294,6 +1295,10 @@ void WaylandCompositor::set_scanout_suspended(bool p_suspended) {
 
 bool WaylandCompositor::scanout_suspended() const {
 	return server != NULL && wl_server_scanout_suspended(server) != 0;
+}
+
+String WaylandCompositor::scanout_reason() const {
+	return String(wl_server_scanout_reason(server));
 }
 
 Dictionary WaylandCompositor::_output_dict(int p_output_id) const {

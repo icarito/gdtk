@@ -278,6 +278,9 @@ struct wl_server {
 	// con esto en true el scanout no se engancha y las ventanas ya en scanout se
 	// devuelven al camino textura.
 	bool scanout_suspended;
+	// Último motivo por el que `scanout_candidate` rechazó (o aceptó) el scanout, sólo
+	// diagnóstico (RPC state.compositor.scanout_reason). Apunta a un literal estático.
+	const char *scanout_reason;
 
 	// Salidas logicas: coleccion explicita de wlr_output headless. `output_layout`
 	// (xdg-output usa este) y `outputs` (logical_output.link) viven toda la corrida.
@@ -444,26 +447,45 @@ static bool scanout_has_visible_sibling(struct wl_server *s, int self_id) {
 }
 
 static bool scanout_candidate(struct wl_server *s, surface_state *st) {
-	if (!s->scanout_enabled || s->scanout_suspended || st->surface == NULL || st->id <= 0) {
+	if (!s->scanout_enabled) {
+		s->scanout_reason = "bridge off";
+		return false;
+	}
+	if (s->scanout_suspended) {
+		s->scanout_reason = "suspendido (overlay del shell)";
+		return false;
+	}
+	if (st->surface == NULL || st->id <= 0) {
+		s->scanout_reason = "sin surface/id";
 		return false;
 	}
 	toplevel *t = toplevel_find(s, st->id);
 	if (t == NULL || !t->mapped || t->tl == NULL) {
+		s->scanout_reason = "toplevel no mapeado";
 		return false;
 	}
 	if (t->tl->base->surface != st->surface) {
+		s->scanout_reason = "surface no raiz (subsurface)";
 		return false;
 	}
 	if (t->output_id != s->primary_output_id) {
+		s->scanout_reason = "salida no primaria";
 		return false;
 	}
 	if (!wl_list_empty(&t->tl->base->popups)) {
+		s->scanout_reason = "popup abierto";
 		return false;
 	}
 	if (scanout_has_visible_sibling(s, st->id)) {
+		s->scanout_reason = "otra ventana visible";
 		return false;
 	}
-	return t->tl->current.fullscreen;
+	if (!t->tl->current.fullscreen) {
+		s->scanout_reason = "xdg no fullscreen";
+		return false;
+	}
+	s->scanout_reason = "on";
+	return true;
 }
 
 static void scanout_buffer(surface_state *st, struct wlr_buffer *buf,
@@ -3564,6 +3586,10 @@ void wl_server_scanout_set_suspended(wl_server *s, int suspended) {
 
 int wl_server_scanout_suspended(wl_server *s) {
 	return s != NULL && s->scanout_suspended;
+}
+
+const char *wl_server_scanout_reason(wl_server *s) {
+	return (s != NULL && s->scanout_reason != NULL) ? s->scanout_reason : "?";
 }
 
 void wl_server_destroy(wl_server *s) {

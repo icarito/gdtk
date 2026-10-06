@@ -183,6 +183,8 @@ const char *wl_server_scanout_state(wl_server *s);
 // implicita: el proximo commit dmabuf vuelve a enganchar. `suspended` 1/0.
 void wl_server_scanout_set_suspended(wl_server *s, int suspended);
 int wl_server_scanout_suspended(wl_server *s);
+// Último motivo (literal) por el que el scanout fue rechazado/aceptado; diagnóstico.
+const char *wl_server_scanout_reason(wl_server *s);
 void wl_server_bind_dmabuf(wl_server *s, uint64_t key, unsigned int texid);
 // Llena hasta `max` capas del arbol del toplevel (o layer surface) `id` en orden de dibujo;
 // devuelve cuantas escribio (0 si el id no existe o no esta mapeado).

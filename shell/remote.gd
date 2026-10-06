@@ -447,6 +447,7 @@ func _state():
 			"scanout": shell.compositor.scanout_state() if shell.compositor.has_method("scanout_state") else "?",
 			"scanout_on": shell.compositor.scanout_enabled() if shell.compositor.has_method("scanout_enabled") else false,
 			"scanout_suspended": shell.compositor.scanout_suspended() if shell.compositor.has_method("scanout_suspended") else false,
+			"scanout_reason": shell.compositor.scanout_reason() if shell.compositor.has_method("scanout_reason") else "?",
 		},
 		# Presentaciones livianas (present-only, sin rearmar ImGui) vs completas del shell
 		# (SPEC-rendimiento-compositor P1): dos lecturas muestran qué camino domina.
