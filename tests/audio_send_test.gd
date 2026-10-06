@@ -40,19 +40,26 @@ func _init():
 	check("recv puerto 0", A.recv_load_argv("10.0.0.1", 0) == [])
 	check("recv puerto 70000", A.recv_load_argv("10.0.0.1", 70000) == [])
 
-	# --- tunnel_load_argv ----------------------------------------------------
+	# --- tunnel_load_argv (mono + latencia fija; sin reconnect) --------------
 	check("tunnel IPv4",
 		A.tunnel_load_argv("10.0.0.5", 4714, "aa03")
 		== ["load-module", "module-tunnel-sink",
-			"server=tcp:10.0.0.5:4714", "sink_name=gdtk_send_aa03"])
+			"server=tcp:10.0.0.5:4714", "sink_name=gdtk_send_aa03",
+			"channels=1", "channel_map=mono",
+			"latency_msec=" + str(A.TUNNEL_LATENCY_MS)])
 	check("tunnel IPv6 corchetes",
 		A.tunnel_load_argv("fe80::1", 4714, "aa03")
 		== ["load-module", "module-tunnel-sink",
-			"server=tcp:[fe80::1]:4714", "sink_name=gdtk_send_aa03"])
+			"server=tcp:[fe80::1]:4714", "sink_name=gdtk_send_aa03",
+			"channels=1", "channel_map=mono",
+			"latency_msec=" + str(A.TUNNEL_LATENCY_MS)])
 	check("tunnel puerto custom",
 		A.tunnel_load_argv("10.0.0.5", 6000, "x/y")
 		== ["load-module", "module-tunnel-sink",
-			"server=tcp:10.0.0.5:6000", "sink_name=gdtk_send_x_y"])
+			"server=tcp:10.0.0.5:6000", "sink_name=gdtk_send_x_y",
+			"channels=1", "channel_map=mono",
+			"latency_msec=" + str(A.TUNNEL_LATENCY_MS)])
+	check("tunnel sin reconnect", A.tunnel_load_argv("10.0.0.5", 4714, "a").find("reconnect_interval_ms") < 0)
 	check("tunnel IP inválida", A.tunnel_load_argv("nope", 4714, "a") == [])
 	check("tunnel puerto inválido", A.tunnel_load_argv("10.0.0.5", -1, "a") == [])
 

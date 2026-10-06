@@ -5,6 +5,11 @@ extends Reference
 # OS.execute("pactl", argv, true, out). Ver SPEC-sugar-group-2026-10.md.
 
 const RECV_PORT = 4714
+# Latencia fija del túnel (buffer del cliente) para absorber jitter de Wi-Fi. El
+# default de PipeWire es 200 ms; 400 da margen sin volverse incómodo. NO se activa
+# `reconnect_interval_ms`: medido 2026-10-06, insertaba cortes (~7-8% de la señal)
+# en un enlace sano; sin él, 1%.
+const TUNNEL_LATENCY_MS = 400
 
 
 static func _valid_port(port):
@@ -50,7 +55,10 @@ static func tunnel_load_argv(peer_ip, port, hid):
 		server = "tcp:[" + ip + "]:" + str(int(port))
 	return ["load-module", "module-tunnel-sink",
 		"server=" + server,
-		"sink_name=" + sink_name(hid)]
+		"sink_name=" + sink_name(hid),
+		# Mono: la mitad de bytes que estéreo; el receptor remezcla a su sink.
+		"channels=1", "channel_map=mono",
+		"latency_msec=" + str(TUNNEL_LATENCY_MS)]
 
 
 static func unload_argv(module_id):
