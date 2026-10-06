@@ -300,6 +300,9 @@ var system_osd = null
 # puente dmabuf mientras dibuja un overlay (Frame/OSD/exposé/Vecindario) para que la
 # subsurface del host no lo tape; se reanuda al desaparecer (SPEC-scanout-directo).
 var _scanout_suspended_sent = false
+# Perfilado A1: tiempo de `_imgui_frame` (armado de la UI). Gate por flag archivo.
+var _imgui_us = 0
+var _imgui_n = 0
 
 # Diagnóstico de entrada (ver remote.gd state.input): cuentan eventos que llegan al shell.
 var input_motion_count = 0
@@ -1682,6 +1685,7 @@ func _redraw_on_signal(_id):
 
 
 func _imgui_frame():
+	var _it0 = OS.get_ticks_usec()
 	# Antes de dibujar: el texto sigue el tamaño de la grilla (fuentes escaladas).
 	_sync_ui_scale()
 	# Auto-rotación: arrancar el daemon una vez (sway o X11, según la sesión).
@@ -1787,6 +1791,15 @@ func _imgui_frame():
 
 	frame_count += 1
 	_run_test_logic()
+	# Perfilado A1: costo de armar la UI ImGui (promedio cada 120 armados).
+	_imgui_us += OS.get_ticks_usec() - _it0
+	_imgui_n += 1
+	if _imgui_n >= 120:
+		if File.new().file_exists(OS.get_environment("HOME") + "/.gdtk-imgui-time") \
+				or OS.get_environment("GDTK_IMGUI_TIME") != "":
+			print("[IMGUI] avg=%.2fms n=%d" % [float(_imgui_us) / float(_imgui_n) / 1000.0, _imgui_n])
+		_imgui_us = 0
+		_imgui_n = 0
 
 
 # --- Pantallas: una fila horizontal; cada pantalla puede tener varias apps ---
