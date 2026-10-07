@@ -12,7 +12,7 @@ extends Reference
 const REFRESH_MS = 20000      # refresco normal del listado
 const RESCAN_MS = 60000       # rescan best-effort una vez por minuto
 const SLEEP_STEP_MS = 100     # granularidad para que stop() no espere de más
-const AVAHI_TIMEOUT = "4"      # avahi-browse puede quedarse esperando si no hay servicio
+const AVAHI_TIMEOUT = "8"      # avahi-browse -r puede tardar (resolve IPv6 link-local)
 const BT_TIMEOUT = "2"        # timeout de cada bluetoothctl (worker)
 const BT_MAX = 16             # tope de dispositivos para no inflar el mapa
 
@@ -258,8 +258,9 @@ func _read_hosts():
 	var text = ""
 	for svc in GDTK_SERVICES:
 		out = []
-		if OS.execute("timeout", [AVAHI_TIMEOUT, "avahi-browse", "-rtp", svc], true, out) != 0:
-			continue
+		# Usar la salida aunque `timeout` corte avahi-browse (rc!=0): el resolve de
+		# AAAA link-local puede tardar; descartarla dejaba 0 hosts.
+		OS.execute("timeout", [AVAHI_TIMEOUT, "avahi-browse", "-rtp", svc], true, out)
 		for line in out:
 			text += str(line) + "\n"
 	if text.strip_edges() == "":
