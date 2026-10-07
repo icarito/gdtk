@@ -1,0 +1,157 @@
+#!/bin/sh
+# gdtk-mesh — arma/desarma el mesh Wi-Fi de baja latencia del Vecindario.
+#
+# Una interfaz wifi "spare" (p.ej. una USB, que sólo hace de cliente) se usa como
+# uplink a Internet; la interfaz wifi "ap" (la que soporta modo AP) emite el AP
+# `gdtk-mesh` (5 GHz por defecto) con `ipv4.method shared`: NetworkManager hace
+# DHCP + NAT. Las otras máquinas del grupo se unen solas (perfil `gdtk-mesh`
+# cliente con autoconnect y prioridad alta).
+#
+# Uso:
+#   gdtk-mesh auto     # si hay USB wifi secundaria, arma; si no, desarma
+#   gdtk-mesh up|down
+#   gdtk-mesh status
+#
+# Pensado para correr como root desde systemd/udev (ver session/gdtk-mesh-provision).
+# También sirve a mano sin sudo (el usuario tiene settings.modify.system).
+# Nunca pasa secretos por argv: clona el perfil de uplink.
+set -u
+
+CONF="${GDTK_MESH_CONF:-/etc/gdtk/gdtk-mesh.conf}"
+# shellcheck disable=SC1090
+[ -f "$CONF" ] && . "$CONF"
+
+AP_PROFILE="${AP_PROFILE:-gdtk-mesh}"
+UPLINK_PROFILE="${UPLINK_PROFILE:-gdtk-uplink}"
+SSID="${SSID:-gdtk-mesh}"
+UPLINK_SRC="${UPLINK_SRC:-Alvitos_Govista}"
+AP_BAND="${AP_BAND:-a}"
+AP_CHANNEL="${AP_CHANNEL:-149}"
+LOG="${GDTK_MESH_LOG:-/var/log/gdtk-mesh.log}"
+[ -w "$(dirname "$LOG")" ] 2>/dev/null || LOG=/tmp/gdtk-mesh.log
+
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$LOG" 2>/dev/null || true; }
+nmt() { nmcli "$@"; }
+
+wifi_ifaces() {
+	for d in /sys/class/net/*/wireless; do
+		[ -e "$d" ] && basename "$(dirname "$d")"
+	done
+}
+
+iface_phy() { basename "$(readlink -f "/sys/class/net/$1/phy80211" 2>/dev/null)" 2>/dev/null; }
+
+iface_supports_ap() {
+	phy="$(iface_phy "$1")"
+	[ -n "$phy" ] || return 1
+	iw phy "$phy" info 2>/dev/null | grep -qE '^[[:space:]]+\* AP$'
+}
+
+pick_ifaces() {
+	AP_IFACE=""
+	for i in $(wifi_ifaces); do
+		if [ -z "$AP_IFACE" ] && iface_supports_ap "$i"; then AP_IFACE="$i"; fi
+	done
+	SPARE_IFACE=""
+	if [ -n "$AP_IFACE" ]; then
+		for i in $(wifi_ifaces); do
+			[ "$i" = "$AP_IFACE" ] && continue
+			SPARE_IFACE="$i"
+			break
+		done
+	fi
+}
+
+active_conn_on() {
+	nmt -t -f NAME,DEVICE connection show --active | awk -F: -v d="$1" '$2==d{print $1; exit}'
+}
+
+profile_exists() { nmt -t -f NAME connection show | grep -qxF "$1"; }
+
+ensure_uplink() {
+	if ! profile_exists "$UPLINK_PROFILE"; then
+		if [ -z "$UPLINK_SRC" ] || ! profile_exists "$UPLINK_SRC"; then
+			log "uplink: falta el perfil fuente '$UPLINK_SRC'"
+			return 1
+		fi
+		nmt connection clone "$UPLINK_SRC" "$UPLINK_PROFILE" >>"$LOG" 2>&1 || {
+			log "uplink: clone falló"
+			return 1
+		}
+	fi
+	nmt connection modify "$UPLINK_PROFILE" \
+		connection.interface-name "$SPARE_IFACE" \
+		connection.autoconnect no connection.autoconnect-priority 10 \
+		802-11-wireless.powersave 2 >>"$LOG" 2>&1
+}
+
+ensure_ap() {
+	if ! profile_exists "$AP_PROFILE"; then
+		if ! nmt connection add type wifi ifname "$AP_IFACE" con-name "$AP_PROFILE" \
+			autoconnect no ssid "$SSID" 802-11-wireless.mode ap \
+			802-11-wireless.band "$AP_BAND" 802-11-wireless.channel "$AP_CHANNEL" \
+			ipv4.method shared ipv6.method ignore >>"$LOG" 2>&1; then
+			log "ap: add en $AP_BAND/$AP_CHANNEL falló, reintento en bg/11"
+			nmt connection add type wifi ifname "$AP_IFACE" con-name "$AP_PROFILE" \
+				autoconnect no ssid "$SSID" 802-11-wireless.mode ap \
+				802-11-wireless.band bg 802-11-wireless.channel 11 \
+				ipv4.method shared ipv6.method ignore >>"$LOG" 2>&1 || {
+				log "ap: add falló"
+				return 1
+			}
+		fi
+	fi
+	nmt connection modify "$AP_PROFILE" \
+		connection.interface-name "$AP_IFACE" connection.autoconnect no \
+		802-11-wireless.powersave 2 >>"$LOG" 2>&1
+}
+
+do_up() {
+	pick_ifaces
+	if [ -z "$AP_IFACE" ] || [ -z "$SPARE_IFACE" ]; then
+		log "auto: sin USB wifi secundaria (ap=${AP_IFACE:-none})"
+		return 1
+	fi
+	ensure_uplink || return 1
+	ensure_ap || return 1
+	log "mesh up: ap=$AP_IFACE spare=$SPARE_IFACE ssid=$SSID src=$UPLINK_SRC"
+	nmt connection up "$UPLINK_PROFILE" >>"$LOG" 2>&1
+	sleep 4
+	nmt connection up "$AP_PROFILE" >>"$LOG" 2>&1
+}
+
+do_down() {
+	pick_ifaces
+	log "mesh down (ap=${AP_IFACE:-none})"
+	nmt connection down "$AP_PROFILE" >>"$LOG" 2>&1
+	nmt connection down "$UPLINK_PROFILE" >>"$LOG" 2>&1
+	# Devolver Internet a la interfaz AP (NM elige un perfil autoconnect).
+	if [ -n "$AP_IFACE" ] && [ -z "$(active_conn_on "$AP_IFACE")" ]; then
+		nmt device connect "$AP_IFACE" >>"$LOG" 2>&1
+	fi
+}
+
+do_status() {
+	pick_ifaces
+	printf 'ap_iface=%s spare_iface=%s\n' "${AP_IFACE:-}" "${SPARE_IFACE:-}"
+	printf 'ap_active=%s uplink_active=%s\n' \
+		"$([ -n "${AP_IFACE:-}" ] && active_conn_on "$AP_IFACE")" \
+		"$([ -n "${SPARE_IFACE:-}" ] && active_conn_on "$SPARE_IFACE")"
+	[ -n "${AP_IFACE:-}" ] && nmt -t -f GENERAL.STATE device show "$AP_IFACE" 2>/dev/null
+}
+
+do_auto() {
+	pick_ifaces
+	if [ -n "$AP_IFACE" ] && [ -n "$SPARE_IFACE" ]; then
+		do_up
+	else
+		do_down
+	fi
+}
+
+case "${1:-auto}" in
+	up) do_up ;;
+	down) do_down ;;
+	status) do_status ;;
+	auto | *) do_auto ;;
+esac

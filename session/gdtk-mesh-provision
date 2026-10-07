@@ -1,0 +1,86 @@
+#!/bin/sh
+# session/gdtk-mesh-provision — instala el mesh Wi-Fi automático. Correr con sudo UNA vez.
+#
+# Hace:
+#   - ip_forward persistente (/etc/sysctl.d/99-gdtk-mesh.conf);
+#   - permite el forward del mesh en /etc/nftables.conf (si existe);
+#   - config por defecto /etc/gdtk/gdtk-mesh.conf;
+#   - servicio+timer systemd y regla udev que corren `gdtk-mesh auto` al
+#     conectar/desconectar interfaces de red y cada 15 s.
+#
+# Idempotente. No instala paquetes.
+set -e
+
+U="${SUDO_USER:-$(id -un)}"
+HOME_DIR="$(getent passwd "$U" | cut -d: -f6)"
+GDTK_DIR="${GDTK_DIR:-$HOME_DIR/gdtk}"
+MESH="$GDTK_DIR/session/gdtk-mesh"
+AP_IFACE="${GDTK_MESH_AP_IFACE:-wlan0}"
+UPLINK_SRC="${GDTK_MESH_UPLINK_SRC:-Alvitos_Govista}"
+
+[ -x "$MESH" ] || { echo "falta $MESH (¿deploy/rsync del repo?)"; exit 1; }
+
+echo "== ip_forward =="
+printf 'net.ipv4.ip_forward=1\n' > /etc/sysctl.d/99-gdtk-mesh.conf
+sysctl -qw net.ipv4.ip_forward=1
+
+echo "== firewall (/etc/nftables.conf) =="
+if [ -f /etc/nftables.conf ] && ! grep -q gdtk-mesh-forward /etc/nftables.conf; then
+	cp -a /etc/nftables.conf "/etc/nftables.conf.gdtk-bak-$(date +%s)"
+	sed -i "/policy drop/a\\    # gdtk-mesh-forward\n    ip saddr 10.42.0.0/24 iifname \"$AP_IFACE\" accept\n    ip daddr 10.42.0.0/24 oifname \"$AP_IFACE\" ct state { established, related } accept" /etc/nftables.conf
+	nft -f /etc/nftables.conf && echo "forward del mesh agregado y recargado"
+else
+	echo "sin cambios en el firewall"
+fi
+
+echo "== config =="
+install -d /etc/gdtk
+if [ ! -f /etc/gdtk/gdtk-mesh.conf ]; then
+	cat > /etc/gdtk/gdtk-mesh.conf <<EOF
+# Mesh Wi-Fi del Vecindario. UPLINK_SRC debe ser una red 2.4 GHz guardada que vea
+# la USB (para que la USB pueda asociarse y dar Internet al grupo).
+UPLINK_SRC=$UPLINK_SRC
+AP_BAND=a
+AP_CHANNEL=149
+EOF
+	echo "creado /etc/gdtk/gdtk-mesh.conf"
+else
+	echo "config existente, no se toca"
+fi
+
+echo "== systemd/udev =="
+cat > /etc/systemd/system/gdtk-mesh-auto.service <<EOF
+[Unit]
+Description=gdtk: mesh Wi-Fi automático (USB secundaria)
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=$MESH auto
+EOF
+
+cat > /etc/systemd/system/gdtk-mesh-auto.timer <<'EOF'
+[Unit]
+Description=gdtk mesh auto (poll)
+
+[Timer]
+OnBootSec=20
+OnUnitActiveSec=15
+Unit=gdtk-mesh-auto.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+cat > /etc/udev/rules.d/90-gdtk-mesh.rules <<'EOF'
+# gdtk: reevaluar el mesh cuando aparece/desaparece una interfaz de red.
+SUBSYSTEM=="net", ACTION=="add", RUN+="/usr/bin/systemctl --no-block start gdtk-mesh-auto.service"
+SUBSYSTEM=="net", ACTION=="remove", RUN+="/usr/bin/systemctl --no-block start gdtk-mesh-auto.service"
+EOF
+
+udevadm control --reload-rules
+systemctl daemon-reload
+systemctl enable --now gdtk-mesh-auto.timer
+systemctl start gdtk-mesh-auto.service || true
+echo "gdtk-mesh provision OK (timer + udev activos)"

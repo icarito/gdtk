@@ -129,6 +129,9 @@
 - `2026-10-05_rendimiento-compositor.md`
   - Description: Research de rendimiento (Meet FPS bajo/CPU alta) + acciones cortas entregadas: frame_done a la presentación, diagnóstico dmabuf; binario rebuild+instalado y validado headless.
   - Read If: Retomando el rendimiento del compositor/shell, o el plan present-only/explicit-sync.
+- `2026-10-06_mesh-wifi.md`
+  - Description: Setup final del mesh Wi-Fi bastion·tengu·cupid (AP 5GHz de bastion + uplink USB, NAT/DHCP NM, firewall nftables), latencias y gotchas (AP+STA no nativo, uap0 en mwifiex peligroso); hooks para la UI del Vecindario.
+  - Read If: Retomando la señal Wi-Fi compartida, el Vecindario o el setup de red de los tres hosts.
 - `2026-10-06_popup-layout-grupo.md`
   - Description: Popup de revisión del layout al mover un host en Grupo (mini distribución, countdown 10 s, arrastre/resize in-place, snap contra lo solapado) + fixes de Deskflow (reinicio con debounce, vigía con enfriamiento).
   - Read If: Tocando la vista Grupo, el popup ##layout_confirm, screen_layout.gd o el reinicio de Deskflow.
