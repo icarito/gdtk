@@ -16,7 +16,13 @@ const VERSION = 1
 # remoto completo, sólo lo necesario para pantalla y el aviso de lados compartidos).
 const METHODS = ["ping", "gvd_recv", "gvd_stop", "gvd_send", "gvd_status",
 	"share_notify", "share_stop", "clip_set", "audio_recv", "audio_stop", "gvd_size",
-	"window_input", "window_input_stream", "gvd_meta"]
+	"window_input", "window_input_stream", "gvd_meta", "direction"]
+
+# Handshake de dirección del Vecindario (antes por ssh): viaja por el canal peer SIN
+# token (es la vinculación inicial del Grupo). Vocabulario del DTO de
+# neighborhood_handshake.gd.
+const DIRECTIONS = ["north", "south", "east", "west", "none"]
+const DIR_KINDS = ["direction_proposal", "direction_response"]
 
 # Parámetros válidos de los avisos de lados compartidos (G5). El `side` llega YA
 # invertido por el emisor: acá sólo se valida el vocabulario, no se transforma.
@@ -149,6 +155,25 @@ static func valid_share_params(method, params):
 	return true
 
 
+# Handshake de dirección del Vecindario (antes por ssh): DTO validado o {}.
+static func direction_message(params):
+	var p = params if typeof(params) == TYPE_DICTIONARY else {}
+	var kind = String(p.get("kind", "")).strip_edges()
+	if not DIR_KINDS.has(kind):
+		return {}
+	var from = String(p.get("from", "")).strip_edges()
+	var to = String(p.get("to", "")).strip_edges()
+	if not valid_hid(from) or not valid_hid(to):
+		return {}
+	var d = String(p.get("direction", "none")).strip_edges()
+	if not DIRECTIONS.has(d):
+		return {}
+	var out = {"v": VERSION, "kind": kind, "from": from, "to": to, "direction": d}
+	if kind == "direction_response":
+		out["accepted"] = bool(p.get("accepted", false))
+	return out
+
+
 static func valid_hid(hid):
 	var s = String(hid).strip_edges()
 	if s == "" or s.length() > 128 or s.begins_with("-"):
@@ -253,4 +278,12 @@ static func selftest():
 		{"type": "screen", "side": "up", "state": "active"})
 	ok = ok and valid_share_params("share_stop", {"type": "input"})
 	ok = ok and not valid_share_params("share_stop", {})
+	ok = ok and valid_method("direction")
+	var dm = direction_message({"kind": "direction_proposal", "from": "aa033bda2a7c6092",
+		"to": "61950c8964e60e15", "direction": "east"})
+	ok = ok and String(dm.kind) == "direction_proposal" and String(dm.direction) == "east"
+	ok = ok and direction_message({"kind": "direction_response", "from": "aa033bda2a7c6092",
+		"to": "61950c8964e60e15", "direction": "up", "accepted": true}).empty()
+	ok = ok and direction_message({"kind": "otra", "from": "a", "to": "b"}).empty()
+	ok = ok and direction_message({"kind": "direction_proposal", "from": "a b", "to": "b"}).empty()
 	return ok

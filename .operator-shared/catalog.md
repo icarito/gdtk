@@ -93,6 +93,9 @@
 - `SPEC-sugar-group-mesh.md`
   - Description: Mesh Wi-Fi automático del Grupo: host = servidor Deskflow con radio spare; mesh abierto con DHCP/NAT de NM; aviso mDNS sin secreto; miembros se unen por autoconnect; fallback y reporte.
   - Read If: Flujo automático de red del Grupo, session/gdtk-mesh, anuncio `mesh=` o estado del mesh por equipo.
+- `SPEC-sugar-group-no-ssh.md`
+  - Description: Grupo sin SSH: el control (handshake de direcciones, gvd, audio, portapapeles, ventana) va por el canal peer TCP `:7788` con token TOFU; SSH sólo para aprovisionamiento; transporte por Deskflow/gstreamer/PipeWire; ruta más corta (mesh).
+  - Read If: Control del Grupo, handshake de direcciones, canal peer, o quitar dependencia de ssh.
 - `SPEC-sugar-home-visual.md`, `SPEC-sugar-resource-ring.md`, `SPEC-sugar-spatial.md`
   - Description: Hogar: identidad visual, anillo de recursos, orientación espacial del shell.
   - Read If: Vista Hogar, anillo, navegación espacial entre vistas.

@@ -221,6 +221,19 @@ func _handle(conn, line):
 	if String(r.method) == "ping":
 		_send(conn, LINK.encode_response(true, "", {"paired": tokens.has("srv:" + hid)}))
 		return
+	if String(r.method) == "direction":
+		# Vinculación inicial del Grupo: sin token (como ping). Sólo aplica un DTO
+		# validado; no ejecuta nada.
+		var dmsg = LINK.direction_message(r.params)
+		if dmsg.empty():
+			_send(conn, LINK.encode_response(false, "direction inválido"))
+			return
+		if shell == null or not is_instance_valid(shell) or not shell.has_method("_peer_direction"):
+			_send(conn, LINK.encode_response(false, "no disponible"))
+			return
+		var dok = bool(shell._peer_direction(hid, dmsg))
+		_send(conn, LINK.encode_response(dok, "" if dok else "no aplicado"))
+		return
 	var known = String(tokens.get("srv:" + hid, ""))
 	var extra = {}
 	if known == "":
