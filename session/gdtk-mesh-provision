@@ -48,6 +48,23 @@ else
 	echo "config existente, no se toca"
 fi
 
+echo "== ssh (aceptar host keys nuevas del mesh) =="
+SSH_DIR="$HOME_DIR/.ssh"
+SSHCFG="$SSH_DIR/config"
+install -d -m 700 -o "$U" -g "$U" "$SSH_DIR" 2>/dev/null || install -d -m 700 "$SSH_DIR"
+if ! grep -q "gdtk-mesh (auto)" "$SSHCFG" 2>/dev/null; then
+	tmp="$(mktemp)"
+	{
+		printf '# gdtk-mesh (auto)\nHost 10.42.0.*\n    StrictHostKeyChecking accept-new\n    UserKnownHostsFile ~/.ssh/known_hosts_mesh\n'
+		cat "$SSHCFG" 2>/dev/null
+	} >"$tmp"
+	install -m 600 -o "$U" -g "$U" "$tmp" "$SSHCFG" 2>/dev/null || { cp "$tmp" "$SSHCFG"; chmod 600 "$SSHCFG"; }
+	rm -f "$tmp"
+	echo "ssh config actualizado para $U"
+else
+	echo "ssh config ya tiene el bloque del mesh"
+fi
+
 echo "== systemd/udev =="
 cat > /etc/systemd/system/gdtk-mesh-auto.service <<EOF
 [Unit]

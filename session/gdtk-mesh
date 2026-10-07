@@ -114,6 +114,11 @@ do_up() {
 	fi
 	ensure_uplink || return 1
 	ensure_ap || return 1
+	# Ya arriba: no reconectar (evita churn del timer).
+	if [ "$(active_conn_on "$AP_IFACE")" = "$AP_PROFILE" ] \
+		&& [ "$(active_conn_on "$SPARE_IFACE")" = "$UPLINK_PROFILE" ]; then
+		return 0
+	fi
 	log "mesh up: ap=$AP_IFACE spare=$SPARE_IFACE ssid=$SSID src=$UPLINK_SRC"
 	nmt connection up "$UPLINK_PROFILE" >>"$LOG" 2>&1
 	sleep 4
@@ -122,6 +127,10 @@ do_up() {
 
 do_down() {
 	pick_ifaces
+	if [ "$(active_conn_on "${AP_IFACE:-none}")" != "$AP_PROFILE" ] \
+		&& [ "$(active_conn_on "${SPARE_IFACE:-none}")" != "$UPLINK_PROFILE" ]; then
+		return 0
+	fi
 	log "mesh down (ap=${AP_IFACE:-none})"
 	nmt connection down "$AP_PROFILE" >>"$LOG" 2>&1
 	nmt connection down "$UPLINK_PROFILE" >>"$LOG" 2>&1
