@@ -90,6 +90,9 @@
 - `SPEC-sugar-group-2026-10.md`
   - Description: Grupo (zoom Sugar), Vecindario sin solapes, Hogar por orientación, dockapp Compartiendo (G1-G5), portapapeles y enviar audio/ventanas.
   - Read If: Vista Grupo, dockapp Compartiendo, briefs `.operator-shared/briefs/G*.txt`.
+- `SPEC-sugar-group-mesh.md`
+  - Description: Mesh Wi-Fi automático del Grupo: host = servidor Deskflow con radio spare; mesh abierto con DHCP/NAT de NM; aviso mDNS sin secreto; miembros se unen por autoconnect; fallback y reporte.
+  - Read If: Flujo automático de red del Grupo, session/gdtk-mesh, anuncio `mesh=` o estado del mesh por equipo.
 - `SPEC-sugar-home-visual.md`, `SPEC-sugar-resource-ring.md`, `SPEC-sugar-spatial.md`
   - Description: Hogar: identidad visual, anillo de recursos, orientación espacial del shell.
   - Read If: Vista Hogar, anillo, navegación espacial entre vistas.

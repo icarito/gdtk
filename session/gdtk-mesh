@@ -241,6 +241,28 @@ do_status() {
 	[ -n "${AP_IFACE:-}" ] && nmt -t -f GENERAL.STATE device show "$AP_IFACE" 2>/dev/null
 }
 
+do_join() {
+	# Miembro del grupo: perfil cliente ABIERTO para el SSID, autoconnect + prioridad
+	# alta. NetworkManager lo une solo cuando el AP aparece y vuelve a la red conocida
+	# cuando desaparece. No corre en el host que puede hospedar (tiene spare).
+	if pick_ifaces && [ -n "$SPARE_IFACE" ]; then
+		log "join: este host puede hospedar (spare=$SPARE_IFACE); no me uno"
+		return 1
+	fi
+	jif=""
+	for i in $(wifi_ifaces); do jif="$i"; break; done
+	[ -n "$jif" ] || { log "join: sin wifi"; return 1; }
+	if profile_exists "$AP_PROFILE"; then
+		nmt connection modify "$AP_PROFILE" connection.autoconnect yes \
+			connection.autoconnect-priority 100 >>"$LOG" 2>&1
+	else
+		nmt connection add type wifi ifname "$jif" con-name "$AP_PROFILE" ssid "$SSID" \
+			connection.autoconnect yes connection.autoconnect-priority 100 >>"$LOG" 2>&1
+	fi
+	log "join: perfil '$AP_PROFILE' asegurado en $jif"
+	nmt connection up "$AP_PROFILE" >>"$LOG" 2>&1 || true
+}
+
 do_auto() {
 	pick_ifaces && do_up || do_down
 }
@@ -248,6 +270,7 @@ do_auto() {
 case "${1:-auto}" in
 	up) do_up ;;
 	down) do_down ;;
+	join) do_join ;;
 	status) do_status ;;
 	auto | *) do_auto ;;
 esac
