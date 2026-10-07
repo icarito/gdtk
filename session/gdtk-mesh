@@ -28,6 +28,7 @@ UPLINK_SRC="${UPLINK_SRC:-}"
 AP_BAND="${AP_BAND:-}"
 AP_CHANNEL="${AP_CHANNEL:-}"
 MESH_USER="${MESH_USER:-}"
+ROLE_FILE="${ROLE_FILE:-}"
 LOG="${GDTK_MESH_LOG:-/var/log/gdtk-mesh.log}"
 [ -w "$(dirname "$LOG")" ] 2>/dev/null || LOG=/tmp/gdtk-mesh.log
 
@@ -124,6 +125,21 @@ mesh_home() {
 	else
 		echo "$HOME"
 	fi
+}
+
+# Archivo de rol escrito por el shell: "host" si este equipo es el servidor
+# Deskflow del Grupo (y por lo tanto puede hospedar). Sin él, no se hospeda.
+mesh_role_file() {
+	if [ -n "$ROLE_FILE" ]; then echo "$ROLE_FILE"; return 0; fi
+	uid=""
+	if is_root && [ -n "$MESH_USER" ]; then uid="$(id -u "$MESH_USER" 2>/dev/null)"; fi
+	if [ -n "$uid" ] && [ -d "/run/user/$uid" ]; then echo "/run/user/$uid/gdtk/mesh-role"; return 0; fi
+	if [ -n "${XDG_RUNTIME_DIR:-}" ]; then echo "$XDG_RUNTIME_DIR/gdtk/mesh-role"; return 0; fi
+	echo ""
+}
+mesh_role() {
+	rf="$(mesh_role_file)"
+	[ -n "$rf" ] && [ -f "$rf" ] && tr -d '[:space:]' <"$rf"
 }
 
 ensure_uplink() {
@@ -231,6 +247,7 @@ do_down() {
 
 do_status() {
 	pick_ifaces || true
+	printf 'role=%s\n' "$(mesh_role)"
 	printf 'ap_iface=%s spare_iface=%s\n' "${AP_IFACE:-}" "${SPARE_IFACE:-}"
 	if [ -n "${SPARE_IFACE:-}" ]; then
 		printf 'uplink_src(auto)=%s\n' "$(pick_uplink_src)"
@@ -264,7 +281,13 @@ do_join() {
 }
 
 do_auto() {
-	pick_ifaces && do_up || do_down
+	# Sólo hospeda si el shell marcó este equipo como host del mesh (servidor
+	# Deskflow del Grupo). Si no, asegura que no haya mesh y devuelve la red.
+	if [ "$(mesh_role)" = "host" ]; then
+		pick_ifaces && do_up || do_down
+	else
+		do_down
+	fi
 }
 
 case "${1:-auto}" in
