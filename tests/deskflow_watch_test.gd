@@ -25,6 +25,6 @@ func _init():
 	check("log vacío", W.stuck_on("", "bastion") == "")
 	check("server cree local tras volver", W.server_local(base + "[t] INFO: switch from \"cupid\" to \"bastion\" at 3,4\n", "bastion"))
 	check("server cree remoto", not W.server_local(base, "bastion"))
-	check("sin switches: local", W.server_local("[t] NOTE: started server\n", "bastion"))
+	check("sin switches: no concluye local", not W.server_local("[t] NOTE: started server\n", "bastion"))
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

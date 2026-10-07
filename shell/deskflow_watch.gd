@@ -30,11 +30,12 @@ static func stuck_on(log_text, local_name):
 	return ""
 
 
-# ¿El servidor cree que el puntero está en la pantalla local? (último switch hacia el
-# local, o ninguno en la cola). Con la captura activa eso es una discordancia: Deskflow
-# volvió al local pero no pidió Release.
+# ¿El servidor cree que el puntero está en la pantalla local? Sólo si el ÚLTIMO
+# `switch from "A" to "B"` de la cola va al local. Sin ninguna línea `switch` en la
+# ventana (p.ej. el log creció y el switch salió del tail mientras se escribe en el
+# remoto) NO se concluye: antes se asumía local y eso soltaba la captura en pleno uso.
 static func server_local(log_text, local_name):
-	var dest = String(local_name)
+	var dest = ""
 	for line in String(log_text).split("\n"):
 		var sw = line.find("switch from \"")
 		if sw < 0:
@@ -43,4 +44,4 @@ static func server_local(log_text, local_name):
 		var end = line.find("\"", to + 6) if to >= 0 else -1
 		if end > to + 6:
 			dest = line.substr(to + 6, end - (to + 6))
-	return dest == String(local_name)
+	return dest != "" and dest == String(local_name)
