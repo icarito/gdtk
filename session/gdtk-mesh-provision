@@ -3,20 +3,18 @@
 #
 # Hace:
 #   - ip_forward persistente (/etc/sysctl.d/99-gdtk-mesh.conf);
-#   - permite el forward del mesh en /etc/nftables.conf (si existe);
-#   - config por defecto /etc/gdtk/gdtk-mesh.conf;
+#   - /etc/gdtk/gdtk-mesh.conf (MESH_USER; UPLINK_SRC/AP_BAND/AP_CHANNEL opcionales);
 #   - servicio+timer systemd y regla udev que corren `gdtk-mesh auto` al
 #     conectar/desconectar interfaces de red y cada 15 s.
 #
-# Idempotente. No instala paquetes.
+# El forward del firewall y el ~/.ssh/config del mesh los administra `gdtk-mesh`
+# en runtime (con la subnet y la interfaz reales). Idempotente. No instala paquetes.
 set -e
 
 U="${SUDO_USER:-$(id -un)}"
 HOME_DIR="$(getent passwd "$U" | cut -d: -f6)"
 GDTK_DIR="${GDTK_DIR:-$HOME_DIR/gdtk}"
 MESH="$GDTK_DIR/session/gdtk-mesh"
-AP_IFACE="${GDTK_MESH_AP_IFACE:-wlan0}"
-UPLINK_SRC="${GDTK_MESH_UPLINK_SRC:-Alvitos_Govista}"
 
 [ -x "$MESH" ] || { echo "falta $MESH (¿deploy/rsync del repo?)"; exit 1; }
 
@@ -24,45 +22,21 @@ echo "== ip_forward =="
 printf 'net.ipv4.ip_forward=1\n' > /etc/sysctl.d/99-gdtk-mesh.conf
 sysctl -qw net.ipv4.ip_forward=1
 
-echo "== firewall (/etc/nftables.conf) =="
-if [ -f /etc/nftables.conf ] && ! grep -q gdtk-mesh-forward /etc/nftables.conf; then
-	cp -a /etc/nftables.conf "/etc/nftables.conf.gdtk-bak-$(date +%s)"
-	sed -i "/policy drop/a\\    # gdtk-mesh-forward\n    ip saddr 10.42.0.0/24 iifname \"$AP_IFACE\" accept\n    ip daddr 10.42.0.0/24 oifname \"$AP_IFACE\" ct state { established, related } accept" /etc/nftables.conf
-	nft -f /etc/nftables.conf && echo "forward del mesh agregado y recargado"
-else
-	echo "sin cambios en el firewall"
-fi
-
 echo "== config =="
 install -d /etc/gdtk
 if [ ! -f /etc/gdtk/gdtk-mesh.conf ]; then
 	cat > /etc/gdtk/gdtk-mesh.conf <<EOF
-# Mesh Wi-Fi del Vecindario. UPLINK_SRC debe ser una red 2.4 GHz guardada que vea
-# la USB (para que la USB pueda asociarse y dar Internet al grupo).
-UPLINK_SRC=$UPLINK_SRC
-AP_BAND=a
-AP_CHANNEL=149
+# Mesh Wi-Fi del Vecindario. gdtk-mesh elige interfaces y red de uplink solo;
+# estos campos son opcionales (para forzar).
+MESH_USER=$U
+# UPLINK_SRC=MiRed.2.4GHz
+# AP_BAND=a
+# AP_CHANNEL=149
 EOF
 	echo "creado /etc/gdtk/gdtk-mesh.conf"
 else
-	echo "config existente, no se toca"
-fi
-
-echo "== ssh (aceptar host keys nuevas del mesh) =="
-SSH_DIR="$HOME_DIR/.ssh"
-SSHCFG="$SSH_DIR/config"
-install -d -m 700 -o "$U" -g "$U" "$SSH_DIR" 2>/dev/null || install -d -m 700 "$SSH_DIR"
-if ! grep -q "gdtk-mesh (auto)" "$SSHCFG" 2>/dev/null; then
-	tmp="$(mktemp)"
-	{
-		printf '# gdtk-mesh (auto)\nHost 10.42.0.*\n    StrictHostKeyChecking accept-new\n    UserKnownHostsFile ~/.ssh/known_hosts_mesh\n'
-		cat "$SSHCFG" 2>/dev/null
-	} >"$tmp"
-	install -m 600 -o "$U" -g "$U" "$tmp" "$SSHCFG" 2>/dev/null || { cp "$tmp" "$SSHCFG"; chmod 600 "$SSHCFG"; }
-	rm -f "$tmp"
-	echo "ssh config actualizado para $U"
-else
-	echo "ssh config ya tiene el bloque del mesh"
+	grep -q '^MESH_USER=' /etc/gdtk/gdtk-mesh.conf || echo "MESH_USER=$U" >>/etc/gdtk/gdtk-mesh.conf
+	echo "config existente (MESH_USER asegurado)"
 fi
 
 echo "== systemd/udev =="
