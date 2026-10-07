@@ -119,20 +119,30 @@ pick_uplink_src() {
 }
 
 subnet_of() { python3 -c 'import sys,ipaddress;print(ipaddress.ip_interface(sys.argv[1]).network)' "$1" 2>/dev/null; }
-mesh_home() {
+# Usuario de la sesión (para el runtime dir y ~/.ssh). Como root se deriva del
+# dueño de este script (systemd lo corre como root con el árbol del usuario).
+mesh_user() {
+	if [ -n "${MESH_USER:-}" ]; then echo "$MESH_USER"; return 0; fi
 	if is_root; then
-		[ -n "$MESH_USER" ] && getent passwd "$MESH_USER" | cut -d: -f6
+		u="$(stat -c %U "$0" 2>/dev/null)"
+		[ -n "$u" ] || u="${SUDO_USER:-}"
+		echo "$u"
 	else
-		echo "$HOME"
+		echo "${USER:-$(id -un)}"
 	fi
+}
+
+mesh_home() {
+	var_home="$(getent passwd "$(mesh_user)" 2>/dev/null | cut -d: -f6)"
+	[ -n "$var_home" ] || var_home="$HOME"
+	echo "$var_home"
 }
 
 # Archivo de rol escrito por el shell: "host" si este equipo es el servidor
 # Deskflow del Grupo (y por lo tanto puede hospedar). Sin él, no se hospeda.
 mesh_role_file() {
 	if [ -n "$ROLE_FILE" ]; then echo "$ROLE_FILE"; return 0; fi
-	uid=""
-	if is_root && [ -n "$MESH_USER" ]; then uid="$(id -u "$MESH_USER" 2>/dev/null)"; fi
+	uid="$(id -u "$(mesh_user)" 2>/dev/null)"
 	if [ -n "$uid" ] && [ -d "/run/user/$uid" ]; then echo "/run/user/$uid/gdtk/mesh-role"; return 0; fi
 	if [ -n "${XDG_RUNTIME_DIR:-}" ]; then echo "$XDG_RUNTIME_DIR/gdtk/mesh-role"; return 0; fi
 	echo ""
@@ -206,7 +216,19 @@ ssh_cfg_set() {
 	} >"$tmp"
 	mv "$tmp" "$cfg"
 	chmod 600 "$cfg" 2>/dev/null
-	[ -n "$MESH_USER" ] && chown "$MESH_USER" "$cfg" 2>/dev/null
+	chown "$(mesh_user)" "$cfg" 2>/dev/null
+}
+
+# Reglas de red del mesh para la subnet REAL del AP: forward del firewall (si
+# existe) y bloque ssh del usuario. Idempotente; sólo aplica como root.
+apply_net_rules() {
+	cidr="$(ip -4 -o addr show dev "$AP_IFACE" 2>/dev/null | awk '{print $4; exit}')"
+	sub="$(subnet_of "$cidr")"
+	if [ -n "$sub" ]; then
+		log "mesh subnet=$sub iface=$AP_IFACE"
+		fw_add "$sub" "$AP_IFACE"
+		ssh_cfg_set
+	fi
 }
 
 do_up() {
@@ -215,19 +237,14 @@ do_up() {
 	ensure_ap || return 1
 	if [ "$(active_conn_on "$AP_IFACE")" = "$AP_PROFILE" ] \
 		&& [ "$(active_conn_on "$SPARE_IFACE")" = "$UPLINK_PROFILE" ]; then
+		apply_net_rules
 		return 0
 	fi
 	log "mesh up: ap=$AP_IFACE spare=$SPARE_IFACE ssid=$SSID"
 	nmt connection up "$UPLINK_PROFILE" >>"$LOG" 2>&1
 	sleep 4
 	nmt connection up "$AP_PROFILE" >>"$LOG" 2>&1
-	cidr="$(ip -4 -o addr show dev "$AP_IFACE" 2>/dev/null | awk '{print $4; exit}')"
-	sub="$(subnet_of "$cidr")"
-	if [ -n "$sub" ]; then
-		log "mesh subnet=$sub iface=$AP_IFACE"
-		fw_add "$sub" "$AP_IFACE"
-		ssh_cfg_set
-	fi
+	apply_net_rules
 }
 
 do_down() {
@@ -280,13 +297,51 @@ do_join() {
 	nmt connection up "$AP_PROFILE" >>"$LOG" 2>&1 || true
 }
 
+# --- Miembro: unirse al mesh cuando el AP está a la vista -----------------------
+# NM no migra entre SSIDs distintos estando conectado, así que un miembro del
+# grupo tiene que activar el perfil del mesh cuando aparece (y soltarlo cuando
+# desaparece, volviendo a la red conocida).
+
+pick_join_iface() {
+	JOIN_IFACE=""
+	for i in $(wifi_ifaces); do JOIN_IFACE="$i"; break; done
+	[ -n "$JOIN_IFACE" ]
+}
+
+# Perfil cliente del SSID (mode != ap). Lo crea si no existe.
+join_profile_name() {
+	for p in $(nmt -t -f NAME,TYPE connection show 2>/dev/null | awk -F: '$2=="802-11-wireless"{print $1}'); do
+		[ "$(profile_ssid "$p")" = "$SSID" ] || continue
+		[ "$(nmt -g 802-11-wireless.mode connection show "$p" 2>/dev/null)" = "ap" ] && continue
+		echo "$p"
+		return 0
+	done
+	nmt connection add type wifi ifname "$JOIN_IFACE" con-name "$SSID" ssid "$SSID" \
+		connection.autoconnect yes connection.autoconnect-priority 100 >>"$LOG" 2>&1 && echo "$SSID"
+}
+
+do_client() {
+	[ "$(mesh_role)" = "host" ] && return 0
+	pick_join_iface || return 0
+	p="$(join_profile_name)"
+	[ -n "$p" ] || return 0
+	# Ya conectado al mesh: no escanear (el scan del timer cortaba el enlace).
+	[ "$(active_conn_on "$JOIN_IFACE")" = "$p" ] && return 0
+	# Si el SSID del mesh está a la vista, unirse. Si no, NM ya volvió a la conocida.
+	if nmt -t -f SSID device wifi list ifname "$JOIN_IFACE" 2>/dev/null | grep -qxF "$SSID"; then
+		log "client: $SSID visible; me uno ($p) en $JOIN_IFACE"
+		nmt connection modify "$p" 802-11-wireless.powersave 2 >>"$LOG" 2>&1
+		nmt connection up "$p" >>"$LOG" 2>&1
+	fi
+}
+
 do_auto() {
-	# Sólo hospeda si el shell marcó este equipo como host del mesh (servidor
-	# Deskflow del Grupo). Si no, asegura que no haya mesh y devuelve la red.
+	# Host (=servidor Deskflow del Grupo con spare): hospeda. Miembro: se une al
+	# mesh cuando lo ve, o vuelve a la red conocida.
 	if [ "$(mesh_role)" = "host" ]; then
 		pick_ifaces && do_up || do_down
 	else
-		do_down
+		do_client
 	fi
 }
 

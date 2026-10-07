@@ -25,20 +25,23 @@ falla **revienten a la red conocida** y lo reportan en la vista Grupo.
 2. **Aviso (sin secreto)**: publica por mDNS un flag `mesh=<SSID>` (y `mesh_hid=<hid>`)
    en su anuncio. `neighborhood_publish.gd` prohíbe secretos/slash en TXT: acá no hay
    clave, así que alcanza.
-3. **Unión automática**: los miembros ya tienen el perfil cliente **abierto** del
-   SSID con `autoconnect` y prioridad alta (`gdtk-mesh join`); NetworkManager los
-   une en cuanto aparece el AP y los devuelve a la red conocida cuando desaparece.
-   El mesh es la red de menor latencia (dedicada, 5 GHz si se puede), así que gana
-   por prioridad frente a la red de casa.
+3. **Unión automática**: los miembros tienen el perfil cliente **abierto** del SSID.
+   NetworkManager **no migra entre SSIDs distintos** estando conectado, así que no
+   alcanza con autoconnect: un timer en cada host corre `gdtk-mesh auto` y, sin rol
+   de host, entra en **modo cliente** — si ve el SSID del mesh y no está en él,
+   `nmcli con up`; si ya está en el mesh, no escanea (el scan cortaba el enlace).
+   Cuando el AP desaparece, NM vuelve solo a la red conocida. El mesh es la red de
+   menor latencia (dedicada, 5 GHz si se puede).
 4. **Fallback + reporte**: si no asocian o el AP cae, NM reverte al perfil conocido;
    la vista Grupo/Vecindario muestra el estado del mesh por equipo
    (`mesh activo` / `conectado` / `sin Internet` / `revertido`).
 
 ## Capas y archivos
 
-- `session/gdtk-mesh` (**hecho**): `auto|up|down|join|status`. `auto` = host si hay
-  spare, baja si no. `join` = asegura el perfil cliente abierto (provisiona un
-  miembro). Genérico (sin nombres de interfaz/SSID/subnet fijos).
+- `session/gdtk-mesh` (**hecho**): `auto|up|down|join|client|status`. `auto` = host
+  si el shell marcó el rol `host` (archivo en el runtime dir del usuario, que el
+  script resuelve como root por el dueño del propio script); si no, **modo cliente**
+  (se une al mesh cuando lo ve). Genérico (sin nombres de interfaz/SSID/subnet fijos).
 - `session/gdtk-mesh-provision` (**hecho**): servicio+timer systemd + udev que corren
   `auto`; `ip_forward`; config.
 - `neighborhood_publish.gd` (**hecho**): campo TXT `mesh=<SSID>` (sin secreto) en el
