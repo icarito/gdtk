@@ -41,11 +41,16 @@ falla **revienten a la red conocida** y lo reportan en la vista Grupo.
   miembro). Genérico (sin nombres de interfaz/SSID/subnet fijos).
 - `session/gdtk-mesh-provision` (**hecho**): servicio+timer systemd + udev que corren
   `auto`; `ip_forward`; config.
-- `neighborhood_publish.gd` (**pendiente**): campo TXT `mesh=`/`mesh_hid=` (sin
-  secreto) en el anuncio del host.
-- `shell.gd` (**pendiente**): disparar `gdtk-mesh up` cuando el host es servidor
-  Deskflow del Grupo con spare (y bajarlo cuando deja de serlo); reflejar estado.
-- `group_model.gd` / vista (**pendiente**): estado del mesh por miembro.
+- `neighborhood_publish.gd` (**hecho**): campo TXT `mesh=<SSID>` (sin secreto) en el
+  anuncio cuando el equipo hospeda; `neighborhood_hosts.gd` lo parsea a `host.mesh`
+  (validado: sólo un átomo seguro de SSID).
+- `shell.gd` (**hecho en el árbol**): `_mesh_sync()` escribe/borra
+  `$XDG_RUNTIME_DIR/gdtk/mesh-role` = `host` **ssi `_deskflow_role == "server"`** y
+  corre `gdtk-mesh auto`; al cambiar el rol república el mDNS para agregar/quitar
+  `mesh=`.
+- `neighborhood_ui.gd` (**hecho**): la vista Grupo muestra `Red propia del Grupo
+  (mesh): activa` si este equipo hospeda, o `Red propia disponible en <nombre>` si
+  un vecino la anuncia; cada nodo con `host.mesh` lleva la etiqueta `red propia`.
 
 ## Seguridad
 

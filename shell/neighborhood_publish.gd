@@ -66,6 +66,10 @@ func build_common_txt(identity):
 	var accent = _valid_accent(String(identity.get("accent", "")))
 	if accent != "":
 		txt.append("accent=" + accent)
+	# Red propia (mesh) que este equipo hospeda: SSID, sin secreto ni rutas.
+	var mesh = _txt_atom(String(identity.get("mesh", "")), "")
+	if mesh != "":
+		txt.append("mesh=" + mesh)
 	return txt
 
 

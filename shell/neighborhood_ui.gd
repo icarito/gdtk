@@ -240,6 +240,9 @@ func _refresh_group(vp, bar):
 		})
 
 	_label("Grupo", Vector2(16, bar + 10), 220)
+	var mesh_status = _mesh_status_text()
+	if mesh_status != "":
+		_label(mesh_status, Vector2(16, bar + 30), 460, Label.ALIGN_LEFT, TEXT_DIM)
 	var ch = float(_group_layout.get("center_size", GROUP.CENTER_SIZE)) * 0.5
 	_label(MAP.CENTER_TITLE, center + Vector2(-90, ch + 8), 180, Label.ALIGN_CENTER)
 	_label(local_name(), center + Vector2(-90, ch + 28), 180, Label.ALIGN_CENTER, TEXT_DIM)
@@ -254,6 +257,9 @@ func _refresh_group(vp, bar):
 		if bool(node.dimmed):
 			_label("apagado", Vector2(c.x - 80, c.y + size * 0.5 + 24), 160,
 				Label.ALIGN_CENTER, TEXT_DIM)
+		elif String(node.host.get("mesh", "")).strip_edges() != "":
+			_label("red propia", Vector2(c.x - 80, c.y + size * 0.5 + 24), 160,
+				Label.ALIGN_CENTER, LINK_OK)
 		_make_icon(self, _host_icon(node.host), Vector2(node.pos) + Vector2(4, 4), size - 8.0)
 
 	if not _group_layout.get("unplaced", []).empty():
@@ -264,6 +270,21 @@ func _refresh_group(vp, bar):
 		var bc = Vector2(d.pos)
 		_label(_bt_label(d), Vector2(bc.x - 70, bc.y + float(d.size) * 0.5 + 3), 140,
 			Label.ALIGN_CENTER, _bt_color(d))
+
+
+# Estado del mesh para la vista Grupo: "hospedando" si este equipo es el servidor
+# Deskflow del Grupo; si no, avisa si un vecino ofrece "red propia". "" si nada.
+func _mesh_status_text():
+	if shell != null and shell.has_method("_mesh_is_host") and bool(shell._mesh_is_host()):
+		return "Red propia del Grupo (mesh): activa"
+	var hosts = model.hosts if model.get("hosts") != null else []
+	for h in hosts:
+		if typeof(h) != TYPE_DICTIONARY:
+			continue
+		var m = String(h.get("mesh", "")).strip_edges()
+		if m != "":
+			return "Red propia disponible en " + String(h.get("label", m))
+	return ""
 
 
 # Claves de los tokens por-par, sin leer jamás el valor del token: el shell lista
