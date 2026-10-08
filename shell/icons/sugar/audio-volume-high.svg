@@ -5,8 +5,8 @@
 ]>
 <svg xmlns="http://www.w3.org/2000/svg" width="55" height="55" viewBox="0 0 55 55">
   <g id="audio-volume-high">
-    <path d="M 10 22 L 20 22 L 30 14 L 30 41 L 20 33 L 10 33 Z" fill="&fill_color;" stroke="&stroke_color;" stroke-linejoin="round" stroke-width="3"/>
-    <path d="M 34 21 Q 40 27.5 34 34" fill="none" stroke="&stroke_color;" stroke-linecap="round" stroke-width="3"/>
-    <path d="M 39 16 Q 49 27.5 39 39" fill="none" stroke="&stroke_color;" stroke-linecap="round" stroke-width="3"/>
+    <path d="M9 20 Q9 18 11 18 L18.5 18 L30.5 9 Q32.5 7.3 34 9.2 Q34.8 10.2 34.8 11.3 L34.8 43.7 Q34.8 44.8 34 45.8 Q32.5 47.7 30.5 46 L18.5 37 L11 37 Q9 37 9 35 Z" fill="&fill_color;"/>
+    <path d="M39 20 Q46 27.5 39 35" fill="none" stroke="&stroke_color;" stroke-linecap="round" stroke-width="3.8"/>
+    <path d="M45 13.5 Q54.5 27.5 45 41.5" fill="none" stroke="&stroke_color;" stroke-linecap="round" stroke-width="3.8"/>
   </g>
 </svg>
