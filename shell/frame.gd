@@ -2561,6 +2561,15 @@ func _input(event):
 				shell.request_redraw()
 				get_tree().set_input_as_handled()
 				return
+			# Rueda sobre la dockapp de Volumen: sube/baja el volumen (con OSD), sin
+			# arrastrar nada. `_applet_at` sólo devuelve el applet si la barra está
+			# dibujada, así que con el Frame oculto no la intercepta.
+			if _applet_at(mouse_pos) == "volumen":
+				if shell.system_osd != null:
+					shell.system_osd.rpc_action({"action": "up" if event.button_index == BUTTON_WHEEL_UP else "down"})
+				shell.request_redraw()
+				get_tree().set_input_as_handled()
+				return
 			# Rueda sobre el tramo del DockApp de ventanas: scroll horizontal de sus
 			# teselas (modo scroll); no cambia el foco de pantalla.
 			if _window_scroll_at(mouse_pos, -1 if event.button_index == BUTTON_WHEEL_UP else 1):

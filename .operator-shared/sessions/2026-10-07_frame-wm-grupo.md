@@ -157,3 +157,11 @@ Briefs: .operator-shared/briefs/2026-10-07-K{1,2,3}-*.txt. Logs Kilo: /tmp/kilo-
 - Dockapp de volumen: `applet_volume.gd:draw` dibuja faders de mezclador (3 rieles con
   perilla al nivel, relleno de nivel y valor; mute al piso). Reemplaza el texto VOL/47%.
 - bastion: rsync + motor nuevo + recarga transaccional. Commit de esta tanda.
+
+## Kilo tanda 3 (2026-10-07 23:25) — dockapp volumen: indicador + rueda
+- `applet_volume.gd:draw` deja UN indicador horizontal (riel + relleno de nivel +
+  marcas + valor); se quitan los 3 faders (no arrastrables).
+- `frame._input` (rueda): sobre `_applet_at == "volumen"` llama
+  `system_osd.rpc_action({"action":"up"|"down"})` y consume el evento. Sólo actúa si
+  la barra está dibujada (`_applet_at` usa applets_drawn), así que con el Frame oculto
+  no intercepta. Verificado en vivo (wpctl 62%->72%->62%).

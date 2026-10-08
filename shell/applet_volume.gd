@@ -126,9 +126,9 @@ func choose(sink):
 
 # --- dibujo en el bloque LCD (lo llama _draw_applet) -------------------------
 
-# Faders de mezclador (estilo Sugar/Mixer): tres rieles verticales con perilla
-# cuadrada al nivel del volumen y el valor abajo. Mute pone las perillas al piso y
-# sin relleno. Sin dato: rieles tenues y "--".
+# Un solo indicador horizontal (sin faders ni arrastre): riel rehundido, relleno al
+# nivel y el valor abajo. El volumen se cambia con la rueda del mouse sobre el bloque
+# (ver frame._input), no arrastrando. Mute: sin relleno y knobs al piso.
 func draw(frame, ui, scr, loc, w, h):
 	var on = state == "activo"
 	var col = frame._lcd(frame.NX_TEXT, "on" if on else "off")
@@ -139,24 +139,22 @@ func draw(frame, ui, scr, loc, w, h):
 			muted = true
 		elif value.ends_with("%"):
 			pct = clamp(float(value.trim_suffix("%")) / 100.0, 0.0, 1.0)
-	var text_h = 8.0
-	var top = loc.y + 2.0
-	var bot = loc.y + h - text_h - 1.0
-	var rail = Color(col.r, col.g, col.b, 0.28)
-	var n = 3
-	for i in range(n):
-		var x = loc.x + w * float(i + 1) / float(n + 1)
-		ui.imgui_draw_rect_filled(Rect2(Vector2(x - 1.0, top), Vector2(2.0, bot - top)), rail, 0.0)
-		var lvl = 0.0 if muted else pct
-		if lvl > 0.0:
-			var y = bot - (bot - top) * lvl
-			ui.imgui_draw_rect_filled(Rect2(Vector2(x - 1.0, y), Vector2(2.0, bot - y)), col, 0.0)
-		var ky = (bot - (bot - top) * pct - 1.5) if not muted else (bot - 3.0)
-		ky = clamp(ky, top, bot - 3.0)
-		ui.imgui_draw_rect_filled(Rect2(Vector2(x - 3.0, ky), Vector2(6.0, 3.0)), col, 0.0)
+	var bar_h = max(6.0, h * 0.34)
+	var bx = loc.x + 3.0
+	var bw = max(8.0, w - 6.0)
+	var by = loc.y + (h - bar_h) * 0.5 - 3.0
+	# Riel rehundido + relleno de nivel.
+	ui.imgui_draw_rect_filled(Rect2(Vector2(bx, by), Vector2(bw, bar_h)), Color(col.r, col.g, col.b, 0.26), 0.0)
+	var fill = 0.0 if muted else pct
+	if fill > 0.0:
+		ui.imgui_draw_rect_filled(Rect2(Vector2(bx, by), Vector2(bw * fill, bar_h)), col, 0.0)
+	# Marcas de cuarto: leen como indicador de volumen.
+	for i in range(1, 4):
+		var mx = bx + bw * float(i) / 4.0
+		ui.imgui_draw_rect_filled(Rect2(Vector2(mx - 0.5, by), Vector2(1.0, bar_h)), Color(0.0, 0.0, 0.0, 0.35), 0.0)
 	var txt = value if on else ("--" if state == "no_disponible" else "…")
 	var tw = frame._text_w(ui, txt)
-	ui.set_cursor_pos(Vector2(loc.x + max(1.0, (w - tw) * 0.5), bot + 0.5))
+	ui.set_cursor_pos(Vector2(loc.x + max(1.0, (w - tw) * 0.5), by + bar_h + 1.0))
 	ui.text_colored(col, txt)
 
 
