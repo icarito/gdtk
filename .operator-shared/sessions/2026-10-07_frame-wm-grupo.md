@@ -195,3 +195,23 @@ Briefs: .operator-shared/briefs/2026-10-07-K{1,2,3}-*.txt. Logs Kilo: /tmp/kilo-
 - Deuda: el árbol vivo (`~/gdtk/shell`) sigue sin ser el que corre. Volver a él exige un
   reinicio pedido (prohibido con VS Code abierto); el snapshot quedó overlaid con el código
   actual, equivalente funcional. Caída rc=139/134 sin diagnóstico (no reproducida desde 23:52).
+
+## Kilo tanda 6 (2026-10-08 00:00) — icono nuevo + caída total y recuperación
+- Icono del parlante rediseñado: SVG `audio-volume-high/muted` con cuerpo redondeado
+  (sólo M/L/Q/Z, como los otros Sugar) y ondas/X de trazo grueso; legible a 26 px. Se
+  verifica que el motor lo rasteriza (nanosvg no trae `load_svg_from_string`; cae al
+  `_load_sugar_file` y da 192x192). Commit 52ba38e.
+- `system_osd._draw_plate`: el icono iba con trazo OSCURO (0.32,0.30,0.38) sobre la placa
+  oscura → las ondas/X casi no se veían. Ahora trazo claro (0.88,0.90,0.95). Afecta a
+  todos los iconos del OSD (volumen/brillo).
+- INCIDENTE: la sesión gdtk cayó y GDM arrancó GNOME. Causa: el `frame.gd` WIP de OTRA
+  sesión (interruptor del DockApp "Compartiendo") quedó a medio escribir y mi rsync de
+  `shell/` lo desplegó. El parseo fallaba en cadena: primero `_draw_radar()` con 4 args y
+  def de 3 (estado intermedio), luego `Variable "k" already defined` (el `var k` nuevo
+  chocaba con `for k in`). El supervisor acumuló 5 caídas y "se rindió".
+- Fix mínimo y quirúrgico (NO revertir el WIP ajeno): renombrar el factor nuevo a `damp`
+  en `_draw_radar`. `session/gdtk-preflight` da 75 scripts, 0 fallas en el árbol vivo y en
+  el snapshot. Sin locks stale (`gdtk-supervisor.lock`/`gdtk-shell.pid` ausentes). El
+  árbol vivo arranca limpio en el próximo login (elegir la sesión gdtk en GDM).
+- `frame.gd` sigue SIN COMMITEAR a propósito: contiene el WIP de la otra sesión. Sólo se
+  armó el fix de parseo en el archivo desplegado.
