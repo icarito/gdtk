@@ -248,6 +248,10 @@ struct wl_server {
 	struct wl_listener new_toplevel;
 	struct wl_listener new_popup;
 	struct wl_listener new_decoration;
+	// KDE org_kde_kwin_server_decoration (GTK3 sin headerbar): ver kde_sync_csd.
+	struct wlr_server_decoration_manager *kde_deco_mgr;
+	struct wlr_xdg_decoration_manager_v1 *xdg_deco_mgr;
+	struct wl_listener new_kde_decoration;
 	struct wl_listener new_layer;
 	struct wl_listener request_activate;
 	struct wl_listener request_set_selection;
@@ -1632,6 +1636,73 @@ static void handle_new_popup(struct wl_listener *listener, void *data) {
 	}
 }
 
+// KDE server-decoration: un cliente (GTK3 sin headerbar) que no habla xdg-decoration
+// pide SERVER y no dibuja su barra; el chrome lo pone el shell. xdg-decoration, si el
+// toplevel tiene un objeto, manda (decoration_sync_csd). `skip`: decoración que se
+// está destruyendo (aún figura en la lista del manager).
+static void kde_sync_csd(struct wl_server *s, struct wlr_surface *surface,
+		struct wlr_server_decoration *skip) {
+	toplevel *t = toplevel_find_surface(s, surface);
+	if (t == NULL || t->tl == NULL) {
+		return;
+	}
+	if (s->xdg_deco_mgr != NULL) {
+		struct wlr_xdg_toplevel_decoration_v1 *xd;
+		wl_list_for_each(xd, &s->xdg_deco_mgr->decorations, link) {
+			if (xd->toplevel == t->tl) {
+				return;
+			}
+		}
+	}
+	bool csd = true;
+	if (s->kde_deco_mgr != NULL) {
+		struct wlr_server_decoration *kd;
+		wl_list_for_each(kd, &s->kde_deco_mgr->decorations, link) {
+			if (kd != skip && kd->surface == surface) {
+				csd = kd->mode == WLR_SERVER_DECORATION_MANAGER_MODE_CLIENT;
+				break;
+			}
+		}
+	}
+	t->csd = csd;
+}
+
+typedef struct kde_decoration {
+	struct wl_server *s;
+	struct wlr_server_decoration *d;
+	struct wl_listener mode;
+	struct wl_listener destroy;
+} kde_decoration;
+
+static void handle_kde_decoration_mode(struct wl_listener *listener, void *data) {
+	kde_decoration *kd = wl_container_of(listener, kd, mode);
+	kde_sync_csd(kd->s, kd->d->surface, NULL);
+}
+
+static void handle_kde_decoration_destroy(struct wl_listener *listener, void *data) {
+	kde_decoration *kd = wl_container_of(listener, kd, destroy);
+	kde_sync_csd(kd->s, kd->d->surface, kd->d);
+	wl_list_remove(&kd->mode.link);
+	wl_list_remove(&kd->destroy.link);
+	free(kd);
+}
+
+static void handle_new_kde_decoration(struct wl_listener *listener, void *data) {
+	struct wl_server *s = wl_container_of(listener, s, new_kde_decoration);
+	struct wlr_server_decoration *d = data;
+	kde_decoration *kd = calloc(1, sizeof(*kd));
+	if (kd == NULL) {
+		return;
+	}
+	kd->s = s;
+	kd->d = d;
+	kd->mode.notify = handle_kde_decoration_mode;
+	wl_signal_add(&d->events.mode, &kd->mode);
+	kd->destroy.notify = handle_kde_decoration_destroy;
+	wl_signal_add(&d->events.destroy, &kd->destroy);
+	kde_sync_csd(s, d->surface, NULL);
+}
+
 static void handle_new_toplevel(struct wl_listener *listener, void *data) {
 	struct wl_server *s = wl_container_of(listener, s, new_toplevel);
 	struct wlr_xdg_toplevel *tl = data;
@@ -1678,6 +1749,8 @@ static void handle_new_toplevel(struct wl_listener *listener, void *data) {
 	t->csd = true;
 
 	wl_list_insert(s->toplevels.prev, &t->link);
+	// La decoración KDE puede haberse creado antes que el rol xdg_toplevel.
+	kde_sync_csd(s, tl->base->surface, NULL);
 
 	// Estado de la surface raiz; las subsurfaces se descubren por el signal
 	// new_subsurface de cada surface. Los buffers se importan en su commit.
@@ -1985,6 +2058,9 @@ static void cursor_surface_drop(struct wl_server *s) {
 // accesibles desde CPU (dmabuf) o > 256 px se ignoran: queda el cursor anterior.
 static void cursor_surface_import(struct wl_server *s) {
 	struct wlr_buffer *buf = s->cursor_surface->current.buffer;
+	// Surface de cursor sin buffer = cursor vacío (GTK3/Firefox ocultan así el puntero
+	// en video a pantalla completa, no con set_cursor NULL).
+	notify_client_cursor_hidden(s, buf == NULL);
 	if (s->cb.cursor_image == NULL || buf == NULL || buf->width > 256 || buf->height > 256) {
 		return;
 	}
@@ -2036,8 +2112,8 @@ static void handle_request_set_cursor(struct wl_listener *listener, void *data) 
 	if (ev->seat_client != s->seat->pointer_state.focused_client) {
 		return;
 	}
-	notify_client_cursor_hidden(s, ev->surface == NULL);
 	if (ev->surface == NULL) {
+		notify_client_cursor_hidden(s, 1);
 		cursor_surface_drop(s);
 		return;
 	}
@@ -2662,6 +2738,7 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 
 	struct wlr_xdg_decoration_manager_v1 *deco_mgr = wlr_xdg_decoration_manager_v1_create(s->display);
 	if (deco_mgr != NULL) {
+		s->xdg_deco_mgr = deco_mgr;
 		s->new_decoration.notify = handle_new_decoration;
 		wl_signal_add(&deco_mgr->events.new_toplevel_decoration, &s->new_decoration);
 	}
@@ -2698,6 +2775,9 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 	struct wlr_server_decoration_manager *kde_deco = wlr_server_decoration_manager_create(s->display);
 	if (kde_deco != NULL) {
 		wlr_server_decoration_manager_set_default_mode(kde_deco, WLR_SERVER_DECORATION_MANAGER_MODE_SERVER);
+		s->kde_deco_mgr = kde_deco;
+		s->new_kde_decoration.notify = handle_new_kde_decoration;
+		wl_signal_add(&kde_deco->events.new_decoration, &s->new_kde_decoration);
 	}
 
 	// GDTK_NO_XWAYLAND=1: sin X (las apps sólo X11 no abren).
@@ -3669,6 +3749,9 @@ void wl_server_destroy(wl_server *s) {
 	}
 	if (s->new_decoration.notify != NULL) {
 		wl_list_remove(&s->new_decoration.link);
+	}
+	if (s->new_kde_decoration.notify != NULL) {
+		wl_list_remove(&s->new_kde_decoration.link);
 	}
 	struct wl_listener *extra[] = { &s->new_layer, &s->request_activate,
 		&s->request_set_selection, &s->request_set_primary_selection, &s->new_xsurface,
