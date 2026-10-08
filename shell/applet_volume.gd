@@ -126,9 +126,8 @@ func choose(sink):
 
 # --- dibujo en el bloque LCD (lo llama _draw_applet) -------------------------
 
-# Panel oscuro con medidor rayado cian, como el marco de volumen clásico de Sugar:
-# a la derecha una columna de líneas horizontales que se encienden hasta el nivel; a
-# la izquierda la lectura del porcentaje y una rampa en escalones. El volumen se
+# Panel oscuro con medidor rayado cian y el icono de parlante (Sugar) + lectura del
+# porcentaje, todo proporcional al tamaño del bloque (1 o 2 celdas). El volumen se
 # cambia con la rueda (o pan de touchpad) sobre el bloque, no arrastrando.
 func draw(frame, ui, scr, loc, w, h):
 	var on = state == "activo"
@@ -142,44 +141,42 @@ func draw(frame, ui, scr, loc, w, h):
 		elif value.ends_with("%"):
 			pct = clamp(float(value.trim_suffix("%")) / 100.0, 0.0, 1.0)
 
-	# Medidor rayado (derecha): filas horizontales, encendidas de abajo hacia arriba.
-	var m_w = max(8.0, w * 0.44)
+	# Medidor rayado (derecha): filas horizontales encendidas de abajo hacia arriba.
+	# Cantidad de filas y grosor salen del alto disponible, para que escale.
+	var m_w = max(10.0, w * 0.40)
 	var m_x = loc.x + w - m_w - 2.0
 	var m_top = loc.y + 2.0
 	var m_bot = loc.y + h - 2.0
-	var rows = 16
-	var row_h = 1.6
-	var step = max(0.5, (m_bot - m_top - row_h) / float(rows - 1))
+	var m_h = max(4.0, m_bot - m_top)
+	var rows = int(clamp(round(m_h / 5.0), 6.0, 24.0))
+	var step = m_h / float(rows)
+	var row_h = max(1.0, step * 0.5)
 	var lit = 0 if (muted or not on) else int(round(pct * float(rows)))
 	for i in range(rows):
 		var y = m_bot - row_h - float(i) * step
 		ui.imgui_draw_rect_filled(Rect2(Vector2(m_x, y), Vector2(m_w, row_h)), cyan if i < lit else dim, 0.0)
 
-	# Lectura del valor (arriba-izquierda), sobre un recuadro más oscuro.
+	# Columna izquierda: lectura del % arriba, icono de parlante (Sugar) abajo.
 	var l_x = loc.x + 2.0
-	var l_w = max(6.0, w - m_w - 6.0)
+	var l_w = max(8.0, w - m_w - 6.0)
 	var small = frame._push_label_font(ui)
 	var th = 12.0
 	if ui.has_method("calc_text_size"):
 		th = max(8.0, ui.calc_text_size("00%").y)
-	var rd_h = th + 3.0
-	ui.imgui_draw_rect_filled(Rect2(Vector2(l_x, loc.y + 2.0), Vector2(l_w, rd_h)), Color(0.015, 0.05, 0.07, 1.0), 0.0)
 	var txt = value if on else ("--" if state == "no_disponible" else "…")
 	var tw = frame._text_w(ui, txt)
-	ui.set_cursor_pos(Vector2(l_x + max(0.5, (l_w - tw) * 0.5), loc.y + 3.0))
+	ui.set_cursor_pos(Vector2(l_x + max(0.5, (l_w - tw) * 0.5), loc.y + 2.0))
 	ui.text_colored(cyan if on else dim, txt)
-
-	# Rampa en escalones (motivo del icono): sube hacia la derecha.
-	var ramp_top = loc.y + 2.0 + rd_h + 2.0
-	var ramp_bot = loc.y + h - 2.0
-	var ramp_h = ramp_bot - ramp_top
-	if ramp_h > 3.0 and l_w > 4.0:
-		var steps = 5
-		var sw = l_w / float(steps)
-		for i in range(steps):
-			var bh = ramp_h * float(i + 1) / float(steps)
-			ui.imgui_draw_rect_filled(Rect2(Vector2(l_x + sw * float(i), ramp_bot - bh), Vector2(sw - 0.6, bh)),
-				cyan if on else dim, 0.0)
+	var icon_top = loc.y + 2.0 + th + 2.0
+	var icon_h = max(6.0, loc.y + h - 3.0 - icon_top)
+	var icon_s = min(l_w, icon_h)
+	var tex = null
+	if frame.shell != null:
+		var icon_name = "audio-volume-muted" if (muted or not on) else "audio-volume-high"
+		tex = frame.shell._load_sugar_svg(icon_name, cyan, cyan)
+	if tex != null:
+		ui.set_cursor_pos(Vector2(l_x + (l_w - icon_s) * 0.5, icon_top + (icon_h - icon_s) * 0.5))
+		ui.image(tex, Vector2(icon_s, icon_s))
 	if small:
 		ui.pop_font()
 
