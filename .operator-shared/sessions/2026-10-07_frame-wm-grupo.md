@@ -176,3 +176,22 @@ Briefs: .operator-shared/briefs/2026-10-07-K{1,2,3}-*.txt. Logs Kilo: /tmp/kilo-
   volumen cambiaba al instante pero el bloque no releía. Ahora, tras la rueda/pan y
   tras las teclas multimedia (shell._input), se llama `frame.volume.refresh(true)`
   para releer ya.
+
+## Kilo tanda 5 (2026-10-07 23:53 → 2026-10-08 05:00) — failsafe + "no lee el volumen"
+- El shell cayó a FAILSAFE a las 23:46:50: caída rc=139 (segfault) y luego rc=1 por un
+  error de parseo TRANSITORIO en `frame.gd` (`Variable "side" already defined in the
+  scope`, línea 3343) mientras el editor aún escribía. El supervisor arrancó el snapshot
+  `20261007-221727` y NO el árbol vivo (`running-version` = `fallback 20261007-221727`).
+  A las 23:52 hubo otra caída (rc=134) y volvió al mismo snapshot.
+- Sintoma "el volumen ya no lee": el shell corriendo era el snapshot con el `applet_volume.gd`
+  viejo (buggy `_run` = `timeout timeout ...`, sin `draw`, sin icono). No era regresión del código:
+  era la copia de fallback desactualizada.
+- Fix operativo (sin reiniciar, VS Code abierto): rsync del `shell/` + `settings/` vivos
+  al directorio del snapshot y `reload_shell` transaccional. Verificado en vivo:
+  `frame.volume.state`=`activo`, `frame.volume.value`=`55%` == `wpctl get-volume` 0.55;
+  la fuente cargada es byte-idéntica al `shell/applet_volume.gd` commiteado (10712 B;
+  `get_source_code().length()` da 10677 por UTF-8 multibyte). Icono Sugar, medidor cian
+  y `[TIMEOUT_S] + argv` presentes en vivo (commit b05a3eb).
+- Deuda: el árbol vivo (`~/gdtk/shell`) sigue sin ser el que corre. Volver a él exige un
+  reinicio pedido (prohibido con VS Code abierto); el snapshot quedó overlaid con el código
+  actual, equivalente funcional. Caída rc=139/134 sin diagnóstico (no reproducida desde 23:52).
