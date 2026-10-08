@@ -1,8 +1,12 @@
 extends "res://pages/page.gd"
 
+
 # Página Pantallas (K11b): diseno de la disposicion local-vecinos, estilo GNOME.
-# Arrastrar mueve; al soltar se imanta para quedar pegada por un borde (contacto
-# minimo > 0, sin solaparse) y permite deslizarse a lo largo del borde.
+# Arrastrar mueve con imán en vivo (SL.live_snap): por eje se imanta a bordes
+# filas/columnas/centros de las demás dentro de SL.MAGNET_TOL. Al soltar, si ya
+# toca a alguien queda tal cual; si no, el snap de contacto (> 0, sin solaparse).
+# Los bordes y las esquinas redimensionan (SL.resize_live) respetando el aspect
+# ratio de la resolución, y el imán evita contactos al 1%/99%.
 #
 # Toda la geometria vive en el modelo puro shell/screen_layout.gd (otro proyecto
 # Godot; se compila desde el fuente, mismo patron que shell/settings_bridge.gd).
@@ -15,6 +19,7 @@ extends "res://pages/page.gd"
 const MODEL_PATH = "shell/screen_layout.gd"
 const DIRS_FILE = "neighborhood-directions.json"
 const PAD = 48.0
+const HANDLE_HIT = 7.0   # px del lienzo para tomar un borde/esquina
 
 var SL = null
 var canvas = null
@@ -22,7 +27,11 @@ var status_label = null
 var layout = {}
 
 var drag_id = ""
+var drag_handle = ""
 var drag_grab = Vector2.ZERO
+var drag_pre = null      # rect previo al resize (para revertir si queda solape)
+var guides = []
+var hover_handle = ""
 
 var scale = 1.0
 var origin = Vector2.ZERO
@@ -34,7 +43,7 @@ const DIR_LABELS = {"north": "Norte", "south": "Sur", "east": "Este", "west": "O
 func _build():
 	SL = _load_model()
 	h_title("Pantallas")
-	h_note("Arrastra los equipos para ordenarlos alrededor de Este equipo. Al soltar se pegan por un borde; guarda con Aplicar.")
+	h_note("Arrastra los equipos: se atraen entre sí (bordes y alineaciones). Al soltar quedan pegados; guarda con Aplicar.")
 	h_gap(6)
 
 	canvas = Control.new()
@@ -51,100 +60,11 @@ func _build():
 
 	layout = _ensure_layout()
 	_refresh_status()
-	_build_sizes()
 
 
-# La geometria usa tamaño fisico; resolución queda como metadata para gvd/UI.
-func _build_sizes():
-	h_gap(6)
-	h_note("Tamaño físico (cm) y resolución (px). La disposición usa los centímetros.")
-	var row = h_row()
-	h_label("Este equipo", row)
-	_dim_spin(layout.local.w / 10.0, row, layout.local.id, true)
-	_dim_spin(layout.local.h / 10.0, row, layout.local.id, false)
-	_px_spin(layout.local.px_w, row, layout.local.id, true)
-	_px_spin(layout.local.px_h, row, layout.local.id, false)
-	for sc in layout.screens:
-		row = h_row()
-		h_label(_label_of(sc), row)
-		_dim_spin(sc.w / 10.0, row, sc.id, true)
-		_dim_spin(sc.h / 10.0, row, sc.id, false)
-		_px_spin(sc.px_w, row, sc.id, true)
-		_px_spin(sc.px_h, row, sc.id, false)
-
-
-func _dim_spin(value, row, sc_id, is_w):
-	var sp = SpinBox.new()
-	sp.min_value = 5
-	sp.max_value = 300
-	sp.step = 0.1
-	sp.value = float(value)
-	sp.suffix = " cm"
-	sp.rect_min_size.x = 88
-	sp.connect("value_changed", self, "_on_dim_changed", [String(sc_id), bool(is_w)])
-	row.add_child(sp)
-	return sp
-
-
-func _px_spin(value, row, sc_id, is_w):
-	var sp = SpinBox.new()
-	sp.min_value = 100
-	sp.max_value = 16384
-	sp.step = 1
-	sp.value = float(value)
-	sp.suffix = " px"
-	sp.rect_min_size.x = 104
-	sp.connect("value_changed", self, "_on_px_changed", [String(sc_id), bool(is_w)])
-	row.add_child(sp)
-	return sp
-
-
-func _on_dim_changed(value, sc_id, is_w):
-	_apply_size(sc_id, value * 10.0 if is_w else null, null if is_w else value * 10.0)
-	# Cambiar el tamaño físico puede dejar un hueco con el vecino: sin contacto no
-	# hay enlace Deskflow y el puntero deja de cruzar.
-	drag_id = String(sc_id)
-	_snap_release()
-	drag_id = ""
-	if canvas != null:
-		canvas.update()
-	_commit()
-
-
-func _on_px_changed(value, sc_id, is_w):
-	_apply_pixels(sc_id, int(value) if is_w else null, null if is_w else int(value))
-	_commit()
-
-
-func _apply_size(id, w, h):
-	if String(id) == String(layout.local.id):
-		if w != null:
-			layout.local.w = float(w)
-		if h != null:
-			layout.local.h = float(h)
-		return
-	for i in range(layout.screens.size()):
-		if String(layout.screens[i].id) == String(id):
-			if w != null:
-				layout.screens[i].w = float(w)
-			if h != null:
-				layout.screens[i].h = float(h)
-			return
-
-
-func _apply_pixels(id, w, h):
-	var sc = layout.local if String(id) == String(layout.local.id) else null
-	if sc == null:
-		for item in layout.screens:
-			if String(item.id) == String(id):
-				sc = item
-				break
-	if sc == null:
-		return
-	if w != null:
-		sc.px_w = int(w)
-	if h != null:
-		sc.px_h = int(h)
+# El tamano de cada pantalla se ajusta arrastrando sus bordes/esquinas en el
+# lienzo (SL.resize_live, con aspect ratio de la resolucion fijo); no hay
+# campos numéricos manuales. El local conserva el tamano fisico medido (OS).
 
 
 func _on_resized():
@@ -246,6 +166,12 @@ func _ensure_layout():
 	if size.x > 0.0 and size.y > 0.0:
 		lay.local.px_w = int(size.x)
 		lay.local.px_h = int(size.y)
+		# El tamano fisico del local sigue a la resolucion medida (mismo
+		# aspect ratio); el resize interactivo solo toca a los vecinos y el
+		# caret de tamaño manual ya no existe.
+		var ar = float(size.x) / float(size.y)
+		if abs(float(lay.local.w) / float(lay.local.h) - ar) > 0.01:
+			lay.local.h = float(lay.local.w) / ar
 	if lay.screens.empty():
 		for c in _catalog():
 			var sc = SL.default_screen(String(c.get("id", "")), String(c.get("label", "")))
@@ -271,28 +197,93 @@ func _commit():
 func _canvas_input(event):
 	if event is InputEventMouseButton and event.button_index == BUTTON_LEFT:
 		if event.pressed:
-			drag_id = _hit(event.position)
-			if drag_id != "":
-				drag_grab = _plane_of(event.position) - _screen_pos(drag_id)
+			var hit = _hit_handle(event.position)
+			drag_handle = ""
+			drag_id = ""
+			if hit.id != "":
+				drag_id = String(hit.id)
+				drag_handle = String(hit.handle)
+				guides = []
+				if drag_handle == "":
+					drag_grab = _plane_of(event.position) - _screen_pos(drag_id)
+				else:
+					drag_pre = SL.rect(SL.screen_by_id(layout, drag_id))
 				canvas.update()
+			_update_cursor("")
 		elif drag_id != "":
 			_snap_release()
 			drag_id = ""
+			drag_handle = ""
+			drag_pre = null
+			guides = []
 			canvas.update()
-	elif event is InputEventMouseMotion and drag_id != "":
-		var p = _plane_of(event.position) - drag_grab
-		_set_pos(drag_id, p.x, p.y)
-		canvas.update()
+			_update_cursor("")
+	elif event is InputEventMouseMotion:
+		var plane = _plane_of(event.position)
+		if drag_id != "" and drag_handle == "":
+			_drag_magnet(plane - drag_grab)
+			canvas.update()
+		elif drag_id != "" and drag_handle != "":
+			_drag_resize(plane)
+			canvas.update()
+		else:
+			_update_cursor(_hit_handle(event.position).handle)
+
+
+# Imán en vivo del movimiento: cada eje dentro del alcance (SL.MAGNET_TOL)
+# contra bordes/filas/columnas/centros de las demás pantallas, con guías.
+func _drag_magnet(p):
+	var sn = SL.live_snap(SL.all_screens(layout), drag_id, p.x, p.y, SL.MAGNET_TOL)
+	_set_pos(drag_id, float(sn.x), float(sn.y))
+	guides = sn.guides
+
+
+# Redimension: borde/esquina con aspect ratio fijo (SL.resize_live). Si el
+# resultado solapea (ok=false), ese frame no se aplica: la pantalla se quedara
+# en el último rect válido.
+func _drag_resize(p):
+	var sn = SL.resize_live(SL.all_screens(layout), drag_id, drag_handle, p.x, p.y, SL.MAGNET_TOL)
+	if typeof(sn) != TYPE_DICTIONARY or not bool(sn.get("ok", false)):
+		guides = []
+		return
+	guides = sn.guides
+	_set_rect(drag_id, float(sn.x), float(sn.y), float(sn.w), float(sn.h))
 
 
 func _snap_release():
 	var sc = SL.screen_by_id(layout, drag_id)
 	if sc == null:
+		guides = []
+		return
+	guides = []
+	if drag_handle != "":
+		# Redimension: si el rect final solapea, se vuelve al previo.
+		if not SL.fits(SL.all_screens(layout), drag_id, sc.x, sc.y, sc.w, sc.h):
+			_set_rect(drag_id, float(drag_pre.position.x), float(drag_pre.position.y),
+				float(drag_pre.size.x), float(drag_pre.size.y))
+		_commit()
+		return
+	# Movimiento: si el imán ya dejó la pantalla tocando a alguien, queda tal
+	# cual (sin salto al soltar).
+	if SL.has_contact(SL.all_screens(layout), drag_id):
+		_commit()
 		return
 	var sn = SL.snap(SL.all_screens(layout), drag_id, sc.x, sc.y)
 	if bool(sn.snapped):
 		_set_pos(drag_id, float(sn.x), float(sn.y))
 	_commit()
+
+
+func _set_rect(id, x, y, w, h):
+	if String(id) == String(layout.local.id):
+		return
+	for i in range(layout.screens.size()):
+		if layout.screens[i].id == String(id):
+			layout.screens[i].x = float(x)
+			layout.screens[i].y = float(y)
+			layout.screens[i].w = float(w)
+			layout.screens[i].h = float(h)
+			return
 
 
 func _set_pos(id, x, y):
@@ -305,20 +296,67 @@ func _set_pos(id, x, y):
 			return
 
 
+# Cursor por asa: los nombres salen de _hit_handle (un borde o dos).
+func _update_cursor(handle):
+	var shape = Input.CURSOR_ARROW
+	match String(handle):
+		"e", "w":
+			shape = Input.CURSOR_HSIZE
+		"n", "s":
+			shape = Input.CURSOR_VSIZE
+		"en", "ws":
+			shape = Input.CURSOR_BDIAGSIZE
+		"wn", "es":
+			shape = Input.CURSOR_FDIAGSIZE
+	Input.set_default_cursor_shape(shape)
+
+
 func _screen_pos(id):
 	var sc = SL.screen_by_id(layout, id)
 	return Vector2(sc.x, sc.y) if sc != null else Vector2.ZERO
 
 
-func _hit(mouse):
+# Asas de resize: bordes y esquinas de cada pantalla del vecindario (el local
+# es fijo: su tamano físico lo mide el shell). handle "" = mover.
+# {id, handle}: interior (handle "") = mover; borde/esquina = redimensionar.
+func _hit_handle(mouse):
+	var r = {"id": "", "handle": ""}
+	if scale <= 0.0:
+		return r
+	var plane = _plane_of(mouse)
+	var tol = HANDLE_HIT / scale
 	var items = SL.all_screens(layout)
 	for i in range(items.size() - 1, -1, -1):
 		var sc = items[i]
 		if sc.local:
 			continue
-		if SL.rect(sc).has_point(_plane_of(mouse)):
-			return sc.id
-	return ""
+		var rc = SL.rect(sc)
+		# Con el lienzo muy reducido 7 px de asa son demasiados mm: el asa
+		# nunca ocupa mas de un tercio del lado (si no, todo seria borde).
+		var tl = min(tol, min(float(rc.size.x), float(rc.size.y)) * 0.33)
+		if not rc.grow(tl).has_point(plane):
+			continue
+		var x0 = float(rc.position.x)
+		var y0 = float(rc.position.y)
+		var x1 = x0 + float(rc.size.x)
+		var y1 = y0 + float(rc.size.y)
+		var at_l = abs(plane.x - x0) <= tl
+		var at_r = abs(plane.x - x1) <= tl
+		var at_t = abs(plane.y - y0) <= tl
+		var at_b = abs(plane.y - y1) <= tl
+		var handle = ""
+		if at_r and plane.y >= y0 - tol and plane.y <= y1 + tol:
+			handle += "e"
+		elif at_l and plane.y >= y0 - tol and plane.y <= y1 + tol:
+			handle += "w"
+		if at_b and plane.x >= x0 - tol and plane.x <= x1 + tol:
+			handle += "s"
+		elif at_t and plane.x >= x0 - tol and plane.x <= x1 + tol:
+			handle += "n"
+		r.id = String(sc.id)
+		r.handle = handle
+		return r
+	return r
 
 
 # --- Dibujo -------------------------------------------------------------------
@@ -372,6 +410,31 @@ func _draw_canvas():
 			canvas.draw_string(font, cp + Vector2(-font.get_string_size(t).x * 0.5, -4), t, STYLE.WARN)
 	if layout.screens.empty() and font != null:
 		canvas.draw_string(font, Vector2(PAD, PAD), "No hay otros equipos", STYLE.DIM)
+	# Asas tomadas: franja en el borde o cuadrado en la esquina arrastrada.
+	if drag_id != "" and drag_handle != "":
+		for sc in SL.all_screens(layout):
+			if String(sc.id) != String(drag_id):
+				continue
+			var cr = _canvas_rect(sc)
+			var th = 3.0
+			var hnd = String(drag_handle)
+			if hnd.find("e") >= 0:
+				canvas.draw_rect(Rect2(cr.position.x + cr.size.x - 4.0, cr.position.y, th, cr.size.y), STYLE.WARN)
+			if hnd.find("w") >= 0:
+				canvas.draw_rect(Rect2(cr.position.x + 1.0, cr.position.y, th, cr.size.y), STYLE.WARN)
+			if hnd.find("s") >= 0:
+				canvas.draw_rect(Rect2(cr.position.x, cr.position.y + cr.size.y - 4.0, cr.size.x, th), STYLE.WARN)
+			if hnd.find("n") >= 0:
+				canvas.draw_rect(Rect2(cr.position.x, cr.position.y + 1.0, cr.size.x, th), STYLE.WARN)
+	# Guías del imán: líneas donde el arrastre se imanta (columnas y filas).
+	for g in guides:
+		var v = float(g.get("value", 0.0))
+		if String(g.get("axis", "")) == "x":
+			var gx = _canvas_of(Vector2(v, 0.0)).x
+			canvas.draw_line(Vector2(gx, 0.0), Vector2(gx, canvas.rect_size.y), STYLE.WARN, 1.0)
+		else:
+			var gy = _canvas_of(Vector2(0.0, v)).y
+			canvas.draw_line(Vector2(0.0, gy), Vector2(canvas.rect_size.x, gy), STYLE.WARN, 1.0)
 
 
 func _size_of(sc):

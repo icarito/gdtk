@@ -172,6 +172,7 @@ static func _new_host(id, hid, svc):
 		"auth": str(txt.get("auth", "")),
 		"ctl": _ctl_port(txt.get("ctl", "")),
 		"accent": valid_accent(str(txt.get("accent", ""))),
+		"mesh": _mesh_atom(str(txt.get("mesh", ""))),
 		"state": "visto",
 		"connected": false,
 		"degraded": hid == "",
@@ -193,6 +194,7 @@ static func _new_saved_host(hid):
 		"auth": "",
 		"ctl": 0,
 		"accent": "",
+		"mesh": "",
 		"state": "guardado",
 		"connected": false,
 		"degraded": false,
@@ -202,6 +204,18 @@ static func _new_saved_host(hid):
 		"live_count": 0,
 		"saved": true,
 	}
+
+
+# SSID de la "red propia" (mesh) que el host anuncia en su TXT (`mesh=...`). Sólo
+# un átomo seguro: sin controles, `=`, barras ni longitud excesiva.
+static func _mesh_atom(v):
+	var s = String(v).strip_edges()
+	if s == "" or s.length() > 32:
+		return ""
+	for ch in ["\n", "\r", "\t", "=", "/", "\\"]:
+		if s.find(ch) >= 0:
+			return ""
+	return s
 
 
 static func _add_service(host, svc, now_sec, ttl_sec):
@@ -217,6 +231,11 @@ static func _add_service(host, svc, now_sec, ttl_sec):
 		var accent = valid_accent(str(svc.txt.get("accent", "")))
 		if accent != "":
 			host.accent = accent
+	# Red propia (mesh): el primer servicio que traiga un SSID válido lo fija.
+	if host.mesh == "":
+		var mesh = _mesh_atom(str(svc.txt.get("mesh", "")))
+		if mesh != "":
+			host.mesh = mesh
 	if live:
 		host.live_count += 1
 		host.capabilities[item.capability] = item
@@ -246,6 +265,66 @@ static func _valid_kind(kind):
 
 static func _degraded_id(svc):
 	return "degraded:%s:%s:%s:%s" % [svc.service, svc.name, svc.host, str(svc.port)]
+
+
+# --- Resolución de dirección para el cliente Deskflow -------------------------
+
+# Servicio Deskflow descubierto que corresponde a `key` (nombre de pantalla
+# txt.name, etiqueta del host, nombre mDNS con o sin sufijo, o dirección IP).
+# {} si no hay dato fresco.
+static func deskflow_service_for(hosts, key):
+	var want = String(key).strip_edges().to_lower()
+	if want == "" or typeof(hosts) != TYPE_ARRAY:
+		return {}
+	for h in hosts:
+		for svc in h.get("services", []):
+			if typeof(svc) != TYPE_DICTIONARY or String(svc.get("service", "")) != SERVICE_DESKFLOW:
+				continue
+			var nm = String(svc.get("txt", {}).get("name", "")).strip_edges().to_lower()
+			var label = String(h.get("label", "")).strip_edges().to_lower()
+			var hostname = String(svc.get("host", "")).strip_edges().to_lower()
+			var short = hostname.split(".")[0]
+			var addr = String(svc.get("address", "")).strip_edges()
+			if want == nm or want == label or want == short or want == addr \
+					or want == hostname or want == nm + ".local" or want == label + ".local":
+				return svc
+	return {}
+
+
+# Nombre de pantalla del vecino Deskflow por id/hid (estable ante cambios de IP).
+# `hosts` = el arreglo ya descubierto. "" si no se conoce.
+static func deskflow_peer_name(hosts, id):
+	var key = String(id).strip_edges()
+	if key == "" or typeof(hosts) != TYPE_ARRAY:
+		return ""
+	for h in hosts:
+		if String(h.get("id", "")) == key or String(h.get("hid", "")) == key:
+			return String(h.get("label", "")).strip_edges()
+	return ""
+
+
+# `remoteHost` para el cliente Deskflow a partir de lo guardado (`host`: nombre de
+# pantalla, nombre mDNS o IP). Prefiere la IPv4 ACTUAL del servicio descubierto
+# (un cambio de IP del servidor no rompe); si no hay dato fresco y es un nombre,
+# `<nombre>.local` (mDNS). Puro.
+static func deskflow_remote_host(hosts, host):
+	var h = String(host).strip_edges()
+	if h == "":
+		return ""
+	var svc = deskflow_service_for(hosts, h)
+	if not svc.empty():
+		var a = String(svc.get("address", "")).strip_edges()
+		if a.is_valid_ip_address() and a.find(":") < 0:
+			return a
+		var hn = String(svc.get("host", "")).strip_edges()
+		if hn != "":
+			return hn
+		return h
+	if h.is_valid_ip_address():
+		return h
+	if h.ends_with(".local"):
+		return h
+	return h + ".local"
 
 
 static func _parse_avahi_line(line, now_sec):

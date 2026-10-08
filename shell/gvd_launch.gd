@@ -176,13 +176,16 @@ static func local_send_argv(gvd_path, peer, port = 0, position = "", wlr_virtual
 	return plan
 
 
-# Plan del receptor LOCAL ("Ver su escritorio aquí"): `gvd recv --sink auto`
+# Plan del receptor LOCAL ("Ver su escritorio aquí"): `gvd recv --sink gl`
 # (prefiere gl/xv; waylandsink aborta en el compositor embebido) y `--port` si el
 # emisor remoto usa otro puerto. El emisor wlroots ya no transmite el puntero en
 # el video (--overlay-cursor 0); se usa el puntero propio de este equipo, así que
 # se desactiva el cursor separado (no hay que mover el cursor de sway por red).
 static func local_recv_argv(gvd_path, has_sway = false, port = 0, video = Vector2()):
-	var plan = ACTIONS.gvd_recv_plan(gvd_path, {"sink": "auto", "port": int(port),
+	# Sink `gl` explícito: la «Pantalla compartida» es una ventana administrada por
+	# el shell (marco con el acento del origen + input). Con TCP `auto` elegiría
+	# ffplay (ventana propia, sin input ni marco), así que se pide glimagesink.
+	var plan = ACTIONS.gvd_recv_plan(gvd_path, {"sink": "gl", "port": int(port),
 		"jitter_ms": ACTIONS.GVD_JITTER_MS})
 	if bool(plan.get("ok", false)) and typeof(plan.get("args", [])) == TYPE_ARRAY:
 		plan["args"].append_array(["--cursor", "none"])
@@ -195,7 +198,8 @@ static func local_recv_argv(gvd_path, has_sway = false, port = 0, video = Vector
 # resuelve gvd por candidatos y no interpola nada no confiable: `has_sway` sólo
 # elige una variante fija.
 static func remote_recv_argv(peer, has_sway = false):
-	var cmd = _remote_loop() + " recv --sink auto --jitter-ms " + str(ACTIONS.GVD_JITTER_MS)
+	var cmd = _remote_loop() + " recv --sink gl --jitter-ms " + str(ACTIONS.GVD_JITTER_MS)
+	cmd += " --transport " + ACTIONS.GVD_TRANSPORT
 	if bool(has_sway):
 		cmd += " --cursor sway"
 	cmd += "; done; echo 'vecindario: gvd no encontrado (recv)' >&2"
@@ -219,6 +223,7 @@ static func remote_send_argv(peer, target_host, port = 0, position = ""):
 	if pos != "":
 		cmd += " --position " + pos
 	cmd += " --fps " + str(ACTIONS.GVD_SEND_FPS) + " --bitrate " + str(ACTIONS.GVD_SEND_BITRATE)
+	cmd += " --transport " + ACTIONS.GVD_TRANSPORT
 	cmd += "; done; echo 'vecindario: gvd no encontrado (send)' >&2"
 	return _ssh_argv(peer, cmd)
 
@@ -446,7 +451,7 @@ static func selftest():
 	ok = ok and rr.args.has("BatchMode=yes") and rr.args.has("ConnectTimeout=3")
 	ok = ok and rr.args[rr.args.size() - 2] == "tengu.local"
 	var rcmd = String(rr.args[rr.args.size() - 1])
-	ok = ok and rcmd.find("recv --sink auto") >= 0 and rcmd.find("--cursor") < 0
+	ok = ok and rcmd.find("recv --sink gl") >= 0 and rcmd.find("--cursor") < 0
 	ok = ok and rcmd.find("command -v gvd") >= 0
 	var rrs = remote_recv_argv("tengu.local", true)
 	ok = ok and String(rrs.args[rrs.args.size() - 1]).find("--cursor sway") >= 0

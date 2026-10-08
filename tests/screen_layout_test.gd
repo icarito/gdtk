@@ -195,5 +195,146 @@ func _init():
 				clean = false
 	check("sin vocabulario interno en cadenas visibles", clean)
 
+	# --- Imantado en vivo (live_snap) ---------------------------------------
+	# local (0,0,340,212) pegado por el este a h1 (340,0,300,190).
+	var plane = SL.normalize_layout({"version": 2,
+		"local": {"id": "local", "label": "Este equipo", "local": true, "x": 0, "y": 0,
+			"w": 340, "h": 212, "px_w": 1280, "px_h": 800},
+		"screens": [
+			{"id": "h1", "label": "1", "x": 340, "y": 0, "w": 300, "h": 190, "px_w": 1280, "px_h": 800},
+			{"id": "h2", "label": "2", "x": 0, "y": 232, "w": 340, "h": 212, "px_w": 1280, "px_h": 800},
+		]})
+	check("arranque: vecino al este pegado",
+		not SL.contact(SL.screen_by_id(plane, "local"), SL.screen_by_id(plane, "h1")).empty())
+
+	# Columna: mi borde izquierdo alinea con el borde izquierdo del vecino.
+	var m1 = SL.live_snap(SL.all_screens(plane), "h2", 342.0, 500.0)
+	check("imán vivo: alinea columna izquierda", bool(m1.snap_x) and float(m1.x) == 340.0)
+	check("imán vivo: guía x alinea columnas",
+		m1.guides.size() == 1 and String(m1.guides[0].axis) == "x"
+		and abs(float(m1.guides[0].value) - 340.0) <= 0.001)
+
+	# Pegado: mi borde izquierdo al borde derecho de h1 (contacto al este,
+	# x=340+300=640) y top alineado con h1 en el mismo gesto.
+	var m2 = SL.live_snap(SL.all_screens(plane), "h2", 655.0, 8.0)
+	check("imán vivo: pega el borde derecho de h1", bool(m2.snap_x) and float(m2.x) == 640.0)
+	check("imán vivo: top alineado en el mismo gesto", bool(m2.snap_y) and float(m2.y) == 0.0)
+	check("imán vivo: composición produce dos guías", m2.guides.size() == 2)
+
+	# Centro con centro: 324 está más cerca del centro de h1 (490-170=320) que
+	# de su borde izquierdo (340).
+	var m3 = SL.live_snap(SL.all_screens(plane), "h2", 324.0, 500.0)
+	check("imán vivo: centro alineado con centro de h1",
+		bool(m3.snap_x) and abs(float(m3.x) - 320.0) <= 0.001)
+
+	# Fuera de alcance: sin imán y sin guías.
+	var m4 = SL.live_snap(SL.all_screens(plane), "h2", 900.0, 600.0)
+	check("imán vivo: lejos no imanta", not bool(m4.snap_x) and not bool(m4.snap_y)
+		and float(m4.x) == 900.0 and float(m4.y) == 600.0 and m4.guides.empty())
+
+	# Preview arrastrada entre pantallas: (336,6) está en alcance de la columna
+	# de h1 (340) y de la fila de h1/local (y=0), pero cualquier combinación
+	# compuesta solaparía; la preview queda libre y el snap() de contacto
+	# resuelve al soltar.
+	var m5 = SL.live_snap(SL.all_screens(plane), "h2", 336.0, 6.0)
+	check("imán vivo: no imanta a posición solapante",
+		not bool(m5.snap_x) and not bool(m5.snap_y) and m5.guides.empty())
+
+	# Al soltar encima de h1: el snap() de contacto la deja pegada y sin solape
+	# con nadie (la preview solapante jamás se guarda como queda final).
+	var rrel = SL.snap(SL.all_screens(plane), "h2", 368.0, 6.0)
+	check("soltar: siempre cae pegada", bool(rrel.snapped))
+	var dr = SL.rect({"x": float(rrel.x), "y": float(rrel.y), "w": 340.0, "h": 212.0})
+	check("soltar: sin solape final", not SL.overlaps(dr,
+			SL.rect(SL.screen_by_id(plane, "h1")))
+		and not SL.overlaps(dr, SL.rect(plane.local)))
+	var soltada = SL.normalize_layout({"version": 2,
+		"local": {"id": "local", "label": "L", "local": true, "x": 0, "y": 0, "w": 340, "h": 212},
+		"screens": [{"id": "h1", "label": "1", "x": 340, "y": 0, "w": 300, "h": 190},
+			{"id": "h2", "label": "2", "x": float(rrel.x), "y": float(rrel.y), "w": 340, "h": 212}]})
+	check("soltar: contacto real tras soltar",
+		SL.has_contact(SL.all_screens(soltada), "h2"))
+
+	# Contacto tras el imán: la pantalla pegada al este de h1 toca.
+	var pegada = SL.normalize_layout({"version": 2,
+		"local": {"id": "local", "label": "L", "local": true, "x": 0, "y": 0, "w": 340, "h": 212},
+		"screens": [{"id": "h2", "label": "2", "x": 660, "y": 0, "w": 300, "h": 190},
+			{"id": "h1", "label": "1", "x": 360, "y": 0, "w": 300, "h": 190}]})
+	check("has_contact: pegado al este", SL.has_contact(SL.all_screens(pegada), "h2"))
+	var separada = SL.normalize_layout({"version": 2,
+		"local": {"id": "local", "label": "L", "local": true, "x": 0, "y": 0, "w": 340, "h": 212},
+		"screens": [{"id": "h2", "label": "2", "x": 760, "y": 300, "w": 300, "h": 190}]})
+	check("has_contact: separado no", not SL.has_contact(SL.all_screens(separada), "h2"))
+
+	# --- Redimension por borde/esquina (aspect ratio fijo) ------------------
+	# rz: h2 300x187.5 (ar 1.6 como su 1280x800) bien abajo, lejos del alcance
+	# de las filas de local/h1 para el salto del reparto del alto.
+	var rz = SL.normalize_layout({"version": 2,
+		"local": {"id": "local", "label": "L", "local": true, "x": 0, "y": 0, "w": 340, "h": 212,
+			"px_w": 1280, "px_h": 800},
+		"screens": [{"id": "h1", "label": "1", "x": 340, "y": 0, "w": 300, "h": 187.5,
+				"px_w": 1280, "px_h": 800},
+			{"id": "h2", "label": "2", "x": 0, "y": 450, "w": 300, "h": 187.5,
+				"px_w": 1280, "px_h": 800}]})
+
+	# Borde este: el cursor cae a 16 de la linea 640 (borde derecho de h1):
+	# se imanta por tamano -> w = 640, h = 400, ratio exacto, sin desplazamiento
+	# (el top del reparto queda fuera del alcance de las filas).
+	var rz1 = SL.resize_live(SL.all_screens(rz), "h2", "e", 656.0, 600.0)
+	check("resize e: imanta al borde derecho de h1",
+		bool(rz1.ok) and abs(float(rz1.w) - 640.0) <= 0.001)
+	check("resize e: ratio respetado", abs(float(rz1.h) - 400.0) <= 0.001
+		and abs(float(rz1.h) * 1.6 - float(rz1.w)) <= 0.001)
+	check("resize e: guia vertical del extremo", rz1.guides.size() == 1
+		and String(rz1.guides[0].axis) == "x" and abs(float(rz1.guides[0].value) - 640.0) <= 0.001)
+
+	# Con h2 mas alta el reparto del centro deja el top a 0.25 de la fila de
+	# local (212): el desplazamiento lo alinea (212) sin tocar el ratio.
+	var rzB = SL.normalize_layout({"version": 2,
+		"local": {"id": "local", "label": "L", "local": true, "x": 0, "y": 0, "w": 340, "h": 212,
+			"px_w": 1280, "px_h": 800},
+		"screens": [{"id": "h1", "label": "1", "x": 340, "y": 0, "w": 300, "h": 187.5,
+				"px_w": 1280, "px_h": 800},
+			{"id": "h2", "label": "2", "x": 0, "y": 318, "w": 300, "h": 187.5,
+				"px_w": 1280, "px_h": 800}]})
+	var rz2 = SL.resize_live(SL.all_screens(rzB), "h2", "e", 650.0, 400.0)
+	check("resize e: esquina desplazada alinea filas",
+		bool(rz2.ok) and abs(float(rz2.y) - 212.0) <= 0.001)
+	check("resize e: guia con fila alineada", rz2.guides.size() == 2
+		and (String(rz2.guides[0].axis) == "y" or String(rz2.guides[1].axis) == "y"))
+
+	# Esquina SE con pivote en (0, 450): el par de lineas no paga el ratio
+	# (no hay horizontal en alcance), manda la linea x mas cercana con el
+	# ratio exacto y el top no se corre del pivote.
+	var rz3 = SL.resize_live(SL.all_screens(rz), "h2", "se", 660.0, 546.5)
+	check("resize se: imanta solo a la linea compatible",
+		bool(rz3.ok) and abs(float(rz3.w) - 640.0) <= 0.001
+		and abs(float(rz3.h) - 400.0) <= 0.001 and abs(float(rz3.y) - 450.0) <= 0.001)
+
+	# Cursor dentro de otra pantalla: no aplica ese frame (la vista revierte).
+	var bloqueada = SL.normalize_layout({"version": 2,
+		"local": {"id": "local", "label": "L", "local": true, "x": 0, "y": 0, "w": 340, "h": 212,
+			"px_w": 1280, "px_h": 800},
+		"screens": [{"id": "b3", "label": "3", "x": 200, "y": 250, "w": 300, "h": 190,
+				"px_w": 1280, "px_h": 800},
+			{"id": "h2", "label": "2", "x": 0, "y": 300, "w": 300, "h": 187.5,
+				"px_w": 1280, "px_h": 800}]})
+	var rz4 = SL.resize_live(SL.all_screens(bloqueada), "h2", "e", 360.0, 400.0)
+	check("resize: solape del cursor no aplica", not bool(rz4.ok))
+
+	# live_snap: alineaciones nuevas por esquinas — encima de local con el
+	# borde derecho parejo al de local; y pegada al sur con la esquina
+	# inferior-derecha compartida (dos ejes a la vez).
+	var rzn = SL.normalize_layout({"version": 2,
+		"local": {"id": "local", "label": "L", "local": true, "x": 0, "y": 0, "w": 340, "h": 212},
+		"screens": [{"id": "h1", "label": "1", "x": 340, "y": 0, "w": 200, "h": 120}]})
+	var mv = SL.live_snap(SL.all_screens(rzn), "h1", 130.0, -180.0)
+	check("live_snap: borde derecho con borde derecho",
+		bool(mv.snap_x) and abs(float(mv.x) - 140.0) <= 0.001 and not bool(mv.snap_y))
+	var mv2 = SL.live_snap(SL.all_screens(rzn), "h1", 132.0, 220.0)
+	check("live_snap: pegado al sur con esquina derecha compartida",
+		bool(mv2.snap_x) and abs(float(mv2.x) - 140.0) <= 0.001
+		and bool(mv2.snap_y) and abs(float(mv2.y) - 212.0) <= 0.001)
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

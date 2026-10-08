@@ -29,6 +29,7 @@ const DEFAULT_PX_H = 800
 const LEGACY_MM_PER_PX = 25.4 / 96.0
 # Contacto minimo fisico para que el puntero cruce de una pantalla a otra.
 const MIN_CONTACT = 8.0
+const MAGNET_TOL = 24.0      # mm: alcance del imán mientras se arrastra
 const TOUCH_TOL = 0.5
 
 const DIRECTIONS = ["north", "south", "east", "west"]
@@ -363,6 +364,341 @@ static func _candidate(moving, o, side, px, py, mc):
 	return {"x": x2, "y": y2, "w": mw, "h": mh}
 
 
+# --- Imantado en vivo (mientras se arrastra) -----------------------------------
+
+# Candidatos por eje contra otra pantalla: bordes propios y opuestos (pegado
+# de lado) y centros alineados.
+static func _axis_candidates(moving, o, vertical):
+	var mw = float(moving.w)
+	var mh = float(moving.h)
+	var out = []
+	var bx = float(o.x)
+	var by = float(o.y)
+	var bw = float(o.w)
+	var bh = float(o.h)
+	if vertical:
+		# x: mi borde izquierdo en o.x, mi borde izquierdo en el derecho de o
+		# (pegado al este o columna derecha), mi borde derecho en el izquierdo
+		# de o (pegado al oeste o columna izquierda), bordes derechos juntos
+		# (esquina compartida) y centro con centro.
+		out.append({"kind": "left_at", "value": bx})
+		out.append({"kind": "left_at_right", "value": bx + bw})
+		out.append({"kind": "right_at_left", "value": bx - mw})
+		out.append({"kind": "right_at", "value": bx + bw - mw})
+		out.append({"kind": "center", "value": bx + bw * 0.5 - mw * 0.5})
+	else:
+		out.append({"kind": "top_at", "value": by})
+		out.append({"kind": "top_at_bottom", "value": by + bh})
+		out.append({"kind": "bottom_at_top", "value": by - mh})
+		out.append({"kind": "bottom_at", "value": by + bh - mh})
+		out.append({"kind": "center", "value": by + bh * 0.5 - mh * 0.5})
+	return out
+
+
+# Devuelve {x, y, snap_x, snap_y, guides: [{axis, kind, value, target}]}.
+# Cada eje toma su mejor candidato dentro de `tol` (mm); el resultado no debe
+# solapar a otra pantalla. Si la composicion de ambos ejes solapa, se conserva
+# solo el eje mas cercano (el otro vuelve libre).
+static func live_snap(screens, id, px, py, tol = -1.0):
+	var t = MAGNET_TOL if tol < 0.0 else float(tol)
+	var clean = sanitize_screens(screens)
+	var probe = null
+	for s in clean:
+		if s.id == String(id):
+			probe = s
+	if probe == null:
+		return {"x": float(px), "y": float(py), "snap_x": false, "snap_y": false,
+			"guides": []}
+	var xc = []
+	var yc = []
+	for o in clean:
+		if o.id == probe.id:
+			continue
+		for c in _axis_candidates(probe, o, true):
+			var d = abs(c.value - float(px))
+			if d <= t:
+				xc.append({"axis": "x", "kind": c.kind, "value": c.value, "target": o.id, "d": d})
+		for c in _axis_candidates(probe, o, false):
+			var d2 = abs(c.value - float(py))
+			if d2 <= t:
+				yc.append({"axis": "y", "kind": c.kind, "value": c.value, "target": o.id, "d": d2})
+	# Opciones validas (sin solape): un eje, el otro, o ambos compuestos.
+	var best = {}
+	for a in xc:
+		_consider(best, probe, clean, float(a.value), float(py), [a], [])
+	for b in yc:
+		_consider(best, probe, clean, float(px), float(b.value), [], [b])
+	for a in xc:
+		for b in yc:
+			_consider(best, probe, clean, float(a.value), float(b.value), [a], [b])
+	if best.empty():
+		return {"x": float(px), "y": float(py), "snap_x": false, "snap_y": false,
+			"guides": []}
+	var guides = []
+	guides.append_array(best.get("gx", []))
+	guides.append_array(best.get("gy", []))
+	return {"x": float(best.x), "y": float(best.y),
+		"snap_x": not best.get("gx", []).empty(), "snap_y": not best.get("gy", []).empty(),
+		"guides": guides}
+
+
+# Compara una opcion contra la mejor hasta ahora: primero gana MAS EJES
+# imantados (pegado + alineado vale mas que el contacto suelto que da el
+# snap() al soltar); a igualdad de ejes, menos distancia total. Una opcion
+# nunca solapa a otra pantalla.
+static func _consider(best, probe, clean, x, y, ax, ay):
+	var opt = {"x": float(x), "y": float(y)}
+	if _overlaps_any(
+			{"x": float(x), "y": float(y), "w": float(probe.w), "h": float(probe.h)},
+			clean, probe.id):
+		return
+	var cost = 0.0
+	for a in ax:
+		cost += float(a.d)
+	for b in ay:
+		cost += float(b.d)
+	var axes = ax.size() + ay.size()
+	opt["cost"] = cost
+	opt["axes"] = axes
+	opt["gx"] = ax
+	opt["gy"] = ay
+	var better = false
+	if best.empty():
+		better = true
+	elif axes > int(best.axes) or (axes == int(best.axes) and cost < float(best.cost) - 0.0001):
+		better = true
+	if not better:
+		return
+	for k in ["x", "y", "cost", "axes", "gx", "gy"]:
+		best[k] = opt[k]
+
+
+# ¿El rect (x,y,w,h) cabe sin solapar a las otras pantallas (de id distinta)?
+static func fits(screens, id, x, y, w, h):
+	var clean = sanitize_screens(screens)
+	return not _overlaps_any(
+		{"x": float(x), "y": float(y), "w": float(w), "h": float(h)},
+		clean, String(id))
+
+
+static func has_contact(screens, id, tol = TOUCH_TOL):
+	var clean = sanitize_screens(screens)
+	for s in clean:
+		if s.id == String(id):
+			for o in clean:
+				if o.id == s.id:
+					continue
+				if not contact(s, o, tol).empty():
+					return true
+	return false
+
+
+# --- Redimension por borde/esquina (aspect ratio fijo) -------------------------
+
+# Ajusta la pantalla `id` desde `handle` (n,s,e,w,ne,nw,se,sw) al punto de
+# cursor (px,py en el plano mm) con el aspect ratio de su RESOLUCION fijo
+# (px_w/px_h; si falta, el w/h actual). El iman evita contactos al 1%/99%:
+#  - el extremo arrastrado se imanta ajustando el tamano a una linea de borde
+#    o centro de otra pantalla a <= MAGNET_TOL del cursor;
+#  - en esquinas ambas lineas se imantan juntas solo si el par queda
+#    compatible con el ratio (<= 2 mm); si no, manda la linea mas cercana;
+#  - bordes: el rect se desplaza en el eje PERPENDICULAR para alinear los
+#    extremos del contacto (evita pedacitos de borde) sin mover el extremo
+#    ya imantado;
+#  - nunca solapa: opciones solapantes se descartan; si el cursor mismo
+#    solapa, ok=false y al soltar la vista revierte al rect previo.
+# Devuelve {x, y, w, h, ok, guides: [{axis, value}]}.
+const SIZE_MIN_MM = 50.0
+const SIZE_MAX_MM = 1000.0
+
+static func resize_live(screens, id, handle, px, py, tol = -1.0):
+	var t = MAGNET_TOL if tol < 0.0 else float(tol)
+	var clean = sanitize_screens(screens)
+	var probe = null
+	for s in clean:
+		if s.id == String(id):
+			probe = s
+	if probe == null:
+		return {"ok": false}
+	var r = rect(probe)
+	var x0 = float(r.position.x)
+	var y0 = float(r.position.y)
+	var w0 = float(r.size.x)
+	var h0 = float(r.size.y)
+	var aspect = float(probe.px_w) / float(probe.px_h) \
+		if int(probe.px_w) > 0 and int(probe.px_h) > 0 else w0 / h0
+	var lines_x = []
+	var lines_y = []
+	for o in clean:
+		if o.id == probe.id:
+			continue
+		var ro = rect(o)
+		lines_x.append(float(ro.position.x))
+		lines_x.append(float(ro.position.x + ro.size.x))
+		lines_x.append(float(ro.position.x + ro.size.x * 0.5))
+		lines_y.append(float(ro.position.y))
+		lines_y.append(float(ro.position.y + ro.size.y))
+		lines_y.append(float(ro.position.y + ro.size.y * 0.5))
+	var kind = String(handle)
+	var gx = []
+	var gy = []
+	var out = {}
+	if kind == "e" or kind == "w":
+		var pivot_x = x0 if kind == "e" else x0 + w0
+		var dw = _snap_size_at(lines_x, float(px), pivot_x, t)
+		var w = clamp(abs(px - pivot_x), SIZE_MIN_MM, SIZE_MAX_MM) if dw < 0.0 else dw
+		if dw >= 0.0:
+			gx.append({"axis": "x", "value": (x0 + w) if kind == "e" else (pivot_x - w)})
+		var h = w / aspect
+		var x = x0 if kind == "e" else x0 + w0 - w
+		var y = y0 + h0 * 0.5 - h * 0.5
+		out = {"x": x, "y": y, "w": w, "h": h}
+		# Solo el eje perpendicular: alinear el reparto del contacto con una
+		# fila (el shift se prueba primero: rescata solapes leves del spread).
+		var sy = _best_shift(lines_y, y, h, t)
+		var c2 = {"x": x, "y": y + sy, "w": w, "h": h}
+		if not _overlaps_any(c2, clean, probe.id):
+			if sy != 0.0:
+				gy.append({"axis": "y", "value": y + sy})
+			out = c2
+	elif kind == "n" or kind == "s":
+		var pivot_y = y0 if kind == "s" else y0 + h0
+		var dh = _snap_size_at(lines_y, float(py), pivot_y, t)
+		var h2 = clamp(abs(py - pivot_y), SIZE_MIN_MM, SIZE_MAX_MM) if dh < 0.0 else dh
+		if dh >= 0.0:
+			gy.append({"axis": "y", "value": (y0 + h2) if kind == "s" else (pivot_y - h2)})
+		var w2 = h2 * aspect
+		var y2 = y0 if kind == "s" else y0 + h0 - h2
+		var x2 = x0 + w0 * 0.5 - w2 * 0.5
+		out = {"x": x2, "y": y2, "w": w2, "h": h2}
+		var sx1 = _best_shift(lines_x, x2, w2, t)
+		var c3 = {"x": x2 + sx1, "y": y2, "w": w2, "h": h2}
+		if not _overlaps_any(c3, clean, probe.id):
+			if sx1 != 0.0:
+				gx.append({"axis": "x", "value": x2 + sx1})
+			out = c3
+	else:
+		var left = kind.find("w") >= 0
+		var top = kind.find("n") >= 0
+		var pivot_x = (x0 + w0) if left else x0
+		var pivot_y = (y0 + h0) if top else y0
+		var w_r = abs(px - pivot_x)
+		var h_r = abs(py - pivot_y)
+		var w_r2 = max(w_r, h_r * aspect)
+		var w = clamp(w_r2, SIZE_MIN_MM, SIZE_MAX_MM)
+		var h = w / aspect
+		var x = x0 if not left else pivot_x - w
+		var y = pivot_y if not top else pivot_y - h
+		# Par de lineas ratio-compatible: ambos extremos imantados.
+		var best_d = -1.0
+		for lx in lines_x:
+			var w_l = abs(lx - pivot_x)
+			var dx_l = abs(lx - px)
+			if dx_l > t or w_l < SIZE_MIN_MM or w_l > SIZE_MAX_MM:
+				continue
+			var h_l = w_l / aspect
+			for ly in lines_y:
+				var h_l2 = abs(ly - pivot_y)
+				var dy_l = abs(ly - py)
+				if dy_l > t or h_l2 < SIZE_MIN_MM or h_l2 > SIZE_MAX_MM:
+					continue
+				if abs(h_l2 - h_l) > 2.0:
+					continue
+				var d_tot = dx_l + dy_l
+				if best_d < 0.0 or d_tot < best_d:
+					best_d = d_tot
+					w = w_l
+					h = h_l2
+					x = x0 if not left else pivot_x - w
+					y = pivot_y if not top else pivot_y - h
+					gx = [{"axis": "x", "value": lx}]
+					gy = [{"axis": "y", "value": ly}]
+		if best_d < 0.0:
+			# Una sola linea: la mas cercana del cursor entre ambos ejes.
+			var nx = _nearest_line(lines_x, px, pivot_x, t)
+			var ny = _nearest_line(lines_y, py, pivot_y, t)
+			if nx.size() == 3 and (ny.size() != 3 or float(nx[0]) <= float(ny[0])):
+				w = float(nx[1])
+				h = w / aspect
+				x = x0 if not left else pivot_x - w
+				y = pivot_y if not top else pivot_y - h
+				gx = [{"axis": "x", "value": float(nx[2])}]
+			elif ny.size() == 3:
+				h = float(ny[1])
+				w = h * aspect
+				y = pivot_y if not top else pivot_y - h
+				x = x0 if not left else pivot_x - w
+				gy = [{"axis": "y", "value": float(ny[2])}]
+		out = {"x": x, "y": y, "w": w, "h": h}
+	var ok = not _overlaps_any(out, clean, probe.id)
+	var guides = []
+	guides.append_array(gx)
+	guides.append_array(gy)
+	out["ok"] = ok
+	out["guides"] = guides
+	return out
+
+
+# La linea cuya coordenada esta a <= tol del cursor y cuyo size implicito
+# |line - pivot| cae en [SIZE_MIN_MM..SIZE_MAX_MM]. Devuelve ese size o -1.
+static func _snap_size_at(lines, cursor, pivot, tol):
+	var best = -1.0
+	var out = -1.0
+	for line in lines:
+		var d = abs(line - float(cursor))
+		if d > tol:
+			continue
+		var implied = abs(line - float(pivot))
+		if implied < SIZE_MIN_MM or implied > SIZE_MAX_MM:
+			continue
+		if best < 0.0 or d < best:
+			best = d
+			out = implied
+	return out
+
+
+# La linea mas cercana: [dist, size_implicito, coord]; [] si ninguna entra.
+static func _nearest_line(lines, cursor, pivot, tol):
+	var best = -1.0
+	var found = []
+	for line in lines:
+		var d = abs(line - float(cursor))
+		if d > tol:
+			continue
+		var implied = abs(line - float(pivot))
+		if implied < SIZE_MIN_MM or implied > SIZE_MAX_MM:
+			continue
+		if best < 0.0 or d < best:
+			best = d
+			found = [d, implied, line]
+	return found
+
+
+# Desplazamiento que alinea un extremo del rect (pos..pos+size) a una linea
+# dentro de tol; 0.0 si ninguna.
+static func _best_shift(lines, pos, size, tol):
+	var best = -1.0
+	var shift = 0.0
+	for line in lines:
+		for v in [line, line - size]:
+			var d = abs(v - float(pos))
+			if d <= tol and (best < 0.0 or d < best):
+				best = d
+				shift = v - float(pos)
+	return shift
+
+
+static func _finish(probe, rect, clean, gx, gy):
+	var fits = not _overlaps_any(rect, clean, probe.id)
+	var guides = []
+	guides.append_array(gx)
+	guides.append_array(gy)
+	return {"x": float(rect.x), "y": float(rect.y), "w": float(rect.w), "h": float(rect.h),
+		"ok": fits, "guides": guides}
+
+
+# --- Colocacion por direccion y cadenas ---------------------------------------
+
 # --- Colocacion por direccion y cadenas ---------------------------------------
 
 # Coloca `id` pegado al ancla (local por defecto) por `direction`, centrado o con
@@ -521,6 +857,18 @@ static func mm_rect(transform, screen):
 		max(1.0, float(screen.w) * k), max(1.0, float(screen.h) * k))
 
 
+# Punto en mm -> px del rect destino (guías del imán en la vista mini).
+static func mm_pt(transform, mm):
+	if typeof(transform) != TYPE_DICTIONARY or transform.empty():
+		return Vector2.ZERO
+	var k = float(transform.k)
+	var off = Vector2(transform.off)
+	var bp = Vector2(transform.bbox.position)
+	return Vector2(
+		off.x + (float(mm.x) - bp.x) * k,
+		off.y + (float(mm.y) - bp.y) * k)
+
+
 # Vista mini de la distribución (SPEC-sugar-group-2026-10, popup de Grupo): mapea
 # cada pantalla al rect destino preservando proporción y centrando. Devuelve
 # [{id, label, is_local, rect, moved}] con `rect` local al rect destino, en px,
@@ -597,6 +945,39 @@ static func mini_map_edge(marks, local_pos, tol_px = 6.0):
 				dist = float(ds[k])
 		if edge != "":
 			return {"id": String(marks[i].id), "edge": edge}
+	return {}
+
+
+# Asa de una pantalla mini para el gesto del popup (idéntico a Configuración >
+# Pantallas): interior -> "" (mover); un borde -> "e|w|n|s"; una esquina ->
+# dos letras ("es","en","ws","wn"). En px del rect destino. Sin hit: {}.
+static func mini_map_handle(marks, local_pos, tol_px = 7.0):
+	var p = Vector2(local_pos)
+	var tol = max(2.0, float(tol_px))
+	for i in range(marks.size() - 1, -1, -1):
+		var r = marks[i].rect
+		# El asa nunca ocupa mas de un tercio del lado.
+		var tl = min(tol, min(r.size.x, r.size.y) * 0.33)
+		if not r.grow(tl).has_point(p):
+			continue
+		var x0 = r.position.x
+		var y0 = r.position.y
+		var x1 = r.end.x
+		var y1 = r.end.y
+		var at_l = abs(p.x - x0) <= tl
+		var at_r = abs(p.x - x1) <= tl
+		var at_t = abs(p.y - y0) <= tl
+		var at_b = abs(p.y - y1) <= tl
+		var handle = ""
+		if at_r and p.y >= y0 - tol and p.y <= y1 + tol:
+			handle += "e"
+		elif at_l and p.y >= y0 - tol and p.y <= y1 + tol:
+			handle += "w"
+		if at_b and p.x >= x0 - tol and p.x <= x1 + tol:
+			handle += "s"
+		elif at_t and p.x >= x0 - tol and p.x <= x1 + tol:
+			handle += "n"
+		return {"id": String(marks[i].id), "handle": handle}
 	return {}
 
 

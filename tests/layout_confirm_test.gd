@@ -188,5 +188,25 @@ func _init():
 	var sn2 = SL.snap(SL.all_screens(far_lay), "x1", 900.0, 0.0)
 	check("snap: lejos elige por costo", String(sn2.get("target", "")) == "local")
 
+	# --- asas del popup (mini_map_handle) y mm_pt -----------------------------
+	# Idéntico a Pantallas: interior mueve; borde y esquina redimensionan.
+	var h_center = SL.mini_map_handle(marks2, tr.position + tr.size * 0.5)
+	check("asa: interior -> mover", String(h_center.get("id", "")) == "tengu"
+		and String(h_center.get("handle", "")) == "")
+	var h_e = SL.mini_map_handle(marks2, Vector2(tr.end.x - 1.0, tr.position.y + tr.size.y * 0.5))
+	check("asa: borde este", String(h_e.get("handle", "")) == "e")
+	var h_s = SL.mini_map_handle(marks2, Vector2(tr.position.x + tr.size.x * 0.5, tr.end.y - 1.0))
+	check("asa: borde sur", String(h_s.get("handle", "")) == "s")
+	var h_es = SL.mini_map_handle(marks2, tr.end - Vector2(1.0, 1.0))
+	check("asa: esquina sureste", String(h_es.get("handle", "")) == "es")
+	var h_en = SL.mini_map_handle(marks2, Vector2(tr.end.x - 1.0, tr.position.y + 1.0))
+	check("asa: esquina noreste", String(h_en.get("handle", "")) == "en")
+	check("asa: fuera -> {}", SL.mini_map_handle(marks2, Vector2(2000.0, 2000.0)).empty())
+
+	# mm_pt coincide con mm_rect en el origen de la pantalla (guías del imán).
+	var pm = SL.mm_pt(t, Vector2(float(scr.x), float(scr.y)))
+	check("mm_pt: origen coincide con mm_rect",
+		approx(pm.x, rr.position.x, 0.01) and approx(pm.y, rr.position.y, 0.01))
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

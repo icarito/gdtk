@@ -63,8 +63,24 @@ pantalla solapada" en vez de llevársela lejos.
 
 - Verificación visual del popup (arrastre/resize) por el usuario; screenshot RPC
   disponible para inspección.
-- Unificación de **presentación** con Pantallas (la geometría ya es el mismo
-  `screen_layout.gd`; falta que la vista del popup y la página compartan el
-  dibujo/widget si se quiere idéntico).
 - Tecla pegada residual en el cliente: mitigado por debounce; el reset de
   dispositivos EIS del cliente queda como trabajo aparte si reaparece.
+
+## Unificación con Pantallas (2026-10-06, posterior)
+
+El popup quedó **idéntico** a Configuración > Pantallas usando el mismo modelo:
+
+- Asas de **borde y esquina** (`screen_layout.mini_map_handle`, px con tope de
+  1/3 del lado) → `handle` "" (mover), e/w/n/s o esquina (es/en/ws/wn).
+- **Mover** con imán en vivo (`live_snap`, per-eje bordes/filas/columnas/centros)
+  mientras se arrastra; la local sigue arrastrando el plano completo.
+- **Redimensionar** con `resize_live` (antes `resize_edge`): aspecto de la
+  resolución, snap de extremos para no dejar contactos al 1%/99%, y **no solapa**
+  (si el cursor solapa, se mantiene el último rect válido; al soltar revierte al
+  rect previo con `fits`).
+- **Soltar**: si ya quedó tocando (`has_contact`) se respeta; si no, `snap`.
+- **Guías** del imán dibujadas en el mini-mapa (`mm_pt`) y resaltado del asa bajo
+  el puntero (hover) / tomada (drag).
+- `resize_edge` queda como helper público (tests); el popup ya no lo usa.
+- Tests: `tests/layout_confirm_test.gd` suma las asas y `mm_pt` (55 checks);
+  `tests/screen_layout_test.gd` cubre `resize_live`/`live_snap` (65 checks).

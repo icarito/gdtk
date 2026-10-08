@@ -86,5 +86,26 @@ func _init():
 	var saved_hosts = nb.model_from_text("", {"sv1": {"label": "Guardado"}}, 5)
 	check("host guardado sin accent", saved_hosts.size() == 1 and saved_hosts[0].accent == "")
 
+	# Resolución del remoteHost Deskflow: el nombre guardado se resuelve a la IP
+	# actual del Vecindario (sobrevive a que el servidor cambie de IP).
+	var df_sample = PoolStringArray([
+		"=;mlan0;IPv4;gdtk\\032deskflow\\032bastion;_gdtk-deskflow._tcp;local;bastion-116.local;192.168.18.91;24800;\"v=1\" \"hid=a1c5\" \"name=bastion\" \"role=server\"",
+	]).join("\n")
+	var df_hosts = nb.model_from_text(df_sample, {}, 5)
+	check("deskflow: nombre -> IPv4 actual",
+		nb.deskflow_remote_host(df_hosts, "bastion") == "192.168.18.91")
+	check("deskflow: IPv4 guardada se normaliza a la actual",
+		nb.deskflow_remote_host(df_hosts, "192.168.18.91") == "192.168.18.91")
+	check("deskflow: nombre mDNS del service se reconoce",
+		nb.deskflow_remote_host(df_hosts, "bastion-116.local") == "192.168.18.91")
+	check("deskflow: alias <nombre>.local se resuelve a la IPv4",
+		nb.deskflow_remote_host(df_hosts, "bastion.local") == "192.168.18.91")
+	check("deskflow: nombre desconocido -> <nombre>.local",
+		nb.deskflow_remote_host(df_hosts, "fantasma") == "fantasma.local")
+	check("deskflow: IP desconocida se deja igual",
+		nb.deskflow_remote_host(df_hosts, "10.0.0.9") == "10.0.0.9")
+	check("deskflow: nombre de pantalla por id",
+		nb.deskflow_peer_name(df_hosts, "a1c5") == "bastion")
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

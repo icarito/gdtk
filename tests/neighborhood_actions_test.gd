@@ -43,7 +43,7 @@ func _init():
 		and df.plan.args[1] == "client"
 		and df.plan.args[df.plan.args.size() - 1] == df.plan.config)
 	check("deskflow cliente con remoteHost del peer", df.plan.settings_text.find("coreMode=1") >= 0
-		and df.plan.settings_text.find("remoteHost=192.168.1.20") >= 0)
+		and df.plan.settings_text.find("remoteHost=tengu.local") >= 0)
 
 	# El portapapeles no aparece como acción, ni siquiera si el peer anuncia clip=1.
 	check("sin acción de portapapeles aunque clip=1",

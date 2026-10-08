@@ -58,6 +58,12 @@ const DEFAULT_DESKFLOW_PORT = 24800
 const GVD_JITTER_MS = 120
 const GVD_SEND_FPS = 24
 const GVD_SEND_BITRATE = 6000
+# Transporte del video gvd: TCP. Sobre Wi-Fi (hotspot) UDP pierde paquetes y el
+# receptor muestra franjas/bloques; con TCP (retransmite) y `--sink auto` el
+# receptor prefiere ffplay, que evita las franjas horizontales de la recepción
+# GStreamer durante movimiento intenso (ver tools/gvd/DEPS.md y b08afbb de gvd).
+# Override por llamada con opts.transport = "udp".
+const GVD_TRANSPORT = "tcp"
 # Modelo puro de la brujula (direccion N/S/E/O), generador puro de links Deskflow
 # (compas) y los dos formatos reales de Deskflow: layout barrier y ajustes QSettings.
 const DIRECTIONS = preload("res://neighborhood_directions.gd")
@@ -169,6 +175,10 @@ static func gvd_send_plan(gvd_path, target_host, port = 0, opts = {}):
 		if br < 100 or br > 100000:
 			return _bad("bitrate inválido: " + str(opts.get("bitrate")))
 		args.append_array(["--bitrate", str(br)])
+	var tr = String(opts.get("transport", GVD_TRANSPORT)).strip_edges()
+	if tr != "udp" and tr != "tcp":
+		return _bad("transporte inválido: " + tr)
+	args.append_array(["--transport", tr])
 	return {"ok": true, "kind": "process", "cmd": cmd, "args": args, "error": ""}
 
 
@@ -199,6 +209,10 @@ static func gvd_recv_plan(gvd_path, opts = {}):
 		if jitter > 5000:
 			return _bad("jitter_ms inválido: " + str(opts.get("jitter_ms")))
 		args.append_array(["--jitter-ms", str(jitter)])
+	var tr = String(opts.get("transport", GVD_TRANSPORT)).strip_edges()
+	if tr != "udp" and tr != "tcp":
+		return _bad("transporte inválido: " + tr)
+	args.append_array(["--transport", tr])
 	return {"ok": true, "kind": "process", "cmd": cmd, "args": args, "error": ""}
 
 
@@ -390,7 +404,7 @@ static func _deskflow_actions(df, local, host):
 static func _remote_input_action(cfg, df, local):
 	var base = {"id": "use_remote_input", "label": "Usar su teclado y mouse aquí",
 		"enabled": false, "state": "disponible", "reason": "", "plan": null}
-	var addr = _peer_target(df)
+	var addr = _deskflow_target(df)
 	if addr == "":
 		base.reason = "sin dirección del servidor"
 		return base
@@ -478,6 +492,19 @@ static func _default_server_settings(home):
 
 
 # Dirección del peer para argv: address (SRV/A) si es válida, si no el host mDNS.
+# `remoteHost` para el cliente Deskflow de un servidor descubierto: prefiere el
+# nombre mDNS (`svc.host`; sobrevive cambios de IP), luego `<nombre>.local`, y
+# recién la IP. El cliente resuelve el nombre al conectar.
+static func _deskflow_target(svc):
+	var host = String(svc.get("host", "")).strip_edges()
+	if valid_host(host) and host.find(".") >= 0:
+		return host
+	var name = _txt(svc, "name")
+	if valid_host(name) and not name.is_valid_ip_address():
+		return name + ".local"
+	return _peer_target(svc)
+
+
 static func _peer_target(svc):
 	var addr = String(svc.get("address", "")).strip_edges()
 	if valid_host(addr):
@@ -567,6 +594,15 @@ static func selftest():
 		and no_addr["use_remote_input"].reason == "sin dirección del servidor",
 		"cliente sin dirección deshabilitado")
 
+	# Con nombre mDNS del servicio, el cliente usa el nombre (sobrevive cambios de
+	# IP del servidor) en vez de la IP.
+	var dfmdns = {"txt": {"role": "server", "name": "tengu"}, "host": "tengu-2.local",
+		"address": "192.168.1.20", "port": 24800}
+	var mdns = _by_id(host_actions({"id": "h1", "capabilities": {"deskflow": dfmdns}}, local))
+	assert(mdns["use_remote_input"].enabled
+		and mdns["use_remote_input"].plan.settings_text.find("remoteHost=tengu-2.local") >= 0,
+		"cliente con nombre mDNS del servidor")
+
 	# state=capable sin canal autorizado queda deshabilitada; con canal, habilitada.
 	var capable_svc = {"txt": {"role": "recv", "state": "capable"},
 		"address": "192.168.1.20", "port": 5600}
@@ -637,7 +673,14 @@ static func selftest():
 
 	# format_command: cita sólo lo necesario.
 	assert(format_command(p) == "python3 /home/u/Proyectos/gvd/gvd.py send --host tengu.local"
-		+ " --port 5601 --position right", "formato de comando")
+		+ " --port 5601 --position right --transport tcp", "formato de comando")
+	# Transporte: TCP por defecto (evita las franjas de UDP); override a udp.
+	assert(p.args.find("--transport") >= 0 and p.args[p.args.find("--transport") + 1] == "tcp",
+		"transporte tcp por defecto")
+	assert(gvd_recv_plan("/home/u/gvd/gvd.py", {"transport": "udp"}).args.find("udp") >= 0,
+		"override de transporte a udp")
+	assert(not gvd_send_plan("/home/u/Proyectos/gvd/gvd.py", "tengu.local", 0,
+		{"transport": "sctp"}).ok, "transporte inválido")
 	assert(format_command(deskflow_plan("client", "/home/u/gdtk/deskflow client.conf")).find("'") >= 0,
 		"cita config con espacio")
 	return true
