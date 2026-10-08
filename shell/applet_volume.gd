@@ -140,11 +140,18 @@ func draw(frame, ui, scr, loc, w, h):
 			muted = true
 		elif value.ends_with("%"):
 			pct = clamp(float(value.trim_suffix("%")) / 100.0, 0.0, 1.0)
-	var text_h = 9.0
+	# El texto usa la fuente chica de labels; su alto real reserva el pie del bloque
+	# (con la fuente por defecto el "%" se salía por abajo del LCD).
+	var txt = value if on else ("--" if state == "no_disponible" else "…")
+	var small = frame._push_label_font(ui)
+	var th = 12.0
+	if ui.has_method("calc_text_size"):
+		th = max(8.0, ui.calc_text_size("00%").y)
+	var text_h = th + 1.0
 	var n = 12
 	var gap = 1.0
 	var bar_top = loc.y + 2.0
-	var bar_bot = loc.y + h - text_h - 1.0
+	var bar_bot = loc.y + h - text_h
 	var cell_h = max(2.0, (bar_bot - bar_top - float(n - 1) * gap) / float(n))
 	var cw = max(10.0, w * 0.42)
 	var cx = loc.x + (w - cw) * 0.5
@@ -156,10 +163,11 @@ func draw(frame, ui, scr, loc, w, h):
 				Color(led.r, led.g, led.b, 0.20), 0.0)
 		var c = led if i < lit else dim
 		ui.imgui_draw_rect_filled(Rect2(Vector2(cx, cell_y), Vector2(cw, cell_h)), c, 0.0)
-	var txt = value if on else ("--" if state == "no_disponible" else "…")
 	var tw = frame._text_w(ui, txt)
-	ui.set_cursor_pos(Vector2(loc.x + max(1.0, (w - tw) * 0.5), bar_bot + 1.0))
+	ui.set_cursor_pos(Vector2(loc.x + max(1.0, (w - tw) * 0.5), bar_bot))
 	ui.text_colored(led if on else dim, txt)
+	if small:
+		ui.pop_font()
 
 
 # --- hilo de trabajo ---------------------------------------------------------
