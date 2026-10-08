@@ -303,6 +303,7 @@ struct wl_server {
 
 	const char *socket_name;
 	struct wlr_surface *pointer_surface;
+	double pointer_off_x, pointer_off_y; // origen de pointer_surface en coords de la raiz (ultimo hit)
 	int pointer_id;
 
 	// Pointer lock de clientes alojados (zwp_pointer_constraints_v1 + relative
@@ -3294,6 +3295,13 @@ void wl_server_pointer_motion(wl_server *s, int id, double x, double y, uint32_t
 	double sub_x = 0.0;
 	double sub_y = 0.0;
 	struct wlr_surface *surface = NULL;
+	// Grab implicito: con un boton apretado la motion sigue a la surface del press
+	// aunque salga de ella (coords fuera de rango): seleccion con autoscroll, arrastres.
+	if (s->pointer_surface != NULL && s->pointer_id == id && s->seat->pointer_state.button_count > 0) {
+		wlr_seat_pointer_notify_motion(s->seat, time_ms, x - s->pointer_off_x, y - s->pointer_off_y);
+		wlr_seat_pointer_notify_frame(s->seat);
+		return;
+	}
 	toplevel *t = toplevel_find(s, id);
 	layer_surf *l = t == NULL ? layer_find(s, id) : NULL;
 	if (t != NULL && t->tl != NULL) {
@@ -3330,6 +3338,8 @@ void wl_server_pointer_motion(wl_server *s, int id, double x, double y, uint32_t
 		wlr_seat_pointer_notify_enter(s->seat, surface, sub_x, sub_y);
 		update_pointer_constraint(s);
 	}
+	s->pointer_off_x = x - sub_x;
+	s->pointer_off_y = y - sub_y;
 	wlr_seat_pointer_notify_motion(s->seat, time_ms, sub_x, sub_y);
 	wlr_seat_pointer_notify_frame(s->seat);
 }
