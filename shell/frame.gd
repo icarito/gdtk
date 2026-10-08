@@ -37,6 +37,10 @@ const MIN_CELLS = 9
 const TILE_PAD = 4.0     # aire entre texto/ícono y el borde del bloque (escala con la UI)
 const HOT_EDGE = 4.0     # con autohide sólo revela si el puntero empuja contra este canto
 const DRAG_PX = 8.0
+# ImGuiWindowFlags_NoScrollWithMouse (1 << 4): sin esto, un dockapp que desborda la
+# franja hace que la rueda scrollee la ventana ImGui completa. El motor no expone esta
+# constante (sólo WINDOW_NO_SCROLLBAR), así que se fija su valor como WINDOW_NO_MOUSE_INPUTS.
+const WINDOW_NO_SCROLL_WITH_MOUSE = 16
 # Estilo WindowMaker/NeXT: teselas CUADRADAS de una unidad de rejilla (shell.grid_unit),
 # bisel de 2px sin esquinas redondeadas, fondo gris azulado oscuro tipo NeXT. El bloque
 # comunica identidad/estado aunque el nombre no quepa; el nombre largo va en el tooltip.
@@ -80,6 +84,7 @@ const APPLETS = [
 	{"id": "termico", "name": "Temperatura · Governor", "short": "TEMP", "span": 1},
 	{"id": "reloj", "name": "Reloj", "short": "REL"},
 	{"id": "teclado", "name": "Teclado", "short": "TEC"},
+	{"id": "volumen", "name": "Volumen", "short": "VOL"},
 	{"id": "portapapeles", "name": "Portapapeles", "short": "CLIP"},
 ]
 const APPLET_DEFAULT = ["recursos", "termico", "reloj", "teclado"]
@@ -150,10 +155,15 @@ var sysmon = Host.sc("res://sysmon.gd").new()
 var keyboard = Host.sc("res://applet_keyboard.gd").new()
 var bluetooth = Host.sc("res://applet_bluetooth.gd").new()
 var clipboard = Host.sc("res://applet_clipboard.gd").new()
+var volume = Host.sc("res://applet_volume.gd").new()
+# Modelo PURO de las posiciones de bloque ancladas al costado (izquierda/derecha): al
+# cambiar `n` (rotar pantalla, otro monitor) los bloques vuelven a su borde. Se carga
+# con Host.sc (no `const preload`) para que la recarga en caliente tome el .gd nuevo.
+var bar_slots = Host.sc("res://bar_slots.gd")
 # Applets con módulo propio (contrato en .operator-shared/guides/dockapp.md): el Frame
 # les pide state/value/detail, los refresca mientras están a la vista y los para al
 # salir. Sumar una dockapp = un archivo + su entrada en APPLETS + una línea acá.
-var applet_mods = {"teclado": keyboard, "portapapeles": clipboard}
+var applet_mods = {"teclado": keyboard, "portapapeles": clipboard, "volumen": volume}
 var items_layout = []
 var drawn = false
 # Applets del borde inferior: orden visible persistido (no es items_layout, que sigue
@@ -178,6 +188,12 @@ const WINDOW_TOKEN = "w:windows"
 const SHARED_TOKEN = "s:sharing"
 var bar_order = {"top": [], "dock": []}
 var bar_order_saved = {"top": [], "dock": []}
+# Orden CRUDO guardado por barra (ancla): lista de {"tok","at"} en el formato anclado
+# (bar_slots.to_saved) o, en archivos viejos, lista de tokens/"". Se resuelve con
+# `bar_slots.to_cells` cada vez que cambia la grilla (`n`). `bar_order_n` recuerda con
+# qué n se resolvió para no recalcular por frame.
+var bar_order_anchor = {"top": [], "dock": []}
+var bar_order_n = {"top": -1, "dock": -1}
 var pinned_top = []
 var pinned_dock = []
 var pinned_saved_top = []
@@ -613,6 +629,8 @@ func _load_applets():
 	applets_raw = {}
 	applets_saved_bottom = APPLET_DEFAULT.duplicate()
 	bar_order = {"top": [], "dock": []}
+	bar_order_anchor = {"top": [], "dock": []}
+	bar_order_n = {"top": -1, "dock": -1}
 	var legacy_pins = {"top": [], "dock": []}
 	var f = File.new()
 	if f.open(_applets_path(), File.READ) == OK:
@@ -658,8 +676,9 @@ func _load_applets():
 					applets_future.append(v)
 				saved.append(v)
 			applets_saved_bottom = saved
-	# Orden unificado: se prefiere "order" si está; si no, se migra de los arrays
-	# legacy (pines por zona + applets en la barra inferior).
+	# Orden unificado: se prefiere "order" (crudo, anclado si es el formato nuevo) si
+	# está; si no, se migra de los arrays legacy (pines por zona + applets en la barra
+	# inferior). El ancla se resuelve a la grilla vigente con `_resolve_order`.
 	var have_order = false
 	var order = applets_raw.get("order", null)
 	if typeof(order) == TYPE_DICTIONARY:
@@ -667,12 +686,8 @@ func _load_applets():
 			var toks = order.get(zone, [])
 			if typeof(toks) == TYPE_ARRAY and not toks.empty():
 				have_order = true
-				for tok in toks:
-					if _maybe_order_token(tok):
-						bar_order[zone].append(String(tok))
-					elif typeof(tok) == TYPE_STRING and String(tok) == "":
-						# Slot vacío persistido: conserva la posición/hueco elegidos.
-						bar_order[zone].append("")
+				bar_order_anchor[zone] = toks.duplicate(true)
+				_resolve_order(zone)
 	if not have_order:
 		for id in legacy_pins["top"]:
 			bar_order["top"].append(_tok_pin(id))
@@ -680,6 +695,8 @@ func _load_applets():
 			bar_order["dock"].append(_tok_pin(id))
 		for id in applets_visible:
 			bar_order["dock"].append(_tok_applet(id))
+		bar_order_anchor["top"] = bar_order["top"].duplicate()
+		bar_order_anchor["dock"] = bar_order["dock"].duplicate()
 	# Sanidad: sin duplicados; se reponen pines/applets visibles que falten y se
 	# descartan applets ocultos que hayan quedado en el orden.
 	var present = {}
@@ -715,24 +732,15 @@ func _load_applets():
 	# El DockApp de ventanas existe exactamente una vez, en la barra que el usuario
 	# eligió (cualquier celda). Si el archivo previo no lo traía, va al final de la
 	# barra superior. Sus teselas se dibujan en la barra donde esté el token.
-	var have_window = bar_order["top"].has(WINDOW_TOKEN) or bar_order["dock"].has(WINDOW_TOKEN)
-	if not have_window:
-		bar_order["top"].append(WINDOW_TOKEN)
-	else:
-		var kept_window = false
-		for zone in ["top", "dock"]:
-			var kept = []
-			for tok in bar_order[zone]:
-				if tok == WINDOW_TOKEN:
-					if kept_window:
-						continue
-					kept_window = true
-				kept.append(tok)
-			bar_order[zone] = kept
+	_ensure_window_token()
 	# Normaliza a celdas sin superposición: datos viejos fuera de rango se reubican en
 	# la celda libre más cercana (o se descartan si no caben).
 	for zone in ["top", "dock"]:
 		_normalize_order(zone)
+	# `bar_order_n` = `n` con el que quedó resuelto el orden. Si difiere del `n` del
+	# primer dibujo (rotación/monitor), el hook de `draw` vuelve a resolver el ancla.
+	for zone in ["top", "dock"]:
+		bar_order_n[zone] = _order_n(zone)
 	bar_order_saved = {"top": bar_order["top"].duplicate(), "dock": bar_order["dock"].duplicate()}
 	_sync_pins()
 	pinned_saved_top = pinned_top.duplicate()
@@ -773,6 +781,87 @@ func _normalize_order(zone):
 	bar_order[zone] = cells_to_seq(out)
 
 
+# --- Anclaje de bloques al costado (puro en bar_slots.gd) -----------------------
+# `n` de la grilla vigente: celdas movibles de la barra (sin las fijas ni la del pin).
+func _order_n(zone):
+	var g = _grid_for(zone)
+	return int(g.n) - 1 - bar_fixed_cells(zone)
+
+
+# ¿El orden guardado es el formato VIEJO (lista de tokens/"") en vez del anclado?
+func _anchor_is_legacy(anchor):
+	if typeof(anchor) != TYPE_ARRAY or anchor.empty():
+		return true
+	return typeof(anchor[0]) != TYPE_DICTIONARY
+
+
+# Resuelve el ancla cruda a la grilla vigente. Formato nuevo: `bar_slots.to_cells`
+# ubica cada bloque (mitad izquierda desde la izquierda, mitad derecha desde el borde).
+# Formato viejo: se lee como celdas desde la izquierda, igual que antes (y el primer
+# guardado lo migra al formato anclado). Ningún bloque vivo se pierde: los tokens que
+# la sanidad agregó después del ancla (ventana, pines/applets nuevos) se reponen.
+func _resolve_order(zone):
+	bar_order_n[zone] = _order_n(zone)
+	var anchor = bar_order_anchor.get(zone, [])
+	var prev = bar_order[zone].duplicate()
+	if _anchor_is_legacy(anchor):
+		var seq = []
+		for tok in anchor:
+			if _maybe_order_token(tok):
+				seq.append(String(tok))
+		bar_order[zone] = _with_missing(seq, prev)
+		return
+	bar_order[zone] = cells_to_seq(bar_slots.to_cells(anchor, int(bar_order_n[zone])))
+	_normalize_order(zone)
+	bar_order[zone] = _with_missing(bar_order[zone], prev)
+
+
+# Bloques de `prev` que no quedaron en `seq` (los que agregó la sanidad de carga, no
+# anclados): se agregan al final para no perderlos al re-resolver con otro `n`.
+func _with_missing(seq, prev):
+	var have = {}
+	for t in seq:
+		if String(t) != "":
+			have[String(t)] = true
+	var out = seq.duplicate()
+	for t in prev:
+		var s = String(t)
+		if s != "" and not have.has(s):
+			out.append(s)
+			have[s] = true
+	return out
+
+
+# Re-escribe el ancla de cada barra desde el orden vivo, usando el n actual. Se llama
+# al guardar: así el archivo siempre queda en el formato anclado.
+func _sync_anchor():
+	for zone in ["top", "dock"]:
+		var spans = {}
+		for t in bar_order[zone]:
+			if t != "":
+				spans[t] = token_span(t)
+		bar_order_anchor[zone] = bar_slots.to_saved(seq_to_cells(bar_order[zone], spans), _order_n(zone))
+
+
+# El DockApp de ventanas existe exactamente una vez (la barra que eligió el usuario o,
+# si no estaba, al final de la superior). No repone pines ni applets: eso es sólo de la
+# sanidad de carga.
+func _ensure_window_token():
+	if not (bar_order["top"].has(WINDOW_TOKEN) or bar_order["dock"].has(WINDOW_TOKEN)):
+		bar_order["top"].append(WINDOW_TOKEN)
+		return
+	var kept_window = false
+	for zone in ["top", "dock"]:
+		var kept = []
+		for tok in bar_order[zone]:
+			if tok == WINDOW_TOKEN:
+				if kept_window:
+					continue
+				kept_window = true
+			kept.append(tok)
+		bar_order[zone] = kept
+
+
 func _same_list(a, b):
 	if a.size() != b.size():
 		return false
@@ -798,7 +887,8 @@ func _save_applets():
 	var path = _applets_path()
 	var dir = Directory.new()
 	dir.make_dir_recursive(path.get_base_dir())
-	applets_raw["order"] = {"top": bar_order["top"], "dock": bar_order["dock"]}
+	_sync_anchor()
+	applets_raw["order"] = {"top": bar_order_anchor["top"], "dock": bar_order_anchor["dock"]}
 	applets_raw["bottom"] = bottom
 	applets_raw["top"] = pinned_top
 	applets_raw["dock"] = pinned_dock
@@ -1467,7 +1557,30 @@ static func applet_menu(id):
 		return "gov"
 	if id == "reloj":
 		return "reloj"
+	if id == "volumen":
+		return "volumen"
+	if id == "portapapeles":
+		return "portapapeles"
 	return ""
+
+
+# Nombre legible de una salida de audio para el menú: recorta prefijo/sufijo técnicos
+# de PipeWire ("alsa_output.pci-...analog-stereo" -> "pci-...") para que la lista no
+# sea ilegible. Puro para test; si el recorte deja vacío, devuelve el nombre crudo.
+static func sink_label(name):
+	var s = String(name).strip_edges()
+	if s == "":
+		return ""
+	for p in ["alsa_output.", "alsa_input.", "alsa_card.", "bluez_output.", "bluez_input."]:
+		if s.begins_with(p):
+			s = s.substr(p.length())
+			break
+	for suf in [".analog-stereo", ".analog-mono", ".iec958-stereo", ".hdmi-stereo",
+			".pro-audio", ".stereo-fallback"]:
+		if s.ends_with(suf):
+			s = s.substr(0, s.length() - suf.length())
+			break
+	return s if s != "" else String(name)
 
 
 # ¿Hay que muestrear los applets? Sí mientras alguna franja que los contiene esté a
@@ -1483,6 +1596,13 @@ func _applet_primary(id):
 	if id == "termico":
 		applet_action_want = "gov"
 		shell.request_redraw()
+	elif id == "volumen":
+		# Clic izquierdo = silenciar/activar el sonido. Sólo si el shell expone el OSD
+		# con su API de mute; si no, no se hace nada.
+		if shell.system_osd != null and shell.system_osd.has_method("toggle_mute"):
+			shell.system_osd.toggle_mute()
+			volume.refresh(true)
+			shell.request_redraw()
 
 
 # Menú contextual del applet (clic derecho). Mismo destino que el equivalente de
@@ -1821,14 +1941,6 @@ func _draw_shared_face(ui, pos, rect, diagram, side):
 				kind, col)
 		if focused:
 			_draw_shared_pointer(ui, nc + Vector2(ns * 0.5, ns * 0.5), ns)
-		# Inicial como etiqueta tenue debajo del blip (el detalle va en el tooltip).
-		var initial = String(p.get("initial", ""))
-		if initial != "" and ns >= 14.0:
-			var small = _push_label_font(ui)
-			ui.set_cursor_pos(pos + (nc - rect.position) + Vector2(-_text_w(ui, initial) * 0.5, ns * 0.66))
-			ui.text_colored(_lcd(col, "on"), initial)
-			if small:
-				ui.pop_font()
 
 
 # Scope de radar viejo: disco oscuro con retícula, tres anillos concéntricos, marcas
@@ -2428,9 +2540,9 @@ func _input(event):
 			if not event.pressed:
 				return
 			# Sobre Vecindario/Grupo/Hogar o el ícono central: un paso de la misma cadena
-			# vertical que el gesto de 3 dedos (rueda arriba = dedos arriba).
+			# vertical que el gesto de 3 dedos (rueda arriba = acercar / dedos abajo).
 			if super_press == null and (_over_place(mouse_pos) or shell._over_center_icon(mouse_pos)):
-				shell._wheel_vchain(1 if event.button_index == BUTTON_WHEEL_UP else -1)
+				shell._wheel_vchain(-1 if event.button_index == BUTTON_WHEEL_UP else 1)
 				get_tree().set_input_as_handled()
 				return
 			# En exposé la rueda desplaza la tira (no cambia la selección).
@@ -2475,6 +2587,15 @@ func _input(event):
 				if right_shared != null:
 					shared_menu_want = String(right_shared.id)
 					shell.request_redraw()
+					get_tree().set_input_as_handled()
+					return
+				# Clic derecho sobre la tesela de una ventana: abre su menú de ventana
+				# (shell._draw_window_menu) desde el bloque, sin tocar shell.gd. Los
+				# ítems con id < 0 son actividades de script: no tienen menú de ventana.
+				var it = _item_at(mouse_pos)
+				if it != null and it.id >= 0:
+					shell.wm_menu_id = it.id
+					shell.wm_menu_want = true
 					get_tree().set_input_as_handled()
 					return
 				if _applet_bar_at(mouse_pos) and not _bar_occupied_at(mouse_pos):
@@ -3135,7 +3256,7 @@ func _draw_applets(ui, vp, off, mouse, grid):
 	ui.push_style_var_vec2(ui.STYLE_VAR_WINDOW_PADDING, Vector2.ZERO)
 	ui.set_next_window_pos(Vector2(0.0, by), true)
 	ui.set_next_window_size(Vector2(vp.x, side), true)
-	var flags = ui.WINDOW_NO_DECORATION | ui.WINDOW_NO_MOVE | ui.WINDOW_NO_SAVED_SETTINGS | ui.WINDOW_NO_SCROLLBAR | ui.WINDOW_NO_BACKGROUND
+	var flags = ui.WINDOW_NO_DECORATION | ui.WINDOW_NO_MOVE | ui.WINDOW_NO_SAVED_SETTINGS | ui.WINDOW_NO_SCROLLBAR | ui.WINDOW_NO_BACKGROUND | WINDOW_NO_SCROLL_WITH_MOUSE
 	if not ui.begin("##frame_bottom", flags):
 		ui.end()
 		ui.pop_style_var()
@@ -3252,6 +3373,38 @@ func _draw_frame_popups(ui, mouse, side):
 			_set_clock_analog(false)
 		if MENU_STYLE.item(ui, "Analógico", "", clock_analog):
 			_set_clock_analog(true)
+		ui.end_popup()
+	MENU_STYLE.end(ui)
+	# Volumen: elegir la salida de audio actual (check en la vigente), copiando el menú
+	# del teclado. El nombre técnico se recorta con `sink_label`.
+	MENU_STYLE.begin(ui)
+	if ui.begin_popup("##applet_volumen"):
+		MENU_STYLE.chrome(ui, "Volumen")
+		if volume.sinks.empty():
+			ui.text_disabled("Sin salidas de audio")
+		else:
+			for s in volume.sinks:
+				var nm = String(s.get("name", ""))
+				if MENU_STYLE.item(ui, sink_label(nm), "", nm == String(volume.current_sink)):
+					if volume.choose(nm):
+						shell.request_redraw()
+		if volume.detail != "":
+			ui.text_disabled(volume.detail)
+		ui.end_popup()
+	MENU_STYLE.end(ui)
+	# Portapapeles: historial (resumen), más nuevo primero. Sin copias, un ítem
+	# deshabilitado para que el menú no quede vacío.
+	MENU_STYLE.begin(ui)
+	if ui.begin_popup("##applet_portapapeles"):
+		MENU_STYLE.chrome(ui, "Portapapeles")
+		if clipboard.items.empty():
+			ui.text_disabled("Sin copias")
+		else:
+			for it in clipboard.items:
+				var summary = String(it.get("summary", ""))
+				if MENU_STYLE.item(ui, summary):
+					if clipboard.pick(String(it.get("name", ""))):
+						shell.request_redraw()
 		ui.end_popup()
 	MENU_STYLE.end(ui)
 
@@ -4151,6 +4304,17 @@ var _shared_cache_ms = 0
 var _tw_cache = {}
 var _tw_scale = 0.0
 
+# Descarta el layout del último dibujo de una franja que NO se está dibujando. Hace
+# falta limpiar las TRES estructuras: si quedan `bar_layout`/`window_region`/
+# `window_span` viejos, los hit-tests `_window_grip_zone`, `_window_dock_hit` y
+# `_pinned_hit` siguen viendo la franja oculta y se comen clics que deberían llegar
+# a la ventana Wayland de abajo.
+func _clear_zone_layout(zone):
+	bar_layout.erase(zone)
+	window_region.erase(zone)
+	window_span.erase(zone)
+
+
 func draw(ui):
 	var _f0 = OS.get_ticks_usec()
 	var _tt0 = 0
@@ -4171,6 +4335,8 @@ func draw(ui):
 		applets_drawn = false
 		shared_layout = []
 		shared_drawn = false
+		_clear_zone_layout("top")
+		_clear_zone_layout("dock")
 		return
 	var home = shell.current_activity == null
 	var mouse = ui.get_mouse_pos()
@@ -4237,16 +4403,20 @@ func draw(ui):
 		shared_layout = []
 		shared_drawn = false
 		applet_picker_open = false
+		_clear_zone_layout("top")
+		_clear_zone_layout("dock")
 		_draw_explosions(ui)
 		return
 	if not top_drawn:
 		# Barra superior fuera: no hay layout de ventanas en pantalla.
 		items_layout = []
+		_clear_zone_layout("top")
 	if not bottom_drawn:
 		applets_layout = []
 		applets_drawn = false
 		shared_layout = []
 		shared_drawn = false
+		_clear_zone_layout("dock")
 
 	shared_layout = []
 	shared_drawn = false
@@ -4257,6 +4427,12 @@ func draw(ui):
 	var grid = bar_grid(vp.x, bh, PAD)
 	bar_grid_state["top"] = grid
 	bar_grid_state["dock"] = grid
+	# Cambió `n` (rotar pantalla, conectar un monitor): el ancla guardada se re-resuelve
+	# a la grilla nueva sin que el usuario toque nada. Un bloque pegado a la derecha
+	# vuelve a su borde; nada se re-guarda acá (el ancla es independiente de `n`).
+	for zone in ["top", "dock"]:
+		if _order_n(zone) != int(bar_order_n[zone]):
+			_resolve_order(zone)
 	_sync_shared_token()
 	var _f1 = OS.get_ticks_usec()
 	var side = float(grid.side)
@@ -4273,7 +4449,7 @@ func draw(ui):
 		ui.push_style_var_vec2(ui.STYLE_VAR_WINDOW_PADDING, Vector2.ZERO)
 		ui.set_next_window_pos(Vector2(0.0, off_top), true)
 		ui.set_next_window_size(Vector2(vp.x, bh), true)
-		var flags = ui.WINDOW_NO_DECORATION | ui.WINDOW_NO_MOVE | ui.WINDOW_NO_SAVED_SETTINGS | ui.WINDOW_NO_SCROLLBAR | ui.WINDOW_NO_BACKGROUND
+		var flags = ui.WINDOW_NO_DECORATION | ui.WINDOW_NO_MOVE | ui.WINDOW_NO_SAVED_SETTINGS | ui.WINDOW_NO_SCROLLBAR | ui.WINDOW_NO_BACKGROUND | WINDOW_NO_SCROLL_WITH_MOUSE
 		if ui.begin("##frame", flags):
 			# Fondo NeXT de la franja superior.
 			ui.imgui_draw_rect_filled(Rect2(Vector2.ZERO, Vector2(vp.x, bh)), NX_BG, 0.0)

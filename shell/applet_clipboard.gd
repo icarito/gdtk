@@ -17,10 +17,15 @@ const RELAUNCH_MS = 10000   # cada cuánto se reintenta el vigía si murió
 const MAX_FAILS = 3         # vigía que no arranca N veces -> no_disponible, sin bucle
 const READ_MAX = 4096       # bytes leídos de la entrada (sólo para resumir)
 const SYNC_MAX = 65536      # tope de lo que se comparte con el Grupo (= tope de `store`)
+const ITEMS_MAX = 10        # entradas publicadas en `items` (las más nuevas primero)
+const SUMMARY_MAX = 60      # recorte del resumen por ítem
 
 var state = "sin_dato"
 var value = ""     # resumen corto del último ítem (una línea)
 var detail = ""    # tooltip: más texto + tamaño del historial
+# Historial navegable publicado por el worker: [{"name": <archivo>, "summary": <str>}],
+# más nuevo primero, hasta ITEMS_MAX. Sólo lo llena el worker (lee los archivos ahí).
+var items = []
 
 # Lo fija el Frame antes del primer refresh(): socket del compositor embebido.
 var wayland_display = ""
@@ -28,11 +33,13 @@ var wayland_display = ""
 var _mutex = Mutex.new()
 var _thread = null
 var _want_stop = false
-var _snap = {"state": "sin_dato", "value": "", "detail": ""}
+var _snap = {"state": "sin_dato", "value": "", "detail": "", "items": []}
 # Portapapeles compartido con el Grupo (SPEC-sugar-group «Portapapeles»): el worker
 # deja cada copia local nueva en `_outbox`; el shell la reparte por el canal peer.
 var _outbox = []
 var _last_received = ""
+# Pedidos de pick() (nombres de archivo) que el worker convierte en copia local nueva.
+var _picks = []
 
 
 # --- API del Frame -----------------------------------------------------------
@@ -45,10 +52,12 @@ func refresh(_force := false):
 	_mutex.lock()
 	var s = _snap
 	_mutex.unlock()
-	var changed = state != s.state or value != s.value or detail != s.detail
+	var s_items = s.get("items", [])
+	var changed = state != s.state or value != s.value or detail != s.detail or items != s_items
 	state = s.state
 	value = s.value
 	detail = s.detail
+	items = s_items.duplicate(true)
 	return changed
 
 
@@ -79,8 +88,21 @@ func receive(text):
 	_mutex.lock()
 	_last_received = t
 	_mutex.unlock()
-	# El texto viaja por archivo (XDG_RUNTIME_DIR, 0700), nunca por argumentos.
-	OS.execute("sh", ["-c", "'%s' set '%s' '%s' </dev/null >>'%s' 2>&1 &" % [p.script, d, tmp, p.log]], true)
+	_run_set(p, tmp)
+	return true
+
+
+# Elige una entrada del historial: el worker la copia a un temporal y la pone como
+# selección local. No setea `_last_received`: el vigía la guarda como copia nueva y
+# se sincroniza al Grupo como cualquier copia local. `name` viene del popup (frontera
+# de confianza): sólo se acepta un nombre simple del directorio de historial.
+func pick(name):
+	var n = String(name)
+	if not valid_name(n):
+		return false
+	_mutex.lock()
+	_picks.append(n)
+	_mutex.unlock()
 	return true
 
 
@@ -120,14 +142,15 @@ func draw(frame, ui, scr, loc, w, h):
 
 # --- puro (testeable) --------------------------------------------------------
 
-# Primera línea no vacía, con espacios colapsados. "" si no hay texto.
-static func summary(text):
+# Primera línea no vacía, con espacios colapsados y recortada a `limit` chars. "" si no hay texto.
+static func summary(text, limit = -1):
+	var lim = SUMMARY_MAX if int(limit) < 0 else int(limit)
 	for line in String(text).split("\n", false):
 		var s = String(line).strip_edges().replace("\t", " ")
 		while s.find("  ") >= 0:
 			s = s.replace("  ", " ")
 		if s != "":
-			return s
+			return s.substr(0, lim)
 	return ""
 
 
@@ -138,6 +161,32 @@ static func newest(names):
 		if not String(n).begins_with(".") and String(n) > best:
 			best = String(n)
 	return best
+
+
+# Nombres visibles del historial ordenados del más nuevo al más viejo (descendente).
+# Los archivos ocultos (`.lock`, `.in.N`) no son entradas.
+static func sorted_names(names):
+	var out = []
+	for n in names:
+		var s = String(n)
+		if s != "" and not s.begins_with("."):
+			out.append(s)
+	out.sort()
+	out.invert()
+	return out
+
+
+# Frontera de confianza del popup: sólo un nombre simple del directorio de historial.
+# Rechaza vacío, ocultos, separadores y cualquier `..`.
+static func valid_name(name):
+	var n = String(name)
+	if n == "" or n == "." or n == "..":
+		return false
+	if n.begins_with("."):
+		return false
+	if n.find("/") >= 0 or n.find("\\") >= 0 or n.find("..") >= 0:
+		return false
+	return true
 
 
 # --- hilo de trabajo ---------------------------------------------------------
@@ -163,10 +212,12 @@ func _stopped():
 
 func _work(p):
 	var last_name = null   # null: la primera vuelta siempre publica (listo/activo)
+	var last_sig = null
 	var fails = 0
 	var launch_at = 0
-	var snap = {"state": "sin_dato", "value": "", "detail": ""}
+	var snap = {"state": "sin_dato", "value": "", "detail": "", "items": []}
 	while not _stopped():
+		_drain_picks(p)
 		var now = OS.get_ticks_msec()
 		if fails < MAX_FAILS and now >= launch_at:
 			launch_at = now + RELAUNCH_MS
@@ -176,18 +227,25 @@ func _work(p):
 				_launch(p)
 				fails += 1   # se confirma vivo en la próxima vuelta (lock tomado)
 		var names = _list(p.dir)
-		var name = newest(names)
-		if last_name == null or name != last_name:
-			if last_name != null and name != "":
+		var ordered = sorted_names(names)
+		var name = ordered[0] if not ordered.empty() else ""
+		var sig = PoolStringArray(ordered).join("\n")
+		var cur_items = snap.get("items", [])
+		if last_name == null or sig != last_sig:
+			if last_name != null and name != "" and name != last_name:
 				_queue_sync(_read(p.dir.plus_file(name), SYNC_MAX))
 			last_name = name
+			last_sig = sig
 			var text = _read(p.dir.plus_file(name)) if name != "" else ""
+			cur_items = _build_items(p.dir, ordered)
 			snap = {"state": "activo" if name != "" else "listo",
 				"value": summary(text),
-				"detail": "Portapapeles: %s\n\n%d en el historial" % [text.substr(0, 300), names.size()]}
+				"detail": "Portapapeles: %s\n\n%d en el historial" % [text.substr(0, 300), names.size()],
+				"items": cur_items}
 		if fails >= MAX_FAILS and name == "":
 			snap = {"state": "no_disponible", "value": "",
-				"detail": "Portapapeles: no se pudo vigilar (falta wl-paste o el motor no trae ext-data-control). Ver %s" % p.log}
+				"detail": "Portapapeles: no se pudo vigilar (falta wl-paste o el motor no trae ext-data-control). Ver %s" % p.log,
+				"items": cur_items}
 		_mutex.lock()
 		_snap = snap
 		_mutex.unlock()
@@ -195,6 +253,45 @@ func _work(p):
 		while waited < PERIOD_MS and not _stopped():
 			OS.delay_msec(SLEEP_STEP_MS)
 			waited += SLEEP_STEP_MS
+
+
+# Saca los pedidos de pick() y los aplica como copia local nueva (lee en el worker).
+func _drain_picks(p):
+	_mutex.lock()
+	var picks = _picks
+	_picks = []
+	_mutex.unlock()
+	for nm in picks:
+		_apply_pick(p, nm)
+
+
+# Los ITEMS_MAX más nuevos con su resumen; los archivos se leen acá, nunca en el render.
+func _build_items(dir, ordered):
+	var out = []
+	var n = min(ordered.size(), ITEMS_MAX)
+	for i in range(n):
+		out.append({"name": ordered[i], "summary": summary(_read(dir.plus_file(ordered[i]), READ_MAX))})
+	return out
+
+
+# Copia una entrada del historial a un temporal y la pone como selección local.
+func _apply_pick(p, name):
+	if not valid_name(name):
+		return
+	var src = p.dir.plus_file(name)
+	var f = File.new()
+	if f.open(src, File.READ) != OK:
+		return
+	var data = f.get_buffer(min(f.get_len(), SYNC_MAX))
+	f.close()
+	Directory.new().make_dir_recursive(p.dir.get_base_dir())
+	var tmp = p.dir.get_base_dir().plus_file("clip-pick.%d" % OS.get_ticks_usec())
+	var o = File.new()
+	if o.open(tmp, File.WRITE) != OK:
+		return
+	o.store_buffer(data)
+	o.close()
+	_run_set(p, tmp)
 
 
 # El vigía vivo tiene el lock: `flock -n` falla (≠ 0) si está tomado.
@@ -233,6 +330,16 @@ func _queue_sync(text):
 	if text != "" and text != _last_received:
 		_outbox.append(text)
 	_mutex.unlock()
+
+
+# `gdtk-clipboard set <display> <archivo>`: pone el texto del archivo como selección
+# local (el script borra el temporal). El texto viaja por archivo, nunca por argumentos.
+func _run_set(p, path):
+	var d = String(p.display)
+	if d == "" or not d.is_valid_filename() or d.find("'") >= 0:
+		return false
+	OS.execute("sh", ["-c", "'%s' set '%s' '%s' </dev/null >>'%s' 2>&1 &" % [p.script, d, path, p.log]], true)
+	return true
 
 
 func _read(path, limit = READ_MAX):

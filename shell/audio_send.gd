@@ -117,3 +117,24 @@ static func move_argvs(input_ids, sink):
 	for id in input_ids:
 		out.append(["move-sink-input", str(id), String(sink)])
 	return out
+
+
+# `pactl list short sinks`: columnas separadas por tab → id, name, driver, format,
+# state. Devuelve [{"name": ..., "state": ...}] ignorando los sinks túnel que crea
+# este mismo módulo: sink_name() los nombra con el prefijo "gdtk_send_".
+static func parse_sinks(text: String) -> Array:
+	var out = []
+	for line in text.split("\n"):
+		if String(line).strip_edges() == "":
+			continue
+		var cols = String(line).split("\t")
+		if cols.size() < 2:
+			continue
+		if not cols[0].strip_edges().is_valid_integer():
+			continue
+		var name = cols[1].strip_edges()
+		if name == "" or name.begins_with("gdtk_send_"):
+			continue
+		var state = cols[4].strip_edges() if cols.size() > 4 else ""
+		out.append({"name": name, "state": state})
+	return out
