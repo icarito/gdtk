@@ -184,6 +184,8 @@ func _init():
 	f.applets_raw = {}
 	f.applets_saved_bottom = []
 	f.bar_order_saved = {"top": [], "dock": []}
+	f.bar_order_anchor = {"top": [], "dock": []}
+	f.bar_order_n = {"top": -1, "dock": -1}
 	f.pinned_top = []
 	f.pinned_dock = []
 	f.pinned_saved_top = []
@@ -192,6 +194,7 @@ func _init():
 	f.bar_side = {"top": 0.0, "dock": 0.0}
 	f.applets_layout = []
 	f.window_block_x = {"top": 0.0, "dock": 0.0}
+	f.bar_slots = load("res://bar_slots.gd")
 
 	# Grilla regular de la barra: paso entero `pitch` = lado del bloque + PAD. Se usa
 	# en las dos barras; `side = pitch - PAD` es el lado cuadrado del bloque.

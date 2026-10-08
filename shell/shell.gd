@@ -33,7 +33,6 @@ const SHOT_MAX_FRAMES = 900
 # Modelo puro de la brújula de dirección (Kilo A): sólo normaliza/serializa y
 # detecta conflictos; sin I/O. El shell lo cablea a la vista y a la persistencia.
 const DIRECTIONS_MODEL = preload("res://neighborhood_directions.gd")
-const RING_LAYOUT = preload("res://ring_layout.gd")
 # Generadores puros del layout Deskflow (K5): links desde la brujula y el formato
 # real de servidor; el shell sólo los consume al aplicar.
 const LAYOUT_MODEL = preload("res://deskflow_layout.gd")
@@ -43,6 +42,9 @@ const DESKFLOW_SETTINGS = preload("res://deskflow_settings.gd")
 # mini_map, y una recarga transaccional reusa el preload cacheado (viejo) en
 # lugar de releer el fuente — "nonexistent function 'mini_map'". 
 var SCREEN_LAYOUT = Host.sc("res://screen_layout.gd")
+# Layout puro del anillo del Hogar: por Host.sc (no `const preload`) para que una
+# recarga transaccional tome el .gd nuevo en vez del preload cacheado.
+var RING_LAYOUT = Host.sc("res://ring_layout.gd")
 # Modelo puro de hosts del Vecindario: resuelve el `remoteHost` del cliente
 # Deskflow contra el descubrimiento (Host.sc para recargas transaccionales).
 var HOSTS_MODEL = Host.sc("res://neighborhood_hosts.gd")
@@ -1714,6 +1716,11 @@ func _process(_delta):
 	_wmem_poll(now)
 	# Configuración: reapa el Thread de lectura y aplica acento/fondo del snapshot.
 	settings_poll()
+	# Apps instaladas/desinstaladas (incluidas ~/.local/share/applications): si el
+	# conjunto de .desktop cambió, reescanea y pide un frame para refrescar grilla y
+	# pines. Chequeo barato por mtime+conteo, espaciado; el escaneo no corre siempre.
+	if apps != null and apps.maybe_rescan(now):
+		request_redraw()
 	# swaymsg de ajustes de entrada: reap de Threads one-shot (bloqueó a lo sumo su
 	# propio Thread, no el frame).
 	_sway_exec_poll()
@@ -5973,6 +5980,19 @@ func _apply_input_settings():
 		settings_bridge.settings.get("natural_scroll", null))
 	for cmd in settings_bridge.model.natural_scroll_cmds(nat):
 		_sway_exec_async(cmd)
+
+
+# Teclado en vivo (Super+Espacio / popup del applet): keymap del compositor embebido
+# (clientes alojados) + sway (el propio Godot) + OSD. Variante vacía a propósito: las
+# distribuciones del applet no usan variante y una heredada rompería el cambio.
+func apply_keyboard_layout(layout, label):
+	if compositor != null and compositor.has_method("set_keymap"):
+		compositor.set_keymap(layout, "")
+	if OS.get_environment("SWAYSOCK").strip_edges() != "":
+		_sway_exec_async(["input", "type:keyboard", "xkb_layout", layout])
+		_sway_exec_async(["input", "type:keyboard", "xkb_variant", "\"\""])
+	if system_osd != null:
+		system_osd.show_message("Teclado: " + str(label), "")
 
 
 # swaymsg fuera del frame (ajustes de entrada en vivo): un Thread one-shot por
@@ -12079,10 +12099,21 @@ func _input(event):
 			"alt": event.alt, "meta": event.meta}
 	if event is InputEventMouse:
 		_move_eis_cursor(event)
-	if current_activity == null and not apps.search_active and not neighborhood_view and event is InputEventKey and event.pressed \
-			and event.unicode >= 32 and not (event.control or event.alt or event.meta):
-		apps_view = true
-		apps.type(char(event.unicode))
+	if not neighborhood_view and event is InputEventKey and event.pressed \
+			and not (event.control or event.alt or event.meta):
+		if expose and event.unicode >= 33:
+			# Exposé: empezar a escribir lleva al Hogar con la búsqueda abierta, igual que
+			# el Hogar espiral. El espacio (>=32) queda para confirmar la ventana elegida.
+			# Va antes del caso Hogar: en exposé sobre el Hogar `current_activity` ya es
+			# null y hay que salir del exposé igual. No se exige `not apps.search_active`:
+			# fuera del Hogar ese flag puede quedar pegado en true.
+			_go_home()
+			apps_view = true
+			apps.type(char(event.unicode))
+			get_tree().set_input_as_handled()
+		elif current_activity == null and not apps.search_active and event.unicode >= 32:
+			apps_view = true
+			apps.type(char(event.unicode))
 
 
 # ¿Hay una ventana flotante enfocada, viva y a la vista? Vale como destino de

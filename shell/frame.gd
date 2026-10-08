@@ -2850,6 +2850,13 @@ func _input(event):
 			shell.request_redraw()
 			_gulp(code)
 			return
+		if code == KEY_SPACE and not event.echo:
+			# Super+Espacio: siguiente distribución de teclado de la lista activa.
+			super_press = null
+			_keyboard_set(keyboard.next_layout())
+			shell.request_redraw()
+			_gulp(code)
+			return
 		if code == KEY_F:
 			# Super+F: maximizar/restaurar (alias de Alt+F10).
 			super_press = null
@@ -2953,6 +2960,12 @@ func _input(event):
 	else:
 		return
 	_gulp(code)
+
+
+# Aplica una distribución de la lista activa: estado del applet + teclado en vivo.
+func _keyboard_set(layout):
+	if layout != "" and keyboard.apply(layout):
+		shell.apply_keyboard_layout(layout, keyboard.name_of(layout))
 
 
 func _gulp(code):
@@ -3327,10 +3340,16 @@ func _draw_frame_popups(ui, mouse, side):
 	MENU_STYLE.begin(ui)
 	if ui.begin_popup("##applet_teclado"):
 		MENU_STYLE.chrome(ui, "Teclado")
-		ui.text_disabled("Distribución · próxima sesión")
+		ui.text_disabled("Distribución · clic aplica · casilla = en Super+Espacio")
 		for layout in ["es", "latam", "us"]:
-			if MENU_STYLE.item(ui, {"es":"Español (ES)", "latam":"Latinoamericano (LAT)", "us":"Inglés (US)"}[layout]):
-				keyboard.choose(layout)
+			var in_list = keyboard.active.has(layout)
+			if MENU_STYLE.item(ui, keyboard.name_of(layout), "", layout == keyboard.current):
+				_keyboard_set(layout)
+				shell.request_redraw()
+			ui.same_line()
+			# checkbox devuelve el valor nuevo (SPEC-imgui-api.md), no "hubo clic".
+			if ui.checkbox("##kb_" + layout, in_list) != in_list:
+				keyboard.toggle_active(layout)
 				shell.request_redraw()
 		ui.text_disabled(keyboard.detail)
 		ui.end_popup()

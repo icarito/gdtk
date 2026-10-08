@@ -25,6 +25,12 @@ var scanned = false
 var theme_dirs = []
 var field_code = RegEx.new()
 var path_dirs = []
+# Auto-detección de apps instaladas/desinstaladas: firma del último escaneo y cuándo
+# se comprobó. La firma es barata (mtime + conteo de .desktop por directorio); el
+# escaneo completo sólo corre cuando cambia. Ver maybe_rescan().
+const RESCAN_POLL_MS = 4000
+var _apps_sig = ""
+var _rescan_ms = 0
 # pid lanzado desde la grilla -> nombre de la app (ver watch).
 var watching = {}
 # Rect en pantalla del último ícono elegido (para animar la entrada de su ventana).
@@ -68,6 +74,54 @@ func scan():
 		_scan_dir(d + "/applications", "", seen, desktops)
 	apps.sort_custom(self, "_by_key")
 	_find_theme_dirs()
+
+
+# Auto-detección: si el conjunto de .desktop cambió (instalaron/desinstalaron una app,
+# incluida ~/.local/share/applications), vuelve a escanear. `now_ms` lo pasa el tick
+# idle del shell; no bloquea el render más que el walk de metadata, espaciado por
+# RESCAN_POLL_MS. Devuelve true si reescaneó (el llamador pide un frame).
+func maybe_rescan(now_ms):
+	if scanned and now_ms - _rescan_ms < RESCAN_POLL_MS:
+		return false
+	_rescan_ms = now_ms
+	var sig = _apps_signature()
+	if scanned and sig == _apps_sig:
+		return false
+	scan()
+	_apps_sig = sig
+	return true
+
+
+# Firma del estado de los directorios de aplicaciones: por cada raíz, si existe (con su
+# mtime) y cuántos .desktop tiene recursivamente. Barata frente a `scan()`: no abre
+# ningún .desktop. Un directorio que aparece/desaparece también cambia la firma.
+func _apps_signature():
+	var parts = []
+	for d in data_dirs():
+		var adir = d + "/applications"
+		var da = Directory.new()
+		if da.open(adir) != OK:
+			parts.append(adir + ":missing")
+			continue
+		parts.append(adir + ":" + str(File.new().get_modified_time(adir)) + ":" + str(_count_desktops(adir)))
+	return "|".join(parts)
+
+
+func _count_desktops(dir):
+	var n = 0
+	var da = Directory.new()
+	if da.open(dir) != OK:
+		return 0
+	da.list_dir_begin(true, true)
+	var f = da.get_next()
+	while f != "":
+		if da.current_is_dir():
+			n += _count_desktops(dir + "/" + f)
+		elif f.ends_with(".desktop"):
+			n += 1
+		f = da.get_next()
+	da.list_dir_end()
+	return n
 
 
 func _by_key(a, b):

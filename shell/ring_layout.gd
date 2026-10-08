@@ -4,8 +4,10 @@ extends Reference
 #
 # Lógica PURA de distribución de las entradas del Hogar alrededor del equipo
 # central. Extraída de shell.gd `_orbit_layout`/`_ring_clamp` para poder probarla
-# sin render ni estado global. Pocas entradas (n <= circle_max) → elipse ordenada;
-# muchas → espiral de ángulo áureo con dispersión orgánica (burbujas).
+# sin render ni estado global. El anillo es un círculo centrado (como el Hogar de
+# Sugar). Pocas entradas (n <= circle_max) → anillo ordenado; muchas → espiral de
+# ángulo áureo con dispersión orgánica, dentro del mismo radio (no se pega a los
+# costados en pantallas anchas).
 #
 # La unidad de rejilla `u` (= grid_unit(vp)) y el alto de barra del Frame `top`
 # (= frame_bar_h(vp)) se reciben como parámetros: el shell los calcula una sola
@@ -32,23 +34,25 @@ static func orbit_layout(vp, n, entries, u, top, circle_max):
 	var cy = vp.y * 0.5
 	var avail_x = min(cx, vp.x - cx)
 	var avail_y = min(cy - (top + 2.0), (vp.y - top - 18.0) - cy)
+	# Radio del anillo: un CÍRCULO centrado (como el Hogar de Sugar), no una elipse
+	# estirada al ancho de la pantalla. El mínimo de los dos ejes evita que el anillo
+	# se pegue a los costados en 16:9; el margen deja aire contra el borde del Frame.
+	var radius = min(avail_x, avail_y) - btn * 0.5
 	if n <= circle_max:
-		# Elipse: usa el ancho y el alto disponibles por separado (rx/ry) para
-		# aprovechar el espacio real de la pantalla en vez de un único radio.
-		var rx = clamp(avail_x - btn * 0.5, btn * 1.15, max(btn * 1.15, avail_x * 0.92))
-		var ry = clamp(avail_y - btn * 0.5, btn * 1.15, max(btn * 1.15, avail_y * 0.92))
+		# Radio del anillo (círculo centrado, como Sugar); el piso evita que dos
+		# ítems se encimen cuando la pantalla es muy chica.
+		var r = max(btn * 1.15, radius)
 		# Ángulo base según orientación: landscape → 0° a izquierda/derecha
 		# (base PI, ítems 0 y 1 al oeste/este); portrait → arriba/abajo (base -PI/2).
 		var base = PI if vp.x >= vp.y else -PI * 0.5
 		for i in range(n):
 			var a = base + TAU * float(i) / float(n)
-			var center = Vector2(cx + cos(a) * rx, cy + sin(a) * ry)
+			var center = Vector2(cx + cos(a) * r, cy + sin(a) * r)
 			out.append(ring_clamp(center, btn, vp, top))
 		return out
 	var margin = 10.0
-	var srx = max(btn * 1.4, (vp.x - btn) * 0.5 - margin)
-	var sry = max(btn * 1.4, (vp.y - 2.0 * top - btn) * 0.5 - margin)
-	var f_in = clamp(max(u * 0.62, btn * 0.85) / max(srx, sry), 0.12, 0.60)
+	var srad = max(btn * 1.4, radius - margin)
+	var f_in = clamp(max(u * 0.62, btn * 0.85) / srad, 0.12, 0.60)
 	for i in range(n):
 		var t = (float(i) + 0.5) / float(n)
 		var f = lerp(f_in, 1.0, sqrt(t))
@@ -61,7 +65,7 @@ static func orbit_layout(vp, n, entries, u, top, circle_max):
 			jr = (float(int(h / 1000) % 1000) / 1000.0 - 0.5) * RING_JITTER_R
 		var ff = clamp(f + jr, f_in, 1.0)
 		var aa = a + ja
-		var center = Vector2(cx + cos(aa) * srx * ff, cy + sin(aa) * sry * ff)
+		var center = Vector2(cx + cos(aa) * srad * ff, cy + sin(aa) * srad * ff)
 		out.append(ring_clamp(center, btn, vp, top))
 	return out
 

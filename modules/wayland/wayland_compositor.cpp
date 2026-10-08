@@ -709,6 +709,7 @@ void WaylandCompositor::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("gesture_pinch", "phase", "fingers", "scale"),
 			&WaylandCompositor::gesture_pinch);
 	ClassDB::bind_method(D_METHOD("key", "event"), &WaylandCompositor::key);
+	ClassDB::bind_method(D_METHOD("set_keymap", "layout", "variant"), &WaylandCompositor::set_keymap, DEFVAL(String()));
 
 	ClassDB::bind_method(D_METHOD("set_default_size", "size"), &WaylandCompositor::set_default_size);
 	ClassDB::bind_method(D_METHOD("get_default_size"), &WaylandCompositor::get_default_size);
@@ -1246,6 +1247,13 @@ void WaylandCompositor::key(const Ref<InputEventKey> &p_event) {
 	}
 	wl_server_key(server, (uint32_t)OS::get_singleton()->get_ticks_msec(), evdev,
 			p_event->is_pressed() ? 1 : 0);
+}
+
+bool WaylandCompositor::set_keymap(const String &p_layout, const String &p_variant) {
+	if (server == NULL) {
+		return false;
+	}
+	return wl_server_set_keymap(server, p_layout.utf8().get_data(), p_variant.utf8().get_data()) != 0;
 }
 
 void WaylandCompositor::set_default_size(const Vector2 &p_size) {

@@ -240,7 +240,7 @@ func _run(argv):
 	var out = []
 	var code = 0
 	if _timeout != "":
-		code = OS.execute(_timeout, [_timeout, TIMEOUT_S] + argv, true, out, true)
+		code = OS.execute(_timeout, [TIMEOUT_S] + argv, true, out, true)
 	else:
 		code = OS.execute(argv[0], argv.slice(1, argv.size()), true, out, true)
 	var text = ""

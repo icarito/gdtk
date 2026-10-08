@@ -3518,6 +3518,54 @@ void wl_server_key(wl_server *s, uint32_t time_ms, uint32_t evdev_key, int press
 	wlr_seat_keyboard_notify_key(s->seat, time_ms, evdev_key, ev.state);
 }
 
+// Cambia en vivo la distribucion del teclado virtual. Mismo origen que el arranque
+// (XKB_DEFAULT_MODEL/OPTIONS salen del entorno porque model/options van en NULL).
+// wlr_keyboard_set_keymap emite events.keymap y el seat reenvia el keymap nuevo al
+// cliente con foco (y al grab del IME). Con `variant` vacia hay que ocultar
+// XKB_DEFAULT_VARIANT durante la compilacion: xkbcommon cae a ese entorno cuando el
+// campo es NULL/vacio y una variante de otra distribucion rompe el keymap.
+// Devuelve 1 si aplico; 0 (conservando el keymap anterior) si el input es invalido
+// o xkb no compila. Hilo principal (como el resto de wl_server_*).
+int wl_server_set_keymap(wl_server *s, const char *layout, const char *variant) {
+	if (s == NULL || layout == NULL || layout[0] == '\0' || strlen(layout) > 63 ||
+			(variant != NULL && strlen(variant) > 63)) {
+		return 0;
+	}
+	struct xkb_context *ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+	if (ctx == NULL) {
+		return 0;
+	}
+	struct xkb_rule_names names = {
+		.rules = NULL,
+		.model = NULL,
+		.layout = layout,
+		.variant = (variant != NULL && variant[0] != '\0') ? variant : NULL,
+		.options = NULL,
+	};
+	char *saved_variant = NULL;
+	if (names.variant == NULL) {
+		const char *env = getenv("XKB_DEFAULT_VARIANT");
+		if (env != NULL) {
+			saved_variant = strdup(env);
+			unsetenv("XKB_DEFAULT_VARIANT");
+		}
+	}
+	struct xkb_keymap *keymap = xkb_keymap_new_from_names(ctx, &names,
+			XKB_KEYMAP_COMPILE_NO_FLAGS);
+	if (saved_variant != NULL) {
+		setenv("XKB_DEFAULT_VARIANT", saved_variant, 1);
+		free(saved_variant);
+	}
+	xkb_context_unref(ctx);
+	if (keymap == NULL) {
+		wlr_log(WLR_ERROR, "wl_server: no se pudo compilar el keymap '%s'", layout);
+		return 0;
+	}
+	int ok = wlr_keyboard_set_keymap(&s->keyboard, keymap) ? 1 : 0;
+	xkb_keymap_unref(keymap);
+	return ok;
+}
+
 int wl_server_dmabuf_enabled(wl_server *s) {
 	return s != NULL && s->dmabuf_enabled;
 }

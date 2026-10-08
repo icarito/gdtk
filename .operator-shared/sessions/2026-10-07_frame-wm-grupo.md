@@ -102,3 +102,36 @@ Briefs: .operator-shared/briefs/2026-10-07-K{1,2,3}-*.txt. Logs Kilo: /tmp/kilo-
 - S3 dejó T3 a medias en _maximize_window. Relanzado como S4 (T3 + B9 sombra de diálogos).
 - OJO: cambios ajenos en deploy.sh, catalog.md, tech-debt.md, session/gdtk-firefox,
   guides/firefox-crashes.md (otra sesión): NO commitear con esta tanda.
+
+## Tanda 1 entregada (2026-10-07 21:45)
+- Commits a96d596 (frame/dockapps) + ea52b43 (wm/grupo). verify_all: 0 FAIL (rc 134/139 =
+  crash conocido al salir; slug_vector ok=0 preexistente).
+- bastion: rsync + motor 9143d600 en ~/gdtk/bin (activa en el próximo login) + recarga
+  transaccional OK (PID 1900170 igual, 4 ventanas). tengu/cupid: deploy.sh OK, md5 iguales.
+- OJO: el MCP gdtk del repo (.mcp.json) apunta a TENGU (192.168.18.163), no a bastion.
+  Para bastion: python3 mcp/gdtk_mcp.py → call_shell(...) local.
+
+## F6 (nuevo) — Super+Espacio rota distribuciones (es ↔ latam) en vivo
+- Brief: briefs/2026-10-07-F6-keymap-switch.txt. Sonnet en curso (motor set_keymap +
+  swaymsg + applet_keyboard lista activa + popup multi + OSD). Requiere recompilar.
+
+## Retomado por Kilo (2026-10-07 22:50) — bugs + features + cierre
+- B1 (franjas comen clics con el Frame oculto): verificado en vivo con A2 (K1 ya lo dejó).
+  Con pin_top=false y visible=false, `frame.drawn=false`, `bar_layout=[]`, `window_span={}`
+  y `_window_dock_hit`/`_item_at` devuelven Null. No requiere más cambios.
+- F6 applet_keyboard: dos escrituras concurrentes compartían el .tmp y se pisaban (test
+  flaky 1/5). Reemplazado por UN hilo escritor con coalescencia (gana el último cuerpo);
+  stress 12/12. tests/applet_keyboard_test.gd.
+- F6 sin recompilar aún: el binario vivo NO tiene `wl_server_set_keymap` (has_method=false);
+  el shell cae por swaymsg. Falta build+install.
+- frame_slots_test: fallaba desde Tanda 1 (el stub no tenía Host → `bar_slots`/`bar_order_anchor`
+  Nil). Sembrados en el test: 65 ok.
+- Nuevo: auto-rescan de apps. shell/apps.gd `maybe_rescan(now)` (firma mtime+conteo por dir
+  XDG de applications, poll 4 s desde shell._process). Detecta instalar/desinstalar, incluidas
+  ~/.local/share/applications. tests/apps_rescan_test.gd 14 ok. Verificado en vivo (2 s alta, 4 s baja).
+- Nuevo: en exposé, teclear lleva al Hogar en modo búsqueda (como el Hogar espiral).
+  shell.gd `_input`; verificado en vivo (expose→false, apps_view=true, query).
+- Nuevo: anillo del Hogar como Sugar: círculo centrado (radio min(avail_x,avail_y)), no
+  estirado a los costados. shell/ring_layout.gd. RING_LAYOUT pasa de `const preload` a
+  `Host.sc` para que la recarga transaccional tome el .gd (preload quedaba cacheado).
+- bastion: rsync + 2 recargas transaccionales (mismo PID 19223, ventanas vivas).

@@ -143,6 +143,7 @@ void pointer_axis_finger(Vector2 p_delta);
 void pointer_axis_stop();
 	void gesture_pinch(int p_phase, int p_fingers, double p_scale);
 	void key(const Ref<InputEventKey> &p_event);
+	bool set_keymap(const String &p_layout, const String &p_variant);
 
 	void set_default_size(const Vector2 &p_size);
 	Vector2 get_default_size() const;

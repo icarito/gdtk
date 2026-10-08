@@ -2,22 +2,25 @@ extends Reference
 
 # Applet Teclado del Frame (SPEC-sugar-frame-applets.md): distribución de teclado.
 # Módulo autocontenido: no usa shell, no crea providers ni abre ventanas; el Frame
-# conecta su UI con choose(layout). No aplica el mapa en vivo: el keymap de los
-# clientes del compositor embebido y del input remoto se compila al arrancar, así que
-# la elección sólo rige la PRÓXIMA sesión.
+# conecta su UI con apply(layout) / next_layout() / toggle_active(layout). El módulo sólo
+# lleva el estado (lista activa + distribución en uso) y lo persiste; aplicar el mapa en
+# vivo (compositor.set_keymap + swaymsg + OSD) es del shell (apply_keyboard_layout). El
+# keymap del input remoto (EIS) se compila al arrancar: ponytail: sigue la PRÓXIMA sesión.
 #
 # El hilo de render NUNCA consulta (SPEC-screen-share-compass §0/§14): `localectl status`
 # y la lectura del archivo de config corren en un worker (Thread + Mutex, como
 # neighborhood.gd) que publica un snapshot atómico {state, value, detail, version}.
-# refresh() sólo copia ese snapshot; choose() encola la escritura (Thread de un solo
-# uso, tmp + rename) y pide un refresco, sin bloquear.
+# refresh() sólo copia ese snapshot; apply()/toggle_active() encolan la escritura (Thread
+# de un solo uso, tmp + rename) y piden un refresco, sin bloquear.
 #
 # Fuentes:
 #   - sesión activa: XKB_DEFAULT_LAYOUT del entorno (lo que exporta session/keyboard.sh);
 #     si falta, localectl status con timeout corto (dentro del worker).
 #   - próxima sesión: ${XDG_CONFIG_HOME:-$HOME/.config}/gdtk/keyboard. Se lee y se
-#     escribe como texto, sin evaluarlo (nunca `.` ni eval). choose() sólo escribe
-#     líneas de variables con caracteres seguros para que keyboard.sh pueda sourcearlas.
+#     escribe como texto, sin evaluarlo (nunca `.` ni eval). Sólo se escriben líneas de
+#     variables con caracteres seguros para que keyboard.sh pueda sourcearlas.
+#     GDTK_LAYOUTS=latam,es es la lista activa (Super+Espacio rota entre ellas); su
+#     primera entrada es también XKB_DEFAULT_LAYOUT: la sesión siguiente arranca con ella.
 
 const PERIOD_MS = 5000
 const SLEEP_STEP_MS = 100
@@ -36,6 +39,10 @@ var state = "sin_dato"
 var value = "sin dato"   # texto muy corto para el bloque (ES, LAT, US)
 var detail = ""          # texto para tooltip; dice si requiere reiniciar la sesión
 var version = 0
+# Lista activa (ids en orden) y distribución en uso. Sólo hilo principal; se siembran
+# una vez desde el worker (entorno + archivo) en refresh().
+var active = []
+var current = ""
 
 # Snapshot compartido con el worker (bajo _mutex).
 var _snap_state = "sin_dato"
@@ -43,7 +50,7 @@ var _snap_value = "sin dato"
 var _snap_detail = ""
 var _snap_version = 0
 
-# Cache de config leída por el worker; choose() la lee bajo Mutex. `_last_value` es el
+# Cache de config leída por el worker; _persist_active() la lee bajo Mutex. `_last_value` es el
 # último valor activo real, para no fingir un estado en error.
 var _config_exists = false
 var _config_layout = ""
@@ -51,6 +58,9 @@ var _config_variant = ""
 var _config_model = ""
 var _config_options = ""
 var _last_value = ""
+var _config_active = []      # GDTK_LAYOUTS leído por el worker
+var _config_read = false     # el worker ya leyó la config al menos una vez
+var _live = ""               # distribución aplicada en vivo (la que gana sobre el entorno)
 
 # Resolución de binarios ($PATH, sin procesos): se hace en el hilo principal antes de
 # arrancar el worker y sólo se lee desde éste.
@@ -58,13 +68,17 @@ var _timeout = ""
 var _localectl = ""
 var _probed = false
 
-# Worker de sonda (Thread + Mutex) y escrituras de un solo uso (tmp + rename).
+# Worker de sonda (Thread + Mutex) y UN escritor con coalescencia (tmp + rename). Un
+# solo hilo escritor evita que dos tmp+rename concurrentes compartan el .tmp y se pise
+# la escritura: si llegan varias, gana el último cuerpo (se descartan los intermedios).
 var _mutex = Mutex.new()
 var _thread = null
 var _want_stop = false
 var _want_refresh = false
-var _write_threads = []
-var _write_states = []
+var _writer = null
+var _write_pending = false
+var _write_path = ""
+var _write_body = ""
 
 
 # --- ciclo de vida -----------------------------------------------------------
@@ -95,10 +109,9 @@ func stop():
 	if _thread != null:
 		_thread.wait_to_finish()
 		_thread = null
-	for th in _write_threads:
-		th.wait_to_finish()
-	_write_threads = []
-	_write_states = []
+	if _writer != null:
+		_writer.wait_to_finish()
+		_writer = null
 
 
 # --- API del Frame -----------------------------------------------------------
@@ -109,7 +122,6 @@ func stop():
 func refresh(force := false):
 	if _thread == null:
 		start()
-	_reap_writes()
 	if force:
 		_request_refresh()
 	_mutex.lock()
@@ -119,6 +131,8 @@ func refresh(force := false):
 	var nver = _snap_version
 	_mutex.unlock()
 	var changed = state != ns or value != nv or detail != nd
+	if current == "" and _seed_active():
+		changed = true
 	state = ns
 	value = nv
 	detail = nd
@@ -126,35 +140,95 @@ func refresh(force := false):
 	return changed
 
 
-# Elige la distribución para la próxima sesión. Sólo acepta ids exactos (es, latam, us);
-# la escritura del archivo se delega a un Thread de un solo uso (tmp + rename) y no
-# bloquea. Conserva las opciones XKB actuales sólo si tienen caracteres seguros.
-# Devuelve true si encoló la escritura.
-func choose(layout):
+# Siembra `active`/`current` cuando el worker ya leyó la config. Lista por defecto:
+# [XKB_DEFAULT_LAYOUT]. Devuelve true si sembró.
+func _seed_active():
+	_mutex.lock()
+	var ready = _config_read
+	var cfg = _config_active.duplicate()
+	var cfg_layout = _config_layout
+	_mutex.unlock()
+	if not ready:
+		return false
+	var env = _safe_xkb(OS.get_environment("XKB_DEFAULT_LAYOUT"))
+	var list = []
+	for l in cfg:
+		if LAYOUTS.has(l) and not list.has(l):
+			list.append(l)
+	if list.empty():
+		var first = env if env != "" else cfg_layout
+		if LAYOUTS.has(first):
+			list.append(first)
+	active = list
+	current = env if env != "" else (list[0] if not list.empty() else "")
+	return current != ""
+
+
+# Siguiente distribución de la lista activa tras `current` ("" si hay menos de dos).
+func next_layout():
+	if active.size() < 2:
+		return ""
+	var i = active.find(current)
+	return active[(i + 1) % active.size()]
+
+
+# Marca `layout` como en uso (la aplicación en vivo la hace el shell). Si no estaba en
+# la lista activa la agrega. Persiste y refresca. Devuelve true si es un id válido.
+func apply(layout):
 	if not LAYOUTS.has(layout):
 		_apply_error("Distribución no válida: %s (sólo es, latam, us)." % str(layout))
 		return false
+	if not active.has(layout):
+		active.append(layout)
+	current = layout
+	_mutex.lock()
+	_live = layout
+	_mutex.unlock()
+	_persist_active()
+	return true
+
+
+# Agrega o quita `layout` de la lista activa (siempre queda al menos una). Quitar la
+# que está en uso no cambia el teclado en vivo: la próxima rotación sale de la lista.
+func toggle_active(layout):
+	if not LAYOUTS.has(layout):
+		return false
+	if active.has(layout):
+		if active.size() < 2:
+			return false
+		active.erase(layout)
+	else:
+		active.append(layout)
+	_persist_active()
+	return true
+
+
+func name_of(layout):
+	return _name(layout)
+
+
+# Escribe el archivo de config con la lista activa (primera = XKB_DEFAULT_LAYOUT).
+# Conserva modelo y opciones actuales sólo si tienen caracteres seguros. Sin bloquear.
+func _persist_active():
 	var path = _config_path()
 	if path == "":
 		_apply_error("no se pudo ubicar la configuración: falta HOME/XDG_CONFIG_HOME")
-		return false
-	# Opciones y modelo actuales: primero el entorno (lo que se aplicó), luego el
-	# archivo leído por el worker (bajo Mutex). Sólo pasan valores con caracteres seguros.
+		return
 	var env_model = OS.get_environment("XKB_DEFAULT_MODEL").strip_edges()
 	var env_options = OS.get_environment("XKB_DEFAULT_OPTIONS").strip_edges()
 	_mutex.lock()
 	var cfg_model = _config_model
 	var cfg_options = _config_options
+	_config_active = active.duplicate()
 	_mutex.unlock()
 	var model = _safe_xkb(env_model if env_model != "" else cfg_model)
 	var options = _safe_xkb(env_options if env_options != "" else cfg_options)
-	var body = "XKB_DEFAULT_LAYOUT=%s\nXKB_DEFAULT_VARIANT=\nXKB_DEFAULT_MODEL=%s\nXKB_DEFAULT_OPTIONS=%s\n" \
-		% [layout, model, options]
+	var body = "XKB_DEFAULT_LAYOUT=%s\nXKB_DEFAULT_VARIANT=\nXKB_DEFAULT_MODEL=%s\nXKB_DEFAULT_OPTIONS=%s\nGDTK_LAYOUTS=%s\n" \
+		% [active[0], model, options, PoolStringArray(active).join(",")]
+	# ponytail: dos escrituras casi simultáneas comparten el .tmp; con clics humanos no ocurre.
 	_write_config_async(path, body)
-	# Refresca para mostrar el pendiente cuando el worker relea el archivo ya escrito.
 	start()
 	_request_refresh()
-	return true
 
 
 # --- hilo de sonda -----------------------------------------------------------
@@ -210,6 +284,14 @@ func _work(_userdata):
 func _build_snapshot():
 	var env_layout = OS.get_environment("XKB_DEFAULT_LAYOUT").strip_edges()
 	var cfg = _read_config()
+	_mutex.lock()
+	var live = _live
+	_mutex.unlock()
+	if live != "":
+		# Aplicada en vivo desde el shell: gana sobre el entorno de arranque.
+		_last_value = _label(live)
+		return _snap("activo", _label(live),
+			"Distribución %s activa. Super+Espacio rota entre las elegidas." % _name(live))
 	var active = env_layout
 	if active == "":
 		if _localectl == "":
@@ -278,9 +360,9 @@ static func parse_localectl_layout(text):
 
 # Lee ~/.config/gdtk/keyboard como texto (sin evaluar) y publica en la cache compartida
 # sólo los valores con caracteres seguros. Un valor inseguro o ausente queda vacío.
-# Sólo lo llama el worker; choose() lee la cache bajo Mutex.
+# Sólo lo llama el worker; _persist_active() lee la cache bajo Mutex.
 func _read_config():
-	var res = {"exists": false, "layout": "", "variant": "", "model": "", "options": ""}
+	var res = {"exists": false, "layout": "", "variant": "", "model": "", "options": "", "layouts": []}
 	var path = _config_path()
 	if path != "":
 		var f = File.new()
@@ -306,28 +388,59 @@ func _read_config():
 						res.model = val
 					"XKB_DEFAULT_OPTIONS":
 						res.options = val
+					"GDTK_LAYOUTS":
+						for id in val.split(",", false):
+							if not res.layouts.has(id):
+								res.layouts.append(id)
 	_mutex.lock()
 	_config_exists = res.exists
 	_config_layout = res.layout
 	_config_variant = res.variant
 	_config_model = res.model
 	_config_options = res.options
+	_config_active = res.layouts
+	_config_read = true
 	_mutex.unlock()
 	return res
 
 
-# Escribe el archivo de config en un Thread de un solo uso (tmp + rename atómico).
+# Encola la escritura (tmp + rename) con coalescencia: un único hilo escritor toma el
+# último cuerpo pedido. Nunca hay dos tmp+rename a la vez, así que clics seguidos no se
+# pisan (el penúltimo estado se descarta y gana el último).
 func _write_config_async(path, body):
-	var state = {"done": false}
-	var th = Thread.new()
-	_write_threads.append(th)
-	_write_states.append(state)
-	th.start(self, "_write_config_work", {"path": path, "body": body, "state": state})
+	_mutex.lock()
+	_write_path = path
+	_write_body = body
+	_write_pending = true
+	var start_writer = _writer == null
+	_mutex.unlock()
+	if start_writer:
+		_writer = Thread.new()
+		_writer.start(self, "_write_loop")
 
 
-func _write_config_work(userdata):
-	var path = String(userdata.get("path", ""))
-	var body = String(userdata.get("body", ""))
+func _write_loop(_userdata):
+	while true:
+		_mutex.lock()
+		var pending = _write_pending
+		var path = _write_path
+		var body = _write_body
+		var stop = _want_stop
+		_write_pending = false
+		_mutex.unlock()
+		if pending:
+			_write_config_now(path, body)
+			# Pide al worker releer el archivo ya escrito.
+			_mutex.lock()
+			_want_refresh = true
+			_mutex.unlock()
+		if stop:
+			return
+		if not pending:
+			OS.delay_msec(SLEEP_STEP_MS)
+
+
+func _write_config_now(path, body):
 	if path != "":
 		var dir = Directory.new()
 		dir.make_dir_recursive(path.get_base_dir())
@@ -341,25 +454,6 @@ func _write_config_work(userdata):
 				w.close()
 				if dir.rename(tmp, path) != OK:
 					printerr("applet_keyboard: no se pudo renombrar ", tmp, " a ", path)
-	# Pide al worker releer el archivo ya escrito; publica el fin sin bloquear.
-	_mutex.lock()
-	_want_refresh = true
-	userdata.state.done = true
-	_mutex.unlock()
-
-
-# Reapea los Threads de escritura ya terminados. is_active() no baja hasta
-# wait_to_finish(): el fin lo publica el propio Thread con el flag `done` bajo Mutex.
-func _reap_writes():
-	for i in range(_write_threads.size() - 1, -1, -1):
-		var st = _write_states[i]
-		_mutex.lock()
-		var done = st.done
-		_mutex.unlock()
-		if done:
-			_write_threads[i].wait_to_finish()
-			_write_threads.remove(i)
-			_write_states.remove(i)
 
 
 # Ruta del archivo que lee session/keyboard.sh, o "" si no hay HOME ni XDG_CONFIG_HOME.

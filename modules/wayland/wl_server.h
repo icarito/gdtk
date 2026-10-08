@@ -170,6 +170,8 @@ void wl_server_pointer_axis_stop(wl_server *s, uint32_t time_ms);
 void wl_server_gesture_pinch(wl_server *s, uint32_t time_ms, int phase,
 		uint32_t fingers, double dx, double dy, double scale, double rotation);
 void wl_server_key(wl_server *s, uint32_t time_ms, uint32_t evdev_key, int pressed);
+// Cambia en vivo la distribucion del teclado virtual; 1 si aplico, 0 si fallo (keymap previo intacto).
+int wl_server_set_keymap(wl_server *s, const char *layout, const char *variant);
 // dmabuf: 1 si se anuncio linux-dmabuf con feedback propio; estado/motivo para el reporte.
 int wl_server_dmabuf_enabled(wl_server *s);
 const char *wl_server_dmabuf_reason(wl_server *s);
