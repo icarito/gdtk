@@ -106,6 +106,8 @@ func _handoff_wire(candidate):
 		Host.remote.shell = candidate
 	if Host.peer_control != null:
 		Host.peer_control.shell = candidate
+	if Host.kdeconnect != null:
+		Host.kdeconnect.shell = candidate
 
 
 # Handoff falló después de retirar el activo: reinsertarlo y devolver el layout

@@ -9,6 +9,7 @@ var compositor = null
 var remote_input = null
 var remote = null        # control remoto JSON-RPC (remote.gd)
 var peer_control = null  # canal peer LAN sin ssh (peer_control.gd)
+var kdeconnect = null    # receptor KDE Connect (kdeconnect_link.gd), opt-in
 var main = null          # main.gd, para pedirle la recarga
 var live_reload = false  # true mientras se instancia el shell por recarga
 var layout = {}          # layout del shell (orden/grupos/foco) para restaurar tras recargar
@@ -66,6 +67,8 @@ func _ready():
 	if peer_port <= 0:
 		peer_port = 7788
 	peer_control.start(null, peer_port)
+
+	_start_kdeconnect()
 
 	_health_setup()
 
@@ -164,7 +167,28 @@ func reload_remote():
 	if peer_port <= 0:
 		peer_port = 7788
 	peer_control.start(null, peer_port)
+	_start_kdeconnect()
 	return true
+
+
+# Receptor KDE Connect (protocolo v8): EXPERIMENTAL y opt-in con GDTK_KDECONNECT=1.
+# Por defecto NO se carga: el flujo con un peer real todavía puede colgar el motor
+# (handshake TLS entrante sin resolver) y la sesión principal no debe arriesgarse.
+# La copia estable (esta funcion + gdtk-supervisor + gdtk-version) no se versiona,
+# así que un snapshot roto del shell no lo afecta.
+func _start_kdeconnect():
+	if OS.get_environment("GDTK_KDECONNECT") != "1":
+		return
+	if kdeconnect != null and is_instance_valid(kdeconnect):
+		return
+	var script = sc("res://kdeconnect_link.gd")
+	if script == null:
+		printerr("Host: kdeconnect_link.gd no compila; receptor KDE Connect off")
+		return
+	kdeconnect = script.new()
+	kdeconnect.name = "KdeConnect"
+	add_child(kdeconnect)
+	kdeconnect.start(null)
 
 
 # Script sin caché: una recarga toma los .gd nuevos del disco. ResourceLoader con
