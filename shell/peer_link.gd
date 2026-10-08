@@ -16,7 +16,7 @@ const VERSION = 1
 # remoto completo, sólo lo necesario para pantalla y el aviso de lados compartidos).
 const METHODS = ["ping", "gvd_recv", "gvd_stop", "gvd_send", "gvd_status",
 	"share_notify", "share_stop", "clip_set", "audio_recv", "audio_stop", "gvd_size",
-	"window_input", "window_input_stream", "gvd_meta", "direction"]
+	"window_input", "window_input_stream", "gvd_meta", "direction", "expose"]
 
 # Handshake de dirección del Vecindario (antes por ssh): viaja por el canal peer SIN
 # token (es la vinculación inicial del Grupo). Vocabulario del DTO de

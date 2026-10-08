@@ -1,0 +1,13 @@
+Repo gdtk (Godot 3.6 GDScript, NO Godot 4). Write set: SOLO shell/frame.gd. No commitear, no deployar, no correr el shell, no revertir cambios ajenos (hay trabajo sin commitear en otros archivos). Leé AGENTS.md (estilo).
+
+Cuatro cambios chicos en shell/frame.gd:
+
+1) BUG franjas comen clicks con el Frame oculto. En draw() (~frame.gd:4233-4249) cuando una barra no se dibuja se limpian items_layout/applets_layout/shared_* pero quedan viejos bar_layout, window_region y window_span de esa zona. _window_grip_zone (~2545, vía _window_grip_rect ~3944) y _window_dock_hit (~2552, ~1132) los usan y hacen set_input_as_handled(), comiéndose el click que debería ir a la ventana Wayland. Fix: en las ramas "not drawn" / "not top_drawn" / "not bottom_drawn" borrar las entradas de esa zona ("top"/"dock" o como se llamen las claves; mirá cómo se llenan) de bar_layout, window_region y window_span. Revisá también _pinned_hit (~1122). La rama de rueda (~2457, `visible or shell.current_activity == null`) dejarla.
+
+2) BUG el Frame entero scrollea cuando un dockapp desborda verticalmente. Las ventanas ImGui "##frame_bottom" (~3135) y "##frame" (~4276) tienen NO_SCROLLBAR pero no ImGui WINDOW_NO_SCROLL_WITH_MOUSE: agregá ese flag (buscá cómo se nombran las otras constantes de flags en el archivo y usá la misma forma). Además quitá la etiqueta (inicial del host) que el radar del dockapp Compartiendo dibuja debajo de cada blip (~1823-1831, bloque "Inicial como etiqueta tenue debajo del blip"): borrar ese bloque; el nombre queda en el tooltip.
+
+3) TWEAK rueda invertida sobre bloques de vista: ~2433 `shell._wheel_vchain(1 if event.button_index == BUTTON_WHEEL_UP else -1)` → invertir (`-1 if ... WHEEL_UP else 1`) y actualizar el comentario de arriba (rueda arriba = acercar / dedos abajo). No tocar las otras ramas (_zoom_step, _pan_by).
+
+4) FEATURE menú de ventana desde su bloque: en la rama BUTTON_RIGHT (~2463-2485) antes del fallback al selector de controles: `var it = _item_at(mouse_pos)`; si it != null y it.id >= 0 (mirá qué devuelve _item_at ~1665 y cómo items_layout guarda el id de ventana en _draw_windows ~3979/4076) → `shell.wm_menu_id = it.id; shell.wm_menu_want = true; get_tree().set_input_as_handled(); return`. El menú lo dibuja shell._draw_window_menu; no tocar shell.gd.
+
+Al terminar validá parseo: `~/gdtk/bin/godot-gdtk --no-window --path shell -s <script>` con un script temporal en el repo (tests/_parse_tmp.gd, borrarlo después) que haga GDScript.new(); set_source_code(File leído de res://frame.gd); reload()==0. Reportá diff resumido por item.

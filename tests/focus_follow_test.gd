@@ -52,5 +52,15 @@ func _init():
 	var back = FF.decide(7, 31, 9, 0)
 	check("de diálogo a ventana vuelve al tile", int(back.target) == 9 and int(back.dialog) == 0)
 
+	# Dwell: sólo listo tras 250 ms sobre el mismo objetivo; cambiar de objetivo reinicia.
+	var w = FF.dwell({}, [9, 0], 1000)
+	check("dwell no listo al entrar", not w.ready)
+	w = FF.dwell(w, [9, 0], 1249)
+	check("dwell no listo antes de 250 ms", not w.ready)
+	w = FF.dwell(w, [9, 0], 1250)
+	check("dwell listo a los 250 ms", w.ready)
+	w = FF.dwell(w, [4, 0], 1300)
+	check("dwell reinicia al cambiar de objetivo", not w.ready and int(w.since) == 1300)
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

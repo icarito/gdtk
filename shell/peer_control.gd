@@ -296,6 +296,11 @@ func _handle(conn, line):
 				ok = bool(shell._peer_clip_set(text))
 			else:
 				err = "no disponible"
+		"expose":
+			if shell.has_method("_peer_expose"):
+				ok = bool(shell._peer_expose(bool(params.get("on", false))))
+			else:
+				err = "no disponible"
 		"audio_recv":
 			# Enviar audio (Grupo): este equipo acepta un túnel de audio SÓLO desde la IP
 			# que hizo el pedido; responde el puerto.

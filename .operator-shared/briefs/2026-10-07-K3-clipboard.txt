@@ -1,0 +1,11 @@
+Repo gdtk (Godot 3.6 GDScript, NO Godot 4). Write set: shell/applet_clipboard.gd y un test nuevo tests/applet_clipboard_history_test.gd. NO tocar shell/frame.gd (el popup lo agrega otro agente después). No commitear, no deployar, no revertir cambios ajenos.
+
+Leé .operator-shared/guides/dockapp.md y shell/applet_clipboard.gd completo. Hoy el worker (~164-195) sólo lee el archivo más nuevo del directorio de historial ($XDG_RUNTIME_DIR/gdtk/clipboard, hasta 50 entradas nombradas por timestamp, escritas por session/gdtk-clipboard store).
+
+Objetivo: historial navegable.
+- En el worker, además, publicar en el snapshot `items`: los 10 más nuevos como [{"name": <archivo>, "summary": <primera línea recortada a ~60 chars, usando READ_MAX>}], más nuevo primero. Leer archivos SÓLO en el worker.
+- `var items = []` público, copiado en refresh() (devolver true si cambió).
+- `func pick(name: String)`: encola; el worker copia ese archivo a un temporal y corre `gdtk-clipboard set` igual que receive() (~66-84), pero SIN setear _last_received (así el pick cuenta como copia local nueva y se sincroniza al grupo como cualquier copia). Validar que name sea un nombre simple (sin "/" ni ".."), está en una frontera de confianza.
+- Extraer la lógica pura (ordenar nombres, armar summary, validar name) en funciones static para testearlas.
+- Test extends SceneTree con check()/OS.exit_code/quit() (modelo: tests/system_osd_test.gd): orden de items, summary recortado/multilínea, rechazo de "../x" y "a/b".
+Correr: /home/icarito/Proyectos/godot3-box3d/godot-dev/bin/godot.frt.opt.tools.x86_64.gdtk --no-window --path shell -s $PWD/tests/applet_clipboard_history_test.gd (desde la raíz). Reportá API final.

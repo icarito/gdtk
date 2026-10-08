@@ -34,3 +34,14 @@ static func decide(focused_tile, focused_dialog, hit_id, hit_dialog = 0, hit_min
 			return {"target": id, "dialog": 0}
 		return {"target": -1, "dialog": 0}
 	return {"target": id, "dialog": 0}
+
+
+# Dwell del foco por hover: el cambio sólo se aplica si el puntero permaneció
+# HOVER_DWELL_MS sobre el mismo objetivo. `pend` es el estado previo ({} al inicio);
+# devuelve {"key", "since", "ready"} para pasar como `pend` en la próxima llamada.
+const HOVER_DWELL_MS = 250
+
+
+static func dwell(pend, key, now_ms):
+	var since = int(pend.since) if pend.has("since") and pend.key == key else int(now_ms)
+	return {"key": key, "since": since, "ready": int(now_ms) - since >= HOVER_DWELL_MS}

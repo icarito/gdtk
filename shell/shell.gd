@@ -43,6 +43,9 @@ const DESKFLOW_SETTINGS = preload("res://deskflow_settings.gd")
 # mini_map, y una recarga transaccional reusa el preload cacheado (viejo) en
 # lugar de releer el fuente — "nonexistent function 'mini_map'". 
 var SCREEN_LAYOUT = Host.sc("res://screen_layout.gd")
+# Modelo puro de hosts del Vecindario: resuelve el `remoteHost` del cliente
+# Deskflow contra el descubrimiento (Host.sc para recargas transaccionales).
+var HOSTS_MODEL = Host.sc("res://neighborhood_hosts.gd")
 const DESKFLOW_WATCH = preload("res://deskflow_watch.gd")
 const SERVICE_STATE = preload("res://service_state.gd")
 # Sesión de pantalla gvd (Kilo F2): modelo puro de estados/planes/clasificación que
@@ -164,6 +167,8 @@ var tex_ready_frame = -1
 # arriba). El padre puede cambiar por set_parent, se consulta cada frame.
 var dialogs = []
 var focused_dialog = 0
+var hover_pend = {}  # dwell del foco por hover (ver focus_follow.gd)
+var hover_hit = null  # último hit pendiente; _process lo reevalúa con el puntero quieto
 var dialog_view = null
 var dialog_boxes = {}
 # Tamaño que ya se le pidió a cada diálogo para que quepa en el hueco central (se pide
@@ -230,19 +235,17 @@ var layout_confirm_host = ""     # id del equipo acomodado (resaltado en la vist
 var layout_confirm_pos = Vector2.ZERO  # posición clavada del hud (no se arrastra)
 var layout_confirm_rect = Rect2()      # rect del hud (px viewport) para bloquear el gesto
 var layout_confirm_canvas = Rect2()    # canvas mini dentro del hud (o + vsz)
-var _lc_dbg_at = 0              # prints de diagnóstico (rate ~200 ms)
 
-# Diagnóstico del popup (BAIXO volumen, recortado a frames cuando está vivo).
-func _lc_dbg(msg):
-	print("LC " + msg)
 # Arrastre dentro del popup: preview en vivo (sin escribir) y al soltar snap +
-# misma ruta de commit que el acomodo del mapa. La local no se arrastra
-# (pantallas.png lo ignora): el plano es relativo a ella.
+# misma ruta de commit que el acomodo del mapa. La local no se redimensiona.
 var _layout_drag_id = ""
 var _layout_drag_grab = Vector2.ZERO  # mm entre el origen de la pantalla y el click
-var _layout_drag_edge = ""       # no vacío = resize por ese borde (east/west/north/south)
+var _layout_drag_edge = ""       # asa activa: "", borde (e/w/n/s) o esquina (es/en/ws/wn)
 var _layout_drag_lay = null      # layout copiado que sigue al mouse durante el drag
 var _layout_drag_tform = {}      # mini_map_transform congelada al agarrar
+var _layout_drag_pre = {}        # rect previo de la pantalla (para revertir el resize)
+var _layout_drag_guides = []     # guías del imán en el drag (mm: {axis, value})
+var _layout_hover = {}           # asa bajo el puntero (resaltado, sin arrastrar)
 var _df_watch_at = 0       # próximo chequeo del vigía de Deskflow (ms)
 const DESKFLOW_WATCH_COOLDOWN_MS = 6000  # tras soltar la captura, no volver a soltar seguido
 var _df_mismatch = 0       # chequeos seguidos con captura activa y servidor "en local"
@@ -304,6 +307,12 @@ var _sway_exec_mutex = Mutex.new()
 var _rotate_threads = []
 var _rotate_states = []       # {"done": bool}
 var _rotate_exec_mutex = Mutex.new()
+# Mesh Wi-Fi del Grupo: el shell sólo decide el ROL (host si este equipo comparte
+# teclado y mouse del Grupo); session/gdtk-mesh hace la red. Un one-shot por cambio.
+var _mesh_threads = []
+var _mesh_states = []        # {"done": bool}
+var _mesh_exec_mutex = Mutex.new()
+var _mesh_role_written = ""  # último rol aplicado ("host"/"")
 # Deskflow por host: intención en memoria, nunca implícita ni automática. El
 # portapapeles dejó de ser una opción (se asume compartido con "Controlar").
 var host_deskflow = {}        # host_id -> bool (intención; la actividad es global)
@@ -318,6 +327,11 @@ var _deskflow_auto_key = ""
 # y un restart por release cortaba el teclado en plena escritura. El conf se
 # escribe al toque; el server se reinicia una sola vez tras el silencio.
 const DESKFLOW_RELOAD_DEBOUNCE_MS = 2500
+# Cada tanto se verifica que la conf del cliente apunte a la dirección actual del
+# servidor (el nombre guardado se re-resuelve al Vecindario; un cambio de IP del
+# servidor no debe dejar al cliente reintentando contra una IP muerta).
+const DESKFLOW_ADDR_CHECK_MS = 10000
+var _df_addr_check_at = 0
 var _deskflow_reload_pending = false
 var _deskflow_reload_at = 0
 var _deskflow_reload_key = ""
@@ -505,6 +519,11 @@ var drag_layer = null        # CanvasLayer alto: el icono va encima de todo
 var drag_placeholder_tex = null
 var drag_icon_samples = 0    # logging [drag-icon] de las primeras muestras
 var client_drag_active = false
+# Grab implícito del puntero (como wlroots/Wayland): mientras un botón pulsado sobre un
+# cliente siga abajo, motion y release van a ese cliente aunque el puntero salga de su
+# ventana (selección de texto que llega al borde). -1 = sin grab.
+var pointer_grab_id = -1
+var pointer_grab_buttons = {}
 # Modificadores cuya PULSACIÓN se reenvió a la app y cuya suelta todavía no. Si la
 # suelta se pierde (la consume ImGui/Frame, p. ej. Alt+Tab), la app queda con el
 # modificador pegado y las letras llegan como atajos: "no se puede escribir".
@@ -942,7 +961,7 @@ func _compute_float_layout(cr, units = null, s = 0.0):
 		else:
 			tile_rects[id] = WINDOW_CHROME.content_rect(fr, th, bd, rh)
 		_deco_node(id)
-		_sync_client_maximized(id, wm_maximized.has(id))
+		_sync_client_maximized(id, maximize_state.has(id))
 	# Un solo orden de apilado para flotantes y tiled: abajo las tiled nunca elevadas,
 	# después las flotantes en su orden y encima lo elevado por clic/foco (z_stack), sea
 	# flotante o tiled. Antes las flotantes iban siempre encima y clickear una tiled que
@@ -1201,6 +1220,7 @@ func _has_battery():
 
 func _ready():
 	connect("imgui_frame", self, "_imgui_frame")
+	_wmem_load()
 	compositor.connect("toplevel_added", self, "_on_toplevel_added")
 	compositor.connect("toplevel_removed", self, "_on_toplevel_removed")
 	compositor.connect("toplevel_activate", self, "_on_toplevel_activate")
@@ -1397,7 +1417,9 @@ func _save_layout():
 		"units": WM_UNITS.serialize(wm_units),
 		"hybrid": hybrid.serialize(),
 		"minimized": minimized.keys(), "focused": focused_tile, "fullscreen": fullscreen_id,
-		"maximize": maximize_state.duplicate(true)}
+		"maximize": maximize_state.duplicate(true),
+		"float_memory": float_memory.duplicate(), "float_order": float_layout.order.duplicate(),
+		"z_stack": z_stack.duplicate(), "wm_maximized": wm_maximized.duplicate()}
 
 
 # Quita de `wm_units` los ids que ya no están vivos (p. ej. minimizadas), dejando
@@ -1470,6 +1492,19 @@ func _adopt_windows():
 		maximize_state = {}
 		for k in lay.get("maximize", {}):
 			maximize_state[int(k)] = lay["maximize"][k]
+		# Flotantes: rect local, orden de apilado y maximizadas sobreviven a la recarga
+		# (sin esto _compute_float_layout las recascada con place_new).
+		var fmem = lay.get("float_memory", {})
+		var box = _tile_rect(_screen_size())
+		for fid in lay.get("float_order", []):
+			if tiles.has(fid) and hybrid.is_floating(fid) and fmem.get(fid, null) != null:
+				float_layout.restore_one(fid, fmem[fid], box)
+		for fid in fmem.keys():
+			if tiles.has(fid) and fmem[fid] != null:
+				float_memory[fid] = fmem[fid]
+		for zid in lay.get("z_stack", []):
+			if tiles.has(zid):
+				z_stack.append(zid)
 		var f = int(lay.get("focused", -1))
 		_focus_tile(f if tiles.has(f) else (tiles[tiles.size() - 1] if not tiles.empty() else -1))
 		fullscreen_id = int(lay.get("fullscreen", -1))
@@ -1616,6 +1651,8 @@ const VIDEO_COOLDOWN_MS = 1500
 # no se entera de que cambió el contenido): se rearma el frame siguiente.
 func _process(_delta):
 	var now = OS.get_ticks_msec()
+	if hover_hit != null:
+		_focus_follow(hover_hit)
 	_poll_force_close(now)
 	_sync_capture_cursor()
 	# Asa de mover CSD: deslizamiento de entrada/salida (pide frames mientras anima).
@@ -1673,6 +1710,8 @@ func _process(_delta):
 	_gvd_poll()
 	_plan_poll()
 	_clip_sync_poll()
+	_expose_sync_poll()
+	_wmem_poll(now)
 	# Configuración: reapa el Thread de lectura y aplica acento/fondo del snapshot.
 	settings_poll()
 	# swaymsg de ajustes de entrada: reap de Threads one-shot (bloqueó a lo sumo su
@@ -1681,6 +1720,7 @@ func _process(_delta):
 	# Span fisico: worker de hotplug (swaymsg get_outputs), nunca en el render.
 	_span_tick(now)
 	_reap_rotate()
+	_reap_mesh()
 	# Volumen/brillo: copia el estado del worker y mantiene vivo el OSD mientras se
 	# desvanece (mismo patrón que el resto de los workers).
 	if system_osd != null and system_osd.poll():
@@ -2149,10 +2189,28 @@ func _find_handle(h):
 
 
 func _handle_at(pos):
+	var fr = float_frames()
 	for h in handles:
 		if abs(pos.x - h.x) <= HANDLE_HIT and pos.y >= h.y and pos.y <= h.y + h.h:
-			return h
+			# Una flotante encima tapa el asa: no se agarra a través de ella.
+			var covered = false
+			for r in fr:
+				if r.has_point(pos):
+					covered = true
+					break
+			if not covered:
+				return h
 	return null
+
+
+# Marcos (con barra de título) de las flotantes visibles; tapan las asas del mosaico.
+func float_frames():
+	var out = []
+	for id in tiles:
+		if minimized.has(id) or not hybrid.is_floating(id) or not window_rects.has(id):
+			continue
+		out.append(window_rects[id])
+	return out
 
 
 # Transform de contenido por ventana, para el control remoto (claves string = JSON).
@@ -2698,6 +2756,10 @@ func _raise_popup_owners():
 	for id in popup_owners:
 		var n = tile_nodes.get(id)
 		if n == null or not is_instance_valid(n):
+			continue
+		# Una tiled que sólo tiene el foco por hover (tooltip) no salta sobre las
+		# flotantes: sólo sube si es flotante o fue elevada por clic/teclado (z_stack).
+		if not hybrid.is_floating(id) and not z_stack.has(id):
 			continue
 		var d = deco_nodes.get(id)
 		if d != null and is_instance_valid(d):
@@ -3415,7 +3477,10 @@ func _apply_vlevel(level):
 				apps_view = false
 				var units = _units()
 				if not units.empty():
-					_start_home_leave(units, _last_focus_unit(units))
+					# Cadena vertical = sólo zoom (Z): sin deslizar la fila desde el Hogar.
+					home_slide_since = -1
+					fade_skip_until = OS.get_ticks_msec() + 200
+					_focus_unit(units, _last_focus_unit(units))
 		1:
 			if zoom_level > 0:
 				_set_zoom(0)
@@ -3830,7 +3895,13 @@ func _seed_view_anim(now):
 	for id in tiles:
 		var node = tile_nodes.get(id)
 		if node != null and is_instance_valid(node):
-			view_anim[id] = {"from": _node_footprint(node), "since": now}
+			var from = _node_footprint(node)
+			if _at_home() and expose:
+				# Desde el Hogar las ventanas viven fuera de pantalla (fila a ±vp.x): el exposé
+				# nace del centro, achicado (sólo zoom, sin entrar volando por el costado).
+				var c = _screen_size() * 0.5
+				from = Rect2(c - from.size * 0.15, from.size * 0.3)
+			view_anim[id] = {"from": from, "since": now}
 
 
 # Avance de una animación de view_anim: lineal mientras la arrastran los dedos (el
@@ -4017,49 +4088,63 @@ func _toggle_fullscreen():
 	request_redraw()
 
 
-# Alt+F10 / botón max de la app: maximizar = sacar la ventana de su franja partida
-# para que ocupe todo el workspace (el hueco central del Frame, K12). Se recuerda la
-# franja previa (miembros y pesos) para poder deshacerlo con _restore_maximized_window.
-# Pantalla completa (todo el viewport, sin Frame) sigue siendo Alt+F11.
+# Alt+F10 / botón max de la app: maximizar SIEMPRE deja la ventana en mosaico (no hay
+# "flotante maximizada"). Si su pantalla tiene más ventanas (flotante, o tiled en una
+# franja) pasa a un escritorio NUEVO justo después del actual (como soltar en un hueco
+# del exposé) y el foco la sigue; si ya está sola en el suyo, queda tiled ahí. El origen
+# (flotante+rect+ancla, o franja con pesos) se recuerda en maximize_state para
+# deshacerlo con _restore_maximized_window. Pantalla completa sigue siendo Alt+F11.
 func _maximize_window(id):
 	if id < 0 or not tiles.has(id):
 		return
 	fullscreen_id = -1
-	# En flotante, maximizar es ocupar todo el hueco central conservando la geometría
-	# flotante recordada (se restaura con _restore_maximized_window).
-	if hybrid.is_floating(id):
-		wm_maximized[id] = true
+	if maximize_state.has(id):
 		_focus_tile(id)
-		request_redraw()
 		return
-	var g = _group_of(id)
-	if g != null:
-		var weights = {}
+	var units = _units()
+	var floating = hybrid.is_floating(id)
+	var g = null if floating else _group_of(id)
+	var st = {"was_floating": floating, "members": [id], "weights": {}}
+	if floating:
+		_remember_float_geometry()
+		st["float_rect"] = float_memory.get(id, null)
+		st["anchor"] = int(hybrid.anchor(id, WM_HYBRID.ESCRITORIO))
+	elif g != null:
+		st["members"] = g.duplicate()
 		for m in g:
-			weights[m] = _weight(m)
-		maximize_state[id] = {"members": g.duplicate(), "weights": weights}
-		_remove_from_group(id)
-	else:
-		# Ya sola en su pantalla: maximizar no cambia nada visible, pero se marca para
-		# que desmaximizar (-> flotante) tenga a qué responder.
-		maximize_state[id] = {"members": [id], "weights": {}}
+			st["weights"][m] = _weight(m)
+	if floating or g != null:
+		var ui = _anchor_index(units, id) if floating else _focused_unit_index_of(units, id)
+		var next_anchor = int(units[ui + 1][0]) if ui + 1 < units.size() and not units[ui + 1].empty() else -1
+		_insert_solo(id, next_anchor, false)  # limpia maximize_state: se fija después
+	# ponytail: tiled sola con flotantes encima se queda en su unidad (el ancla de esas
+	# flotantes es la propia ventana; moverla no las deja atrás).
+	maximize_state[id] = st
 	_focus_tile(id)
 	request_redraw()
 
 
-# Desmaximizar: rearma la franja partida que la ventana ocupaba antes de maximizar.
-# Los miembros que se cerraron entretanto simplemente no vuelven.
+# Desmaximizar: devuelve la ventana a su origen. Flotante: vuelve a flotante en su
+# escritorio con su rect (si el escritorio ya no existe, al actual) y su escritorio
+# temporal desaparece. Franja: rearma los miembros con sus pesos; los que se cerraron
+# entretanto simplemente no vuelven.
 func _restore_maximized_window(id):
 	if id < 0:
 		return
-	if hybrid.is_floating(id):
-		wm_maximized.erase(id)
-		_focus_tile(id)
-		request_redraw()
-		return
 	var st = maximize_state.get(id)
 	maximize_state.erase(id)
+	wm_maximized.erase(id)
 	if st == null or not tiles.has(id):
+		return
+	if bool(st.get("was_floating", false)):
+		var a = int(st.get("anchor", WM_HYBRID.ESCRITORIO))
+		if a > 0 and (a == id or not tiles.has(a) or not WM_UNITS.has(wm_units, a)):
+			a = _current_float_anchor()
+			if a == id:
+				a = WM_HYBRID.ESCRITORIO
+		if st.get("float_rect", null) != null:
+			float_memory[id] = st.float_rect
+		set_window_mode(id, WM_HYBRID.FLOATING, a)
 		return
 	var weights = st.get("weights", {})
 	var members = []
@@ -4068,18 +4153,25 @@ func _restore_maximized_window(id):
 			members.append(m)
 	if members.size() >= 2:
 		# Por si el usuario retileó a mano mientras estaba maximizada: se saca a cada
-		# miembro de su grupo actual antes de rearmar la franja guardada.
+		# miembro de su grupo actual antes de rearmar la franja guardada. La base es un
+		# miembro distinto de `id` (que está en su escritorio temporal).
 		for m in members:
 			_remove_from_group(m)
-		for m in range(1, members.size()):
-			WM_UNITS.join(wm_units, members[m], members[0], "right")
+		var base = members[0] if members[0] != id else members[1]
+		var bi = members.find(base)
+		for i in range(members.size()):
+			if members[i] != base:
+				WM_UNITS.join(wm_units, members[i], base, "left" if i < bi else "right")
 		for m in members:
 			WM_UNITS.set_weight(wm_units, m, float(weights.get(m, 1.0)))
-		_rebuild_tiles(_units())
+		var rec = _record_of(base)
+		var anchor = int(rec["id"]) if rec != null else base
+		for m in members:
+			hybrid.set_tiled(m, anchor)
+		_rebuild_tiles_preserving_floats()
 	else:
-		# Desmaximizar en mosaico deja la ventana en modo flotante (mismo cambio que el
-		# Super+arrastre); el rect flotante lo restaura float_memory o la cascada.
-		set_window_mode(id, WM_HYBRID.FLOATING)
+		# Sin origen al que volver: flotante en el escritorio actual.
+		set_window_mode(id, WM_HYBRID.FLOATING, _current_float_anchor())
 	_focus_tile(id)
 	request_redraw()
 
@@ -4168,9 +4260,12 @@ func _update_dialogs(root_id):
 			box = _new_dialog_box(d)
 		var visible = root_id >= 0 and _root_of(d) == root_id
 		box.visible = visible
+		var sh = box.get_meta("shadow")
+		sh.visible = visible
 		if visible:
 			any_visible = true
 			_layout_dialog(box, d)
+			sh.dialog_sync(dialog_view.rect_size)
 	dialog_view.visible = any_visible and view.visible
 
 
@@ -4179,12 +4274,23 @@ func _new_dialog_box(d):
 	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	box.rect_clip_content = true
 	box.visible = false
+	# Sombra de compositor (window_deco.gd en modo diálogo): hermana DEBAJO de la caja,
+	# porque la caja recorta a su geometría. Muere con la caja.
+	var sh = Control.new()
+	sh.set_script(Host.sc("res://window_deco.gd"))
+	sh.shell = self
+	sh.id = d
+	sh.dialog_box = box
+	sh.visible = false
+	dialog_view.add_child(sh)
 	dialog_view.add_child(box)
+	box.set_meta("shadow", sh)
+	box.connect("tree_exited", sh, "queue_free")
 	dialog_boxes[d] = box
 	return box
 
 
-# Centra la geometria del dialogo en la vista (sin sombras: la caja recorta).
+# Centra la geometria del dialogo en la vista (la sombra va en un nodo aparte: la caja recorta).
 func _layout_dialog(box, d):
 	_ensure_premult_material()
 	var geo = _dialog_geo(d)
@@ -4521,6 +4627,91 @@ func _reap_rotate():
 			_rotate_threads[i].wait_to_finish()
 			_rotate_threads.remove(i)
 			_rotate_states.remove(i)
+
+
+# --- Mesh Wi-Fi del Grupo --------------------------------------------------------
+# El shell no toca la red: escribe el ROL a session/gdtk-mesh (que decide y aplica
+# con NetworkManager). "host" sólo si este equipo es el servidor Deskflow del Grupo
+# (comparte teclado y mouse). Sin rol, el mesh no se hospeda.
+
+const MESH_SSID = "gdtk-mesh"
+
+
+# ¿Este equipo hospeda el mesh ahora mismo? (rol aplicado por el shell).
+func _mesh_is_host():
+	return _mesh_role_written == "host"
+
+
+func _mesh_runtime_dir():
+	var d = OS.get_environment("XDG_RUNTIME_DIR")
+	if d == "":
+		d = "/tmp"
+	return d + "/gdtk"
+
+
+func _mesh_role_file():
+	return _mesh_runtime_dir() + "/mesh-role"
+
+
+func _mesh_script():
+	var home = OS.get_environment("GDTK_HOME")
+	if home == "":
+		home = OS.get_environment("HOME") + "/gdtk"
+	return home + "/session/gdtk-mesh"
+
+
+# Aplica el rol actual (idempotente): escribe/borra el archivo y, sólo si cambió,
+# corre `gdtk-mesh auto` para hospedar o devolver la red. Se llama al aplicar la
+# configuración de Deskflow (donde se resuelve `_deskflow_role`).
+func _mesh_sync():
+	var want = "host" if String(_deskflow_role) == "server" else ""
+	if want == _mesh_role_written:
+		return
+	_mesh_role_written = want
+	var path = _mesh_role_file()
+	var f = File.new()
+	if want == "host":
+		Directory.new().make_dir_recursive(_mesh_runtime_dir())
+		f.open(path, File.WRITE)
+		f.store_string("host\n")
+		f.close()
+	elif f.file_exists(path):
+		Directory.new().remove(path)
+	# El anuncio mDNS lleva el flag `mesh=` sólo si hospedamos: república al cambiar.
+	if _publish_started:
+		_stop_publishers()
+		_publish_started = false
+		_start_publishers()
+	_mesh_run(["auto"])
+
+
+func _mesh_run(args):
+	var exe = _mesh_script()
+	if not File.new().file_exists(exe):
+		return
+	var state = {"done": false}
+	var th = Thread.new()
+	_mesh_threads.append(th)
+	_mesh_states.append(state)
+	th.start(self, "_mesh_run_work", {"exe": exe, "args": args, "state": state})
+
+
+func _mesh_run_work(userdata):
+	OS.execute(String(userdata.get("exe", "")), userdata.get("args", []), true)
+	_mesh_exec_mutex.lock()
+	userdata.get("state", {}).done = true
+	_mesh_exec_mutex.unlock()
+
+
+func _reap_mesh():
+	for i in range(_mesh_threads.size() - 1, -1, -1):
+		_mesh_exec_mutex.lock()
+		var done = _mesh_states[i].get("done", false)
+		_mesh_exec_mutex.unlock()
+		if done:
+			_mesh_threads[i].wait_to_finish()
+			_mesh_threads.remove(i)
+			_mesh_states.remove(i)
 
 
 # ¿Hay acelerómetro? Se consulta una vez y se cachea. No se lee el sysfs con File:
@@ -5499,6 +5690,9 @@ func _start_publishers():
 	# «Pantalla compartida» que les mandamos.
 	_published_accent = "#" + accent.to_html(false)
 	identity["accent"] = _published_accent
+	# Red propia (mesh): anunciamos el SSID (sin secreto) sólo si la hospedamos.
+	if _mesh_role_written == "host":
+		identity["mesh"] = MESH_SSID
 	var caps = {"gvd": true, "gvd_port": 5600, "deskflow": true, "deskflow_port": 24800,
 		"deskflow_role": _deskflow_role}
 	var plan = PUBLISH_PLAN.new().build(identity, caps, avahi.path)
@@ -6265,6 +6459,7 @@ func _apply_deskflow_settings():
 	elif activity_error.begins_with("Deskflow servidor requiere el portal InputCapture"):
 		activity_error = ""
 	_deskflow_role = "server" if effective_mode == "share_here" else "client"
+	_mesh_sync()
 	var home = OS.get_environment("HOME")
 	if home == "":
 		return
@@ -6347,6 +6542,9 @@ func _deskflow_tick(now):
 				_deskflow_arm()
 		else:
 			_deskflow_want = false
+		# Cliente: mantener la conf apuntando a la dirección actual del servidor.
+		if _deskflow_want and _service_running("Deskflow"):
+			_deskflow_refresh_client_addr(now)
 	if _deskflow_reload_pending and now >= _deskflow_reload_at:
 		_deskflow_reload_pending = false
 		if _deskflow_reload_key != _deskflow_loaded_key and _service_running("Deskflow"):
@@ -6460,12 +6658,80 @@ func _deskflow_service_for(mode, home):
 	return ""
 
 
+# Dirección `remoteHost` del cliente Deskflow: resuelve lo guardado (nombre de
+# pantalla o IP) contra el Vecindario YA descubierto. No bloquea: sólo mira el
+# snapshot; si el nombre no aparece, cae a `<nombre>.local` (mDNS).
+func _deskflow_resolve_host(host):
+	var h = String(host).strip_edges()
+	if h == "":
+		return ""
+	if HOSTS_MODEL == null:
+		return h
+	var hosts = neighborhood.hosts if neighborhood != null else []
+	return String(HOSTS_MODEL.deskflow_remote_host(hosts, h))
+
+
+# `remoteHost=` actual de la conf del cliente ("" si no está).
+func _deskflow_conf_remote_host(path):
+	var f = File.new()
+	if f.open(path, File.READ) != OK:
+		return ""
+	var text = f.get_as_text()
+	f.close()
+	for line in text.split("\n"):
+		var s = String(line).strip_edges()
+		if s.begins_with("remoteHost="):
+			return s.substr(11).strip_edges()
+	return ""
+
+
+# Mantiene la conf del cliente apuntando a la dirección ACTUAL del servidor: si
+# el nombre guardado ahora resuelve a otra dirección, reescribe la conf y
+# reinicia el cliente. Cubre que el servidor cambie de IP sin tocar ajustes.
+func _deskflow_refresh_client_addr(now):
+	if now < _df_addr_check_at:
+		return
+	_df_addr_check_at = now + DESKFLOW_ADDR_CHECK_MS
+	if settings_bridge == null or settings_bridge.model == null:
+		return
+	var cfg = settings_bridge.model.deskflow(settings_bridge.settings.get("deskflow", {}))
+	if String(cfg.get("mode", "")) != "use_remote":
+		return
+	var host = String(cfg.get("host", "")).strip_edges()
+	if host == "":
+		return
+	var want = _deskflow_resolve_host(host)
+	if want == "" or want == host:
+		return
+	var home = OS.get_environment("HOME")
+	if home == "":
+		return
+	var path = home.plus_file("gdtk").plus_file("deskflow-client.conf")
+	if _deskflow_conf_remote_host(path) == want:
+		return
+	var local = _deskflow_local_name(String(cfg.get("name", "")))
+	var text = DESKFLOW_SETTINGS.build_client_settings(local, want, int(cfg.get("port", 24800)))
+	if text == "":
+		return
+	settings_bridge.write_atomic(path, text)
+	_deskflow_loaded_key = ""
+	if _service_running("Deskflow"):
+		# Reusa el ciclo de vida: parar y arrancar con la conf nueva.
+		_toggle_service_by_name("Deskflow")
+		_toggle_service_by_name("Deskflow")
+	request_redraw()
+
+
 func _deskflow_config_writes(mode, cfg, home, local):
 	var writes = []
 	var port = int(cfg.get("port", 24800))
 	match String(mode):
 		"use_remote":
-			var text = DESKFLOW_SETTINGS.build_client_settings(local, String(cfg.get("host", "")), port)
+			# El host guardado es un NOMBRE de pantalla (estable): se resuelve a la
+			# dirección actual del Vecindario, así un cambio de IP del servidor no
+			# deja al cliente reintentando contra una IP muerta.
+			var addr = _deskflow_resolve_host(String(cfg.get("host", "")))
+			var text = DESKFLOW_SETTINGS.build_client_settings(local, addr, port)
 			if text != "":
 				writes.append({"path": home.plus_file("gdtk").plus_file("deskflow-client.conf"), "text": text})
 		"share_here":
@@ -6888,6 +7154,8 @@ func _open_layout_confirm(baseline_layout, host_id):
 func _layout_confirm_close():
 	if _layout_confirm != null:
 		_layout_confirm.open = false
+	_layout_drag_reset()
+	_layout_hover = {}
 	layout_confirm_host = ""
 	layout_confirm_open = false
 	layout_confirm_want = false
@@ -6901,20 +7169,14 @@ func _layout_confirm_accept():
 # Agarrar una pantalla del popup: borde a <= tol px = resize (con la local también
 # se puede); interior = mover (la local no: el plano es relativo a ella).
 func _layout_drag_begin(local, target, live):
-	_lc_dbg("begin entra live_keys=%s" % str(live.keys() if typeof(live) == TYPE_DICTIONARY else "no-dict"))
 	var marks = SCREEN_LAYOUT.mini_map(live, target)
-	var zone = SCREEN_LAYOUT.mini_map_edge(marks, local)
-	var hit = String(zone.get("id", "")) if not zone.empty() else ""
-	var edge = String(zone.get("edge", "")) if not zone.empty() else ""
-	_lc_dbg("begin edge_zone=%s marks=%d" % [str(zone), marks.size()])
-	if hit == "" or edge == "":
-		var pick = SCREEN_LAYOUT.mini_map_pick(marks, local)
-		hit = String(pick.get("id", ""))
+	var pick = SCREEN_LAYOUT.mini_map_handle(marks, local)
+	var hit = String(pick.get("id", ""))
+	var handle = String(pick.get("handle", ""))
 	if hit == "":
 		var near = SCREEN_LAYOUT.mini_map_pick_near(marks, local)
 		hit = String(near.get("id", ""))
 	if hit == "":
-		_lc_dbg("begin aborta hit=%s edge=%s" % [str(hit), str(edge)])
 		return
 	_layout_drag_lay = SCREEN_LAYOUT.normalize_layout({
 		"version": SCREEN_LAYOUT.VERSION, "unit": "mm",
@@ -6928,9 +7190,16 @@ func _layout_drag_begin(local, target, live):
 	if _layout_drag_tform.empty():
 		_layout_drag_reset()
 		return
-	_layout_drag_id = hit
-	_layout_drag_edge = edge
-	_layout_drag_grab = Vector2.ZERO if edge != "" \
+	# La local no se redimensiona (su tamano físico lo mide el sistema): con el
+	# asa tomado igual arrastra el plano completo. Idéntico a Pantallas, donde
+	# la local es fija.
+	if String(hit) == SCREEN_LAYOUT.LOCAL_ID:
+		handle = ""
+	_layout_drag_id = String(hit)
+	_layout_drag_edge = handle
+	_layout_drag_pre = {"x": float(sc.x), "y": float(sc.y), "w": float(sc.w), "h": float(sc.h)}
+	_layout_drag_guides = []
+	_layout_drag_grab = Vector2.ZERO if handle != "" \
 		else SCREEN_LAYOUT.mm_pos(_layout_drag_tform, local) - Vector2(sc.x, sc.y)
 	# Mano sobre el popup: la revisión sigue viva mientras se arrastra.
 	_layout_confirm.propose(_layout_confirm.baseline, OS.get_ticks_msec())
@@ -6954,15 +7223,28 @@ func _layout_drag_follow(local, target):
 		for s in _layout_drag_lay.screens:
 			s.x = float(s.x) + dx
 			s.y = float(s.y) + dy
+		_layout_drag_guides = []
 	elif _layout_drag_edge != "":
-		var nx = SCREEN_LAYOUT.resize_edge(sc, _layout_drag_edge, mm)
-		sc.x = float(nx.x)
-		sc.y = float(nx.y)
-		sc.w = float(nx.w)
-		sc.h = float(nx.h)
+		# Redimension con aspecto fijo y las mismas reglas que Pantallas: si el
+		# cursor solapa, ok=false y se mantiene el último rect válido.
+		var rs = SCREEN_LAYOUT.resize_live(SCREEN_LAYOUT.all_screens(_layout_drag_lay),
+			_layout_drag_id, _layout_drag_edge, mm.x, mm.y, SCREEN_LAYOUT.MAGNET_TOL)
+		if typeof(rs) == TYPE_DICTIONARY and bool(rs.get("ok", false)):
+			sc.x = float(rs.x)
+			sc.y = float(rs.y)
+			sc.w = float(rs.w)
+			sc.h = float(rs.h)
+			_layout_drag_guides = rs.guides
+		else:
+			_layout_drag_guides = []
 	else:
-		sc.x = mm.x - _layout_drag_grab.x
-		sc.y = mm.y - _layout_drag_grab.y
+		# Mover con imán en vivo (idéntico a Pantallas).
+		var proposed = Vector2(mm.x - _layout_drag_grab.x, mm.y - _layout_drag_grab.y)
+		var sn = SCREEN_LAYOUT.live_snap(SCREEN_LAYOUT.all_screens(_layout_drag_lay),
+			_layout_drag_id, proposed.x, proposed.y, SCREEN_LAYOUT.MAGNET_TOL)
+		sc.x = float(sn.x)
+		sc.y = float(sn.y)
+		_layout_drag_guides = sn.guides
 	# Por lo menos media pantalla queda dentro del canvas: el drag nunca se
 	# pierde de vista, pero el recorrido no se corta de golpe.
 	var lo = SCREEN_LAYOUT.mm_pos(_layout_drag_tform, Vector2(12.0, 12.0))
@@ -6970,12 +7252,14 @@ func _layout_drag_follow(local, target):
 	var cx = clamp(sc.x + sc.w * 0.5, lo.x - sc.w * 0.5, hi.x + sc.w * 0.5)
 	var cy = clamp(sc.y + sc.h * 0.5, lo.y - sc.h * 0.5, hi.y + sc.h * 0.5)
 	var shift = Vector2(cx - (sc.x + sc.w * 0.5), cy - (sc.y + sc.h * 0.5))
-	sc.x = float(sc.x) + shift.x
-	sc.y = float(sc.y) + shift.y
-	if local_drag:
-		for s in _layout_drag_lay.screens:
-			s.x = float(s.x) + shift.x
-			s.y = float(s.y) + shift.y
+	if abs(shift.x) > 0.01 or abs(shift.y) > 0.01:
+		sc.x = float(sc.x) + shift.x
+		sc.y = float(sc.y) + shift.y
+		if local_drag:
+			for s in _layout_drag_lay.screens:
+				s.x = float(s.x) + shift.x
+				s.y = float(s.y) + shift.y
+		_layout_drag_guides = []
 	_layout_confirm.propose(_layout_confirm.baseline, OS.get_ticks_msec())
 
 
@@ -6987,16 +7271,29 @@ func _layout_drag_release():
 		return
 	var lay = _layout_drag_lay
 	var id = String(_layout_drag_id)
+	var edge = String(_layout_drag_edge)
+	var pre = _layout_drag_pre
 	_layout_drag_reset()
 	var sc = SCREEN_LAYOUT.screen_by_id(lay, id)
 	if sc == null:
 		return
 	var was_local = String(id) == SCREEN_LAYOUT.LOCAL_ID
-	var sn = {"x": sc.x, "y": sc.y, "snapped": false} if was_local \
-		else SCREEN_LAYOUT.snap(SCREEN_LAYOUT.all_screens(lay), id, sc.x, sc.y)
-	_lc_dbg("release id=%s de=(%s,%s) a=(%s,%s) snap=%s" % [str(id), str(sc.x), str(sc.y), str(sn.x), str(sn.y), str(sn.get("snapped", false))])
-	sc.x = float(sn.x)
-	sc.y = float(sn.y)
+	if edge != "":
+		# Resize: durante el gesto sólo se aplicaron rects sin solape; si aún
+		# así chocara, vuelve al rect previo (idéntico a Pantallas).
+		if not SCREEN_LAYOUT.fits(SCREEN_LAYOUT.all_screens(lay), id, sc.x, sc.y, sc.w, sc.h) \
+				and typeof(pre) == TYPE_DICTIONARY and not pre.empty():
+			sc.x = float(pre.x)
+			sc.y = float(pre.y)
+			sc.w = float(pre.w)
+			sc.h = float(pre.h)
+	elif not was_local:
+		# Movimiento: si el imán ya lo dejó tocando, queda tal cual; si no, el
+		# snap de contacto (misma regla que Pantallas).
+		if not SCREEN_LAYOUT.has_contact(SCREEN_LAYOUT.all_screens(lay), id):
+			var sn = SCREEN_LAYOUT.snap(SCREEN_LAYOUT.all_screens(lay), id, sc.x, sc.y)
+			sc.x = float(sn.x)
+			sc.y = float(sn.y)
 	_write_screen_layout({"version": SCREEN_LAYOUT.VERSION, "unit": "mm",
 		"local": lay.local, "screens": lay.screens})
 	_sync_directions_from_screen_layout()
@@ -7012,6 +7309,8 @@ func _layout_drag_reset():
 	_layout_drag_edge = ""
 	_layout_drag_lay = null
 	_layout_drag_tform = {}
+	_layout_drag_pre = {}
+	_layout_drag_guides = []
 
 
 func _layout_confirm_revert():
@@ -7278,12 +7577,7 @@ func propose_direction(host_id, direction):
 	_refresh_direction_views()
 	_persist_directions()
 	request_redraw()
-	var target = _inbox_peer_for(id)
-	if not bool(target.ok):
-		activity_error = "vecindario: " + String(target.error)
-		return
-	_send_inbox(String(target.peer), INBOX_MODEL.proposal_name(local),
-		HANDSHAKE.encode(HANDSHAKE.proposal(local, id, entry.direction)))
+	_send_direction(id, HANDSHAKE.proposal(local, id, entry.direction))
 
 
 # Responde la propuesta de `host_id`: acepta (confirma local) o rechaza (retira la
@@ -7310,14 +7604,38 @@ func answer_direction(host_id, accepted):
 	_refresh_direction_views()
 	_persist_directions()
 	request_redraw()
-	var target = _inbox_peer_for(id)
-	if not bool(target.ok):
-		activity_error = "vecindario: " + String(target.error)
+	_send_direction(id, HANDSHAKE.response(local, id, direction, bool(accepted)))
+
+
+# Envía el handshake de dirección por el CANAL PEER (TCP, ahora sí sin ssh). El
+# receptor lo aplica en `_peer_direction`. Asíncrono; un fallo no revierte el
+# estado local.
+func _send_direction(host_id, msg):
+	var ep = _peer_endpoint_for(host_id)
+	if not bool(ep.get("ok", false)):
+		activity_error = "vecindario: " + String(ep.error)
 		return
-	_send_inbox(String(target.peer), INBOX_MODEL.response_name(local),
-		HANDSHAKE.encode(HANDSHAKE.response(local, id, direction, bool(accepted))))
+	_peer_send_async([{"id": String(host_id), "host": String(ep.peer), "port": int(ep.port),
+		"token": _peer_token_get(String(host_id))}], "direction", msg)
 
 
+# Handler del método peer `direction`: aplica la propuesta/respuesta al modelo de
+# direcciones (mismo HANDSHAKE.apply que el buzón) y persiste.
+func _peer_direction(hid, msg):
+	if typeof(msg) != TYPE_DICTIONARY:
+		return false
+	var from = String(msg.get("from", "")).strip_edges()
+	if from == "":
+		return false
+	host_directions[from] = HANDSHAKE.apply(host_directions.get(from, {}), msg)
+	_refresh_direction_views()
+	_persist_directions()
+	request_redraw()
+	return true
+
+
+# Deprecado: el handshake ya no usa ssh (ver _send_direction). Se conserva para
+# compatibilidad de lectura; ya no se llama.
 # Lanza el envío ssh (ya con argv seguro del modelo puro) en un Thread de un solo
 # uso, reapeado en _inbox_poll. Un fallo de entrega no revierte el estado local.
 func _send_inbox(peer, remote_name, payload):
@@ -8214,10 +8532,17 @@ func _deskflow_follow(hid, state):
 	if settings_bridge == null or settings_bridge.model == null:
 		return
 	var cfg = settings_bridge.model.deskflow(settings_bridge.settings.get("deskflow", {}))
-	var ep = _peer_endpoint_for(hid)
-	var host = String(ep.get("peer", ""))
-	if host != "" and host.find(".") < 0 and not host.is_valid_ip_address():
-		host += ".local"
+	# Guarda el NOMBRE de pantalla del vecino (estable): la dirección se resuelve
+	# al escribir la conf y se refresca si cambia. Antes quedaba la IP, que se
+	# rompía en cuanto el servidor cambiaba de dirección.
+	var host = ""
+	if HOSTS_MODEL != null and neighborhood != null:
+		host = String(HOSTS_MODEL.deskflow_peer_name(neighborhood.hosts, hid))
+	if host == "":
+		var ep = _peer_endpoint_for(hid)
+		host = String(ep.get("peer", ""))
+		if host != "" and host.find(".") < 0 and not host.is_valid_ip_address():
+			host += ".local"
 	if state == "stopped":
 		if String(cfg.get("mode", "")) == "use_remote" and (host == "" or String(cfg.get("host", "")) == host):
 			_deskflow_write("off", "")
@@ -8268,6 +8593,14 @@ func _clip_sync_poll():
 	var texts = frame.clipboard.take_outbox()
 	if texts.empty():
 		return
+	var targets = _group_targets()
+	if targets.empty():
+		return
+	_peer_send_async(targets, "clip_set", {"text": String(texts[texts.size() - 1])})
+
+
+# Destinos del Grupo con canal peer vivo: [{id, host, port, token}].
+func _group_targets():
 	var ids = _peer_token_hids()
 	for k in host_directions.keys():
 		if not ids.has(String(k)):
@@ -8281,9 +8614,30 @@ func _clip_sync_poll():
 		if host.find(".") < 0 and not host.is_valid_ip_address():
 			host += ".local"
 		targets.append({"id": hid, "host": host, "port": int(ep.port), "token": _peer_token_get(hid)})
-	if targets.empty():
+	return targets
+
+
+# Exposé universal: el estado local se propaga a los demás equipos del Grupo, salvo a
+# mitad de un gesto (el scrub abre/cierra el exposé varias veces).
+var _expose_sent = false
+
+
+func _expose_sync_poll():
+	if expose == _expose_sent or swipe_live == SWIPE_SEG:
 		return
-	_peer_send_async(targets, "clip_set", {"text": String(texts[texts.size() - 1])})
+	_expose_sent = expose
+	var targets = _group_targets()
+	if not targets.empty():
+		_peer_send_async(targets, "expose", {"on": expose})
+
+
+# Handler del método peer `expose`: _expose_sent primero para no rebotar el eco.
+func _peer_expose(on):
+	on = bool(on)
+	_expose_sent = on
+	if expose != on:
+		_toggle_expose(on)
+	return true
 
 
 # Envía `method` a cada destino {id, host, port, token} en un Thread de un solo uso;
@@ -9741,6 +10095,34 @@ func _draw_layout_confirm_popup():
 					lbl = lbl.substr(0, maxch)
 				set_cursor_pos(o + r.position - origin + Vector2(3.0, 2.0) * s)
 				text_colored(Color(0.93, 0.95, 0.99, 1.0), lbl)
+			# Guías del imán (movimiento/resize en curso) y asa bajo el puntero.
+			var gcol = Color(1.0, 0.84, 0.43, 0.85)
+			for g in _layout_drag_guides:
+				var gv = float(g.get("value", 0.0))
+				if String(g.get("axis", "")) == "x":
+					var pa = SCREEN_LAYOUT.mm_pt(tform, Vector2(gv, float(tform.bbox.position.y)))
+					var pb = SCREEN_LAYOUT.mm_pt(tform, Vector2(gv, float(tform.bbox.position.y) + float(tform.bbox.size.y)))
+					imgui_draw_line(o + pa, o + pb, gcol, 1.0)
+				else:
+					var pc = SCREEN_LAYOUT.mm_pt(tform, Vector2(float(tform.bbox.position.x), gv))
+					var pd = SCREEN_LAYOUT.mm_pt(tform, Vector2(float(tform.bbox.position.x) + float(tform.bbox.size.x), gv))
+					imgui_draw_line(o + pc, o + pd, gcol, 1.0)
+			var hov = {"id": _layout_drag_id, "handle": _layout_drag_edge} \
+				if _layout_drag_id != "" else _layout_hover
+			if not hov.empty() and String(hov.get("handle", "")) != "":
+				for sc in SCREEN_LAYOUT.all_screens(preview):
+					if String(sc.get("id", "")) != String(hov.get("id", "")):
+						continue
+					var hr = SCREEN_LAYOUT.mm_rect(tform, sc)
+					var hnd = String(hov.get("handle", ""))
+					if hnd.find("e") >= 0:
+						imgui_draw_rect_filled(Rect2(o + hr.position + Vector2(hr.size.x - 2.0, 0.0), Vector2(2.0, hr.size.y)), gcol, 0.0)
+					if hnd.find("w") >= 0:
+						imgui_draw_rect_filled(Rect2(o + hr.position, Vector2(2.0, hr.size.y)), gcol, 0.0)
+					if hnd.find("s") >= 0:
+						imgui_draw_rect_filled(Rect2(o + hr.position + Vector2(0.0, hr.size.y - 2.0), Vector2(hr.size.x, 2.0)), gcol, 0.0)
+					if hnd.find("n") >= 0:
+						imgui_draw_rect_filled(Rect2(o + hr.position, Vector2(hr.size.x, 2.0)), gcol, 0.0)
 		set_cursor_pos(o + vsz - origin)
 		separator()
 		var secs = _layout_confirm.seconds_left(OS.get_ticks_msec())
@@ -9789,14 +10171,20 @@ func _lc_event_button(pos, pressed, in_window):
 func _lc_event_motion(pos):
 	if layout_confirm_canvas.size.x <= 0.0:
 		return
-	var move = _layout_drag_id != ""
-	if move:
-		var now4 = OS.get_ticks_msec()
-		if now4 - _lc_dbg_at >= 200:
-			_lc_dbg_at = now4
-			_lc_dbg("motion drag=%s pos=%s" % [str(_layout_drag_id), str(pos)])
-		_layout_drag_follow(pos - layout_confirm_canvas.position, layout_confirm_canvas)
+	var local = pos - layout_confirm_canvas.position
+	if _layout_drag_id != "":
+		_layout_drag_follow(local, layout_confirm_canvas)
 		request_redraw()
+		return
+	# Hover: resalta el asa bajo el puntero (sin arrastrar todavia).
+	var live = settings_bridge.settings.get("screens", {}) if settings_bridge != null else {}
+	var marks = SCREEN_LAYOUT.mini_map(live, Rect2(Vector2.ZERO, layout_confirm_canvas.size))
+	var pick = SCREEN_LAYOUT.mini_map_handle(marks, local)
+	if pick.empty():
+		pick = SCREEN_LAYOUT.mini_map_pick_near(marks, local)
+	_layout_hover = {"id": String(pick.get("id", "")), "handle": String(pick.get("handle", ""))} \
+		if not pick.empty() else {}
+	request_redraw()
 
 
 # Posición del popup-hud: cerca del puntero (offset abajo-derecha), recortado
@@ -10030,6 +10418,7 @@ func _on_toplevel_added(id):
 			activity_instance = null
 			_add_tile(id, name)
 			_focus_tile(id)
+			_wmem_apply(id)
 			return
 	# Sin actividad (o sin coincidencia con app_id/título): se creara una dinamica.
 	unmanaged.append(id)
@@ -10300,7 +10689,79 @@ func _open_unmanaged_window(id):
 	_pending_clear()
 	_add_tile(id)
 	_focus_tile(id)
+	_wmem_apply(id)
 	print("actividad dinamica ", name, " para toplevel ", id)
+
+
+# --- Memoria de ventanas entre reinicios ---------------------------------------
+# ~/.config/gdtk/windows.json (modelo window_memory.gd): modo, rect flotante y
+# maximizada por app_id+título. Al mapearse una ventana equivalente se aplica una vez
+# (no se relanzan apps). Se escribe sólo si cambió, como máximo cada WMEM_EVERY_MS.
+const WMEM_EVERY_MS = 5000
+var _wmem = null
+var _wmem_pending = []   # entradas del disco aún no reabiertas
+var _wmem_last = ""
+var _wmem_next = 0
+
+
+func _wmem_path():
+	var base = OS.get_environment("XDG_CONFIG_HOME")
+	if base == "":
+		var home = OS.get_environment("HOME")
+		if home == "":
+			return ""
+		base = home + "/.config"
+	return base + "/gdtk/windows.json"
+
+
+func _wmem_load():
+	_wmem = Host.sc("res://window_memory.gd")
+	var path = _wmem_path()
+	if _wmem == null or path == "":
+		_wmem = null
+		return
+	var f = File.new()
+	if f.open(path, File.READ) == OK:
+		_wmem_pending = _wmem.parse(f.get_as_text())
+		f.close()
+	_wmem_last = _wmem.serialize(_wmem_pending)
+
+
+func _wmem_poll(now):
+	if _wmem == null or now < _wmem_next or settings_bridge == null:
+		return
+	_wmem_next = now + WMEM_EVERY_MS
+	var live = []
+	for id in tiles:
+		if minimized.has(id) or dialogs.has(id) or not _id_alive(id):
+			continue
+		var app = String(compositor.get_app_id(id))
+		if app == "":
+			continue
+		live.append(_wmem.entry(app, compositor.get_title(id),
+			_wmem.TILED if hybrid.is_tiled(id) else _wmem.FLOATING,
+			float_memory.get(id, null), maximize_state.has(id)))
+	var text = _wmem.serialize(_wmem.merge(live, _wmem_pending))
+	if text == _wmem_last:
+		return
+	_wmem_last = text
+	settings_bridge.write_atomic(_wmem_path(), text)
+
+
+# Ventana recién mapeada: si coincide con una entrada guardada, recupera su modo y lugar.
+func _wmem_apply(id):
+	if _wmem == null or _wmem_pending.empty():
+		return
+	var e = _wmem.take(_wmem_pending, compositor.get_app_id(id), compositor.get_title(id))
+	if e == null:
+		return
+	if e.rect != null and hybrid.is_floating(id):
+		var r = e.rect
+		float_memory[id] = _wmem.clamp_rect(Rect2(r[0], r[1], r[2], r[3]), _tile_rect(_screen_size()))
+	if e.maximized:
+		_maximize_window(id)
+	elif e.mode == _wmem.TILED:
+		set_window_mode(id, WM_HYBRID.TILED)
 
 
 # Ancla flotante del escritorio virtual actual: el líder de la pantalla centrada
@@ -10573,6 +11034,8 @@ func _on_view_input(event):
 		return
 	if _capture_remote_input_event(event):
 		return
+	if pointer_grab_id >= 0 and _pointer_grab_input(event):
+		return
 	# K13: en modo flotante, la barra de título y los botones de la ventana se
 	# resuelven antes que el contenido del cliente (y antes del arrastre al Frame).
 	if _on_chrome_input(event):
@@ -10605,6 +11068,7 @@ func _on_view_input(event):
 			request_redraw()
 			return
 		if hit.id < 0:
+			hover_hit = null
 			# Drag nativo sobre el escritorio: limpiar el foco para que el drop no
 			# caiga en la última ventana; el botón que cierre el drag llega abajo.
 			if client_drag_active:
@@ -10649,6 +11113,9 @@ func _on_view_input(event):
 			return
 		compositor.pointer_motion(hit.id, hit.pos)
 		compositor.pointer_button(event.button_index, event.pressed)
+		if event.pressed and _grab_button(event.button_index):
+			pointer_grab_id = hit.id
+			pointer_grab_buttons[event.button_index] = true
 		if event.pressed:
 			if hit.dialog > 0:
 				compositor.focus(hit.id)
@@ -10671,6 +11138,78 @@ func _on_view_input(event):
 			return
 		_forward_pan(event)
 		return
+
+
+func _grab_button(b):
+	return b == BUTTON_LEFT or b == BUTTON_RIGHT or b == BUTTON_MIDDLE
+
+
+func _pointer_grab_clear():
+	pointer_grab_id = -1
+	pointer_grab_buttons.clear()
+
+
+# Posición global -> coords de buffer de la ventana `id`, aunque el puntero esté fuera.
+# El compositor limpia el foco si las coords caen fuera de la superficie
+# (wlr_xdg_surface_surface_at == NULL), así que se acota a la geometría.
+# ponytail: sin autoscroll fuera del borde; requiere que el módulo acepte coords fuera.
+func _grab_local_pos(id, pos):
+	var geo
+	var local
+	if dialogs.has(id):
+		geo = _dialog_geo(id)
+		local = pos - _dialog_rect(id).position + geo.position
+	else:
+		var r = tile_rects.get(id)
+		if r == null:
+			return null
+		var fit = tile_fit.get(id)
+		geo = compositor.get_geometry(id)
+		if fit != null and fit.scale > 0.0:
+			local = (pos - r.position - fit.offset) / fit.scale
+		else:
+			local = pos - r.position + geo.position
+	return Vector2(clamp(local.x, geo.position.x, max(geo.position.x, geo.end.x - 1.0)),
+		clamp(local.y, geo.position.y, max(geo.position.y, geo.end.y - 1.0)))
+
+
+# Devuelve true si el evento se consumió dentro del grab.
+func _pointer_grab_input(event):
+	# DnD nativo, ventana muerta o un arrastre propio del shell: el grab no aplica.
+	if client_drag_active or not _id_alive(pointer_grab_id) or chrome_drag != null \
+			or window_dragging or resize_handle != null:
+		_pointer_grab_clear()
+		return false
+	var id = pointer_grab_id
+	var pos = null
+	if event is InputEventMouseMotion or (event is InputEventMouseButton and _grab_button(event.button_index)):
+		# Un popup/hijo de la misma familia bajo el puntero gana sobre el grab.
+		var hit = _view_hit_test(event.position)
+		if hit.id >= 0 and _root_of(hit.id) == _root_of(id):
+			id = hit.id
+			pos = hit.pos
+		else:
+			pos = _grab_local_pos(id, event.position)
+	if pos == null:
+		_pointer_grab_clear()
+		return false
+	if event is InputEventMouseMotion:
+		if (event.button_mask & (BUTTON_MASK_LEFT | BUTTON_MASK_RIGHT | BUTTON_MASK_MIDDLE)) == 0:
+			_pointer_grab_clear()  # release perdido: no dejar el grab colgado
+			return false
+		last_pointer_pos = event.position
+		compositor.pointer_motion(id, pos)
+		return true
+	compositor.pointer_motion(id, pos)
+	compositor.pointer_button(event.button_index, event.pressed)
+	if event.pressed:
+		pointer_grab_buttons[event.button_index] = true
+	else:
+		pointer_grab_buttons.erase(event.button_index)
+		if pointer_grab_buttons.empty():
+			_pointer_grab_clear()
+			last_pointer_pos = event.position
+	return true
 
 
 # --- K13: input del chrome flotante ------------------------------------------
@@ -11046,7 +11585,17 @@ func _apply_live_float_move(id, frame_rect):
 func _focus_follow(hit):
 	var d = FOCUS_FOLLOW.decide(focused_tile, focused_dialog, hit.id, hit.dialog, minimized.has(hit.id))
 	if int(d.target) < 0:
+		hover_pend = {}
+		hover_hit = null
 		return
+	# Dwell: el foco por hover sólo cambia tras HOVER_DWELL_MS sobre la misma ventana
+	# (cruzar otras camino a una flotante no las enfoca ni las sube). El clic enfoca ya.
+	hover_pend = FOCUS_FOLLOW.dwell(hover_pend, [int(d.target), int(d.dialog)], OS.get_ticks_msec())
+	if not hover_pend.ready:
+		hover_hit = hit
+		return
+	hover_pend = {}
+	hover_hit = null
 	if int(d.dialog) > 0:
 		focused_dialog = int(d.dialog)
 		_compositor_focus(int(d.dialog), false)

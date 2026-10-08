@@ -36,6 +36,9 @@ const GLYPH = Color(0.06, 0.06, 0.08)
 
 var shell = null
 var id = -1
+# Modo diálogo: sólo sombra, detrás de la caja de un diálogo (shell._new_dialog_box).
+var dialog_box = null
+var _dlg_key = null
 
 
 func _ready():
@@ -49,7 +52,21 @@ func refresh(view_size):
 	update()
 
 
+# Diálogo: relayout/foco -> redibuja la sombra sólo si algo cambió.
+func dialog_sync(view_size):
+	var key = [view_size, dialog_box.rect_position, dialog_box.rect_size, shell.focused_dialog == id]
+	rect_size = view_size
+	if key != _dlg_key:
+		_dlg_key = key
+		update()
+
+
 func _draw():
+	if dialog_box != null:
+		if shell != null and is_instance_valid(dialog_box) and dialog_box.visible:
+			_draw_shadow(Rect2(dialog_box.rect_position, dialog_box.rect_size),
+				shell.get_imgui_scale(), shell.focused_dialog == id, shell._is_csd(id))
+		return
 	if shell == null or id < 0 or not shell.tiles.has(id):
 		return
 	if not shell.is_floating(id) or not shell.view.visible or shell.fullscreen_id == id:

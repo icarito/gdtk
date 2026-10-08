@@ -45,8 +45,23 @@ func _draw():
 		return
 	# Asas de redimensión de la franja enfocada: línea tenue del acento en el borde y
 	# asa resaltada al pasar (todo con el accent del shell).
+	var fr = shell.float_frames()
 	for h in (shell.handles if shell.view.visible else []):
-		draw_line(Vector2(h.x, h.y), Vector2(h.x, h.y + h.h), _acc(0.12), 1.0)
+		# La línea se corta donde una flotante la tapa (tiles_ui dibuja sobre `view`).
+		var segs = [[h.y, h.y + h.h]]
+		for r in fr:
+			if h.x < r.position.x or h.x > r.position.x + r.size.x:
+				continue
+			var nxt = []
+			for sg in segs:
+				if r.position.y > sg[0]:
+					nxt.append([sg[0], min(sg[1], r.position.y)])
+				if r.position.y + r.size.y < sg[1]:
+					nxt.append([max(sg[0], r.position.y + r.size.y), sg[1]])
+			segs = nxt
+		for sg in segs:
+			if sg[1] > sg[0]:
+				draw_line(Vector2(h.x, sg[0]), Vector2(h.x, sg[1]), _acc(0.12), 1.0)
 	if shell.hover_handle != null and shell.view.visible:
 		var h = shell.hover_handle
 		var cy = h.y + h.h * 0.5
