@@ -143,3 +143,17 @@ Briefs: .operator-shared/briefs/2026-10-07-K{1,2,3}-*.txt. Logs Kilo: /tmp/kilo-
   estirado a los costados. shell/ring_layout.gd. RING_LAYOUT pasa de `const preload` a
   `Host.sc` para que la recarga transaccional tome el .gd (preload quedaba cacheado).
 - bastion: rsync + 2 recargas transaccionales (mismo PID 19223, ventanas vivas).
+
+## Kilo tanda 2 (2026-10-07 23:10) — inotify, espiral real, dockapp volumen
+- Auto-rescan sin sondeo: nuevo módulo motor `modules/inotify` (GdtkFileWatch, Object
+  nativo) con inotify del kernel + hilo que drena eventos y emite `changed` por
+  call_deferred. shell/apps.gd `ensure_watch()`/`stop_watch()`: la señal marca sucio y
+  el tick reescanea; sin recorrer el FS. Fallback por firma sólo si el motor viejo no
+  trae la clase. Test `tests/inotify_watch_test.gd` (verde con el binario nuevo). Motor
+  recompilado e instalado (md5 cfefc290). El binario vivo sigue siendo el viejo hasta el
+  próximo lanzamiento; mientras tanto corre el fallback (10 s).
+- Espiral del Hogar: filotaxis de ángulo áureo SIN jitter (el jitter la veía como "sopa
+  de letras"). Anillo circular centrado.
+- Dockapp de volumen: `applet_volume.gd:draw` dibuja faders de mezclador (3 rieles con
+  perilla al nivel, relleno de nivel y valor; mute al piso). Reemplaza el texto VOL/47%.
+- bastion: rsync + motor nuevo + recarga transaccional. Commit de esta tanda.

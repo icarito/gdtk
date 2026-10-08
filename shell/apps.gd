@@ -25,12 +25,15 @@ var scanned = false
 var theme_dirs = []
 var field_code = RegEx.new()
 var path_dirs = []
-# Auto-detección de apps instaladas/desinstaladas: firma del último escaneo y cuándo
-# se comprobó. La firma es barata (mtime + conteo de .desktop por directorio); el
-# escaneo completo sólo corre cuando cambia. Ver maybe_rescan().
-const RESCAN_POLL_MS = 4000
+# Auto-detección de apps instaladas/desinstaladas. En el motor nuevo se usa inotify
+# del kernel (GdtkFileWatch, ver modules/inotify): la señal `changed` marca sucio y
+# el shell reescanea en el siguiente tick; SIN sondeo del filesystem. En un motor sin
+# la clase, cae a un sondeo lento por firma (mtime+conteo) para no perder la función.
+const RESCAN_POLL_MS = 10000
 var _apps_sig = ""
 var _rescan_ms = 0
+var _watch = null
+var _watch_dirty = false
 # pid lanzado desde la grilla -> nombre de la app (ver watch).
 var watching = {}
 # Rect en pantalla del último ícono elegido (para animar la entrada de su ventana).
@@ -76,16 +79,56 @@ func scan():
 	_find_theme_dirs()
 
 
+# Arranca el vigilante inotify (idempotente). Si el motor no trae GdtkFileWatch,
+# deja `_watch` en null y maybe_rescan cae al sondeo lento.
+func ensure_watch():
+	if _watch != null or not ClassDB.class_exists("GdtkFileWatch"):
+		return
+	var w = ClassDB.instance("GdtkFileWatch")
+	if w == null:
+		return
+	for d in data_dirs():
+		w.watch(d + "/applications")
+	if w.watch_count() <= 0:
+		return
+	w.connect("changed", self, "_on_fs_changed")
+	w.start()
+	_watch = w
+
+
+func _on_fs_changed():
+	_watch_dirty = true
+
+
+# Detiene el vigilante y espera su hilo (llamar al cerrar el shell). Idempotente.
+func stop_watch():
+	if _watch != null:
+		_watch.stop()
+		_watch = null
+
+
 # Auto-detección: si el conjunto de .desktop cambió (instalaron/desinstalaron una app,
-# incluida ~/.local/share/applications), vuelve a escanear. `now_ms` lo pasa el tick
-# idle del shell; no bloquea el render más que el walk de metadata, espaciado por
-# RESCAN_POLL_MS. Devuelve true si reescaneó (el llamador pide un frame).
+# incluida ~/.local/share/applications), vuelve a escanear. Con inotify el aviso llega
+# por señal (sin sondeo); sin la clase nativa cae a una firma por mtime+conteo cada
+# RESCAN_POLL_MS. `now_ms` lo pasa el tick idle del shell. Devuelve true si reescaneó.
 func maybe_rescan(now_ms):
-	if scanned and now_ms - _rescan_ms < RESCAN_POLL_MS:
+	if not scanned:
+		ensure_watch()
+		scan()
+		_apps_sig = _apps_signature()
+		return true
+	if _watch != null:
+		if _watch_dirty:
+			_watch_dirty = false
+			scan()
+			return true
+		return false
+	# Fallback (motor sin inotify): sondeo lento por firma.
+	if now_ms - _rescan_ms < RESCAN_POLL_MS:
 		return false
 	_rescan_ms = now_ms
 	var sig = _apps_signature()
-	if scanned and sig == _apps_sig:
+	if sig == _apps_sig:
 		return false
 	scan()
 	_apps_sig = sig

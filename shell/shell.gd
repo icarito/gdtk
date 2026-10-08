@@ -6944,6 +6944,9 @@ func _exit_tree():
 	if neighborhood != null:
 		neighborhood.stop()
 		neighborhood = null
+	# Apps: detiene el vigilante inotify y espera su hilo.
+	if apps != null:
+		apps.stop_watch()
 	# Volumen/brillo: detiene el worker y espera a que termine.
 	if system_osd != null:
 		system_osd.shutdown()

@@ -6,8 +6,8 @@ extends Reference
 # central. Extraída de shell.gd `_orbit_layout`/`_ring_clamp` para poder probarla
 # sin render ni estado global. El anillo es un círculo centrado (como el Hogar de
 # Sugar). Pocas entradas (n <= circle_max) → anillo ordenado; muchas → espiral de
-# ángulo áureo con dispersión orgánica, dentro del mismo radio (no se pega a los
-# costados en pantallas anchas).
+# ángulo áureo (filotaxis) en brazos prolijos, dentro del mismo radio (no se pega a
+# los costados en pantallas anchas).
 #
 # La unidad de rejilla `u` (= grid_unit(vp)) y el alto de barra del Frame `top`
 # (= frame_bar_h(vp)) se reciben como parámetros: el shell los calcula una sola
@@ -15,16 +15,14 @@ extends Reference
 # cada ítem (lado `btn`), ya limitada al lienzo útil.
 
 const GOLDEN_ANGLE = 2.399963229728653  # PI * (3 - sqrt(5))
-const RING_JITTER_A = 0.18
-const RING_JITTER_R = 0.05
 
 # Umbral por defecto del modo círculo/elipse; el caller lo pasa en `circle_max`.
 const RING_CIRCLE_MAX = 7
 
 
-# Distribución del anillo. `entries` sólo aporta el nombre para la dispersión de
-# la espiral (hash estable) y viene por último uso. `u` es la unidad de rejilla y
-# `top` el alto de las barras del Frame.
+# Distribución del anillo. `entries` es reservado (la espiral ya no usa hash por
+# nombre) y se mantiene en la firma por compatibilidad. `u` es la unidad de rejilla
+# y `top` el alto de las barras del Frame.
 static func orbit_layout(vp, n, entries, u, top, circle_max):
 	var out = []
 	if n <= 0:
@@ -50,22 +48,17 @@ static func orbit_layout(vp, n, entries, u, top, circle_max):
 			var center = Vector2(cx + cos(a) * r, cy + sin(a) * r)
 			out.append(ring_clamp(center, btn, vp, top))
 		return out
+	# Espiral de ángulo áureo (filotaxis), SIN jitter: los puntos caen sobre brazos
+	# de espiral prolijos y equiespaciados. El jitter anterior los desparramaba y se
+	# veía como "sopa de letras".
 	var margin = 10.0
-	var srad = max(btn * 1.4, radius - margin)
-	var f_in = clamp(max(u * 0.62, btn * 0.85) / srad, 0.12, 0.60)
+	var r_out = max(btn * 1.6, radius - margin)
+	var r_in = max(btn * 1.15, r_out * 0.34)
 	for i in range(n):
 		var t = (float(i) + 0.5) / float(n)
-		var f = lerp(f_in, 1.0, sqrt(t))
 		var a = -PI * 0.5 + GOLDEN_ANGLE * float(i)
-		var jr = 0.0
-		var ja = 0.0
-		if i < entries.size() and typeof(entries[i]) == TYPE_DICTIONARY:
-			var h = abs(String(entries[i].get("name", "")).hash())
-			ja = (float(h % 1000) / 1000.0 - 0.5) * RING_JITTER_A
-			jr = (float(int(h / 1000) % 1000) / 1000.0 - 0.5) * RING_JITTER_R
-		var ff = clamp(f + jr, f_in, 1.0)
-		var aa = a + ja
-		var center = Vector2(cx + cos(aa) * srad * ff, cy + sin(aa) * srad * ff)
+		var r = lerp(r_in, r_out, sqrt(t))
+		var center = Vector2(cx + cos(a) * r, cy + sin(a) * r)
 		out.append(ring_clamp(center, btn, vp, top))
 	return out
 
