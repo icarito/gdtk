@@ -122,8 +122,16 @@ Briefs: .operator-shared/briefs/2026-10-07-K{1,2,3}-*.txt. Logs Kilo: /tmp/kilo-
 - F6 applet_keyboard: dos escrituras concurrentes compartían el .tmp y se pisaban (test
   flaky 1/5). Reemplazado por UN hilo escritor con coalescencia (gana el último cuerpo);
   stress 12/12. tests/applet_keyboard_test.gd.
-- F6 sin recompilar aún: el binario vivo NO tiene `wl_server_set_keymap` (has_method=false);
-  el shell cae por swaymsg. Falta build+install.
+- F6 motor: compilado (slug, 9 s; binding `set_keymap` presente) e instalado en
+  `~/gdtk/bin/godot-gdtk` (md5 e86cbba6). El binario vivo todavía es el viejo: el keymap
+  del compositor embebido entra en el próximo lanzamiento/corte controlado; la vía swaymsg
+  + OSD ya funciona con la recarga.
+- applet_volume: `_run` construía `timeout timeout 2 wpctl ...` (rc 125 → "sin dato");
+  corregido a `timeout 2 wpctl ...`; verificado en vivo (47%, salida skl_hda).
+- Bastion deploy: rsync scripts + binario instalado + recarga transaccional (mismo PID
+  19223, ventanas vivas).
+- Deploy remoto tengu/cupid NO hecho: 192.168.18.163 sin ruta (ping 100% loss) y `cupid`
+  no resuelve ahora. Repetir `./deploy.sh icarito@tengu.local` cuando esté en línea.
 - frame_slots_test: fallaba desde Tanda 1 (el stub no tenía Host → `bar_slots`/`bar_order_anchor`
   Nil). Sembrados en el test: 65 ok.
 - Nuevo: auto-rescan de apps. shell/apps.gd `maybe_rescan(now)` (firma mtime+conteo por dir
