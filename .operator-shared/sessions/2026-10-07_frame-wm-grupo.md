@@ -165,3 +165,14 @@ Briefs: .operator-shared/briefs/2026-10-07-K{1,2,3}-*.txt. Logs Kilo: /tmp/kilo-
   `system_osd.rpc_action({"action":"up"|"down"})` y consume el evento. Sólo actúa si
   la barra está dibujada (`_applet_at` usa applets_drawn), así que con el Frame oculto
   no intercepta. Verificado en vivo (wpctl 62%->72%->62%).
+
+## Kilo tanda 4 (2026-10-07 23:40) — volumen LED verde vertical + refresco inmediato
+- `applet_volume.draw`: indicador VERTICAL segmentado estilo LED verde retro (12
+  segmentos de abajo hacia arriba, halo en los encendidos, valor abajo). La placa LCD
+  toma `frame.VOLUME_LED` (verde) como acento.
+- Rueda/pan: `frame._input` maneja WHEEL_UP/DOWN y además `InputEventPanGesture`
+  (scroll suave de touchpad) sobre `_applet_at == "volumen"`.
+- La "demora en reaccionar" era el período del worker del applet (PERIOD_MS=3000): el
+  volumen cambiaba al instante pero el bloque no releía. Ahora, tras la rueda/pan y
+  tras las teclas multimedia (shell._input), se llama `frame.volume.refresh(true)`
+  para releer ya.

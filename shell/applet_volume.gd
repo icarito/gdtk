@@ -126,12 +126,13 @@ func choose(sink):
 
 # --- dibujo en el bloque LCD (lo llama _draw_applet) -------------------------
 
-# Un solo indicador horizontal (sin faders ni arrastre): riel rehundido, relleno al
-# nivel y el valor abajo. El volumen se cambia con la rueda del mouse sobre el bloque
-# (ver frame._input), no arrastrando. Mute: sin relleno y knobs al piso.
+# Indicador VERTICAL de LED verde retro: columna de segmentos que se encienden de
+# abajo hacia arriba según el volumen, con el valor abajo. Mute/ sin dato: apagado.
+# El volumen se cambia con la rueda (o pan de touchpad) sobre el bloque, no arrastrando.
 func draw(frame, ui, scr, loc, w, h):
 	var on = state == "activo"
-	var col = frame._lcd(frame.NX_TEXT, "on" if on else "off")
+	var led = frame.VOLUME_LED
+	var dim = frame.VOLUME_LED_DIM
 	var pct = 0.0
 	var muted = false
 	if on:
@@ -139,23 +140,26 @@ func draw(frame, ui, scr, loc, w, h):
 			muted = true
 		elif value.ends_with("%"):
 			pct = clamp(float(value.trim_suffix("%")) / 100.0, 0.0, 1.0)
-	var bar_h = max(6.0, h * 0.34)
-	var bx = loc.x + 3.0
-	var bw = max(8.0, w - 6.0)
-	var by = loc.y + (h - bar_h) * 0.5 - 3.0
-	# Riel rehundido + relleno de nivel.
-	ui.imgui_draw_rect_filled(Rect2(Vector2(bx, by), Vector2(bw, bar_h)), Color(col.r, col.g, col.b, 0.26), 0.0)
-	var fill = 0.0 if muted else pct
-	if fill > 0.0:
-		ui.imgui_draw_rect_filled(Rect2(Vector2(bx, by), Vector2(bw * fill, bar_h)), col, 0.0)
-	# Marcas de cuarto: leen como indicador de volumen.
-	for i in range(1, 4):
-		var mx = bx + bw * float(i) / 4.0
-		ui.imgui_draw_rect_filled(Rect2(Vector2(mx - 0.5, by), Vector2(1.0, bar_h)), Color(0.0, 0.0, 0.0, 0.35), 0.0)
+	var text_h = 9.0
+	var n = 12
+	var gap = 1.0
+	var bar_top = loc.y + 2.0
+	var bar_bot = loc.y + h - text_h - 1.0
+	var cell_h = max(2.0, (bar_bot - bar_top - float(n - 1) * gap) / float(n))
+	var cw = max(10.0, w * 0.42)
+	var cx = loc.x + (w - cw) * 0.5
+	var lit = 0 if (muted or not on) else int(round(pct * float(n)))
+	for i in range(n):
+		var cell_y = bar_bot - float(i + 1) * cell_h - float(i) * gap
+		if i < lit:
+			ui.imgui_draw_rect_filled(Rect2(Vector2(cx - 1.0, cell_y - 0.5), Vector2(cw + 2.0, cell_h + 1.0)),
+				Color(led.r, led.g, led.b, 0.20), 0.0)
+		var c = led if i < lit else dim
+		ui.imgui_draw_rect_filled(Rect2(Vector2(cx, cell_y), Vector2(cw, cell_h)), c, 0.0)
 	var txt = value if on else ("--" if state == "no_disponible" else "…")
 	var tw = frame._text_w(ui, txt)
-	ui.set_cursor_pos(Vector2(loc.x + max(1.0, (w - tw) * 0.5), by + bar_h + 1.0))
-	ui.text_colored(col, txt)
+	ui.set_cursor_pos(Vector2(loc.x + max(1.0, (w - tw) * 0.5), bar_bot + 1.0))
+	ui.text_colored(led if on else dim, txt)
 
 
 # --- hilo de trabajo ---------------------------------------------------------

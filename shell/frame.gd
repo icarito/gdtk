@@ -55,6 +55,9 @@ const NX_TEXT = Color(0.93, 0.94, 0.97, 1.0)
 const NX_TEXT_DIM = Color(0.60, 0.63, 0.72, 1.0)
 const NX_SEL = Color(0.98, 0.80, 0.36, 1.0)
 const NX_CUR = Color(0.32, 0.60, 0.98, 1.0)  # fallback; ver _cur()
+# Dockapp de Volumen: fósforo verde de LED retro (indicador vertical segmentado).
+const VOLUME_LED = Color(0.36, 1.0, 0.42, 1.0)
+const VOLUME_LED_DIM = Color(0.09, 0.24, 0.12, 1.0)
 # Bisel "chiseled" y placa LCD (ideas de wmdockapps): el borde no es un tono plano
 # sino un degradé corto desde la cara, y las dockapps viven sobre una pantalla
 # rehundida con gradiente, dither y glare. Se calcula desde la cara de cada tesela
@@ -150,6 +153,7 @@ var mouse_down = false
 var mouse_pos = Vector2.ZERO
 var slide_instant = false  # aparecer sin animación (Alt+Tab)
 var show_until = 0         # ms hasta el que el Frame no se auto-oculta (Alt+Tab)
+var vol_pan = 0.0          # pan de touchpad acumulado sobre la dockapp de Volumen
 # Layout del último frame dibujado (para el control remoto / tests).
 var sysmon = Host.sc("res://sysmon.gd").new()
 var keyboard = Host.sc("res://applet_keyboard.gd").new()
@@ -2567,6 +2571,7 @@ func _input(event):
 			if _applet_at(mouse_pos) == "volumen":
 				if shell.system_osd != null:
 					shell.system_osd.rpc_action({"action": "up" if event.button_index == BUTTON_WHEEL_UP else "down"})
+				volume.refresh(true)  # el worker relee ya (si no, el bloque espera el período)
 				shell.request_redraw()
 				get_tree().set_input_as_handled()
 				return
@@ -2749,6 +2754,27 @@ func _input(event):
 				shell._zoom_step(-1)
 			shell.request_redraw()
 			get_tree().set_input_as_handled()
+		return
+	# Pan de touchpad sobre la dockapp de Volumen: sube/baja el volumen (pasos de
+	# 5%). Se acumula el delta y se aplica un paso por umbral. La rueda de mouse llega
+	# como WHEEL_UP/DOWN (manejado abajo); este caso cubre el scroll suave de touchpad.
+	if event is InputEventPanGesture:
+		if _applet_at(event.position) == "volumen":
+			vol_pan += event.delta.y
+			var vol_step = 14.0
+			while vol_pan <= -vol_step:
+				vol_pan += vol_step
+				if shell.system_osd != null:
+					shell.system_osd.rpc_action({"action": "up"})
+			while vol_pan >= vol_step:
+				vol_pan -= vol_step
+				if shell.system_osd != null:
+					shell.system_osd.rpc_action({"action": "down"})
+			volume.refresh(true)
+			shell.request_redraw()
+			get_tree().set_input_as_handled()
+		else:
+			vol_pan = 0.0
 		return
 	if not (event is InputEventKey):
 		return
@@ -3429,9 +3455,18 @@ func _draw_frame_popups(ui, mouse, side):
 			ui.text_disabled("Sin copias")
 		else:
 			for it in clipboard.items:
-				var summary = String(it.get("summary", ""))
-				if MENU_STYLE.item(ui, summary):
-					if clipboard.pick(String(it.get("name", ""))):
+				var name = String(it.get("name", ""))
+				# ID único por entrada: dos copias con el mismo texto (o resumen
+				# vacío) comparten etiqueta y el ID de ImGui choca ("IDs duplicados"),
+				# dejando el ítem inservible. El nombre de archivo sí es único.
+				var hit = false
+				if name != "":
+					ui.push_id(name)
+				hit = MENU_STYLE.item(ui, clipboard.item_label(String(it.get("summary", ""))))
+				if name != "":
+					ui.pop_id()
+				if hit:
+					if clipboard.pick(name):
 						shell.request_redraw()
 		ui.end_popup()
 	MENU_STYLE.end(ui)
@@ -3612,6 +3647,9 @@ func _draw_applet(ui, id, pos, scr, w, side, is_sel, mouse, is_ghost = false):
 		glow = 0.22
 	elif id == "reloj":
 		accent = NX_LCD_CYAN
+	elif id == "volumen":
+		accent = VOLUME_LED
+		glow = 0.20 if state == "activo" else 0.0
 	_lcd_plate(ui, gp_scr, gp_loc, gp_w, gp_h, accent, glow)
 	var v = _applet_value(id)
 	if id == "recursos":

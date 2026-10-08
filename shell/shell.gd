@@ -12079,6 +12079,9 @@ func _input(event):
 	# van a la app. En _input (no en _unhandled_input) para que también las vea con
 	# el puntero sobre el Home, donde ImGui marca todo como manejado.
 	if system_osd != null and system_osd.handle_input(event):
+		# Refresco inmediato de la dockapp de Volumen (si no, espera su período de 3 s).
+		if frame != null and frame.volume != null:
+			frame.volume.refresh(true)
 		request_redraw()
 		get_tree().set_input_as_handled()
 		return
