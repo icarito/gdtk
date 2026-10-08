@@ -316,6 +316,9 @@ join_profile_name() {
 		echo "$p"
 		return 0
 	done
+	# Si ya existe un perfil con ese nombre (p. ej. el AP del host), NO crear otro:
+	# el timer de cliente creaba un duplicado en cada tick.
+	profile_exists "$SSID" && return 0
 	nmt connection add type wifi ifname "$JOIN_IFACE" con-name "$SSID" ssid "$SSID" \
 		connection.autoconnect yes connection.autoconnect-priority 100 >>"$LOG" 2>&1 && echo "$SSID"
 }
