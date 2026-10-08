@@ -55,9 +55,9 @@ const NX_TEXT = Color(0.93, 0.94, 0.97, 1.0)
 const NX_TEXT_DIM = Color(0.60, 0.63, 0.72, 1.0)
 const NX_SEL = Color(0.98, 0.80, 0.36, 1.0)
 const NX_CUR = Color(0.32, 0.60, 0.98, 1.0)  # fallback; ver _cur()
-# Dockapp de Volumen: fósforo verde de LED retro (indicador vertical segmentado).
-const VOLUME_LED = Color(0.36, 1.0, 0.42, 1.0)
-const VOLUME_LED_DIM = Color(0.09, 0.24, 0.12, 1.0)
+# Dockapp de Volumen: panel oscuro con medidor rayado cian (estilo marco Sugar).
+const VOLUME_CYAN = Color(0.30, 0.95, 1.0, 1.0)
+const VOLUME_CYAN_DIM = Color(0.07, 0.22, 0.28, 1.0)
 # Bisel "chiseled" y placa LCD (ideas de wmdockapps): el borde no es un tono plano
 # sino un degradé corto desde la cara, y las dockapps viven sobre una pantalla
 # rehundida con gradiente, dither y glare. Se calcula desde la cara de cada tesela
@@ -3648,7 +3648,7 @@ func _draw_applet(ui, id, pos, scr, w, side, is_sel, mouse, is_ghost = false):
 	elif id == "reloj":
 		accent = NX_LCD_CYAN
 	elif id == "volumen":
-		accent = VOLUME_LED
+		accent = VOLUME_CYAN
 		glow = 0.20 if state == "activo" else 0.0
 	_lcd_plate(ui, gp_scr, gp_loc, gp_w, gp_h, accent, glow)
 	var v = _applet_value(id)

@@ -126,13 +126,14 @@ func choose(sink):
 
 # --- dibujo en el bloque LCD (lo llama _draw_applet) -------------------------
 
-# Indicador VERTICAL de LED verde retro: columna de segmentos que se encienden de
-# abajo hacia arriba según el volumen, con el valor abajo. Mute/ sin dato: apagado.
-# El volumen se cambia con la rueda (o pan de touchpad) sobre el bloque, no arrastrando.
+# Panel oscuro con medidor rayado cian, como el marco de volumen clásico de Sugar:
+# a la derecha una columna de líneas horizontales que se encienden hasta el nivel; a
+# la izquierda la lectura del porcentaje y una rampa en escalones. El volumen se
+# cambia con la rueda (o pan de touchpad) sobre el bloque, no arrastrando.
 func draw(frame, ui, scr, loc, w, h):
 	var on = state == "activo"
-	var led = frame.VOLUME_LED
-	var dim = frame.VOLUME_LED_DIM
+	var cyan = frame.VOLUME_CYAN
+	var dim = frame.VOLUME_CYAN_DIM
 	var pct = 0.0
 	var muted = false
 	if on:
@@ -140,32 +141,45 @@ func draw(frame, ui, scr, loc, w, h):
 			muted = true
 		elif value.ends_with("%"):
 			pct = clamp(float(value.trim_suffix("%")) / 100.0, 0.0, 1.0)
-	# El texto usa la fuente chica de labels; su alto real reserva el pie del bloque
-	# (con la fuente por defecto el "%" se salía por abajo del LCD).
-	var txt = value if on else ("--" if state == "no_disponible" else "…")
+
+	# Medidor rayado (derecha): filas horizontales, encendidas de abajo hacia arriba.
+	var m_w = max(8.0, w * 0.44)
+	var m_x = loc.x + w - m_w - 2.0
+	var m_top = loc.y + 2.0
+	var m_bot = loc.y + h - 2.0
+	var rows = 16
+	var row_h = 1.6
+	var step = max(0.5, (m_bot - m_top - row_h) / float(rows - 1))
+	var lit = 0 if (muted or not on) else int(round(pct * float(rows)))
+	for i in range(rows):
+		var y = m_bot - row_h - float(i) * step
+		ui.imgui_draw_rect_filled(Rect2(Vector2(m_x, y), Vector2(m_w, row_h)), cyan if i < lit else dim, 0.0)
+
+	# Lectura del valor (arriba-izquierda), sobre un recuadro más oscuro.
+	var l_x = loc.x + 2.0
+	var l_w = max(6.0, w - m_w - 6.0)
 	var small = frame._push_label_font(ui)
 	var th = 12.0
 	if ui.has_method("calc_text_size"):
 		th = max(8.0, ui.calc_text_size("00%").y)
-	var text_h = th + 1.0
-	var n = 12
-	var gap = 1.0
-	var bar_top = loc.y + 2.0
-	var bar_bot = loc.y + h - text_h
-	var cell_h = max(2.0, (bar_bot - bar_top - float(n - 1) * gap) / float(n))
-	var cw = max(10.0, w * 0.42)
-	var cx = loc.x + (w - cw) * 0.5
-	var lit = 0 if (muted or not on) else int(round(pct * float(n)))
-	for i in range(n):
-		var cell_y = bar_bot - float(i + 1) * cell_h - float(i) * gap
-		if i < lit:
-			ui.imgui_draw_rect_filled(Rect2(Vector2(cx - 1.0, cell_y - 0.5), Vector2(cw + 2.0, cell_h + 1.0)),
-				Color(led.r, led.g, led.b, 0.20), 0.0)
-		var c = led if i < lit else dim
-		ui.imgui_draw_rect_filled(Rect2(Vector2(cx, cell_y), Vector2(cw, cell_h)), c, 0.0)
+	var rd_h = th + 3.0
+	ui.imgui_draw_rect_filled(Rect2(Vector2(l_x, loc.y + 2.0), Vector2(l_w, rd_h)), Color(0.015, 0.05, 0.07, 1.0), 0.0)
+	var txt = value if on else ("--" if state == "no_disponible" else "…")
 	var tw = frame._text_w(ui, txt)
-	ui.set_cursor_pos(Vector2(loc.x + max(1.0, (w - tw) * 0.5), bar_bot))
-	ui.text_colored(led if on else dim, txt)
+	ui.set_cursor_pos(Vector2(l_x + max(0.5, (l_w - tw) * 0.5), loc.y + 3.0))
+	ui.text_colored(cyan if on else dim, txt)
+
+	# Rampa en escalones (motivo del icono): sube hacia la derecha.
+	var ramp_top = loc.y + 2.0 + rd_h + 2.0
+	var ramp_bot = loc.y + h - 2.0
+	var ramp_h = ramp_bot - ramp_top
+	if ramp_h > 3.0 and l_w > 4.0:
+		var steps = 5
+		var sw = l_w / float(steps)
+		for i in range(steps):
+			var bh = ramp_h * float(i + 1) / float(steps)
+			ui.imgui_draw_rect_filled(Rect2(Vector2(l_x + sw * float(i), ramp_bot - bh), Vector2(sw - 0.6, bh)),
+				cyan if on else dim, 0.0)
 	if small:
 		ui.pop_font()
 
