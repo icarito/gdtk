@@ -54,6 +54,25 @@ algoritmo**. Aclaración posterior: **nunca** deben quedar dos bloques en el mis
   `shell.gd`), `ring_frame_test` cuelga por clases nativas (dev binary).
 - Sync a `~/gdtk` hecho (md5 igual). **No** hubo reload/deploy ni commit.
 
+## Follow-up: mover un bloque corría a todos (Notificaciones, span 2)
+
+Síntoma reportado al probar: al mover un bloque "se movieron todos los demás debajo
+de él"; el bloque era **Notificaciones** (span 2).
+
+Causa raíz: `frame._order_remove` sacaba el ancho a vaciar del **último dibujo**
+(`_token_cells(... bar_layout ...)`). Durante el arrastre el token no está en
+`bar_layout`, así que el span caía a 1: al mover un bloque de 2 celdas solo se vaciaba
+una y los de su derecha se corrían una celda a la izquierda. `_slot_index` tenía el
+mismo sesgo en el cálculo del índice de soltado.
+
+Fix: usar el **span declarado** (`_token_span`) en `_order_remove` y en `_slot_index`
+(ambos lados). Así mover cualquier bloque —angosto o ancho— deja libres sus celdas y no
+mueve a los demás; el preview y el drop coinciden.
+
+Regresión en `tests/frame_slots_test.gd`: mover `p:a` de 0→12 con 6 bloques (nadie se
+corre, celda 0 queda vacía); mover `a:notificaciones` (span 2) deja 2 huecos y no corre
+a recursos/reloj/volumen; round-trip save→resolve no compacta.
+
 ## Pendiente / cómo probar
 
 Requiere **recargar el shell** (no se hizo: sesión con VS Code/Kilo abiertos). En

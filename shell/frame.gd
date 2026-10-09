@@ -435,10 +435,13 @@ func _sync_pins():
 
 
 func _order_remove(tok):
-	# La celda que deja queda VACÍA: los bloques de su derecha no se mueven.
+	# La celda que deja queda VACÍA: los bloques de su derecha no se mueven. El ancho
+	# sale del span DECLARADO del token (`_token_span`), no del último dibujo: durante
+	# el arrastre el token no está en `bar_layout`, y sacar 1 celda a un bloque ancho
+	# (p. ej. Notificaciones, span 2) corría a todos los de su derecha.
 	for zone in ["top", "dock"]:
 		if bar_order[zone].has(tok):
-			var span = _token_cells(tok, bar_layout.get(zone, []), bar_cell.get(zone, 0.0))
+			var span = _token_span(tok)
 			bar_order[zone] = seq_vacate(bar_order[zone], tok, span)
 
 
@@ -1282,9 +1285,9 @@ func _slot_index(zone, x, skip_tok, layout):
 	# El arrastrado deja su celda vacía (igual que al soltar): no corre a nadie.
 	var seq = bar_order.get(zone, [])
 	if skip_tok != "" and seq.has(skip_tok):
-		seq = seq_vacate(seq, skip_tok, _token_cells(skip_tok, layout, cell))
+		seq = seq_vacate(seq, skip_tok, _token_span(skip_tok))
 	for tok in seq:
-		var span = _token_cells(tok, layout, cell)
+		var span = _token_span(tok)
 		if cells + span > target:
 			return index
 		cells += span

@@ -498,6 +498,54 @@ func _init():
 	check("seq_to_cells/cells_to_seq respetan el span",
 		F.cells_to_seq(F.seq_to_cells(["a", "b", ""], {"a": 2})) == ["a", "b", ""])
 
+	# --- REGRESIÓN: mover un bloque no corre a los demás ------------------------
+	# Seis bloques en 0..5; mover el primero lejos (celda 12) deja hueco y nadie más
+	# cambia de celda (antes "se movían todos los demás").
+	f.bar_grid_state = {"top": big, "dock": big}
+	f.bar_cell = {"top": cell, "dock": cell}
+	f.bar_origin = {"top": x0, "dock": 0.0}
+	f.bar_layout = {"top": [], "dock": []}
+	f.bar_order = {"top": ["p:a", "p:b", "p:c", "p:d", "p:e", "p:f"], "dock": []}
+	f.bar_order_anchor = {"top": [], "dock": []}
+	f._place_token_cell("top", "p:a", 12, 1)
+	check("mover: el bloque va a la celda 12", f.bar_order["top"].find("p:a") == 12)
+	check("mover: b,c,d,e,f quedan en sus celdas",
+		f.bar_order["top"].find("p:b") == 1 and f.bar_order["top"].find("p:c") == 2 \
+		and f.bar_order["top"].find("p:d") == 3 and f.bar_order["top"].find("p:e") == 4 \
+		and f.bar_order["top"].find("p:f") == 5)
+	check("mover: la celda 0 queda vacía", f.bar_order["top"][0] == "")
+
+	# El preview de arrastre coincide con el drop (nadie se corre).
+	var pv = f._seq_with_drag("top", "p:a", x0 + 12.0 * cell + cell * 0.5, big, [], x0)
+	check("preview de arrastre: b..f intactos y a en la celda 12",
+		pv.find("p:b") == 1 and pv.find("p:f") == 5 and pv.find("p:a") == 12 and pv[0] == "")
+
+	# Notificaciones (span 2): mover un bloque ANCHO no corre a los demás ni compacta.
+	f.bar_order = {"top": ["a:recursos", "a:reloj", "a:notificaciones", "a:volumen"], "dock": []}
+	f.bar_order_anchor = {"top": [], "dock": []}
+	f._place_token_cell("top", "a:notificaciones", 10, 2)
+	check("span2: notificaciones va a la celda 10",
+		f.bar_order["top"].find("a:notificaciones") == 10)
+	check("span2: recursos/reloj/volumen quedan en sus celdas",
+		f.bar_order["top"].find("a:recursos") == 0 and f.bar_order["top"].find("a:reloj") == 1 \
+		and f.bar_order["top"].find("a:volumen") == 4)
+	check("span2: las celdas 2 y 3 quedan libres",
+		f.bar_order["top"][2] == "" and f.bar_order["top"][3] == "")
+	var pv2 = f._seq_with_drag("top", "a:notificaciones", x0 + 10.0 * cell + cell * 0.5, big, [], x0)
+	check("span2: preview tampoco corre a los demás",
+		pv2.find("a:recursos") == 0 and pv2.find("a:reloj") == 1 and pv2.find("a:volumen") == 4 \
+		and pv2.find("a:notificaciones") == 10)
+
+	# Round-trip save→resolve con el n actual: el orden no se compacta.
+	f.bar_order = {"top": ["p:a", "p:b", "p:c", "p:d", "p:e", "p:f"], "dock": []}
+	f.bar_order_anchor = {"top": [], "dock": []}
+	f._place_token_cell("top", "p:a", 12, 1)
+	f._sync_anchor()
+	f._resolve_order("top")
+	check("mover+resolve: no se compacta (a queda lejos, huecos intactos)",
+		f.bar_order["top"].find("p:a") >= 12 and f.bar_order["top"][0] == "" \
+		and f.bar_order["top"].find("p:b") == 1)
+
 	f.free()
 	print("FRAME_SLOTS_TEST_" + ("OK" if failed == 0 else "FAIL"))
 	OS.exit_code = 1 if failed > 0 else 0
