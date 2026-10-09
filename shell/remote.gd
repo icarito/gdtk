@@ -247,6 +247,19 @@ func _handle_line(conn, line):
 				_reply(conn, id, shell.system_osd.rpc_action(params))
 			else:
 				_fail(conn, id, -32003, "sin system_osd")
+		"notify":
+			# Bus de notificaciones: {action: push|list|dismiss|clear|silence|attention|panel|urgency}
+			# con summary/body/icon/urgency/id/window/text. Para tests e2e.
+			if shell.notify != null:
+				_reply(conn, id, shell.notify.rpc_action(params))
+			else:
+				_fail(conn, id, -32003, "sin bus de notificaciones")
+		"share":
+			# Interruptor maestro del intercambio (radar). {on: bool} o sin campo
+			# para alternar. Devuelve el estado resultante; se graba para persistir.
+			var want = bool(params.get("on", not shell._share_enabled()))
+			shell._share_all_enable(want)
+			_reply(conn, id, shell._share_enabled())
 		"open":
 			shell._open_by_name(str(params.get("name", "")))
 			_reply(conn, id, true)
@@ -428,6 +441,7 @@ func _state():
 		"units": shell.wm_units,
 		"modes": shell.hybrid.serialize(),
 		"minimized": shell.minimized.keys(),
+		"share_enabled": shell._share_enabled(),
 		"expose": shell.expose,
 		"expose_sel": shell.expose_sel,
 		"expose_scroll": shell.expose_scroll,
@@ -515,6 +529,18 @@ func _ensure_activity(cmd, args):
 
 
 func _screenshot(params):
+	# Selector interactivo y capturas por acción (pruebas/automatización): los maneja
+	# el overlay. `{"ui":true,"mode":"region|window|screen"}` abre el selector;
+	# `{"action":"screen|window|region","region":[x,y,w,h],"id":N}` captura directo,
+	# guarda a disco y copia al portapapeles embebido.
+	if bool(params.get("ui", false)) or params.has("action"):
+		if shell.screenshot_ui == null:
+			shell.screenshot_ui = Host.sc("res://screenshot_ui.gd").new()
+		var p = params.duplicate()
+		if bool(params.get("ui", false)) and not p.has("action"):
+			p["action"] = "open"
+		return {"ui": bool(params.get("ui", false)), "ok": shell.screenshot_ui.rpc_action(shell, p)}
+	# Compat: PNG del escritorio en base64 (script session/gdtk-screenshot, tests).
 	var max_width = int(params.get("max_width", 1280))
 	var image = get_viewport().get_texture().get_data()
 	image.flip_y()

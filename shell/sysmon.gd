@@ -26,6 +26,9 @@ var has_swap = false  # hay swap configurada (SwapTotal > 0)
 var temp_c = -1.0     # temperatura de CPU en °C (-1 = sin dato)
 var has_temp = false  # se leyó alguna zona térmica
 var temp_label = ""   # zona elegida (informativa; no se muestra como jerga)
+var fan_rpm = -1.0    # velocidad del ventilador (rpm, la más alta; -1 = sin dato)
+var has_fan = false   # se leyó algún fan de hwmon
+var fan_label = ""    # hwmon del fan (informativo)
 var governor = ""     # governor de cpu0 (schedutil, performance, …)
 var has_governor = false
 var governor_initial = ""  # governor al arrancar la sesión ("predeterminado")
@@ -79,6 +82,7 @@ func tick():
 			swap = 0.0
 			has_swap = false
 	_sample_thermal()
+	_sample_fan()
 	_sample_battery()
 	return true
 
@@ -131,6 +135,39 @@ func _sample_thermal():
 	temp_c = cpu_t if cpu_t >= 0.0 else any_t
 	temp_label = cpu_label
 	has_temp = temp_c >= 0.0
+
+
+# Ventilador: recorre /sys/class/hwmon/hwmon*/fan*_input y toma el mayor positivo
+# (el fan de CPU suele ser el que más gira). Sin hwmon de fan queda sin dato; la UI
+# lo muestra como "vent. s/d", nunca inventa un valor.
+func _sample_fan():
+	fan_rpm = -1.0
+	has_fan = false
+	fan_label = ""
+	var d = Directory.new()
+	if d.open("/sys/class/hwmon") != OK:
+		return
+	d.list_dir_begin(true, true)
+	var n = d.get_next()
+	while n != "":
+		if n.begins_with("hwmon"):
+			var base = "/sys/class/hwmon/" + n
+			var hname = _read_text(base + "/name")
+			var dd = Directory.new()
+			if dd.open(base) == OK:
+				dd.list_dir_begin(true, true)
+				var e = dd.get_next()
+				while e != "":
+					if e.begins_with("fan") and e.ends_with("_input"):
+						var v = _read_float(base + "/" + e)
+						if v > 0.0 and v > fan_rpm:
+							fan_rpm = v
+							fan_label = hname
+							has_fan = true
+					e = dd.get_next()
+				dd.list_dir_end()
+		n = d.get_next()
+	d.list_dir_end()
 
 
 # Lee una línea de sysfs. sysfs reporta tamaño 0, así que get_as_text() devuelve "";
@@ -249,6 +286,11 @@ func _cpu_now():
 # Valor de CPU actual (público para los applets del Frame).
 func cpu_now():
 	return _cpu_now()
+
+
+# Velocidad del ventilador en rpm (0.0 si no hay dato).
+func fan_now():
+	return fan_rpm if has_fan else 0.0
 
 
 # Gráfica de CPU + diales de MEM y SWP, a partir de la posición (coords de la ventana ImGui).

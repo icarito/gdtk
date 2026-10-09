@@ -79,10 +79,6 @@ void RemoteInput::_cb_motion(void *p_ud, double p_x, double p_y, int p_absolute)
 
 void RemoteInput::_cb_button(void *p_ud, uint32_t p_button, int p_pressed) {
 	RemoteInput *self = static_cast<RemoteInput *>(p_ud);
-	if (remote_pointer_ready(self->host) && !self->pointer_to_godot) {
-		remote_pointer_button(self->host, p_button, p_pressed);
-		return;
-	}
 	int index = 0;
 	switch (p_button) {
 		case EVDEV_BTN_LEFT: index = BUTTON_LEFT; break;
@@ -92,10 +88,14 @@ void RemoteInput::_cb_button(void *p_ud, uint32_t p_button, int p_pressed) {
 		case EVDEV_BTN_EXTRA: index = BUTTON_XBUTTON2; break;
 		default: return;
 	}
-	Input *input = Input::get_singleton();
-	Vector2 pos = self->_pointer();
 	int bit = 1 << (index - 1);
 	self->buttons = p_pressed ? (self->buttons | bit) : (self->buttons & ~bit);
+	if (remote_pointer_ready(self->host) && !self->pointer_to_godot) {
+		remote_pointer_button(self->host, p_button, p_pressed);
+		return;
+	}
+	Input *input = Input::get_singleton();
+	Vector2 pos = self->_pointer();
 	int mask = p_pressed ? (input->get_mouse_button_mask() | bit) : (input->get_mouse_button_mask() & ~bit);
 	mask |= self->buttons;
 	Ref<InputEventMouseButton> ev;
@@ -212,9 +212,6 @@ void RemoteInput::_cb_request(void *p_ud, int p_id, int p_pid, const char *p_app
 // estado XKB. Si no, un cliente que se cortó con Ctrl/Shift apretado deja el modificador
 // pegado para el próximo cliente (todo llega con Ctrl).
 void RemoteInput::_release_all() {
-	if (state == NULL) {
-		return;
-	}
 	Vector<uint32_t> keys;
 	for (Map<uint32_t, uint8_t>::Element *e = pressed_keys.front(); e; e = e->next()) {
 		keys.push_back(e->key());
@@ -223,15 +220,19 @@ void RemoteInput::_release_all() {
 	for (int i = 0; i < keys.size(); i++) {
 		_cb_key(this, keys[i], 0);
 	}
+	const int godot_buttons[] = { BUTTON_LEFT, BUTTON_RIGHT, BUTTON_MIDDLE, BUTTON_XBUTTON1, BUTTON_XBUTTON2 };
+	const uint32_t evdev_buttons[] = { EVDEV_BTN_LEFT, EVDEV_BTN_RIGHT, EVDEV_BTN_MIDDLE, EVDEV_BTN_SIDE, EVDEV_BTN_EXTRA };
 	for (int b = 0; b < 5; b++) {
-		if (buttons & (1 << b)) {
-			_cb_button(this, EVDEV_BTN_LEFT + b, 0);
+		if (buttons & (1 << (godot_buttons[b] - 1))) {
+			_cb_button(this, evdev_buttons[b], 0);
 		}
 	}
 	buttons = 0;
 	scroll_acc = Vector2();
-	xkb_state_unref(state);
-	state = xkb_state_new(keymap);
+	if (state != NULL) {
+		xkb_state_unref(state);
+	}
+	state = keymap != NULL ? xkb_state_new(keymap) : NULL;
 }
 
 void RemoteInput::_bind_methods() {
@@ -288,6 +289,12 @@ String RemoteInput::start() {
 	}
 	evdev_to_godot[EVDEV_KEY_RIGHTSHIFT] = KEY_SHIFT;
 	evdev_to_godot[EVDEV_KEY_RIGHTCTRL] = KEY_CONTROL;
+	// AltGr: xkeyboard-config ata ISO_Level3_Shift a <LVL3> (keycode 92 = evdev 84) además
+	// de <RALT> (100). Deskflow (cliente) mapea kKeyAltGr al botón 84 y, sin este alias,
+	// `_cb_key` lo descarta (physical=0, scancode=0, unicode=0) y AltGr no llega al
+	// compositor (síntoma: AltGr+tecla da el carácter base, p. ej. AltGr+2 -> "2" y no "@").
+	// Se re-emite como RALT (100) vía KEY_HYPER_R → _scancode_to_evdev.
+	evdev_to_godot[84] = KEY_HYPER_R;
 
 	xkb = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
 	struct xkb_rule_names names = {};

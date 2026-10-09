@@ -215,3 +215,30 @@ Briefs: .operator-shared/briefs/2026-10-07-K{1,2,3}-*.txt. Logs Kilo: /tmp/kilo-
   árbol vivo arranca limpio en el próximo login (elegir la sesión gdtk en GDM).
 - `frame.gd` sigue SIN COMMITEAR a propósito: contiene el WIP de la otra sesión. Sólo se
   armó el fix de parseo en el archivo desplegado.
+
+## Kilo (2026-10-08 16:30) — exposé universal: Deskflow no dejaba cambiar de pantalla
+- Causa: `_capture_remote_input_event` (shell.gd:12270) cortaba TODO el input hacia
+  RemoteInput/Deskflow con `if expose: return false`; el puntero nunca llegaba a la
+  barrera de borde y no se podía cambiar de pantalla del Grupo con el exposé abierto.
+- Fix: se corta el cruce SÓLO mientras se arrastra una miniatura (`expose_drag != null`);
+  sin arrastre el borde sigue disponible (el guard de `button_mask` ya frena el arrastre).
+  En `_toggle_expose(on)` se libera la captura remota si estaba activa, así
+  `_sync_capture_cursor` no la re-lockea cada frame.
+- Test: `tests/input_capture_cursor_test.gd` +2 checks (cruce permitido sin arrastre;
+  negado arrastrando). `shell.gd` parsea con el binario instalado. Sync de `shell.gd` a
+  `~/gdtk` + recarga transaccional verificada (mismo PID 876253, 5 ventanas vivas).
+
+## Kilo (2026-10-08 19:15) — el Frame oculto seguía comiendo clics
+- B1 reaparece por un hueco: `set_visible(false)` (frame.gd:2415) reseteaba presses y
+  drags pero NO `shared_power_rect`, así que el interruptor I/O del radar quedaba con el
+  rect del último dibujo; con la franja oculta un clic ahí se consumía y, al soltar,
+  disparaba `_share_all_toggle()`. Los demás hit-tests sí quedaban inertes (layouts
+  limpiados por `draw()` al no estar `drawn`).
+- Fix: `bars_shown()` (Home/visible/pin/exposé) + `drop_mouse_interaction()` (resetea
+  presses, drags y rects del último dibujo). En `_input`, para eventos de mouse con las
+  barras fuera se descarta el estado antes de seguir; NO hay `return`, así los gestos
+  globales (Super+rueda, pinch, vchain, Super+arrastrar) siguen. Además `set_visible(false)`
+  limpia `shared_power_rect`.
+- Test: `tests/frame_hidden_mouse_test.gd` (8 ok, extrae las funciones reales). `frame.gd`
+  y `shell.gd` parsean con el binario instalado; `frame_menu_test` 17 ok. Sync de
+  `shell/frame.gd` a `~/gdtk` + recarga transaccional (mismo PID 876253).

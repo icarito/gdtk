@@ -2,50 +2,113 @@
 # Historial del portapapeles de las apps embebidas (applet Portapapeles del Frame,
 # shell/applet_clipboard.gd). POSIX sh.
 #
-#   gdtk-clipboard watch <wayland-display>   vigía único (flock); despierta con cada copia
-#   gdtk-clipboard store                     guarda stdin como entrada (lo llama wl-paste)
-#   gdtk-clipboard set <wayland-display> <f> pone el texto de <f> como selección y borra <f>
-#                                            (lo que llega de otro equipo del Grupo)
+#   gdtk-clipboard watch <wayland-display>   vigías únicos (flock); despiertan con cada copia
+#   gdtk-clipboard store-text | store-image   guardan stdin como entrada (los llama wl-paste)
+#   gdtk-clipboard set <wayland-display> <f>  pone <f> como selección y borra <f>
+#                                            (texto o .png; lo que llega del Grupo o un pick)
 #
 # Requiere que el compositor ofrezca ext-data-control-v1 (modules/wayland/wl_server.c):
 # sin eso `wl-paste --watch` sale con error y el applet muestra «no disponible".
 # El historial vive en XDG_RUNTIME_DIR (tmpfs, 0700): se borra al cerrar sesión.
 # Una entrada = un archivo con nombre de reloj en ns (orden lexicográfico = orden real).
+#   * texto: archivo sin extensión.
+#   * imagen: archivo .png (así el applet la muestra como imagen, no como su HTML).
 # Lo que el gestor de contraseñas marca como sensible (CLIPBOARD_STATE=sensitive) no
 # se guarda.
 
 dir="${XDG_RUNTIME_DIR:-/tmp}/gdtk/clipboard"
 max=50
 
+# Borra las entradas más viejas por encima del tope (nombres ordenables por reloj).
+prune() {
+	ls -1 "$dir" 2>/dev/null | grep -E '^[0-9]+(\.png)?$' | sort | head -n -"$max" |
+		while IFS= read -r f; do rm -f -- "$dir/$f"; done
+}
+
 case "$1" in
 watch)
 	[ -n "$2" ] || exit 2
 	command -v wl-paste >/dev/null 2>&1 || { echo "gdtk-clipboard: falta wl-paste" >&2; exit 3; }
 	mkdir -p "$dir" && chmod 700 "$dir" || exit 1
-	# El lock lo tiene el vigía vivo: relanzar es idempotente.
-	WAYLAND_DISPLAY="$2" exec flock -n "$dir/.lock" wl-paste --type text --watch "$0" store
+	# Dos vigías (texto e imagen) bajo un mismo lock: relanzar es idempotente. Cada
+	# uno dispara con su tipo para cubrir selecciones que sólo ofrecen texto o sólo
+	# imagen; el de texto se abstiene si hay imagen (ver store-text).
+	exec flock -n "$dir/.lock" sh -c '
+		"$0" wl-text "$1" &
+		"$0" wl-image "$1" &
+		wait
+	' "$0" "$2"
 	;;
-store)
+wl-text)
+	[ -n "$2" ] || exit 2
+	mkdir -p "$dir" && chmod 700 "$dir" || exit 1
+	WAYLAND_DISPLAY="$2" exec wl-paste --type text --watch "$0" store-text
+	;;
+wl-image)
+	[ -n "$2" ] || exit 2
+	mkdir -p "$dir" && chmod 700 "$dir" || exit 1
+	WAYLAND_DISPLAY="$2" exec wl-paste --type image/png --watch "$0" store-image
+	;;
+store-text)
 	[ "${CLIPBOARD_STATE:-data}" = data ] || exit 0
+	# Copiar una imagen suele ofrecer además texto (en el navegador, el HTML
+	# `<meta ...>` que la referencia): eso NO se guarda como texto, lo maneja
+	# store-image. Sin esto el historial mostraba el `<meta ...>` en vez de la imagen.
+	wl-paste --list-types 2>/dev/null | grep -q '^image/' && exit 0
 	umask 077
 	tmp="$dir/.in.$$"
-	head -c 65536 >"$tmp"
-	last="$(ls "$dir" | tail -n 1)"
-	if [ ! -s "$tmp" ] || { [ -n "$last" ] && cmp -s "$tmp" "$dir/$last"; }; then
+	# Preferir text/plain explícito; si el compositor sólo ofrece text/html, caer a
+	# `--type text` y descartar lo que parezca HTML.
+	if wl-paste --no-newline --type text/plain >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+		:
+	elif wl-paste --no-newline --type text >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+		if head -c 128 "$tmp" | grep -qaiE '<(!doctype|html|meta)'; then
+			rm -f "$tmp"; exit 0
+		fi
+	else
+		rm -f "$tmp"; exit 0
+	fi
+	last="$(ls -1 "$dir" 2>/dev/null | grep -E '^[0-9]+$' | sort | tail -n1)"
+	if [ -n "$last" ] && cmp -s "$tmp" "$dir/$last"; then
 		rm -f "$tmp"
 		exit 0
 	fi
 	mv "$tmp" "$dir/$(date +%s%N)"
-	ls "$dir" | head -n -"$max" | (cd "$dir" && xargs -r rm -f --)
+	prune
+	;;
+store-image)
+	[ "${CLIPBOARD_STATE:-data}" = data ] || exit 0
+	umask 077
+	tmp="$dir/.in.$$"
+	wl-paste --type image/png >"$tmp" 2>/dev/null || { rm -f "$tmp"; exit 0; }
+	[ -s "$tmp" ] || { rm -f "$tmp"; exit 0; }
+	# Firma PNG (\x89PNG\r\n\x1a\n): no guardar un archivo vacío/corrupto como imagen.
+	sig="$(head -c 8 "$tmp" 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')"
+	[ "$sig" = 89504e470d0a1a0a ] || { rm -f "$tmp"; exit 0; }
+	last="$(ls -1 "$dir" 2>/dev/null | grep -E '\.png$' | sort | tail -n1)"
+	if [ -n "$last" ] && cmp -s "$tmp" "$dir/$last"; then
+		rm -f "$tmp"
+		exit 0
+	fi
+	mv "$tmp" "$dir/$(date +%s%N).png"
+	prune
+	;;
+store)
+	exec "$0" store-text
 	;;
 set)
 	[ -n "$2" ] && [ -f "$3" ] || exit 2
+	# El tipo lo decide la extensión: un .png es una imagen, el resto, texto.
+	case "$3" in
+		*.png) itype=image/png ;;
+		*)     itype='text/plain;charset=utf-8' ;;
+	esac
 	# wl-copy queda sirviendo la selección en segundo plano; el archivo ya no hace falta.
-	WAYLAND_DISPLAY="$2" wl-copy --type 'text/plain;charset=utf-8' <"$3"
+	WAYLAND_DISPLAY="$2" wl-copy --type "$itype" <"$3"
 	rm -f "$3"
 	;;
 *)
-	echo "uso: $0 watch <wayland-display> | store | set <wayland-display> <archivo>" >&2
+	echo "uso: $0 watch <wayland-display> | store-text | store-image | set <wayland-display> <archivo>" >&2
 	exit 2
 	;;
 esac

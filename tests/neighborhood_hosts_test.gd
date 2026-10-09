@@ -107,5 +107,14 @@ func _init():
 	check("deskflow: nombre de pantalla por id",
 		nb.deskflow_peer_name(df_hosts, "a1c5") == "bastion")
 
+	var dual = df_hosts.duplicate(true)
+	var v6 = dual[0].services[0].duplicate(true)
+	v6.address = "fe80::1234"
+	dual[0].services.push_front(v6)
+	check("deskflow prefiere IPv4 aunque Avahi entregue IPv6 primero",
+		nb.deskflow_remote_host(dual, "bastion") == "192.168.18.91")
+	dual[0].services.invert()
+	check("deskflow no cambia por orden de Avahi",
+		nb.deskflow_remote_host(dual, "bastion") == "192.168.18.91")
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

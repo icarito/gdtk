@@ -29,7 +29,15 @@ func _init():
 	check("applet_menu teclado", F.applet_menu("teclado") == "teclado")
 	check("applet_menu termico", F.applet_menu("termico") == "gov")
 	check("applet_menu reloj", F.applet_menu("reloj") == "reloj")
+	check("applet_menu notificaciones", F.applet_menu("notificaciones") == "notificaciones")
 	check("applet_menu sin menú", F.applet_menu("recursos") == "" and F.applet_menu("ventanas") == "")
+
+	# Span declarado y override persistido del applet Notificaciones (2 por defecto).
+	check("token_span notificaciones = 2", F.token_span("a:notificaciones") == 2)
+	check("span override 3", F.applet_span_override(2, {"notificaciones": 3}, "notificaciones") == 3)
+	check("span sin override", F.applet_span_override(2, {}, "notificaciones") == 2)
+	check("span inválido cae al declarado",
+		F.applet_span_override(2, {"notificaciones": 0}, "notificaciones") == 2)
 
 	# Sombra del Frame: ahora son filas dibujadas dentro de las ventanas reales, no
 	# ventanas ImGui separadas que puedan capturar mouse sobre las apps.

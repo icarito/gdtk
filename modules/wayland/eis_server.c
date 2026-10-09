@@ -100,6 +100,9 @@ struct eis_server {
 	struct eis *test;
 	struct session *sessions;
 	struct client *clients;
+	// El input inyectado comparte estado en RemoteInput: sólo el sender que lo
+	// posee puede soltarlo al detenerse/desconectarse, no un cliente IC ajeno.
+	struct client *input_owner;
 	int keymap_fd;
 	size_t keymap_size;
 	int w, h, next_id;
@@ -163,6 +166,12 @@ static void device_update(struct eis_server *s, struct client *c) {
 
 static void client_free(struct eis_server *s, struct client *c) {
 	struct session *se = c->session;
+	if (s->input_owner == c) {
+		s->input_owner = NULL;
+		if (s->cb.stop_emulating) {
+			s->cb.stop_emulating(s->cb.ud);
+		}
+	}
 	for (struct client **p = &s->clients; *p; p = &(*p)->next) {
 		if (*p == c) {
 			*p = c->next;
@@ -231,11 +240,10 @@ static struct session *capture_active(struct eis_server *s) {
 	return NULL;
 }
 
-// El shell manda milisegundos (OS.get_ticks_msec): libei espera CLOCK_MONOTONIC en µs.
+// Godot manda ms desde el arranque del proceso (CLOCK_MONOTONIC_RAW), mientras
+// libei exige CLOCK_MONOTONIC absoluto en µs. No son el mismo origen ni reloj.
 static uint64_t capture_time(uint64_t time) {
-	if (time > 0) {
-		return time * 1000ULL;
-	}
+	(void)time;
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
@@ -353,7 +361,23 @@ static void handle_eis(struct eis_server *s, struct session *se, struct eis *ctx
 		struct eis_client *ec = eis_event_get_client(e);
 		struct client *c = ec ? eis_client_get_user_data(ec) : NULL;
 		void *ud = s->cb.ud;
-		switch (eis_event_get_type(e)) {
+		enum eis_event_type type = eis_event_get_type(e);
+		// START normalmente precede al input; aceptar también el primer evento
+		// cubre clientes que no notifican el inicio. Una conexión inactiva nunca
+		// toma propiedad ni limpia teclas de otro sender.
+		if (c && eis_client_is_sender(ec) &&
+				(type == EIS_EVENT_DEVICE_START_EMULATING ||
+				 type == EIS_EVENT_POINTER_MOTION || type == EIS_EVENT_POINTER_MOTION_ABSOLUTE ||
+				 type == EIS_EVENT_BUTTON_BUTTON || type == EIS_EVENT_SCROLL_DELTA ||
+				 type == EIS_EVENT_SCROLL_DISCRETE || type == EIS_EVENT_KEYBOARD_KEY)) {
+			if (s->input_owner != c) {
+				if (s->input_owner && s->cb.stop_emulating) {
+					s->cb.stop_emulating(ud);
+				}
+				s->input_owner = c;
+			}
+		}
+		switch (type) {
 			case EIS_EVENT_CLIENT_CONNECT:
 				c = calloc(1, sizeof(*c));
 				c->ctx = ctx;
@@ -414,8 +438,12 @@ static void handle_eis(struct eis_server *s, struct session *se, struct eis *ctx
 				s->cb.key(ud, eis_event_keyboard_get_key(e), eis_event_keyboard_get_key_is_press(e));
 				break;
 			case EIS_EVENT_DEVICE_STOP_EMULATING:
-				if (s->cb.stop_emulating != NULL) {
-					s->cb.stop_emulating(ud);
+			case EIS_EVENT_DEVICE_CLOSED:
+				if (c && s->input_owner == c) {
+					s->input_owner = NULL;
+					if (s->cb.stop_emulating != NULL) {
+						s->cb.stop_emulating(ud);
+					}
 				}
 				break;
 			default:

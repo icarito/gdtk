@@ -381,7 +381,7 @@ static func _deskflow_actions(df, local, host):
 					plan = null
 				else:
 					var settings_text = DESKFLOW_SETTINGS.build_server_settings(local_name,
-						layout_path, _announced_port(df))
+						layout_path, _announced_port(df), [local_name, peer_name])
 					if settings_text == "":
 						enabled = false
 						reason = "ajustes Deskflow inválidos"

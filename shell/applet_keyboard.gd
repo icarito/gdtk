@@ -27,11 +27,17 @@ const SLEEP_STEP_MS = 100
 const TIMEOUT_S = "2"
 
 # Ids exactos que ofrece el selector (frame.gd) y su etiqueta corta/larga. La etiqueta
-# corta es la que cabe en el bloque de 44 px; la larga va al tooltip.
+# corta es la que cabe en el bloque de 44 px; la larga va al tooltip. ESPEJA la lista
+# KEYBOARDS del modelo de Configuración (settings/settings_model.gd): cualquier id
+# elegible desde Settings rota bien con Super+Espacio.
 const LAYOUTS = {
 	"es": {"label": "ES", "name": "Español (ES)"},
 	"latam": {"label": "LAT", "name": "Latinoamericano (LAT)"},
 	"us": {"label": "US", "name": "Inglés (US)"},
+	"gb": {"label": "GB", "name": "Británica (GB)"},
+	"br": {"label": "BR", "name": "Brasileña (BR)"},
+	"de": {"label": "DE", "name": "Alemana (DE)"},
+	"fr": {"label": "FR", "name": "Francesa (FR)"},
 }
 
 # activo | cambiando | error | sin_dato; se copian del snapshot del worker.
@@ -77,6 +83,7 @@ var _want_stop = false
 var _want_refresh = false
 var _writer = null
 var _write_pending = false
+var _write_busy = false    # el escritor está ejecutando tmp+rename (no adoptar del disco)
 var _write_path = ""
 var _write_body = ""
 
@@ -133,6 +140,8 @@ func refresh(force := false):
 	var changed = state != ns or value != nv or detail != nd
 	if current == "" and _seed_active():
 		changed = true
+	if _adopt_external_list():
+		changed = true
 	state = ns
 	value = nv
 	detail = nd
@@ -156,20 +165,63 @@ func _seed_active():
 		if LAYOUTS.has(l) and not list.has(l):
 			list.append(l)
 	if list.empty():
+		# Sin GDTK_LAYOUTS configurada: se siembra con TODAS las distribuciones conocidas
+		# para que Super+Espacio funcione desde el arranque; el popup deja recortar la lista.
+		# La actual va PRIMERO porque `_persist_active` escribe active[0] como
+		# XKB_DEFAULT_LAYOUT (así la próxima sesión NO cambia de distribución).
 		var first = env if env != "" else cfg_layout
 		if LAYOUTS.has(first):
 			list.append(first)
+		for id in LAYOUTS.keys():
+			if not list.has(id):
+				list.append(id)
+	if list.empty():
+		var fallback = env if env != "" else cfg_layout
+		if LAYOUTS.has(fallback):
+			list.append(fallback)
 	active = list
 	current = env if env != "" else (list[0] if not list.empty() else "")
 	return current != ""
 
 
-# Siguiente distribución de la lista activa tras `current` ("" si hay menos de dos).
+# Siguiente distribución de la lista activa tras `current`. Si la lista tiene menos de
+# dos (p. ej. config vieja con un solo GDTK_LAYOUTS), cae a todas las conocidas para que
+# la hotkey nunca quede muda. "" si igual no hay con qué rotar.
 func next_layout():
-	if active.size() < 2:
+	var list = active
+	if list.size() < 2:
+		list = LAYOUTS.keys()
+	if list.size() < 2:
 		return ""
-	var i = active.find(current)
-	return active[(i + 1) % active.size()]
+	var i = list.find(current)
+	if i < 0:
+		i = 0
+	return list[(i + 1) % list.size()]
+
+
+# Adopta una lista escrita POR OTRO programa (la app Configuración reescribe
+# GDTK_LAYOUTS al guardar; el shell no la toca). Reordena la lista activa sin cambiar
+# la distribución en uso; si la actual ya no está, rota desde la primera. Devuelve
+# true si adoptó. Sin adoptar mientras haya escritura propia en vuelo (tmp+rename).
+func _adopt_external_list():
+	if not _config_read:
+		return false
+	_mutex.lock()
+	var busy = _write_pending or _write_busy
+	var ext = _config_active.duplicate()
+	_mutex.unlock()
+	if busy or ext.empty():
+		return false
+	var out = []
+	for id in ext:
+		if LAYOUTS.has(id) and not out.has(id):
+			out.append(id)
+	if out == active or out.empty():
+		return false
+	active = out
+	if not active.has(current):
+		current = active[0]
+	return true
 
 
 # Marca `layout` como en uso (la aplicación en vivo la hace el shell). Si no estaba en
@@ -427,11 +479,13 @@ func _write_loop(_userdata):
 		var body = _write_body
 		var stop = _want_stop
 		_write_pending = false
+		_write_busy = pending
 		_mutex.unlock()
 		if pending:
 			_write_config_now(path, body)
 			# Pide al worker releer el archivo ya escrito.
 			_mutex.lock()
+			_write_busy = false
 			_want_refresh = true
 			_mutex.unlock()
 		if stop:

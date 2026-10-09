@@ -72,6 +72,15 @@ func _init():
 
 	# Archivos de sesión.
 	check("contenido teclado", S.keyboard_file_content("es") == "XKB_DEFAULT_LAYOUT=es\n")
+	check("lista activa por defecto", d.keyboard_layouts == S.KEYBOARD_LAYOUTS_DEFAULT)
+	var nl = S.normalize({"keyboard_layouts": ["es", "latam"]})
+	check("lista activa nueva", nl.keyboard_layouts == ["es", "latam"] and nl.keyboard == "es")
+	check("lista activa filtra", S.keyboard_layouts_list(["latam", "latam", "de", "nope", 5], ["us"]) == ["latam", "de"])
+	var leg = S.parse("{\"keyboard\": \"es\"}")
+	check("legacy sin lista cae a un solo elemento", leg.keyboard == "es" and leg.keyboard_layouts == ["es"])
+	check("json conserva lista", S.normalize({"keyboard_layouts": ["latam", "es", "us"]}).keyboard_layouts == ["latam", "es", "us"])
+	check("contenido con lista", S.keyboard_file_content("latam", ["latam", "es"]) \
+		== "XKB_DEFAULT_LAYOUT=latam\nGDTK_LAYOUTS=latam,es\n")
 	check("contenido idioma", S.locale_file_content("pt_BR") == "LANG=pt_BR.UTF-8\n")
 	check("acento es en vivo", S.is_live("accent"))
 	check("teclado no es en vivo", not S.is_live("keyboard"))

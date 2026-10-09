@@ -1,8 +1,13 @@
 #!/bin/sh
 # Pantallazo del escritorio gdtk -> <Imágenes>/Pantallazos/Pantallazo-<fecha>.png
 #
-# PrintScreen lo atiende el propio shell (shell.gd: captura el viewport compuesto). Este
-# comando es para terminales/scripts o como respaldo, con dos vías:
+# Sin argumentos: captura toda la pantalla (grim o RPC del shell). También:
+#   copy <wayland-display> <archivo>  pone el PNG en el portapapeles del compositor embebido.
+#   ui [region|window|screen]         abre el selector interactivo del shell (PrintScreen).
+#
+# PrintScreen lo atiende el propio shell (shell.gd): abre el selector (ventana/pantalla/
+# selección), guarda y copia. La captura de abajo es para terminales/scripts o respaldo,
+# con dos vías:
 #
 #   1) grim (wlroots) contra el compositor actual. grim 1.5 usa ext-image-copy-capture
 #      (preferido) y cae a wlr-screencopy. Sólo sirve si $WAYLAND_DISPLAY es sway (donde
@@ -18,6 +23,62 @@ set -u
 home="${HOME:-}"
 [ -n "$home" ] || { echo "pantallazo: sin HOME" >&2; exit 1; }
 runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
+# Subcomandos del selector (el shell los usa al guardar):
+#   copy <wayland-display> <archivo>  -> pone el PNG en el portapapeles del compositor
+#                                        embebido (pegable en las apps).
+#   ui [modo]                         -> abre el selector interactivo del shell
+#                                        (region|window|screen; default region).
+case "${1:-}" in
+copy)
+	[ -n "${2:-}" ] && [ -f "${3:-}" ] || exit 2
+	command -v wl-copy >/dev/null 2>&1 || exit 3
+	WAYLAND_DISPLAY="$2" wl-copy --type image/png <"$3" >/dev/null 2>&1
+	exit $?
+	;;
+ui)
+	mode="${2:-region}"
+	command -v python3 >/dev/null 2>&1 || { echo "pantallazo: sin python3" >&2; exit 1; }
+	port="${GDTK_CONTROL_PORT:-7777}"
+	if [ -n "${GDTK_CONTROL_PORT:-}" ]; then
+		token_file="$runtime/gdtk-control-$port.token"
+	else
+		token_file="$runtime/gdtk-control.token"
+	fi
+	python3 - "$port" "$token_file" "$mode" <<'PY'
+import json
+import socket
+import sys
+
+port, token_file, mode = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+try:
+    token = open(token_file).read().strip()
+    sock = socket.create_connection(("127.0.0.1", port), timeout=3)
+except OSError:
+    sys.exit(3)
+try:
+    stream = sock.makefile("rw")
+    stream.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "auth",
+                             "params": {"token": token}}) + "\n")
+    stream.flush()
+    stream.readline()
+    stream.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "screenshot",
+                             "params": {"ui": True, "mode": mode}}) + "\n")
+    stream.flush()
+    line = stream.readline()
+    reply = json.loads(line) if line else {}
+    sys.exit(0 if (reply.get("result") or {}).get("ok") else 5)
+finally:
+    sock.close()
+PY
+	exit $?
+	;;
+"") : ;;   # sin argumentos: captura directa (abajo)
+*)
+	echo "uso: $0 [copy <display> <archivo> | ui [modo]]" >&2
+	exit 2
+	;;
+esac
 
 # $XDG_PICTURES_DIR/Pantallazos, con respaldo a ~/Imágenes, ~/Pictures o el HOME.
 pics=""

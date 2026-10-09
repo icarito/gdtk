@@ -16,6 +16,8 @@ log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/gdtk"
 log="$log_dir/autostart.log"
 run_base="${XDG_RUNTIME_DIR:-/tmp}"
 run_dir="$run_base/gdtk"
+# Directorio de este script (para encontrar gdtk-notify junto a él).
+self_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 mkdir -p "$log_dir" "$run_dir" 2>/dev/null || true
 
 say() { printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$log" 2>/dev/null || true; }
@@ -87,14 +89,17 @@ start_keyring() {
 	fi
 }
 
-# Notificaciones layer-shell (mako).
-start_mako() {
-	have mako || { say "mako no instalado"; return 0; }
-	[ -n "${WAYLAND_DISPLAY:-}" ] || { say "mako omitido: sin WAYLAND_DISPLAY"; return 0; }
-	running "$run_dir/mako.pid" && { say "mako ya corre"; return 0; }
-	mako >>"$log" 2>&1 &
-	echo $! >"$run_dir/mako.pid"
-	say "mako iniciado (pid $!)"
+# Notificaciones: daemon propio (session/gdtk-notify serve) que posee
+# org.freedesktop.Notifications. Reemplaza a mako (que no está instalado) y alimenta
+# el bus del shell; no depende de layer-shell.
+start_notify() {
+	_notify="$self_dir/gdtk-notify"
+	[ -x "$_notify" ] || { say "gdtk-notify no encontrado en $self_dir"; return 0; }
+	have python3 || { say "python3 no instalado (gdtk-notify lo necesita)"; return 0; }
+	running "$run_dir/gdtk-notify.pid" && { say "gdtk-notify ya corre"; return 0; }
+	"$_notify" serve >>"$log" 2>&1 &
+	echo $! >"$run_dir/gdtk-notify.pid"
+	say "gdtk-notify iniciado (pid $!)"
 }
 
 _key() { # _key <archivo .desktop> <clave>  (sólo [Desktop Entry])
@@ -153,7 +158,7 @@ start_desktop_entries() {
 run_autostart() {
 	start_polkit
 	start_keyring
-	start_mako
+	start_notify
 	start_desktop_entries
 	say "autostart terminado"
 }

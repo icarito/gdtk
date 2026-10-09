@@ -69,6 +69,9 @@
 - `SPEC-sugar-senal-wifi.md`
   - Description: Vecindario: señal Wi-Fi que comparte Internet (perfil `Hotspot`, WPA, `ipv4.method shared`) y asociarse a APs con clave por popup ImGui; modelo puro `neighborhood_hotspot.gd`, estado en el worker y experimento STA+AP.
   - Read If: Señal Wi-Fi del Vecindario, `neighborhood_hotspot.gd`, popup de clave, hotspot/AP.
+- `SPEC-deskflow-continuity.md`
+  - Description: Estabilidad del endpoint Deskflow, rescate sin eventos viejos, liberación del sender EIS y reloj monotónico absoluto.
+  - Read If: Desconexiones del Grupo, teclas/botones pegados, cursores duplicados o barreras de Deskflow.
 - `SPEC-screen-share-compass.md`
   - Description: Brújula de pantalla compartida: direcciones N/S/E/O, gvd (extender) vs Deskflow (controlar), receptor 1:1 sin escalar.
   - Read If: gvd, Deskflow, layout de pantallas entre hosts.
@@ -86,7 +89,13 @@
   - Read If: Se retoma P4, el costo de la pasada de Godot por frame, o scanout/direct scanout y presentación de la ventana activa.
 - `SPEC-sugar-frame-blocks.md`, `SPEC-sugar-frame-applets.md`
   - Description: Frame de bloques cuadrados Sugar/NeXT y applets (estados, fuentes, registro `applet_mods`, Portapapeles).
+- `SPEC-notificaciones.md`
+  - Description: Bus central de notificaciones: daemon `org.freedesktop.Notifications`, store efímero, dockapp + columna overlay, urgencia y atención de foco sin robo.
+  - Read If: Tocando `shell/notify.gd`, `applet_notif.gd`, `notifications_panel.gd`, `session/gdtk-notify`, urgencia o pedidos de foco.
   - Read If: Tocando `shell/frame.gd` o `shell/applet_*.gd`.
+- `SPEC-screenshot.md`
+  - Description: Selector de pantallazos (ventana/pantalla/selección) + guardado a disco y copia al portapapeles embebido; PrintScreen, RPC `screenshot` y `session/gdtk-screenshot`.
+  - Read If: Tocando `shell/screenshot_*.gd`, la captura del viewport o el pegado de imágenes.
 - `SPEC-sugar-group-2026-10.md`
   - Description: Grupo (zoom Sugar), Vecindario sin solapes, Hogar por orientación, dockapp Compartiendo (G1-G5), portapapeles y enviar audio/ventanas.
   - Read If: Vista Grupo, dockapp Compartiendo, briefs `.operator-shared/briefs/G*.txt`.
@@ -108,6 +117,10 @@
 - `session-continuity.md`
   - Description: Recarga transaccional vs corte controlado, sync, heartbeat/rollback y provisión del governor.
   - Read If: Iterando, aplicando cambios, recuperando una caída o antes de reiniciar la sesión.
+
+- `firefox-crashes.md`
+  - Description: UAF de escala/monitores de Firefox identificado por minidump/desensamblado; mitigación opt-in por Xwayland, aplicación/rollback y límites de verificación.
+  - Read If: Firefox crashea con medios/meetings, se modifica gdtk-firefox o se retoma la entrega de escala a surfaces.
 
 - `dockapp.md`
   - Description: Tutorial de dockapp/applet del Frame: contrato del módulo, registro en `applet_mods`, worker, scripts de `session/`, tests; ejemplo Portapapeles.
@@ -162,3 +175,7 @@
 - `HANDOFF-senal-wifi.md`
   - Description: Handoff de la Señal Wi-Fi (AP que comparte Internet + asociarse a APs): bloqueante real (falta el cableado en shell.gd), capacidad HW por host (AX201/MT7601U/cupid/tengu), topología viable (cupid=AP) y riesgo de perder SSH por radio única.
   - Read If: Se retoma la feature de señal Wi-Fi o hay que probar/terminar el AP+clientes.
+
+- `HANDOFF-kdeconnect.md`
+  - Description: Auditoría del prototipo KDE Connect: incompatibilidad TLS v8, confianza sin pin, pareo/UI incompletos y pruebas que no demuestran interoperabilidad.
+  - Read If: Retomando KDE Connect, emparejamiento de teléfonos o integración en Vecindario/Grupo.

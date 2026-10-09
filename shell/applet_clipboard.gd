@@ -4,12 +4,15 @@ extends Reference
 # último ítem a la vista. Es la dockapp de ejemplo de `.operator-shared/guides/dockapp.md`
 # (contrato: state/value/detail, refresh(force) -> bool, stop(), draw opcional).
 #
-# Captura: `session/gdtk-clipboard watch <socket>` deja un `wl-paste --watch` vivo
-# contra el compositor embebido (ext-data-control-v1) que guarda cada copia como un
-# archivo en $XDG_RUNTIME_DIR/gdtk/clipboard. Este módulo sólo LEE ese directorio.
+# Captura: `session/gdtk-clipboard watch <socket>` deja vigías `wl-paste --watch` vivos
+# contra el compositor embebido (ext-data-control-v1) que guardan cada copia como un
+# archivo en $XDG_RUNTIME_DIR/gdtk/clipboard. Las imágenes van como `.png` (y una
+# miniatura en gdtk/clipboard-thumbs) para mostrarlas como imagen, no como su HTML.
+# Este módulo sólo LEE ese directorio.
 #
 # El hilo de render NUNCA consulta (SPEC-screen-share-compass §14): el worker lista el
-# directorio, lee la entrada nueva y (re)lanza el vigía; refresh() copia el snapshot.
+# directorio, lee la entrada nueva, arma miniaturas y (re)lanza el vigía; refresh()
+# copia el snapshot.
 
 const PERIOD_MS = 1000
 const SLEEP_STEP_MS = 100
@@ -19,13 +22,18 @@ const READ_MAX = 4096       # bytes leídos de la entrada (sólo para resumir)
 const SYNC_MAX = 65536      # tope de lo que se comparte con el Grupo (= tope de `store`)
 const ITEMS_MAX = 10        # entradas publicadas en `items` (las más nuevas primero)
 const SUMMARY_MAX = 60      # recorte del resumen por ítem
+const IMAGE_EXT = ".png"    # extensión de las entradas de imagen
+const THUMB_MAX = 160       # lado máximo de la miniatura (px); se genera en el worker
 
 var state = "sin_dato"
 var value = ""     # resumen corto del último ítem (una línea)
 var detail = ""    # tooltip: más texto + tamaño del historial
-# Historial navegable publicado por el worker: [{"name": <archivo>, "summary": <str>}],
-# más nuevo primero, hasta ITEMS_MAX. Sólo lo llena el worker (lee los archivos ahí).
+# Historial navegable publicado por el worker: [{"name": <archivo>, "summary": <str>,
+# "kind": "text"|"image"}], más nuevo primero, hasta ITEMS_MAX. Sólo lo llena el worker.
 var items = []
+# Última entrada (para el dibujo de la placa): nombre y tipo.
+var latest_name = ""
+var latest_kind = ""
 
 # Lo fija el Frame antes del primer refresh(): socket del compositor embebido.
 var wayland_display = ""
@@ -33,7 +41,7 @@ var wayland_display = ""
 var _mutex = Mutex.new()
 var _thread = null
 var _want_stop = false
-var _snap = {"state": "sin_dato", "value": "", "detail": "", "items": []}
+var _snap = {"state": "sin_dato", "value": "", "detail": "", "items": [], "latest_name": "", "latest_kind": ""}
 # Portapapeles compartido con el Grupo (SPEC-sugar-group «Portapapeles»): el worker
 # deja cada copia local nueva en `_outbox`; el shell la reparte por el canal peer.
 var _outbox = []
@@ -53,11 +61,14 @@ func refresh(_force := false):
 	var s = _snap
 	_mutex.unlock()
 	var s_items = s.get("items", [])
-	var changed = state != s.state or value != s.value or detail != s.detail or items != s_items
+	var changed = state != s.state or value != s.value or detail != s.detail or items != s_items \
+		or latest_name != s.get("latest_name", "") or latest_kind != s.get("latest_kind", "")
 	state = s.state
 	value = s.value
 	detail = s.detail
 	items = s_items.duplicate(true)
+	latest_name = String(s.get("latest_name", ""))
+	latest_kind = String(s.get("latest_kind", ""))
 	return changed
 
 
@@ -120,6 +131,19 @@ func stop():
 func draw(frame, ui, scr, loc, w, h):
 	var g = min(w, h) * 0.48
 	var col = frame._lcd(frame.NX_TEXT, "on" if state == "activo" else "off")
+	# Imagen: la placa muestra la miniatura (encajada, sin deformar) en vez del texto.
+	var thumb = null
+	if latest_kind == "image" and latest_name != "" and frame.shell != null:
+		thumb = frame.shell._load_png_file(thumb_file(latest_name))
+	if thumb != null:
+		var side = min(w, h) * 0.82
+		var tw = max(1.0, float(thumb.get_width()))
+		var th = max(1.0, float(thumb.get_height()))
+		var k = min(side / tw, side / th)
+		var d = Vector2(tw * k, th * k)
+		ui.set_cursor_pos(loc + (Vector2(w, h) - d) * 0.5)
+		ui.image(thumb, d)
+		return
 	# El clip de icons/np, plano (el relieve es de los bloques de navegación, no de
 	# las dockapps).
 	var icon = frame.shell._load_np_icon("clips") if frame.shell != null else null
@@ -140,6 +164,15 @@ func draw(frame, ui, scr, loc, w, h):
 		ui.pop_font()
 
 
+# Ruta de la miniatura de una entrada de imagen ("" si no es imagen). La genera el
+# worker; el Frame la carga como textura para el popup y la placa.
+func thumb_file(name):
+	var n = String(name)
+	if not is_image(n):
+		return ""
+	return _paths().thumbs.plus_file(n)
+
+
 # --- puro (testeable) --------------------------------------------------------
 
 # Primera línea no vacía, con espacios colapsados y recortada a `limit` chars. "" si no hay texto.
@@ -152,6 +185,42 @@ static func summary(text, limit = -1):
 		if s != "":
 			return s.substr(0, lim)
 	return ""
+
+
+# Etiqueta de menú para una entrada del historial: nunca vacía y sin el token "##"
+# (ImGui lo toma como separador de ID y recortaría el texto a la izquierda). El ID
+# único del ítem NO sale de acá: dos copias con el mismo texto chocarían; lo aporta
+# el nombre de archivo con push_id (ver frame.gd).
+static func item_label(summary_text):
+	var s = String(summary_text)
+	if s == "":
+		return "(sin texto)"
+	return s.replace("##", "# #")
+
+
+# ¿La entrada es una imagen? Las imágenes se guardan con extensión .png (el vigía las
+# separa del texto para no mostrar el HTML `<meta ...>` que copian los navegadores).
+static func is_image(name):
+	return String(name).ends_with(IMAGE_EXT)
+
+
+# Ancho x alto leídos del IHDR de un PNG (primeros 24 bytes), o [] si no es PNG.
+# Puro: recibe los bytes, no toca disco.
+static func png_size(header):
+	if header == null or header.size() < 24:
+		return []
+	if int(header[0]) != 0x89 or int(header[1]) != 0x50 or int(header[2]) != 0x4E or int(header[3]) != 0x47:
+		return []
+	var w = (int(header[16]) << 24) | (int(header[17]) << 16) | (int(header[18]) << 8) | int(header[19])
+	var h = (int(header[20]) << 24) | (int(header[21]) << 16) | (int(header[22]) << 8) | int(header[23])
+	return [w, h]
+
+
+# Etiqueta de una entrada de imagen: "Imagen 1920×1080" si se conocen las dimensiones.
+static func image_label(dims):
+	if dims != null and dims.size() >= 2 and int(dims[0]) > 0 and int(dims[1]) > 0:
+		return "Imagen %d×%d" % [int(dims[0]), int(dims[1])]
+	return "Imagen"
 
 
 # Entrada más nueva: nombres = reloj en ns de igual largo, el mayor lexicográfico gana.
@@ -197,6 +266,7 @@ func _paths():
 		run = "/tmp"
 	return {
 		"dir": run + "/gdtk/clipboard",
+		"thumbs": run + "/gdtk/clipboard-thumbs",
 		"script": ProjectSettings.globalize_path("res://").plus_file("../session/gdtk-clipboard").simplify_path(),
 		"log": run + "/gdtk-clipboard.log",
 		"display": wayland_display,
@@ -232,20 +302,31 @@ func _work(p):
 		var sig = PoolStringArray(ordered).join("\n")
 		var cur_items = snap.get("items", [])
 		if last_name == null or sig != last_sig:
-			if last_name != null and name != "" and name != last_name:
+			# Sincronizar al Grupo sólo texto; las imágenes no viajan por el canal peer.
+			if last_name != null and name != "" and name != last_name and not is_image(name):
 				_queue_sync(_read(p.dir.plus_file(name), SYNC_MAX))
 			last_name = name
 			last_sig = sig
-			var text = _read(p.dir.plus_file(name)) if name != "" else ""
 			cur_items = _build_items(p.dir, ordered)
+			var lk = "image" if (name != "" and is_image(name)) else "text"
+			var lv = ""
+			var ld = ""
+			if name == "":
+				ld = "Portapapeles: sin copias"
+			elif lk == "image":
+				lv = image_label(_image_dims(p, name))
+				ld = "Portapapeles: %s (PNG)\n\n%d en el historial" % [lv, names.size()]
+			else:
+				var text = _read(p.dir.plus_file(name))
+				lv = summary(text)
+				ld = "Portapapeles: %s\n\n%d en el historial" % [text.substr(0, 300), names.size()]
 			snap = {"state": "activo" if name != "" else "listo",
-				"value": summary(text),
-				"detail": "Portapapeles: %s\n\n%d en el historial" % [text.substr(0, 300), names.size()],
-				"items": cur_items}
+				"value": lv, "detail": ld, "items": cur_items,
+				"latest_name": name, "latest_kind": lk}
 		if fails >= MAX_FAILS and name == "":
 			snap = {"state": "no_disponible", "value": "",
 				"detail": "Portapapeles: no se pudo vigilar (falta wl-paste o el motor no trae ext-data-control). Ver %s" % p.log,
-				"items": cur_items}
+				"items": cur_items, "latest_name": "", "latest_kind": ""}
 		_mutex.lock()
 		_snap = snap
 		_mutex.unlock()
@@ -265,16 +346,58 @@ func _drain_picks(p):
 		_apply_pick(p, nm)
 
 
-# Los ITEMS_MAX más nuevos con su resumen; los archivos se leen acá, nunca en el render.
+# Los ITEMS_MAX más nuevos con su resumen/etiqueta; los archivos se leen acá, nunca en
+# el render. Las imágenes se resumen por dimensiones y generan su miniatura.
 func _build_items(dir, ordered):
 	var out = []
 	var n = min(ordered.size(), ITEMS_MAX)
 	for i in range(n):
-		out.append({"name": ordered[i], "summary": summary(_read(dir.plus_file(ordered[i]), READ_MAX))})
+		var nm = ordered[i]
+		if is_image(nm):
+			out.append({"name": nm, "summary": image_label(_image_dims_from_dir(dir, nm)), "kind": "image"})
+		else:
+			out.append({"name": nm, "summary": summary(_read(dir.plus_file(nm), READ_MAX)), "kind": "text"})
 	return out
 
 
-# Copia una entrada del historial a un temporal y la pone como selección local.
+# Dimensiones de una entrada de imagen del directorio `p` (o []).
+func _image_dims(p, name):
+	return _image_dims_from_dir(p.dir, name)
+
+
+# Lee el IHDR (sin decodificar) y asegura la miniatura. Sólo lo llama el worker.
+func _image_dims_from_dir(dir, name):
+	var src = String(dir).plus_file(name)
+	var dims = []
+	var f = File.new()
+	if f.open(src, File.READ) == OK:
+		dims = png_size(f.get_buffer(min(f.get_len(), 24)))
+		f.close()
+	_ensure_thumb(dir, name, src)
+	return dims
+
+
+# Genera (una vez) la miniatura encajada en THUMB_MAX px, para que el render cargue un
+# PNG chico y no la imagen completa. Idempotente por existencia del archivo.
+func _ensure_thumb(dir, name, src):
+	var thumbs = _paths().thumbs
+	var dst = thumbs.plus_file(name)
+	if File.new().file_exists(dst):
+		return
+	Directory.new().make_dir_recursive(thumbs)
+	var img = Image.new()
+	if img.load(src) != OK or img.get_width() == 0:
+		return
+	var w = img.get_width()
+	var h = img.get_height()
+	var k = min(1.0, float(THUMB_MAX) / float(max(w, h)))
+	if k < 1.0:
+		img.resize(max(1, int(round(w * k))), max(1, int(round(h * k))), Image.INTERPOLATE_BILINEAR)
+	img.save_png(dst)
+
+
+# Copia una entrada del historial a un temporal y la pone como selección local. Las
+# imágenes se copian COMPLETAS y con su extensión (no truncar un PNG ni perder el tipo).
 func _apply_pick(p, name):
 	if not valid_name(name):
 		return
@@ -282,10 +405,12 @@ func _apply_pick(p, name):
 	var f = File.new()
 	if f.open(src, File.READ) != OK:
 		return
-	var data = f.get_buffer(min(f.get_len(), SYNC_MAX))
+	var n = f.get_len() if is_image(name) else min(f.get_len(), SYNC_MAX)
+	var data = f.get_buffer(n)
 	f.close()
 	Directory.new().make_dir_recursive(p.dir.get_base_dir())
-	var tmp = p.dir.get_base_dir().plus_file("clip-pick.%d" % OS.get_ticks_usec())
+	var ext = IMAGE_EXT if is_image(name) else ""
+	var tmp = p.dir.get_base_dir().plus_file("clip-pick.%d%s" % [OS.get_ticks_usec(), ext])
 	var o = File.new()
 	if o.open(tmp, File.WRITE) != OK:
 		return

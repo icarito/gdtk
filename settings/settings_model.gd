@@ -32,6 +32,11 @@ const KEYBOARDS = [
 ]
 const KEYBOARD_DEFAULT = "latam"
 
+# Lista activa de Super+Espacio (GDTK_LAYOUTS del applet Teclado, shell/applet_keyboard.gd):
+# elegidas en orden; la primera es XKB_DEFAULT_LAYOUT de la próxima sesión. El orden
+# de los ids espeja KEYBOARDS y el LAYOUTS del applet.
+const KEYBOARD_LAYOUTS_DEFAULT = ["latam", "es"]
+
 # Idiomas para ~/.config/gdtk/locale (LANG). Lista corta.
 const LOCALES = [
 	{"id": "es_PE.UTF-8", "label": "Español (Perú)"},
@@ -102,10 +107,24 @@ const CONTROL_DEFAULT = {
 # derecha de las demás salidas ([] = automático por posición física). El shell lo
 # relee en vivo y reordena sway/el envolvente sin reiniciar.
 const SPAN_DEFAULT = {"enabled": false, "primary": "", "order": []}
+# Notificaciones (SPEC-notificaciones): interruptor global, transitorio, atención de
+# foco, urgencia, tope de historial, modo de la columna y silencio. history_max entre
+# 1 y 1000 para no dejar el store sin tope.
+const NOTIF_HISTORY_MIN = 1
+const NOTIF_HISTORY_MAX = 1000
+const NOTIFICATIONS_DEFAULT = {
+	"enabled": true,
+	"toast_transitorio": true,
+	"atencion_foco": true,
+	"urgencia": true,
+	"history_max": 100,
+	"columna_modo": false,
+	"silencio": false,
+}
 const HOST_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.:-_%[]"
 const NAME_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
 
-const FIELDS = ["keyboard", "locale", "accent", "wallpaper", "natural_scroll", "deskflow", "appearance", "ui_scale", "span"]
+const FIELDS = ["keyboard", "locale", "accent", "wallpaper", "natural_scroll", "deskflow", "appearance", "ui_scale", "span", "notifications"]
 
 const HEX_CHARS = "0123456789abcdef"
 
@@ -116,6 +135,7 @@ func defaults():
 	return {
 		"version": VERSION,
 		"keyboard": KEYBOARD_DEFAULT,
+		"keyboard_layouts": KEYBOARD_LAYOUTS_DEFAULT.duplicate(true),
 		"locale": LOCALE_DEFAULT,
 		"accent": ACCENT_DEFAULT,
 		"wallpaper": WALLPAPER_DEFAULT.duplicate(true),
@@ -124,6 +144,7 @@ func defaults():
 		"appearance": APPEARANCE_DEFAULT.duplicate(true),
 		"ui_scale": UI_SCALE_DEFAULT,
 		"span": SPAN_DEFAULT.duplicate(true),
+		"notifications": NOTIFICATIONS_DEFAULT.duplicate(true),
 	}
 
 
@@ -135,7 +156,8 @@ func normalize(data):
 		data = {}
 	var out = defaults()
 	out["version"] = VERSION
-	out["keyboard"] = keyboard_id(data.get("keyboard", ""))
+	out["keyboard_layouts"] = _keyboard_layouts_in(data)
+	out["keyboard"] = out["keyboard_layouts"][0]
 	out["locale"] = locale_id(data.get("locale", ""))
 	out["accent"] = accent_hex(data.get("accent", ""))
 	out["wallpaper"] = wallpaper(data.get("wallpaper", {}))
@@ -144,6 +166,7 @@ func normalize(data):
 	out["appearance"] = appearance(data.get("appearance", {}))
 	out["ui_scale"] = ui_scale_value(data.get("ui_scale", null))
 	out["span"] = span(data.get("span", {}))
+	out["notifications"] = notifications(data.get("notifications", {}))
 	for k in data.keys():
 		if not out.has(k):
 			out[k] = data[k]
@@ -373,6 +396,31 @@ func span_order(list):
 	return out
 
 
+# Ajustes del sistema de notificaciones normalizados (SPEC-notificaciones). Los
+# booleanos son tolerantes ("on"/"1"); `history_max` se acota a [1, 1000].
+func notifications(v):
+	if typeof(v) != TYPE_DICTIONARY:
+		v = {}
+	var out = NOTIFICATIONS_DEFAULT.duplicate(true)
+	out.enabled = bool_value(v.get("enabled", out.enabled), out.enabled)
+	out.toast_transitorio = bool_value(v.get("toast_transitorio", out.toast_transitorio), out.toast_transitorio)
+	out.atencion_foco = bool_value(v.get("atencion_foco", out.atencion_foco), out.atencion_foco)
+	out.urgencia = bool_value(v.get("urgencia", out.urgencia), out.urgencia)
+	out.columna_modo = bool_value(v.get("columna_modo", out.columna_modo), out.columna_modo)
+	out.silencio = bool_value(v.get("silencio", out.silencio), out.silencio)
+	out.history_max = notif_history(v.get("history_max", out.history_max))
+	return out
+
+
+func notif_history(v):
+	var n = int(v)
+	if n < NOTIF_HISTORY_MIN:
+		n = NOTIF_HISTORY_MIN
+	if n > NOTIF_HISTORY_MAX:
+		n = NOTIF_HISTORY_MAX
+	return n
+
+
 # Variables de entorno para que el resto del escritorio escale igual que el shell.
 # GTK/GNOME usan GDK_SCALE (entero) + GDK_DPI_SCALE (fracción); Qt y el cursor sus
 # propias variables. Puro y testeable.
@@ -423,9 +471,38 @@ func parse(text):
 
 # --- Archivos de sesión (session/keyboard.sh y locale) ------------------------
 
+# Lista elegida del data: ids válidos y sin repetir, en el orden dado. Los archivos
+# viejos (sólo "keyboard") caen a [keyboard]; nada válido cae al par por defecto.
+func keyboard_layouts_list(v, fallback):
+	if typeof(v) != TYPE_ARRAY:
+		return fallback.duplicate(true)
+	var out = []
+	for id in v:
+		if typeof(id) == TYPE_STRING and has_option(KEYBOARDS, id) and not out.has(id):
+			out.append(id)
+	return out if not out.empty() else fallback.duplicate(true)
+
+
+func _keyboard_layouts_in(data):
+	if typeof(data) == TYPE_DICTIONARY:
+		var ids = keyboard_layouts_list(data.get("keyboard_layouts", null), [])
+		if not ids.empty():
+			return ids
+		# Archivo viejo sin GDTK_LAYOUTS: el teclado vigente es la lista entera.
+		if data.has("keyboard"):
+			return [keyboard_id(data.get("keyboard", ""))]
+	return defaults()["keyboard_layouts"].duplicate(true)
+
+
 # `session/keyboard.sh` sourcea este archivo: asigna y exporta XKB_DEFAULT_*.
-func keyboard_file_content(keyboard):
-	return "XKB_DEFAULT_LAYOUT=" + keyboard_id(keyboard) + "\n"
+# GDTK_LAYOUTS es la lista que rota Super+Espacio (el applet Teclado la lee).
+func keyboard_file_content(keyboard, layouts = []):
+	var ids = keyboard_layouts_list(layouts, [])
+	var first = ids[0] if not ids.empty() else keyboard_id(keyboard)
+	var text = "XKB_DEFAULT_LAYOUT=" + first + "\n"
+	if not ids.empty():
+		text += "GDTK_LAYOUTS=" + PoolStringArray(ids).join(",") + "\n"
+	return text
 
 
 # LANG para la próxima sesión.
@@ -438,7 +515,7 @@ func locale_file_content(locale):
 func is_live(field):
 	return field == "accent" or field == "wallpaper" or field == "natural_scroll" \
 		or field == "deskflow" or field == "appearance" or field == "ui_scale" \
-		or field == "span"
+		or field == "span" or field == "notifications"
 
 
 func restart_notice(field):
@@ -497,6 +574,12 @@ func selftest():
 	assert(wallpaper_kind({"mode": "fill", "path": "/tmp/x.png"}) == "image")
 	assert(wallpaper_kind({"mode": "fill", "path": ""}) == "solid")
 	assert(keyboard_file_content("es") == "XKB_DEFAULT_LAYOUT=es\n")
+	assert(keyboard_file_content("latam", ["latam", "es"]) \
+		== "XKB_DEFAULT_LAYOUT=latam\nGDTK_LAYOUTS=latam,es\n")
+	assert(keyboard_layouts_list(["latam", "es", "latam", "nope"], []).size() == 2)
+	assert(keyboard_layouts_list("basura", []).empty())
+	assert(normalize({"keyboard": "de"}).keyboard_layouts == ["de"])
+	assert(normalize({"keyboard_layouts": ["fr", "de", "fr"]}).keyboard == "fr")
 	assert(locale_file_content("en_US") == "LANG=en_US.UTF-8\n")
 	assert(is_live("accent") and is_live("wallpaper") and is_live("deskflow"))
 	assert(not is_live("keyboard") and not is_live("locale"))
@@ -551,4 +634,11 @@ func selftest():
 	assert(sp1.order == ["HDMI-A-1", "DP-1"], "orden sin duplicados ni nombres inválidos")
 	assert(span({"enabled": "no"}).enabled == false)
 	assert(is_live("span"))
+	var nf0 = notifications({})
+	assert(nf0.enabled and nf0.toast_transitorio and nf0.history_max == 100 and not nf0.silencio)
+	var nf1 = notifications({"enabled": "off", "silencio": "on", "history_max": 5000, "urgencia": "no"})
+	assert(not nf1.enabled and nf1.silencio and nf1.history_max == NOTIF_HISTORY_MAX and not nf1.urgencia)
+	assert(notifications({"history_max": 0}).history_max == NOTIF_HISTORY_MIN)
+	assert(normalize({}).notifications.history_max == 100)
+	assert(is_live("notifications"))
 	print("settings_model selftest ok")

@@ -25,14 +25,24 @@ func _init():
 	k.current = "es"
 	check("next desde es envuelve a latam", k.next_layout() == "latam")
 	k.active = ["es"]
-	check("una sola: sin rotación", k.next_layout() == "")
+	check("una sola cae a todas las conocidas", k.next_layout() == "latam")
 	check("no quita la última", not k.toggle_active("es") and k.active == ["es"])
 	check("rechaza id inválido", not k.apply("dvorak") and k.current == "es")
 	check("agrega us", k.toggle_active("us") and k.active == ["es", "us"])
 	check("apply latam la agrega y la usa", k.apply("latam") and k.current == "latam" \
 		and k.active == ["es", "us", "latam"])
 	check("quita us", k.toggle_active("us") and k.active == ["es", "latam"])
-	k.stop()  # reapea las escrituras
+	k.stop()  # reapea el worker y las escrituras: de acá en más, sin I/O de fondo
+	# Adopción de la lista que escribe la app Configuración (cambio externo al archivo).
+	k._config_read = true
+	k._config_active = ["latam", "es"]
+	check("adopta lista externa", k._adopt_external_list() and k.active == ["latam", "es"])
+	check("mantiene la elegida en uso", k.current == "latam")
+	k._config_active = ["gb", "de"]
+	check("recae si la elegida no está", k._adopt_external_list() and k.current == "gb" \
+		and k.active == ["gb", "de"])
+	k._config_active = []
+	check("vacía no adopta", not k._adopt_external_list() and k.current == "gb")
 	var f = File.new()
 	var ok = f.open(dir + "/gdtk/keyboard", File.READ) == OK
 	var text = f.get_as_text() if ok else ""

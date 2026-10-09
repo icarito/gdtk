@@ -236,15 +236,21 @@ static func menu(block):
 #   sides: {north, south, east, west} -> [{type, peer_name, initial, state, origin}]
 #   menu:  filas {kind: "action"|"separator", id, label, enabled, reason}
 #   tooltip: texto humano de qué se comparte y con quién
+#   master: "on"|"off" — estado del interruptor general del intercambio (radar).
 #   sessions:      como lo devuelve from_cache() (bloques {host, type, state, label}),
 #                  cada uno con `side`/`direction` (north/south/east/west) del lado
 #                  hacia el que se comparte. Es local (origin "local").
 #   remote_shares: [{peer_name, type, side, state}] recibido del otro equipo; el
 #                  lado YA viene invertido por el emisor (no se invierte acá).
 #   windows:       [{id, title, peer_name, maximized}] ventanas de pantalla extendida.
-# Sin sesiones, remotos ni ventanas devuelve {} para que el Frame no dibuje nada.
+# `master_on` (2026-10-08) es el interruptor retro del radar: encendido corta o
+# rearma todo el intercambio (pantalla, teclado y mouse, audio). Encendido y sin
+# sesiones devuelve {} para que el Frame no dibuje nada (la dockapp desaparece);
+# apagado SIEMPRE devuelve diagrama no vacío (stub) para que el bloque quede a la
+# vista con el interruptor y se pueda volver a encender.
 # Puro: sin red, procesos ni disco.
-static func diagram(sessions, remote_shares, windows, placements = {}, focus = {}):
+static func diagram(sessions, remote_shares, windows, placements = {}, focus = {},
+		master_on = true):
 	var entries = []
 	for s in _as_array(sessions):
 		var e = _diagram_entry(s, "local")
@@ -256,14 +262,27 @@ static func diagram(sessions, remote_shares, windows, placements = {}, focus = {
 			entries.append(e2)
 	var wlist = _diagram_windows(windows)
 	if entries.empty() and wlist.empty():
-		return {}
+		if master_on:
+			return {}
+		# Cortado a propósito: bloque en modo apagado (radar sin blips) para que el
+		# interruptor siga alcanzable. Los avisos remotos, si los hubiera, se firten
+		# arriba como los demás (ver _diagram_entry).
+		return {
+			"master": "off",
+			"sides": {"north": [], "south": [], "east": [], "west": []},
+			"menu": _diagram_menu([], [], false),
+			"tooltip": "El intercambio está apagado en este equipo",
+			"radial": [],
+			"local_focus": not bool(_as_dict(focus).get("capturing", false)),
+		}
 	entries = _ordered_entries(entries)
 	var sides = {"north": [], "south": [], "east": [], "west": []}
 	for e in entries:
 		sides[e.side].append(_public_entry(e))
 	return {
+		"master": "on" if master_on else "off",
 		"sides": sides,
-		"menu": _diagram_menu(entries, wlist),
+		"menu": _diagram_menu(entries, wlist, master_on),
 		"tooltip": _diagram_tooltip(entries, wlist),
 		"radial": radial(sessions, remote_shares, windows, placements, focus),
 		"local_focus": not bool(_as_dict(focus).get("capturing", false)),
@@ -476,7 +495,7 @@ static func _menu_action(id, label):
 	return {"kind": "action", "id": id, "label": label, "enabled": true, "reason": ""}
 
 
-static func _diagram_menu(entries, windows):
+static func _diagram_menu(entries, windows, master_on = true):
 	var stops = []
 	for e in entries:
 		if String(e.type) == "screen":
@@ -493,7 +512,11 @@ static func _diagram_menu(entries, windows):
 		wins.append(_menu_action("win_show:" + id, show))
 		wins.append(_menu_action("win_max:" + id, "Restaurar" if bool(w.maximized) else "Maximizar"))
 		wins.append(_menu_action("win_close:" + id, "Cerrar"))
-	var rows = []
+	var rows = [
+		_menu_action("master_off" if master_on else "master_on",
+			"Apagar todo el intercambio" if master_on else "Encender el intercambio"),
+		{"kind": "separator"},
+	]
 	if not stops.empty():
 		rows += stops
 	if not wins.empty():

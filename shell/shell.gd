@@ -48,7 +48,7 @@ var RING_LAYOUT = Host.sc("res://ring_layout.gd")
 # Modelo puro de hosts del Vecindario: resuelve el `remoteHost` del cliente
 # Deskflow contra el descubrimiento (Host.sc para recargas transaccionales).
 var HOSTS_MODEL = Host.sc("res://neighborhood_hosts.gd")
-const DESKFLOW_WATCH = preload("res://deskflow_watch.gd")
+var DESKFLOW_WATCH = Host.sc("res://deskflow_watch.gd")
 const SERVICE_STATE = preload("res://service_state.gd")
 # Sesión de pantalla gvd (Kilo F2): modelo puro de estados/planes/clasificación que
 # usa el despacho de acciones del Vecindario (no ejecuta nada por sí mismo).
@@ -95,6 +95,9 @@ const FOCUS_FOLLOW = preload("res://focus_follow.gd")
 const EXPOSE_LAYOUT = preload("res://expose_layout.gd")
 # Volumen/mute/brillo + OSD (teclas multimedia del motor; ver system_osd.gd).
 const SYSTEM_OSD = preload("res://system_osd.gd")
+# Selector de pantallazos (PrintScreen): ventana/pantalla/selección + guardado + copia.
+const SCREENSHOT_UI = preload("res://screenshot_ui.gd")
+const SCREENSHOT_MODEL = preload("res://screenshot_model.gd")
 # K13 — Modelos puros: chrome, layout flotante, decisiones de arrastre, unidades
 # tiled con eje y estado híbrido por ventana. El viejo modo global (wm_mode.gd)
 # queda sólo por compatibilidad de su test; el shell ya no lo usa.
@@ -249,7 +252,7 @@ var _layout_drag_pre = {}        # rect previo de la pantalla (para revertir el 
 var _layout_drag_guides = []     # guías del imán en el drag (mm: {axis, value})
 var _layout_hover = {}           # asa bajo el puntero (resaltado, sin arrastrar)
 var _df_watch_at = 0       # próximo chequeo del vigía de Deskflow (ms)
-const DESKFLOW_WATCH_COOLDOWN_MS = 6000  # tras soltar la captura, no volver a soltar seguido
+var _df_watch_baseline = ""  # último evento consumido: no rescatar por una caída vieja
 var _df_mismatch = 0       # chequeos seguidos con captura activa y servidor "en local"
 var group_placements = {}   # hid -> grados alrededor del equipo local (de host_directions)
 const ZOOM_MS = 220.0
@@ -363,6 +366,13 @@ var eis_cursor = null  # sin cursor propio el host (cage/sway) no lo mueve: se d
 
 # Volumen/mute/brillo: worker + OSD (ver system_osd.gd).
 var system_osd = null
+
+# Bus de notificaciones (ver notify.gd): historial, atención, urgencia y panel.
+var notify = null
+var notifications_panel = null
+
+# Selector de pantallazos (ver screenshot_ui.gd): null si nunca se abrió.
+var screenshot_ui = null
 
 # Scanout directo (P4): último valor de pausa enviado al compositor. El shell pausa el
 # puente dmabuf mientras dibuja un overlay (Frame/OSD/exposé/Vecindario) para que la
@@ -1267,6 +1277,10 @@ func _ready():
 	# Hijo después de Remote: su _input corre antes que el de ImGui (F6, Alt+Tab).
 	# .new() sobre un script nulo aborta la expresión y saltaría el fail-fast, así
 	# que se resuelve el script primero y se instancia sólo si compiló.
+	# Bus de notificaciones antes del Frame: su _ready asigna el applet al bus.
+	notify = Host.sc("res://notify.gd").new()
+	if notify != null:
+		notify.setup(self)
 	var frame_script = Host.sc("res://frame.gd")
 	if frame_script == null:
 		push_error("gdtk: frame.gd no compiló; abortando el arranque")
@@ -1303,6 +1317,8 @@ func _ready():
 	settings_bridge = Host.sc("res://settings_bridge.gd").new()
 	if settings_bridge != null:
 		settings_bridge.reload_now()
+		# Interruptor maestro del intercambio (radar): se preserva entre reloads.
+		share_enabled = bool(settings_bridge.settings.get("share_enabled", true))
 		_apply_settings()
 		ACTIVITIES.append({"name": "Configuración", "wayland": settings_bridge.launch_argv()})
 	# Limpieza de arranque: si ya hay un deskflow-core del usuario (sesión previa,
@@ -1377,6 +1393,10 @@ func _ready():
 	# dibuja al final de _imgui_frame.
 	system_osd = SYSTEM_OSD.new()
 	system_osd.setup(self)
+	# Selector de pantallazos: se instancia acá pero sin overlay activo hasta PrintScreen.
+	screenshot_ui = SCREENSHOT_UI.new()
+	# Columna overlay de notificaciones: dibujo ImGui, sin worker propio.
+	notifications_panel = Host.sc("res://notifications_panel.gd").new()
 
 	# Sin redibujo continuo: ImGui se arma sólo con input (a input_hz), con
 	# request_redraw() (commits Wayland, señales, control remoto) o al cambiar el minuto (reloj).
@@ -1653,6 +1673,11 @@ const VIDEO_COOLDOWN_MS = 1500
 # no se entera de que cambió el contenido): se rearma el frame siguiente.
 func _process(_delta):
 	var now = OS.get_ticks_msec()
+	# Selector de pantallazo abierto: se mantiene el loop activo y se pide frame cada
+	# vuelta (el overlay sigue al puntero; sin esto el reposo lo dejaría a 4 Hz).
+	if screenshot_ui != null and screenshot_ui.is_active():
+		last_activity = now
+		request_redraw()
 	if hover_hit != null:
 		_focus_follow(hover_hit)
 	_poll_force_close(now)
@@ -1732,6 +1757,10 @@ func _process(_delta):
 	# desvanece (mismo patrón que el resto de los workers).
 	if system_osd != null and system_osd.poll():
 		request_redraw()
+	# Notificaciones: copia el snapshot del bus, expira atención/urgencia y mantiene
+	# los frames mientras haya un transitorio o un pulso pendiente.
+	if notify != null and notify.poll():
+		request_redraw()
 	_scanout_tick()
 	if screenshot_path == "":
 		var busy = now - last_activity <= IDLE_MS or now - last_commit_ms <= COMMIT_ACTIVE_MS
@@ -1764,6 +1793,8 @@ func _present_commit():
 # taparía el overlay. Se reanuda solo cuando no queda ninguno.
 func _scanout_overlay_active():
 	if expose or neighborhood_view:
+		return true
+	if screenshot_ui != null and screenshot_ui.is_active():
 		return true
 	if system_osd != null and system_osd.is_active():
 		return true
@@ -1910,6 +1941,12 @@ func _imgui_frame():
 	# OSD de volumen/brillo, por encima de todo y efímero.
 	if system_osd != null:
 		system_osd.draw(self)
+	# Columna overlay de notificaciones (bloques + transitorio), borde izquierdo.
+	if notifications_panel != null and notify != null:
+		notifications_panel.draw(self)
+	# Selector de pantallazo (dim + barra): por encima de las ventanas, debajo del OSD.
+	if screenshot_ui != null:
+		screenshot_ui.draw(self)
 	var _m6 = OS.get_ticks_usec()
 
 	frame_count += 1
@@ -3235,6 +3272,9 @@ func _compositor_focus(id, raise_window):
 func _focus_tile(id, raise_window = true):
 	if id < 0 or not _id_alive(id):
 		return
+	# Enfocar a mano salda el pedido de atención de esa ventana (pulso/notificación).
+	if notify != null:
+		notify.clear_attention(id)
 	if focused_tile != id and _pantalla_window_ids().has(focused_tile):
 		_window_input_reset()
 	# Enfocar a mano cancela cualquier deslizamiento/hogar en curso y cierra la
@@ -3887,6 +3927,13 @@ func _toggle_expose(on):
 		# en exposé todo el mouse va al shell, o el arrastre entre escritorios se pierde.
 		if client_pointer_locked:
 			_set_client_pointer_lock(false)
+		# Deskflow: si el puntero estaba capturado por otro equipo, soltarlo. En
+		# exposé el puntero vive en este equipo y el borde vuelve a cruzar recién
+		# cuando el usuario lo empuja (exposé universal: cambiar de pantalla del Grupo
+		# sin salir de la vista). Sin esto `_sync_capture_cursor` re-lockea cada frame.
+		if remote_input != null and remote_input.has_method("is_capturing") \
+				and remote_input.has_method("release_capture") and remote_input.is_capturing():
+			remote_input.release_capture()
 		if mouse_locked:
 			_set_capture_cursor(false)
 		expose_sel = max(tiles.find(focused_tile), 0)
@@ -4986,6 +5033,24 @@ func _load_np_icon(name):
 	return tex
 
 
+# Carga (y cachea) un PNG de un archivo arbitrario como ImageTexture: miniaturas del
+# portapapeles (el worker ya las dejó chicas en disco). Mismo criterio que _load_np_icon.
+func _load_png_file(path):
+	var p = String(path)
+	if p == "":
+		return null
+	var key = "file:" + p
+	if sugar_icons.has(key):
+		return sugar_icons[key]
+	var img = Image.new()
+	if img.load(p) != OK or img.get_width() == 0:
+		return null
+	var tex = ImageTexture.new()
+	tex.create_from_image(img, Texture.FLAG_FILTER)
+	sugar_icons[key] = tex
+	return tex
+
+
 # Rasteriza un SVG de Sugar a ImageTexture cacheada. Reemplaza las entidades
 # &stroke_color;/&fill_color; por los colores XO, quita el DOCTYPE y lo carga.
 # Slug dibuja el SVG como vector (nítido a cualquier escala) y sólo funciona en
@@ -5409,6 +5474,7 @@ var _svc_mutex = Mutex.new()
 var _svc_thread = null
 var _svc_targets = []               # [{name, cmd}] fijado antes de arrancar el hilo
 var _svc_snapshot = {}              # name -> {"running": bool, "pids": [int]}
+var _df_log_snapshot = {}           # cola del log + timestamp, publicados por el worker
 var _svc_launch_until = {}          # name -> ticks_ms de la gracia de arranque
 var _svc_stop_until = {}            # name -> ticks_ms de la gracia tras parar
 var _svc_errors = {}                # name -> mensaje de fallo de lanzamiento
@@ -5476,8 +5542,10 @@ func _service_work(_userdata):
 		_svc_mutex.unlock()
 		for t in targets:
 			observed[t.name] = _pgrep_pids(t.cmd)
+		var df_log = _deskflow_read_log()
 		var now = OS.get_ticks_msec()
 		_svc_mutex.lock()
+		_df_log_snapshot = {"text": df_log, "sampled_at": now}
 		var merged = SERVICE_STATE.merge_service_snapshot(observed, _svc_snapshot, now,
 			_svc_launch_until, _svc_stop_until)
 		if not SERVICE_STATE.snapshot_equal(merged, _svc_snapshot):
@@ -5780,6 +5848,21 @@ func _open_by_name(name):
 	activity_error = "Actividad desconocida: " + name
 
 
+# Abre la app Configuración en una página concreta (`page` = id de pages/*.gd).
+# Reescribe la entrada de ACTIVIDADES con el argv que lleva `--page` y la activa.
+func _open_settings_page(page):
+	if settings_bridge == null:
+		return
+	var argv = settings_bridge.launch_argv(String(page))
+	for i in range(ACTIVITIES.size()):
+		if String(ACTIVITIES[i].name) == "Configuración":
+			ACTIVITIES[i]["wayland"] = argv
+			_activate(i)
+			return
+	ACTIVITIES.append({"name": "Configuración", "wayland": argv})
+	_open_by_name("Configuración")
+
+
 # --- Cola de lanzamientos pendientes -----------------------------------------
 # Varias actividades wayland pueden estar esperando su toplevel a la vez. Al llegar
 # una ventana se intenta casar su app_id/título con el `expect` de algún pendiente;
@@ -5953,6 +6036,21 @@ func _apply_settings():
 		_sync_directions_from_screen_layout()
 		_apply_deskflow_settings()
 		_apply_span_settings()
+		_apply_notifications_settings()
+
+
+# Sincroniza el bus de notificaciones con settings.json (SPEC-notificaciones).
+func _apply_notifications_settings():
+	if notify == null or settings_bridge == null:
+		return
+	var nf = settings_bridge.notifications()
+	notify.enabled = bool(nf.get("enabled", true))
+	notify.atencion_enabled = bool(nf.get("atencion_foco", true))
+	notify.urgencia_enabled = bool(nf.get("urgencia", true))
+	notify.toast_enabled = bool(nf.get("toast_transitorio", true))
+	notify.history_max = int(nf.get("history_max", 100))
+	notify.panel_mode = bool(nf.get("columna_modo", false))
+	notify.set_silenced(bool(nf.get("silencio", false)))
 
 
 # Exporta la escala de UI a los toolkits para que las apps (Firefox, GTK, Qt) no
@@ -6499,7 +6597,13 @@ func _apply_deskflow_settings():
 	var deskflow_was_configured = _deskflow_settings_key != ""
 	var config_changed = deskflow_was_configured and key != _deskflow_settings_key
 	var writes = _deskflow_config_writes(effective_mode, cfg, home, local)
-	if writes.empty():
+	var inherited_running = not deskflow_was_configured and service_pids.has("Deskflow")
+	if inherited_running and effective_mode == "use_remote":
+		# El Vecindario del candidato aún no terminó el primer scan. Conservar el
+		# endpoint del proceso transferido, no volver al hostname de fallback.
+		writes = []
+		_deskflow_loaded_key = key
+	if writes.empty() and not inherited_running:
 		if _svc_thread != null and _service_running("Deskflow"):
 			_toggle_service_by_name("Deskflow")
 		return
@@ -6526,10 +6630,10 @@ func _apply_deskflow_settings():
 		_deskflow_arm()
 	else:
 		_deskflow_want = false
-	# En una recarga transaccional el servicio se transfiere al shell candidato,
-	# pero su cache de configuración empieza vacío. También debe releer el archivo.
+	# Una recarga de UI conserva el servicio transferido; sólo un cambio real
+	# posterior de ajustes requiere aplicar configuración.
 	var reload_running = _service_running("Deskflow") \
-		and (config_changed or not deskflow_was_configured)
+		and config_changed
 	if reload_running:
 		_deskflow_reload_key = key
 		_deskflow_reload_at = OS.get_ticks_msec() + DESKFLOW_RELOAD_DEBOUNCE_MS
@@ -6543,6 +6647,8 @@ func _apply_deskflow_settings():
 # Marca que el autoarranque quiere el servicio corriendo y difiere el primer intento
 # para que xdg-desktop-portal termine de reiniciarse al arrancar la sesión.
 func _deskflow_arm():
+	if not share_enabled:
+		return
 	_deskflow_want = true
 	if _deskflow_retry_at == 0:
 		_deskflow_retry_at = OS.get_ticks_msec() + DESKFLOW_BOOT_DELAY_MS
@@ -6550,8 +6656,12 @@ func _deskflow_arm():
 
 # Reintenta el arranque por defecto: si el servicio debía correr y no está (p. ej. lo
 # tumbó el reinicio del portal), lo relanza con cooldown acotado. No bloquea: usa el
-# mismo ciclo de vida que la UI (_toggle_service_by_name).
+# mismo ciclo de vida que la UI (_toggle_service_by_name). Con el intercambio cortado
+# no rearma nada: el off es un estado real, no un capricho de un frame.
 func _deskflow_tick(now):
+	if not share_enabled:
+		_share_off_reap()
+		return
 	# Re-deriva la intención de los settings vigentes: si auto sigue activo y el modo
 	# no es off, el servicio debe correr. Así un snapshot transitorio que lo apagó se
 	# corrige solo en el próximo frame.
@@ -6614,48 +6724,63 @@ func deskflow_input_sessions():
 	return out
 
 
-# Red de seguridad del puntero compartido: si la captura está activa pero el equipo al
-# que se fue el puntero se cayó (y Deskflow no pidió Release), se suelta acá. Sólo lee la
-# cola del log del servidor mientras hay captura (cada 300 ms). Caso frecuente: se toca un
-# borde con barrera, Deskflow pide Release en el mismo instante (lo ignoramos 250 ms para que
-# el cruce no rebote) y después NO cruza (tramo sin equipo vinculado): la captura quedaba.
-# ponytail: depende del texto del log de Deskflow; si cambia, el vigía no dispara (y queda
-# Ctrl+Alt+Esc). Un canal de estado del propio Deskflow lo reemplazaría.
-func _deskflow_watch(now):
-	if remote_input == null or not remote_input.has_method("release_capture") or now < _df_watch_at:
-		return
-	_df_watch_at = now + 300  # rescate en < 1 s (tres chequeos seguidos)
-	if not remote_input.is_capturing():
-		_df_mismatch = 0
-		return
+# Sólo el worker lee disco. El frame consume un snapshot con TTL; una línea vieja
+# no puede rescatar una captura nueva (SPEC-deskflow-continuity.md).
+func _deskflow_read_log():
 	var f = File.new()
 	if f.open(OS.get_environment("XDG_RUNTIME_DIR").plus_file("gdtk-deskflow.log"), File.READ) != OK:
-		return
+		return ""
 	var n = f.get_len()
-	f.seek(int(max(0, n - 16384)))
+	var start = int(max(0, n - 16384))
+	f.seek(start)
 	var tail = f.get_buffer(int(min(n, 16384))).get_string_from_utf8()
 	f.close()
+	if start > 0:
+		var newline = tail.find("\n")
+		tail = tail.substr(newline + 1) if newline >= 0 else ""
+	return tail
+
+
+func _deskflow_log_state(now):
+	_svc_mutex.lock()
+	var snap = _df_log_snapshot.duplicate()
+	_svc_mutex.unlock()
 	var name = ""
 	if settings_bridge != null and settings_bridge.model != null:
 		name = String(settings_bridge.model.deskflow(settings_bridge.settings.get("deskflow", {})).get("name", ""))
-	var local = _deskflow_local_name(name)
-	var gone = DESKFLOW_WATCH.stuck_on(tail, local)
-	# Discordancia: el servidor ya volvió al local pero la captura sigue activa. Se exige
-	# en tres chequeos seguidos (~1 s): al cruzar, la línea "switch" llega ms después.
-	# Si Deskflow re-captura al instante, soltar en bucle corta el teclado en plena
-	# escritura (y deja teclas pegadas en el cliente): tras soltar, enfriar 6 s.
-	var mismatch = DESKFLOW_WATCH.server_local(tail, local)
+	var text = String(snap.get("text", "")) if now - int(snap.get("sampled_at", -10000)) <= 2500 else ""
+	return DESKFLOW_WATCH.observe(text, _deskflow_local_name(name))
+
+
+func _deskflow_watch(now):
+	if remote_input == null or not remote_input.has_method("release_capture") or now < _df_watch_at:
+		return
+	_df_watch_at = now + 300
+	var state = _deskflow_log_state(now)
+	var event = String(state.event)
+	if not remote_input.is_capturing():
+		_df_mismatch = 0
+		_df_watch_baseline = event
+		return
+	# Las líneas ya vistas antes de cruzar o durante un rescate no son evidencia
+	# de una nueva caída. Los warnings no cambian el evento del protocolo.
+	if event == "" or event == _df_watch_baseline:
+		_df_mismatch = 0
+		return
+	var local = _deskflow_local_name(String(settings_bridge.model.deskflow(
+		settings_bridge.settings.get("deskflow", {})).get("name", "")))
+	var mismatch = state.destination == local
 	_df_mismatch = _df_mismatch + 1 if mismatch else 0
 	var why = ""
-	if gone != "":
-		why = gone + " se cayó con el puntero allá"
+	if state.gone:
+		why = String(state.destination) + " se cayó con el puntero allá"
 	elif _df_mismatch >= 3:
 		why = "Deskflow volvió a este equipo sin soltar la captura"
 	if why != "" and remote_input.release_capture():
 		var t = OS.get_time()
 		print("[deskflow] %02d:%02d:%02d " % [t.hour, t.minute, t.second], why, ": suelto la captura")
+		_df_watch_baseline = event
 		_df_mismatch = 0
-		_df_watch_at = now + DESKFLOW_WATCH_COOLDOWN_MS
 		_set_capture_cursor(false)
 		request_redraw()
 
@@ -6727,7 +6852,8 @@ func _deskflow_refresh_client_addr(now):
 	if home == "":
 		return
 	var path = home.plus_file("gdtk").plus_file("deskflow-client.conf")
-	if _deskflow_conf_remote_host(path) == want:
+	var current = _deskflow_conf_remote_host(path)
+	if not DESKFLOW_WATCH.should_retarget(current, want, _deskflow_log_state(now).connection):
 		return
 	var local = _deskflow_local_name(String(cfg.get("name", "")))
 	var text = DESKFLOW_SETTINGS.build_client_settings(local, want, int(cfg.get("port", 24800)))
@@ -6757,7 +6883,8 @@ func _deskflow_config_writes(mode, cfg, home, local):
 		"share_here":
 			var layout_path = _deskflow_layout_path()
 			var layout_text = _settings_deskflow_topology_text(local)
-			var settings_text = DESKFLOW_SETTINGS.build_server_settings(local, layout_path, port)
+			var settings_text = DESKFLOW_SETTINGS.build_server_settings(
+				local, layout_path, port, _settings_deskflow_screen_names(local))
 			if layout_text != "" and settings_text != "":
 				writes.append({"path": layout_path, "text": layout_text})
 				writes.append({"path": home.plus_file("gdtk").plus_file("deskflow-server-settings.ini"),
@@ -6823,6 +6950,22 @@ func _deskflow_capture_ranges():
 	return GVD_LAUNCH.capture_ranges(_settings_deskflow_links(), disabled)
 
 
+# Nombres de TODAS las pantallas del layout, local primero (mismo criterio que
+# `SCREEN_LAYOUT.all_screens`). Se usan para el `[computer_*]` del settings del
+# server (Deskflow >= 1.27 resuelve las pantallas de ahí) y para la topología.
+func _settings_deskflow_screen_names(local_name):
+	if settings_bridge == null:
+		return []
+	var layout = settings_bridge.settings.get("screens", {})
+	var lay = SCREEN_LAYOUT.normalize_layout(layout)
+	var names = []
+	for s in SCREEN_LAYOUT.all_screens(lay):
+		var nm = String(local_name) if s.local else (String(s.peer) if String(s.peer) != "" else String(s.id))
+		if nm != "" and not names.has(nm):
+			names.append(nm)
+	return names
+
+
 # Conf del server con la topología COMPLETA del layout de Pantallas: todas las
 # adyacencias entre pantallas (no sólo desde la local), con rangos %. La local usa
 # `local_name`; los vecinos su campo `peer`.
@@ -6832,12 +6975,7 @@ func _settings_deskflow_topology_text(local_name):
 	var layout = settings_bridge.settings.get("screens", {})
 	var lay = SCREEN_LAYOUT.normalize_layout(layout)
 	var topo = SCREEN_LAYOUT.topology(lay, String(local_name))
-	var names = []
-	for s in SCREEN_LAYOUT.all_screens(lay):
-		var nm = String(local_name) if s.local else (String(s.peer) if String(s.peer) != "" else String(s.id))
-		if nm != "" and not names.has(nm):
-			names.append(nm)
-	return CONF_MODEL.build_topology_conf(names, topo)
+	return CONF_MODEL.build_topology_conf(_settings_deskflow_screen_names(local_name), topo)
 
 
 func _settings_layout_key():
@@ -6951,6 +7089,11 @@ func _exit_tree():
 	if system_osd != null:
 		system_osd.shutdown()
 		system_osd = null
+	# Notificaciones: detiene el worker y el vigilante del store.
+	if notify != null:
+		notify.stop()
+		notify = null
+	notifications_panel = null
 	_stop_service_worker()
 	# Anuncios mDNS: sus Threads ya terminaron con el worker; matar los pids vivos.
 	_stop_publishers()
@@ -7739,6 +7882,9 @@ func _run_host_plan(host_id, action):
 #   "server": NO usa la actividad cliente; escribe el layout y lanza el argv del
 #             propio plan de forma rastreada (clave distinta por host).
 func _run_deskflow_plan(host_id, plan):
+	if not share_enabled:
+		activity_error = SHARE_DISABLED_ERROR
+		return
 	if HOST_DISPATCH.deskflow_dispatch_mode(plan) == "server":
 		_run_deskflow_server(host_id, plan)
 		return
@@ -7763,6 +7909,9 @@ func _run_deskflow_plan(host_id, plan):
 # Thread rastreado. Nunca bloquea el render.
 func _run_deskflow_server(host_id, plan):
 	var id = String(host_id)
+	if not share_enabled:
+		activity_error = SHARE_DISABLED_ERROR
+		return
 	var key = HOST_DISPATCH.deskflow_session_key(id)
 	if _has_tracked(key):
 		_stop_tracked(key)
@@ -8440,6 +8589,10 @@ func _pantalla_closed_here():
 
 
 func _peer_gvd_open(port, _from, hid = "", video = Vector2()):
+	# El corte es honesto para el par: con el interruptor apagado no se reciben
+	# pantallas nuevas (el rechazo sale antes y su emisor no llega a lanzarse).
+	if not share_enabled:
+		return false
 	# Un solo receptor de pantalla compartida: cerrar el anterior antes de abrir el
 	# nuevo. Si no, cada compartida deja un `gvd recv` vivo y una ventana extra
 	# («Pantalla compartida 2», …); el input termina apuntando a la ventana vieja.
@@ -8485,7 +8638,8 @@ func _peer_gvd_send(_port, _target):
 # ponytail: la topología incluye todas las pantallas ubicadas, no sólo las encendidas;
 # un vecino apagado no conecta su cliente, así que no recibe el puntero.
 func _group_input_on(host_id):
-	return _screen_share_on(host_id, "input")
+	# Lector UI: con el intercambio cortado todos los interruptores muestran off.
+	return share_enabled and _screen_share_on(host_id, "input")
 
 
 func _screen_share_on(host_id, kind):
@@ -8508,11 +8662,14 @@ func _screen_share_set(host_id, kind, on):
 
 
 func _group_screen_on(host_id):
-	return _screen_share_on(host_id, "screen")
+	return share_enabled and _screen_share_on(host_id, "screen")
 
 
 func _group_screen_set(host_id, on, action = null):
 	var id = String(host_id)
+	if on and not share_enabled:
+		activity_error = SHARE_DISABLED_ERROR
+		return
 	if not _screen_share_set(id, "screen", on):
 		return
 	if on:
@@ -8525,6 +8682,9 @@ func _group_screen_set(host_id, on, action = null):
 
 func _group_input_set(host_id, on):
 	var id = String(host_id)
+	if on and not share_enabled:
+		activity_error = SHARE_DISABLED_ERROR
+		return
 	_screen_share_set(id, "input", on)
 	var e = host_directions.get(id, null)
 	# El dockapp "Compartiendo" corta por nombre de equipo, que puede no estar en
@@ -8749,10 +8909,14 @@ func _audio_status_changed():
 
 
 func _group_audio_on(host_id):
-	return _screen_share_on(host_id, "audio")
+	# Lector UI: con el intercambio cortado, off (la preferencia sigue guardada).
+	return share_enabled and _screen_share_on(host_id, "audio")
 
 
 func _group_audio_set(host_id, on):
+	if on and not share_enabled:
+		activity_error = SHARE_DISABLED_ERROR
+		return
 	var target = {}
 	if on:
 		var ep = _peer_endpoint_for(String(host_id))
@@ -8769,9 +8933,13 @@ func _group_audio_set(host_id, on):
 
 
 # Las preferencias sobreviven al shell. Si un par vuelve a aparecer, se reconcilia
-# el estado deseado sin bloquear ni crear un ciclo de vida paralelo.
+# el estado deseado sin bloquear ni crear un ciclo de vida paralelo. Con el
+# intercambio cortado (interruptor del radar) no revivifica nada: la preferencia
+# queda guardada y vuelve a aplicarse al rearmar.
 func _sharing_reconcile():
 	if settings_bridge == null or neighborhood_ui == null:
+		return
+	if not share_enabled:
 		return
 	var now = OS.get_ticks_msec()
 	if now < _sharing_poll_at:
@@ -8871,6 +9039,8 @@ func _audio_work(t):
 # Handler peer `audio_recv`: abre el puerto de audio sólo para `ip`. Devuelve el
 # puerto o 0. ponytail: pactl corre en el hilo principal (decenas de ms, una vez).
 func _peer_audio_recv(hid, ip):
+	if not share_enabled:
+		return 0   # intercambio cortado: no se abre puerto de audio para nadie
 	_peer_audio_stop("")
 	_audio_unload_stale("port=" + str(AUDIO_SEND.RECV_PORT))
 	var module = AUDIO_SEND.parse_module_id(_pactl(AUDIO_SEND.recv_load_argv(String(ip))))
@@ -8886,6 +9056,193 @@ func _peer_audio_stop(_hid):
 		_pactl(AUDIO_SEND.unload_argv(int(_audio_recv.get("module", 0))))
 		_audio_recv = {}
 	return true
+
+
+# --- Interruptor maestro del intercambio (dockapp "Compartiendo", radar) ------
+# Un control único (placa I/O del radar del Frame) corta o rearma TODO el
+# intercambio: Deskflow (teclado y mouse), el túnel de audio (módulos pactl
+# sender/receptor) y las sesiones de pantalla gvd (extender, recibir y ventanas).
+#
+# Cortar NO borra preferencias: detiene lo vivo, suspende el reconciliador
+# (_sharing_reconcile) y el autoarranque del servicio, y deja la dockapp a la
+# vista en modo apagado (el Frame la mantiene mientras esté cortado). Encender
+# repone: las intenciones de teclado y mouse del último corte vía el MISMO camino
+# del Grupo (_group_input_set), el servicio con el ciclo existente (_deskflow_arm)
+# y pantalla/audio las revive _sharing_reconcile desde share.* guardadas.
+# Sólo memoria: tras un reload/reinicio el intercambio vuelve a habilitado y las
+# preferencias sobrevivientes se reconcilian solas (igual que tras arrancar).
+var share_enabled = true
+var _share_roster_input = []   # hids con teclado y mouse encendidos al cortar
+
+# Motivo visible cuando el corte bloquea un intento nuevo; sin jerga interna.
+const SHARE_DISABLED_ERROR = "el intercambio está apagado: encendelo desde el bloque Compartiendo del Frame"
+
+
+func _share_enabled():
+	return share_enabled
+
+
+func _share_all_toggle():
+	_share_all_enable(not share_enabled)
+
+
+func _share_all_enable(on):
+	var want = bool(on)
+	if want == share_enabled:
+		return
+	share_enabled = want
+	_persist_share_enabled(want)
+	if want:
+		_share_all_arm()
+	else:
+		_share_all_stop()
+	request_redraw()
+
+
+# Graba el interruptor maestro del intercambio en settings.json para que sobreviva a
+# reloads y reinicios del shell (SPEC-notificaciones / SPEC-sugar-group-2026-10 G6).
+func _persist_share_enabled(on):
+	if settings_bridge == null or settings_bridge.model == null:
+		return
+	settings_bridge.settings["share_enabled"] = bool(on)
+	settings_bridge.write_atomic(settings_bridge.settings_path(),
+		settings_bridge.model.to_json(settings_bridge.settings))
+
+
+# Corta todo de una vez sin bloquear el render: pactl y peers van por los mismos
+# hilos/caminos que usan los interruptores y menús existentes (nunca un ciclo de
+# vida paralelo: _toggle_service, _stop_gvd_screen, _audio_work, _stop_tracked).
+func _share_all_stop():
+	# Roster de "teclado y mouse": intención viva + preferencia guardada.
+	var roster = []
+	for hid in host_deskflow.keys():
+		var h = String(hid)
+		if bool(host_deskflow.get(h, false)) and not roster.has(h):
+			roster.append(h)
+	if settings_bridge != null and SCREEN_LAYOUT != null:
+		var lay = SCREEN_LAYOUT.normalize_layout(settings_bridge.settings.get("screens", {}))
+		for sc in lay.screens:
+			var sid = String(sc.get("id", ""))
+			if sid != "" and bool(sc.get("share", {}).get("input", false)) and not roster.has(sid):
+				roster.append(sid)
+	_share_roster_input = roster
+	# Sin restauraciones de vínculo Deskflow en vuelo (al cortar pantallas,
+	# _restore_deskflow_link recrearía sesiones de teclado y mouse recién cortadas).
+	_gvd_link_restore.clear()
+	_deskflow_server_launch.clear()
+	# Cancela lanzamientos peer en curso para que no revivan al terminar.
+	_gvd_mutex.lock()
+	for st in _gvd_peer_states:
+		st.cancelled = true
+	_gvd_mutex.unlock()
+	# Audio: corta el emisario hacia el par (y le avisa) y baja el receptor local.
+	_bg("_audio_work", {})
+	_peer_audio_stop("")
+	# Pantalla: cada sesión viva (emisor local, receptor remoto, ventana espejada).
+	for hid in _share_gvd_hids():
+		_stop_gvd_screen(hid)
+	# Teclado y mouse: servidores por equipo, baja la intención y avisa al par
+	# (prefs share.* y modo del servicio quedan como estaban, para el rearme).
+	for k in gvd_session_pids.keys():
+		if String(k).begins_with("deskflow:"):
+			_stop_tracked(String(k))
+	for hid in host_deskflow.keys():
+		if bool(host_deskflow.get(hid, false)):
+			host_deskflow[hid] = false
+			_share_notify(hid, "input", "stopped")
+	# Servicio global: el mismo toggle de la UI (fija _deskflow_want=false).
+	if _service_running("Deskflow"):
+		_toggle_service_by_name("Deskflow")
+
+
+# Rearma el intercambio con los caminos de siempre. Nada fantasma: sólo el roster
+# del último corte y las preferencias guardadas; lo que no se pueda (par apagado,
+# sin pantalla de software) sigue los reintentos habituales.
+func _share_all_arm():
+	var roster = []
+	for hid in _share_roster_input:
+		var h = String(hid)
+		if h != "" and not roster.has(h):
+			roster.append(h)
+	_share_roster_input = []
+	roster.sort()
+	# Guardia de rol: si este equipo quedó como CLIENTE (use_remote, lo decidió el
+	# par cuando nos avisó que compartía), el roster no se reaplica: volvería a
+	# pincharlo a servidor encima de lo que ya negoció. El mismo ciclo del cliente
+	# (settings sin tocar) rearma el servicio apuntando al host guardado.
+	var mode_before = ""
+	if settings_bridge != null and settings_bridge.model != null:
+		mode_before = String(settings_bridge.model.deskflow(
+			settings_bridge.settings.get("deskflow", {})).get("mode", "off"))
+	if mode_before != "use_remote":
+		for hid in roster:
+			_group_input_set(hid, true)
+	_deskflow_arm()
+	# Pantalla/audio: reintentos inmediatos (_sharing_reconcile espera 1 s de cola
+	# y 10 s entre intentos; arrancar ya mejor la primera pasada).
+	_sharing_poll_at = 0
+	_sharing_retry_at.clear()
+
+
+# hids detrás de claves de sesión rastreada (gvd emisor/receptor/remoto, ventana
+# espejada o servidor por equipo). Sólo texto; sin I/O.
+func _share_hid_of_key(key):
+	var k = String(key)
+	for pref in ["win:", "gvdrecv:", "gvdsend:", "deskflow:"]:
+		if k.begins_with(pref):
+			return k.substr(pref.length())
+	return k
+
+
+func _share_hids_of_keys(keys):
+	var hids = []
+	for k in keys:
+		var hid = _share_hid_of_key(k)
+		if hid != "" and not hids.has(hid):
+			hids.append(hid)
+	return hids
+
+
+# hids con sesión de PANTALLA viva (los servidores de teclado por equipo no
+# cuentan: no son pantallas). Sólo dicts en memoria.
+func _share_gvd_hids():
+	var hids = []
+	for k in gvd_session_pids.keys():
+		var kk = String(k)
+		if kk.begins_with("deskflow:"):
+			continue
+		var hid = _share_hid_of_key(kk)
+		if hid != "" and not hids.has(hid):
+			hids.append(hid)
+	return hids
+
+
+# Vigía del corte: mientras el interruptor está en off, nada del intercambio puede
+# revivir en silencio (lo llama _deskflow_tick cada frame). Checar es barato (dicts
+# en memoria); los efectos reales (kill/_pactl/toggle) sólo si algo revivió: un
+# lanzamiento en vuelo completándose, una escritura de config con toggle diferido
+# o un pico del canal peer. Corta en silencio (el aviso al par ya salió al cortar).
+func _share_off_reap():
+	if share_enabled:
+		return
+	for hid in _share_gvd_hids():
+		_stop_gvd_screen(hid)
+	for k in gvd_session_pids.keys():
+		if String(k).begins_with("deskflow:"):
+			_stop_tracked(String(k))
+	for hid in host_deskflow.keys():
+		if bool(host_deskflow.get(hid, false)):
+			host_deskflow[hid] = false
+	_audio_mutex.lock()
+	var send_live = not _audio_send.empty()
+	var recv_live = not _audio_recv.empty()
+	_audio_mutex.unlock()
+	if send_live:
+		_bg("_audio_work", {})
+	if recv_live:
+		_peer_audio_stop("")
+	if _service_running("Deskflow"):
+		_toggle_service_by_name("Deskflow")
 
 
 # --- Grupo: compartir una ventana por gvd (arrastrar y soltar) -----------------
@@ -8956,6 +9313,9 @@ const WINDOW_CAST_FPS = 30   # tope de cadencia de la ventana compartida (captur
 
 
 func _group_share_window(hid, wid):
+	if not share_enabled:
+		activity_error = SHARE_DISABLED_ERROR
+		return
 	var gvd_path = _gvd_path_local()
 	var target = _peer_endpoint_for(hid)
 	if gvd_path == "" or not bool(target.get("ok", false)):
@@ -9406,7 +9766,13 @@ func _peer_share_notify(hid, params):
 		return false
 	var state = String(params.get("state", "active")).strip_edges()
 	if type == "input":
-		_deskflow_follow(id, state)
+		if state != "stopped":
+			# El corte también es honesto acá: con el intercambio apagado no se
+			# pasa a cliente del par (ni se toca el modo guardado); el rechazo le
+			# deja saber que acá no habrá control compartido por ahora.
+			if not share_enabled:
+				return false
+			_deskflow_follow(id, state)
 	if state == "stopped":
 		for i in range(remote_shares.size() - 1, -1, -1):
 			var old = remote_shares[i]
@@ -9415,6 +9781,10 @@ func _peer_share_notify(hid, params):
 				remote_shares.remove(i)
 		request_redraw()
 		return true
+	# Nada de avisos nuevos mientras el interruptor esté cortado: el radar muestra
+	# el estado apagado, no blips de sesiones que no se aceptan.
+	if not share_enabled:
+		return false
 	var side = String(params.get("side", "")).strip_edges()
 	if not DIRECTIONS_MODEL.valid_direction(side) or side == "none":
 		return false
@@ -9595,6 +9965,9 @@ func provision_channel_for(host_id):
 # local en un tile y pide al peer que emita. Nunca bloquea.
 func _start_gvd_screen(host_id, action):
 	var id = String(host_id)
+	if not share_enabled:
+		activity_error = SHARE_DISABLED_ERROR
+		return
 	var plan = action.get("plan", null) if typeof(action) == TYPE_DICTIONARY else null
 	var gvd_path = GVD_LAUNCH.gvd_path_of(plan)
 	if gvd_path == "":
@@ -10448,13 +10821,19 @@ func _on_toplevel_added(id):
 	unmanaged_since[id] = OS.get_ticks_msec()
 
 
-# xdg-activation (p.ej. clic en una notificación): la ventana pasa al frente.
+# xdg-activation (p.ej. clic en una notificación): la ventana PIDE atención sin
+# robar el foco (SPEC-notificaciones): pulso de borde + bloque del Frame; pulsar la
+# notificación «ir» es lo que enfoca. No abre actividad ni cambia `focused_tile`.
 func _on_toplevel_activate(id):
-	var name = _activity_for_window(_root_of(id))
-	if name != "":
-		_open_by_name(name)
-		compositor.focus(id)
-		request_redraw()
+	var root = _root_of(id)
+	if notify != null:
+		var texto = compositor.get_title(root) if compositor != null else ""
+		if texto == "":
+			texto = _activity_for_window(root)
+		if texto == "":
+			texto = "Una ventana pide atención"
+		notify.request_attention(root, texto)
+	request_redraw()
 
 
 # La propia app pide minimizarse desde su decoración (CSD) o vía iconify X11: se
@@ -10896,6 +11275,9 @@ func _activity_named(name):
 
 func _on_toplevel_removed(id):
 	print("toplevel_removed ", id)
+	if notify != null:
+		notify.clear_attention(id)
+		notify.clear_attention(_root_of(id))
 	var didx = dialogs.find(id)
 	if didx >= 0:
 		dialogs.remove(didx)
@@ -11041,6 +11423,12 @@ func _on_expose_input(event):
 
 
 func _on_view_input(event):
+	# Bloques de notificación: se resuelven ANTES de reenviar el puntero al
+	# compositor (guard DURA: un clic sobre un bloque no debe atravesar a la app).
+	if notifications_panel != null and notify != null and notifications_panel.active(self) \
+			and notifications_panel.handle_input(self, event):
+		get_tree().set_input_as_handled()
+		return
 	# El exposé se atiende ANTES de los guards de pointer-lock y captura remota: si
 	# un cliente quedó con lock (o Deskflow captura), esos caminos se tragaban el
 	# press/motion/drop y el arrastre entre escritorios nunca arrancaba.
@@ -11982,9 +12370,11 @@ var _capture_drag_held = false   # sólo para loguear una vez por arrastre
 
 
 func _capture_remote_input_event(event):
-	# En exposé el mouse es del shell: no reenviar a RemoteInput/Deskflow, o el
-	# `set_input_as_handled` del capture mataría el arrastre entre escritorios.
-	if expose:
+	# En exposé sólo el ARRASTRE de una miniatura es del shell: el `set_input_as_handled`
+	# del capture mataría el arrastre entre escritorios. Sin arrastre el borde sigue
+	# disponible para cambiar de pantalla del Grupo (exposé universal), como fuera de
+	# la vista; el arrastre ya lo frena el guard de `button_mask` de abajo.
+	if expose and expose_drag != null:
 		return false
 	# InputCapture toma exclusivamente el hardware local. Los eventos EIS que entran
 	# desde otro equipo tienen DEVICE_ID y nunca deben volver a Deskflow.
@@ -12041,6 +12431,12 @@ func _capture_remote_input_event(event):
 
 func _input(event):
 	last_activity = OS.get_ticks_msec()
+	# Selector de pantallazo: mientras está abierto se queda con TODO el input (mouse y
+	# teclas), antes de cualquier reenvío a la app o al control remoto.
+	if screenshot_ui != null and screenshot_ui.is_active():
+		if screenshot_ui.handle_input(self, event):
+			get_tree().set_input_as_handled()
+			return
 	# Revisión del layout (hud ##layout_confirm): el gesto es SUYO. Va primero
 	# porque el mapa de Grupo (Control con STOP) secuestra el press y el motion
 	# (mouse_focus) y el drag del popup muere sin mover nada. Eventos reales:
@@ -12058,6 +12454,26 @@ func _input(event):
 			if lc_inside:
 				get_tree().set_input_as_handled()
 				return
+	# Columna de notificaciones: Esc cierra. El clic/hover se resuelve en
+	# `_on_view_input` (es el punto por donde el puntero llega al compositor).
+	if notify != null and notify.panel_open and event is InputEventKey and event.pressed \
+			and not event.echo and int(event.scancode) == KEY_ESCAPE:
+		notify.panel_open = false
+		request_redraw()
+		get_tree().set_input_as_handled()
+		return
+	# Super+Espacio con Deskflow capturando: rota la distribución acá y no en el equipo
+	# remoto (la captura se lleva la tecla y el Frame no la ve). Así el switch de teclado
+	# es universal: funciona con el puntero en cualquier pantalla del Grupo. Super+Shift+
+	# Espacio sigue siendo del Frame (flotante<->mosaico), por eso se exige !shift.
+	if remote_input != null and remote_input.is_capturing() \
+			and event is InputEventKey and event.pressed and not event.echo \
+			and (int(event.scancode) == KEY_SPACE or int(event.physical_scancode) == KEY_SPACE) \
+			and not event.shift and _super_held(event):
+		if frame != null and frame.keyboard != null:
+			frame._keyboard_set(frame.keyboard.next_layout())
+		get_tree().set_input_as_handled()
+		return
 	# Sobre una «Pantalla compartida» el evento va por el canal peer, no por Deskflow:
 	# no se le da la captura (si no, Deskflow se lo lleva y el canal no lo ve).
 	if not _pantalla_input_priority(event) and _capture_remote_input_event(event):
@@ -12066,13 +12482,22 @@ func _input(event):
 		_on_swipe(event)
 		get_tree().set_input_as_handled()
 		return
-	# Pantallazo rápido (PrintScreen). El shell compone la pantalla completa (UI Sugar +
+	# Pantallazo (PrintScreen). El shell compone la pantalla completa (UI Sugar +
 	# ventanas del compositor anidado), así que el viewport es el escritorio entero.
-	# Se atiende acá, antes de reenviar la tecla a la app, para que funcione con cualquier
-	# ventana enfocada. El guardado real corre en un Thread.
+	# Sin modificador abre el selector (ventana/pantalla/selección, estilo GNOME);
+	# Ctrl+PrintScreen captura toda la pantalla directo (guarda y copia); Shift/Alt
+	# abren el selector en modo selección/ventana. Se atiende acá, antes de reenviar
+	# la tecla a la app. El guardado real corre en un Thread.
 	if event is InputEventKey and event.pressed and not event.echo \
 			and (int(event.scancode) == KEY_PRINT or int(event.physical_scancode) == KEY_PRINT):
-		_take_screenshot()
+		if event.control:
+			_capture_screen_now()
+		elif event.alt:
+			_open_screenshot_picker("window")
+		elif event.shift:
+			_open_screenshot_picker("region")
+		else:
+			_open_screenshot_picker("region")
 		get_tree().set_input_as_handled()
 		return
 	# Teclas multimedia (volumen/brillo): el shell las consume y muestra el OSD; no
@@ -12324,35 +12749,101 @@ func _screenshot_stamp():
 		int(t.hour), int(t.minute), int(t.second)]
 
 
-# Toma el viewport y lo manda a codificar/guardar en un Thread (no bloquea el frame).
-func _take_screenshot():
-	# Un solo guardado en vuelo: si el anterior sigue activo, se descarta este.
+# --- Pantallazo (PrintScreen / selector) ------------------------------------
+
+# Copia del viewport compuesto (todo el escritorio, apps anidadas incluidas) ya
+# volcada a CPU y con el eje Y corregido a coords de pantalla. La usa el selector para
+# congelar el marco antes de dibujar el overlay y para la captura directa.
+func _grab_viewport_image():
+	var tex = get_viewport().get_texture()
+	if tex == null:
+		return null
+	var image = tex.get_data()
+	if image == null or image.get_width() == 0:
+		return null
+	image.flip_y()
+	return image
+
+
+# Abre el selector (ventana/pantalla/selección). Congela el marco ANTES de que se
+# dibuje el overlay: así la captura no incluye el dim ni la barra.
+func _open_screenshot_picker(mode = "region"):
+	if screenshot_ui == null:
+		screenshot_ui = SCREENSHOT_UI.new()
+	var image = _grab_viewport_image()
+	if image == null:
+		return
+	if screenshot_ui.begin(image, _desktop_rect().size, mode):
+		request_redraw()
+
+
+# Captura directa de toda la pantalla (Ctrl+PrintScreen): sin overlay.
+func _capture_screen_now():
+	var image = _grab_viewport_image()
+	if image == null:
+		return
+	_screenshot_done(image, "screen")
+
+
+# Rect en pantalla que ocupa una ventana, para resaltar y recortar. Las flotantes usan
+# su marco completo (window_rects); las tiled, la celda del mosaico. Los diálogos los
+# resuelve el overlay con shell._dialog_rect (su objeto, no un id).
+func _screenshot_window_rect(id, pos):
+	var fr = window_rects.get(id)
+	if fr != null:
+		return Rect2(fr)
+	var r = tile_rects.get(id)
+	if r != null:
+		return Rect2(r)
+	return Rect2(pos, Vector2.ZERO)
+
+
+# Confirma el selector: guarda la Image recortada y la copia al portapapeles embebido.
+# El guardado (PNG) y la copia corren en un Thread para no bloquear el frame.
+func _screenshot_done(image, kind):
+	if image == null or image.get_width() == 0 or image.get_height() == 0:
+		return
 	if _shot_thread != null:
 		if _shot_thread.is_active():
-			return
-		_shot_thread.wait_to_finish()
+			_shot_thread.wait_to_finish()
 		_shot_thread = null
-	var image = get_viewport().get_texture().get_data()
-	image.flip_y()
 	var dir = _screenshot_dir()
-	var err = Directory.new().make_dir_recursive(dir)
-	if err != OK:
-		printerr("pantallazo: no se pudo crear ", dir, " (error ", err, ")")
+	if Directory.new().make_dir_recursive(dir) != OK:
+		printerr("pantallazo: no se pudo crear ", dir)
 		return
-	var path = dir.plus_file("Pantallazo-" + _screenshot_stamp() + ".png")
+	var path = dir.plus_file(SCREENSHOT_MODEL.suggest_name(kind, _screenshot_stamp()))
 	if system_osd != null:
 		system_osd.show_message("Pantallazo guardado", "")
 	_shot_thread = Thread.new()
-	_shot_thread.start(self, "_write_screenshot", {"image": image, "path": path})
+	_shot_thread.start(self, "_write_screenshot",
+		{"image": image, "path": path, "display": _clip_display()})
+
+
+# Socket del compositor embebido: poner la imagen ahí la deja pegable en las apps.
+func _clip_display():
+	if frame != null and is_instance_valid(frame) and frame.clipboard != null:
+		return String(frame.clipboard.wayland_display)
+	return ""
 
 
 func _write_screenshot(data):
 	var err = data["image"].save_png(data["path"])
 	if err != OK:
 		printerr("pantallazo: no se pudo guardar ", data["path"], " (error ", err, ")")
-	else:
-		print("pantallazo: ", data["path"])
+		return null
+	print("pantallazo: ", data["path"])
+	_copy_screenshot(data["path"], String(data.get("display", "")))
 	return null
+
+
+# Pone el PNG en el portapapeles del compositor embebido vía session/gdtk-screenshot
+# (wl-copy --type image/png). El script valida el socket y el archivo.
+func _copy_screenshot(path, display):
+	if display == "":
+		return
+	var script = ProjectSettings.globalize_path("res://").plus_file("../session/gdtk-screenshot").simplify_path()
+	var out = []
+	OS.execute("sh", ["-c", "'%s' copy '%s' '%s' </dev/null >/dev/null 2>&1" % [script, display, path]], true, out)
 
 
 # --- Input remoto (libei) ---

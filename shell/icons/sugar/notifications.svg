@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd" [
+  <!ENTITY fill_color "#FFFFFF">
+  <!ENTITY stroke_color "#010101">
+]>
+<svg xmlns="http://www.w3.org/2000/svg" width="55" height="55" viewBox="0 0 55 55">
+  <g id="notifications">
+    <path d="M27.5 8 C20 8 16.5 14.5 16.5 23 L16.5 33 L12.5 39 L42.5 39 L38.5 33 L38.5 23 C38.5 14.5 35 8 27.5 8 Z"
+          fill="&fill_color;" stroke="&stroke_color;" stroke-width="2" stroke-linejoin="round"/>
+    <path d="M23.5 41.5 Q27.5 46.5 31.5 41.5" fill="none" stroke="&stroke_color;"
+          stroke-width="2.4" stroke-linecap="round"/>
+    <path d="M27.5 8 L27.5 5.5" fill="none" stroke="&stroke_color;" stroke-width="2.4" stroke-linecap="round"/>
+  </g>
+</svg>

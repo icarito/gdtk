@@ -42,6 +42,11 @@ de gpty (JSON-RPC + MCP), sin su código. Mínimo que funcione. Leer antes: `she
     vía `Input.parse_input_event`. Mayúsculas: shift en `shift` del evento.
   - `key {combo}` → p.ej. `"Enter"`, `"Escape"`, `"ctrl+c"`, `"alt+Tab"`: modificadores + tecla con
     `OS.find_scancode_from_string`; press+release.
+  - `notify {action, ...}` → bus de notificaciones (SPEC-notificaciones): `push` (`summary`/`body`/`icon`/
+    `urgency`), `list`, `dismiss {id}`, `clear`, `silence {on}`, `attention {window, text}`,
+    `panel {open}`, `urgency {source, severity, ttl_ms, text}`. Devuelve `true` salvo `list` (los ítems).
+  - `share {on?}` → interruptor maestro del intercambio (radar). Sin `on` alterna; devuelve el estado
+    resultante (se persiste en settings.json). `state` incluye `share_enabled`.
   - `quit` → `get_tree().quit()`
   - No agregar nada que ejecute código arbitrario (nada de eval).
 - Encolar los eventos sintéticos de a uno por frame si hace falta para que ImGui los vea (ImGui procesa

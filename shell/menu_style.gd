@@ -135,10 +135,11 @@ static func chrome(ui, title):
 
 
 # Ítem de menú. Si hay ícono lo dibuja a la izquierda y alinea la etiqueta; el
-# `shortcut` se autoalinea a la derecha por MenuItem. Devuelve el bool del ítem.
-static func item(ui, label, shortcut = "", selected = false, icon_tex = null):
+# `shortcut` se autoalinea a la derecha por MenuItem. `icon_size` permite miniaturas
+# (p. ej. imágenes del Portapapeles) sin deformarlas. Devuelve el bool del ítem.
+static func item(ui, label, shortcut = "", selected = false, icon_tex = null, icon_size = Vector2(16.0, 16.0)):
 	if icon_tex != null:
 		var s = ui.get_imgui_scale()
-		ui.image(icon_tex, Vector2(16.0, 16.0) * s)
+		ui.image(icon_tex, icon_size * s)
 		ui.same_line(0.0, 6.0 * s)
 	return ui.menu_item(label, shortcut, selected)

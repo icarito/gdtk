@@ -267,5 +267,40 @@ func _init():
 	check("texto de foco", SB.focus_text(dr.radial, false) == "Controlando a T"
 		and SB.focus_text(dr.radial, true).find("este equipo") >= 0)
 
+	# --- Interruptor retro del radar (2026-10-08): master on/off --------------
+	# Encendido y sin sesiones sigue vacío: para eso no hay dockapp.
+	check("master encendido sin nada vacío", SB.diagram([], [], [], {}, {}, true).empty())
+	# Cortado sin sesiones: stub no vacío (la dockapp queda con el interruptor).
+	var doff = SB.diagram([], [], [], {}, {}, false)
+	check("master apagado no vacío", not doff.empty())
+	check("master apagado marcado", String(doff.master) == "off")
+	check("apagado sin blips", doff.radial.empty() and doff.sides.north.empty()
+		and doff.sides.south.empty() and doff.sides.east.empty() and doff.sides.west.empty())
+	check("apagado lo dice en el tooltip", String(doff.tooltip).find("apagado") >= 0)
+	check("apagado ofrece encender", _first_action_id(doff) == "master_on")
+	# Con sesiones el menú abajo conserva los cortes por equipo.
+	var s1 = [{"host": "tengu", "peer_name": "tengu", "type": "screen",
+		"side": "south", "state": "active"}]
+	var don = SB.diagram(s1, [], [], {}, {}, true)
+	check("master encendido marcado", String(don.master) == "on")
+	check("encendido ofrece apagar todo", _first_action_id(don) == "master_off"
+		and String(don.menu[1].kind) == "separator")
+	check("apagado con sesiones conserva cortes y ofrece encender",
+		_first_action_id(SB.diagram(s1, [], [], {}, {}, false)) == "master_on")
+	check("interruptor sin vocabulario interno",
+		not SB.MAP.has_internal_terms(String(don.menu[0].label))
+		and not SB.MAP.has_internal_terms(String(SB.diagram([], [], [], {}, {},
+			false).menu[0].label))
+		and not SB.MAP.has_internal_terms(String(doff.tooltip)))
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()
+
+
+# Primera fila de acción del menú (salteando separadores).
+func _first_action_id(dg):
+	for m in dg.menu:
+		if String(m.get("kind", "")) == "separator":
+			continue
+		return String(m.get("id", ""))
+	return ""

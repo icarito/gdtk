@@ -67,6 +67,7 @@ mcp/gdtk_mcp.py = puente MCP → JSON-RPC de remote.gd (SPEC-control.md).
 | una app que abre ventana | `ACTIVITIES` en `shell.gd` o un `.desktop` (lo lee `apps.gd`) | `SPEC-shell.md` |
 | un servicio de fondo con botón | `ACTIVITIES[].service` | este doc §5 |
 | una página de Configuración | `settings/pages/<x>.gd` (hereda `page.gd`) | `SPEC-ui-rework-2026-10.md` |
+| una notificación / aviso / urgencia | bus `shell/notify.gd` + daemon `session/gdtk-notify` (store en `$XDG_RUNTIME_DIR`) | `SPEC-notificaciones.md` |
 | un comando del control remoto/MCP | `shell/remote.gd` + `mcp/gdtk_mcp.py` | `SPEC-control.md` |
 | un protocolo Wayland nuevo | `modules/wayland/wl_server.c` (recompilar) | `SPEC-compositor.md` |
 | un script de sesión | `session/` **y** la lista de `deploy.sh` | `AGENTS.md` |

@@ -15,12 +15,17 @@ extends Reference
 #   [security] tlsEnabled=false
 #   [gui]      autoHide=true
 #
-# build_server_settings(local_name, layout_conf_path, port=24800):
+# build_server_settings(local_name, layout_conf_path, port=24800, screens=[]):
 #   [core]     coreMode=2, computerName/screenName=<local_name>, port
 #   [server]   externalConfig=true, externalConfigFile=<layout_conf_path>
 #   [internalConfig] clipboardSharing=true (el portapapeles no es opción: "Controlar"
 #              asume compartido; el layout barrier también lo fuerza a true)
 #   [security] tlsEnabled=false
+#   [computer_<nombre>] name=<nombre> por cada pantalla (local + `screens`)
+#
+# El bloque `[computer_*]` es lo que Deskflow >= 1.27 usa para resolver las pantallas
+# (Settings::knownComputers): 1.27 dejó de leer `section: screens` del config externo.
+# 1.26 lo ignora y sigue leyendo screens del externo, así el mismo ini sirve para ambos.
 #
 # Valida `server_addr` (IPv4/IPv6/hostname: sin espacios, saltos, '=', ';' ni
 # metacaracteres de shell) y las rutas con `valid_local_path` de
@@ -91,7 +96,7 @@ static func build_client_settings(local_name, server_addr, port = DEFAULT_PORT):
 
 # ini de SERVIDOR. `layout_conf_path` es el archivo barrier real que Deskflow lee
 # por `externalConfigFile`; "" si el nombre, la ruta o el puerto son inválidos.
-static func build_server_settings(local_name, layout_conf_path, port = DEFAULT_PORT):
+static func build_server_settings(local_name, layout_conf_path, port = DEFAULT_PORT, screens = []):
 	var name = String(local_name).strip_edges()
 	if not LAYOUT.valid_peer(name):
 		return ""
@@ -100,6 +105,18 @@ static func build_server_settings(local_name, layout_conf_path, port = DEFAULT_P
 		return ""
 	if not valid_port(port):
 		return ""
+	# Deskflow >= 1.27 dejó de leer `section: screens` del config externo y resuelve las
+	# pantallas con `Settings::knownComputers()`, que son los grupos `[computer_<nombre>]`
+	# del archivo de settings (NO `[internalConfig] screens`: el core 1.27 crashea con eso).
+	# El local va primero; dedupe y validación como los peers.
+	var names = [name]
+	if typeof(screens) == TYPE_ARRAY:
+		for s in screens:
+			var sn = String(s).strip_edges()
+			if not LAYOUT.valid_peer(sn):
+				return ""
+			if not names.has(sn):
+				names.append(sn)
 	var lines = PoolStringArray()
 	lines.append("[core]")
 	lines.append(_setting("coreMode", CORE_MODE_SERVER))
@@ -123,6 +140,10 @@ static func build_server_settings(local_name, layout_conf_path, port = DEFAULT_P
 	lines.append("")
 	lines.append("[security]")
 	lines.append(_setting("tlsEnabled", "false"))
+	for n in names:
+		lines.append("")
+		lines.append("[computer_" + String(n) + "]")
+		lines.append(_setting("name", String(n)))
 	return lines.join("\n") + "\n"
 
 
@@ -152,6 +173,11 @@ static func selftest():
 		"externalConfigFile")
 	assert(server.find("[internalConfig]") >= 0 and server.find("clipboardSharing=true") >= 0,
 		"portapapeles compartido siempre")
+	assert(server.find("[computer_gdtk-local]") >= 0 and server.find("name=gdtk-local") >= 0,
+		"servidor declara [computer_] del local (Deskflow >= 1.27)")
+	assert(server.find("screens\\") < 0, "servidor no usa screens\\ (crash 1.27)")
+	assert(build_server_settings("gdtk-local", "/home/u/.config/Deskflow/deskflow-server.conf", 24800,
+		["a", "b"]).find("[computer_a]") >= 0, "servidor declara [computer_] de las pantallas")
 	assert(server.find("[gui]") < 0, "servidor sin gui")
 
 	assert(valid_server_addr("192.168.1.20"), "IPv4 valida")

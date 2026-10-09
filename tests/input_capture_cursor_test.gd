@@ -46,6 +46,8 @@ class CompositorProbe:
 	extends Reference
 	var leaves = 0
 	var enabled = true
+	func is_dragging():
+		return false
 	func pointer_clear_focus():
 		leaves += 1
 	func set_local_pointer_enabled(value):
@@ -72,7 +74,7 @@ func _init():
 		return
 	var source = f.get_as_text()
 	f.close()
-	var harness = "extends Reference\nvar remote_input\nvar eis_cursor\nvar compositor\nvar mouse_locked = false\nvar client_pointer_locked = false\nvar client_cursor_hidden = false\nvar expose = false\nvar chrome_drag = null\nvar _capture_drag_held = false\nvar debug_input = false\nvar input_enabled = true\nvar input_probe\nvar tree_probe\nvar redraws = 0\nfunc get_tree():\n\treturn tree_probe\nfunc request_redraw():\n\tredraws += 1\nfunc set_process_input(value):\n\tinput_enabled = value\nfunc _apply_client_cursor_state():\n\tpass\n"
+	var harness = "extends Reference\nvar remote_input\nvar eis_cursor\nvar compositor\nvar mouse_locked = false\nvar client_pointer_locked = false\nvar client_cursor_hidden = false\nvar expose = false\nvar expose_drag = null\nvar chrome_drag = null\nvar _capture_drag_held = false\nvar debug_input = false\nvar input_enabled = true\nvar input_probe\nvar tree_probe\nvar redraws = 0\nfunc get_tree():\n\treturn tree_probe\nfunc request_redraw():\n\tredraws += 1\nfunc set_process_input(value):\n\tinput_enabled = value\nfunc _apply_client_cursor_state():\n\tpass\n"
 	for name in ["_set_capture_cursor", "_sync_capture_cursor", "_capture_remote_input_event", "_move_eis_cursor"]:
 		harness += "\n" + _function(source, name)
 	harness = harness.replace("RemoteInput.DEVICE_ID", "69").replace("Input.", "input_probe.")
@@ -133,5 +135,14 @@ func _init():
 	motion.device = 0
 	shell._move_eis_cursor(motion)
 	check("motion físico borra cursor auxiliar previo", not shell.eis_cursor.visible)
+	# Exposé universal: sin arrastre, el borde cruza a la pantalla del vecino (Deskflow);
+	# con una miniatura arrastrada, el mouse es del shell y no cruza.
+	shell.expose = true
+	shell.expose_drag = null
+	shell.remote_input.active = true
+	check("exposé sin arrastre permite cruzar de pantalla", shell._capture_remote_input_event(motion))
+	shell.expose_drag = {}
+	shell.remote_input.active = false
+	check("exposé arrastrando no cruza a Deskflow", not shell._capture_remote_input_event(motion))
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

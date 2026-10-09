@@ -213,6 +213,41 @@ mín ~1-4, objetivo 30: fluido a rachas); **AP cero frames** (todo paquete llega
   Emitir desde `_start_gvd_screen`/`_stop_gvd_screen`/`_run_deskflow_server` y sus paradas.
 - Dibujo en `frame._draw_shared` (:1498). Tests: `shared_block_test.gd`, `peer_link_test.gd`, `peer_control_test.gd`.
 
+### G6 — Interruptor retro del radar: master del intercambio (2026-10-08)
+- La dockapp "Compartiendo" (radar) lleva en su esquina inferior derecha un **botón redondo de
+  encendido** (base rehundida + aro de estado + glifo de power; antes era una palanca I/O) que
+  enciende o corta **de una sola vez** todo el intercambio: Deskflow (teclado y mouse), el túnel de
+  audio (PipeWire/módulos pactl de `audio_send.gd`) y las sesiones de pantalla gvd (extender,
+  recibir, ventanas espejadas). Es "Apagar todo el intercambio" / "Encender el intercambio" —
+  también como primera fila del menú del bloque. Nota: lo que la spec anterior decía "la dockapp
+  sólo puede apagar" queda ampliado por esta decisión: además de cortar por sesión, el radar puede
+  rearmar TODO (pero nunca inventa sesiones nuevas: repone de preferencias/roster con los caminos
+  de siempre).
+- Cortar (`shell._share_all_enable(false)`): detiene lo vivo con los ciclos existentes
+  (`_stop_gvd_screen` por hid, `_stop_tracked` de servidores por equipo, `_audio_work({})` +
+  `_peer_audio_stop` para audio, `_toggle_service_by_name("Deskflow")`), cancela lanzamientos peer
+  en vuelo y **no borra preferencias** (`share.*` de settings ni `mode` del servicio). Fija
+  `share_enabled = false` **y lo persiste** en `settings.json` (`share_enabled`), así el estado del
+  radar sobrevive reloads y reinicios (antes era sólo memoria y volvía a encendido). Se restaura al
+  arrancar el shell, tras `settings_bridge.reload_now()`.
+- Mientras está cortado (`share_enabled == false`): `_sharing_reconcile` y `_deskflow_tick/_deskflow_arm`
+  no revivifican; los intentos locales nuevos se rechazan con el mismo mensaje visible
+  (`SHARE_DISABLED_ERROR`) en `_group_*_set(on)`, `_start_gvd_screen`, `_run_deskflow_plan/server`,
+  `_group_share_window`; recepción vía canal peer se rechaza honesta (`_peer_gvd_open` → false,
+  `_peer_audio_recv` → 0), y `share_notify` sólo procesa "stopped" (sin blips fantasma).
+  `_share_off_reap()` (vigía en `_deskflow_tick`) mata en silencio todo lo que logré revivir por
+  carrera (launch terminando, toggle diferido de escrituras de config, pico del buzón ssh — ese
+  buzón ssh remoto queda documentado como lo único fuera de la puerta).
+- Los interruptores de Grupo/Vecindario (`_group_input_on`/`_group_screen_on`/`_group_audio_on`)
+  muestran encendido=0 mientras corta, así el estado mostrado es siempre el real.
+- Encender (`_share_all_enable(true)`): `_share_all_arm()` vuelve a aplicar el roster de teclado y
+  mouse del corte (`share_roster_input`, sin tocar el rol si el modo era `use_remote`: un equipo
+  cliente no se pincha a servidor), `_deskflow_arm()` reactiva el autoarranque del servicio y
+  `_sharing_reconcile` restaura pantalla/audio desde `share.*` guardadas (reintentos inmediatos).
+- Conway de UI: encendido+sin sesiones = dockapp desaparece (como siempre); **cortado = dockapp
+  SIEMPRE a la vista** (stub apagado, radar muerto con scope gris y sin barrido) para que el
+  encendido siempre sea alcanzable. Test `shared_block_test.gd` (sección master).
+
 ## Reparto (archivos disjuntos)
 - **Ola 1 en paralelo**
   - Agente A (G1+G2): `shell/zoom_model.gd`, `shell/ring_layout.gd`, `shell/shell.gd` (zoom/orbit),

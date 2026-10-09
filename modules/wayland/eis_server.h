@@ -20,7 +20,7 @@ typedef struct {
 	// discrete: dx,dy en 1/120 de muesca; si no, en píxeles lógicos.
 	void (*scroll)(void *ud, double dx, double dy, int discrete);
 	void (*key)(void *ud, uint32_t evdev_key, int pressed);
-	// El cliente dejó de emular (Deskflow: el cursor salió de esta pantalla). Hay que
+	// El sender activo dejó de emular o se desconectó. Hay que
 	// soltar lo que quedó apretado o queda pegado (p. ej. Super => todo clic es Super+drag).
 	void (*stop_emulating)(void *ud);
 	// Un cliente pide control remoto (Start del portal): responder con eis_server_respond.
@@ -52,8 +52,9 @@ void eis_server_respond(eis_server *s, int id, int allow);
 // InputCapture: el shell llama estas funciones con eventos FISICOS locales (los que
 // llevan RemoteInput::DEVICE_ID no deben llegar acá). Al cruzar una barrera armada se
 // activa la sesión y, mientras esté activa, el evento se reenvía a los clientes
-// receiver por EIS (frame con `time`). `time` en ms monotónicos (OS.get_ticks_msec),
-// 0 = usar el reloj actual. Devuelven 1 si la captura consumió el evento.
+// receiver por EIS. `time` conserva la ABI del shell; los frames usan siempre el
+// CLOCK_MONOTONIC actual en µs, pues OS.get_ticks_msec tiene origen distinto.
+// Devuelven 1 si la captura consumió el evento.
 int eis_server_capture_motion(eis_server *s, double x, double y, double dx, double dy, uint64_t time);
 int eis_server_capture_button(eis_server *s, uint32_t button, int pressed, uint64_t time);
 int eis_server_capture_scroll(eis_server *s, double dx, double dy, uint64_t time);

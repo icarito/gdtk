@@ -1,0 +1,14 @@
+#!/bin/sh
+# Mitigación opt-in por launcher; ver guides/firefox-crashes.md.
+# Evita el UAF de ScreenHelperGTK/WaylandSurface sin desactivar WebRender/VA-API.
+# El compositor embebido suministra DISPLAY para su Xwayland.
+# GDTK_FIREFOX_NATIVE_WAYLAND=1 permite comparar con el camino original.
+case ":${XDG_CURRENT_DESKTOP:-}:" in
+    *:gdtk:*)
+        if [ "${GDTK_FIREFOX_NATIVE_WAYLAND:-0}" != 1 ]; then
+            export GDK_BACKEND=x11
+            export MOZ_ENABLE_WAYLAND=0
+        fi
+        ;;
+esac
+exec firefox "$@"

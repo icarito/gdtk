@@ -50,7 +50,7 @@ func save(settings):
 	var err = write_atomic(settings_path(), model.to_json(normalized))
 	if err != "":
 		return err
-	err = write_atomic(tree_dir().plus_file("keyboard"), model.keyboard_file_content(normalized.keyboard))
+	err = write_atomic(tree_dir().plus_file("keyboard"), model.keyboard_file_content(normalized.keyboard, normalized.get("keyboard_layouts", [])))
 	if err != "":
 		return err
 	return write_atomic(tree_dir().plus_file("locale"), model.locale_file_content(normalized.locale))

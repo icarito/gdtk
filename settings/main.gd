@@ -20,6 +20,7 @@ const PAGES = [
 	{"id": "wallpaper", "label": "Fondo de pantalla", "path": "res://pages/wallpaper.gd"},
 	{"id": "displays", "label": "Pantallas", "path": "res://pages/displays.gd"},
 	{"id": "monitors", "label": "Monitores", "path": "res://pages/monitors.gd"},
+	{"id": "notifications", "label": "Notificaciones", "path": "res://pages/notifications.gd"},
 ]
 
 var model = null
@@ -40,6 +41,13 @@ func _ready():
 	original = settings.duplicate(true)
 	_build_ui()
 	_select("keyboard")
+	# Página inicial pedida por el shell (`--page <id>`, enlaces del Frame).
+	var want_page = _cmd_page()
+	if want_page != "":
+		for p in PAGES:
+			if p.id == want_page:
+				_select(want_page)
+				break
 	if "--settings-selftest" in OS.get_cmdline_args():
 		# Dev aid: arma todas las páginas y guarda (con GDTK_SETTINGS redirigido).
 		for p in PAGES:
@@ -51,6 +59,19 @@ func _ready():
 
 func _quit_selftest():
 	get_tree().quit()
+
+
+# Página pedida con `--page <id>` ("" si no vino o el id no es válido).
+func _cmd_page():
+	var args = OS.get_cmdline_args()
+	for i in range(args.size()):
+		if args[i] == "--page" and i + 1 < args.size():
+			var id = String(args[i + 1]).strip_edges()
+			for p in PAGES:
+				if p.id == id:
+					return id
+			return ""
+	return ""
 
 
 func _draw():

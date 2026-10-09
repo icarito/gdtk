@@ -1,0 +1,553 @@
+#!/usr/bin/env python3
+# Daemon de notificaciones de gdtk (SPEC-notificaciones.md). POSIX-friendly.
+#
+#   gdtk-notify serve                 posee org.freedesktop.Notifications en el bus de
+#                                     sesión y es el ÚNICO escritor del store
+#   gdtk-notify push <archivo.json>   encola un evento interno (cuerpo por archivo)
+#   gdtk-notify dismiss <id>          cierra/descarta una notificación
+#   gdtk-notify clear                 vacía el historial
+#   gdtk-notify invoke <id> <acción>  dispara la acción de una notificación
+#   gdtk-notify list                  imprime el store actual (JSON)
+#   gdtk-notify selftest              valida el modelo puro sin bus (sale 0)
+#
+# El store vive en $XDG_RUNTIME_DIR/gdtk/notifications.json (tmpfs, sin secretos) y se
+# escribe atómico (tmp+rename). El log va a $XDG_RUNTIME_DIR/gdtk-notify.log.
+# El cuerpo NUNCA viaja por argv: `push` lo recibe por archivo.
+
+import json
+import os
+import sys
+import time
+
+STORE_NAME = "notifications.json"
+HISTORY_MAX = 100
+SPEC_VERSION = "1.2"
+STD_PATH = "/org/freedesktop/Notifications"
+CUSTOM_PATH = "/org/gdtk/Notify"
+IFACE = "org.freedesktop.Notifications"
+CUSTOM_IFACE = "org.gdtk.Notify"
+
+
+# --- rutas -------------------------------------------------------------------
+
+def runtime_dir():
+    return os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+
+
+def run_dir():
+    return os.path.join(runtime_dir(), "gdtk")
+
+
+def store_path():
+    return os.path.join(run_dir(), STORE_NAME)
+
+
+def log_path():
+    return os.path.join(runtime_dir(), "gdtk-notify.log")
+
+
+def log(msg):
+    try:
+        os.makedirs(os.path.dirname(log_path()), exist_ok=True)
+        with open(log_path(), "a") as f:
+            f.write("%s %s\n" % (time.strftime("%F %T"), msg))
+    except OSError:
+        pass
+
+
+# --- modelo puro (testeable sin bus) -----------------------------------------
+
+def normalize(rec):
+    rec = rec if isinstance(rec, dict) else {}
+    actions = []
+    raw = rec.get("actions", [])
+    if isinstance(raw, list):
+        for a in raw:
+            if isinstance(a, dict):
+                actions.append({"key": str(a.get("key", "default")),
+                                "label": str(a.get("label", ""))})
+    urg = str(rec.get("urgency", "normal")).lower()
+    if urg not in ("low", "normal", "critical"):
+        urg = "normal"
+    return {
+        "id": int(rec.get("id", 0) or 0),
+        "source": str(rec.get("source", "")),
+        "app": str(rec.get("app", "")),
+        "app_id": str(rec.get("app_id", "")),
+        "icon": str(rec.get("icon", "")),
+        "summary": str(rec.get("summary", ""))[:400],
+        "body": str(rec.get("body", ""))[:400],
+        "urgency": urg,
+        "actions": actions,
+        "target_window": int(rec.get("target_window", 0) or 0),
+        "created_ms": int(rec.get("created_ms", 0) or 0),
+        "expires_ms": int(rec.get("expires_ms", 0) or 0),
+        "read": bool(rec.get("read", False)),
+    }
+
+
+def next_id(items):
+    return max([int(i.get("id", 0)) for i in items] + [0]) + 1
+
+
+def apply_push(items, rec, cap=HISTORY_MAX):
+    r = normalize(rec)
+    out = [i for i in items if isinstance(i, dict)]
+    rid = int(rec.get("replaces_id", 0) or 0) if isinstance(rec, dict) else 0
+    if rid <= 0:
+        rid = int(r.get("id", 0))
+    if rid > 0:
+        out = [i for i in out if int(i.get("id", 0)) != rid]
+    if int(r.get("id", 0)) <= 0:
+        r["id"] = rid if rid > 0 else next_id(out)
+    out.insert(0, r)
+    return out[:cap]
+
+
+def apply_dismiss(items, nid):
+    return [i for i in items if int(i.get("id", 0)) != int(nid)]
+
+
+def prune_expired(items, now_ms):
+    out = []
+    for i in items:
+        exp = int(i.get("expires_ms", 0))
+        if exp > 0 and int(now_ms) >= exp:
+            continue
+        out.append(i)
+    return out
+
+
+def parse_store(text):
+    doc = {"revision": 0, "items": []}
+    if not text or not text.strip():
+        return doc
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return doc
+    if not isinstance(data, dict):
+        return doc
+    doc["revision"] = int(data.get("revision", 0) or 0)
+    items = data.get("items", [])
+    if isinstance(items, list):
+        doc["items"] = [normalize(i) for i in items if isinstance(i, dict)]
+    return doc
+
+
+def serialize_store(revision, items):
+    return json.dumps({"revision": int(revision), "items": items})
+
+
+def load_store(path=None):
+    path = path or store_path()
+    try:
+        with open(path) as f:
+            return parse_store(f.read())
+    except OSError:
+        return {"revision": 0, "items": []}
+
+
+def write_store(items, revision):
+    path = store_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(serialize_store(revision, items))
+        os.replace(tmp, path)
+    except OSError as e:
+        log("write_store: %s" % e)
+        return False
+    return True
+
+
+# --- daemon D-Bus ------------------------------------------------------------
+
+IFACE_XML = """
+<node>
+  <interface name="org.freedesktop.Notifications">
+    <method name="Notify">
+      <arg type="s" name="app_name" direction="in"/>
+      <arg type="u" name="replaces_id" direction="in"/>
+      <arg type="s" name="app_icon" direction="in"/>
+      <arg type="s" name="summary" direction="in"/>
+      <arg type="s" name="body" direction="in"/>
+      <arg type="as" name="actions" direction="in"/>
+      <arg type="a{sv}" name="hints" direction="in"/>
+      <arg type="i" name="expire_timeout" direction="in"/>
+      <arg type="u" name="id" direction="out"/>
+    </method>
+    <method name="CloseNotification">
+      <arg type="u" name="id" direction="in"/>
+    </method>
+    <method name="GetCapabilities">
+      <arg type="as" name="capabilities" direction="out"/>
+    </method>
+    <method name="GetServerInformation">
+      <arg type="s" name="name" direction="out"/>
+      <arg type="s" name="vendor" direction="out"/>
+      <arg type="s" name="version" direction="out"/>
+      <arg type="s" name="spec_version" direction="out"/>
+    </method>
+    <signal name="NotificationClosed">
+      <arg type="u" name="id"/>
+      <arg type="u" name="reason"/>
+    </signal>
+    <signal name="ActionInvoked">
+      <arg type="u" name="id"/>
+      <arg type="s" name="action_key"/>
+    </signal>
+  </interface>
+  <interface name="org.gdtk.Notify">
+    <method name="Clear"/>
+    <method name="Invoke">
+      <arg type="u" name="id" direction="in"/>
+      <arg type="s" name="action" direction="in"/>
+    </method>
+  </interface>
+</node>
+"""
+
+
+def hint_value(hints, key, default=None):
+    v = hints.get(key, default)
+    # a{sv} puede llegar con el valor envuelto en GLib.Variant.
+    return v.unpack() if hasattr(v, "unpack") else v
+
+
+def _hint_str(hints, key):
+    v = hint_value(hints, key, "")
+    return v if isinstance(v, str) else ""
+
+
+def _hint_urgency(hints):
+    v = hint_value(hints, "urgency", 1)
+    try:
+        return {0: "low", 1: "normal", 2: "critical"}.get(int(v), "normal")
+    except (TypeError, ValueError):
+        return "normal"
+
+
+def cmd_serve():
+    try:
+        import gi
+        gi.require_version("Gio", "2.0")
+        from gi.repository import Gio, GLib
+    except Exception as e:  # noqa: BLE001
+        log("serve: falta PyGObject/Gio: %s" % e)
+        return 1
+
+    # Idempotente por lock (como gdtk-clipboard): un segundo serve no arranca.
+    lock_fd = None
+    try:
+        import fcntl
+        os.makedirs(run_dir(), exist_ok=True)
+        lock_fd = open(os.path.join(run_dir(), ".notify.lock"), "w")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, ImportError) as e:
+        log("serve: ya hay un daemon (lock): %s" % e)
+        return 0
+
+    doc = load_store()
+    state = {"items": doc["items"], "rev": int(doc["revision"])}
+    timers = {}
+
+    def save():
+        state["rev"] += 1
+        write_store(state["items"], state["rev"])
+
+    def remove(nid, reason):
+        before = len(state["items"])
+        state["items"] = apply_dismiss(state["items"], nid)
+        if len(state["items"]) != before:
+            save()
+        if nid in timers:
+            try:
+                GLib.source_remove(timers.pop(nid))
+            except (KeyError, Exception):  # noqa: BLE001
+                pass
+        return before != len(state["items"])
+
+    node = Gio.DBusNodeInfo.new_for_xml(IFACE_XML)
+    std_info = None
+    custom_info = None
+    for i in node.interfaces:
+        if i.name == IFACE:
+            std_info = i
+        elif i.name == CUSTOM_IFACE:
+            custom_info = i
+
+    def handle_std(conn, sender, path, iface, method, params, invocation):
+        try:
+            if method == "Notify":
+                app_name, replaces_id, app_icon, summary, body, actions, hints, expire = params.unpack()
+                hints = hints or {}
+                rec = {
+                    "source": _hint_str(hints, "x-gdtk-source") or "dbus",
+                    "app": app_name,
+                    "app_id": _hint_str(hints, "desktop-entry"),
+                    "icon": app_icon or _hint_str(hints, "desktop-entry"),
+                    "summary": summary,
+                    "body": body,
+                    "urgency": _hint_urgency(hints),
+                    "actions": _pairs_to_actions(actions),
+                    "created_ms": int(time.time() * 1000),
+                    "expires_ms": int(expire) if int(expire) > 0 else 0,
+                }
+                if int(replaces_id) > 0:
+                    rec["replaces_id"] = int(replaces_id)
+                state["items"] = prune_expired(state["items"], int(time.time() * 1000))
+                state["items"] = apply_push(state["items"], rec)
+                save()
+                nid = int(state["items"][0]["id"])
+                if int(expire) > 0:
+                    timers[nid] = GLib.timeout_add(int(expire), _on_expire, nid)
+                invocation.return_value(GLib.Variant("(u)", (nid,)))
+                return
+            if method == "CloseNotification":
+                (nid,) = params.unpack()
+                remove(int(nid), 3)
+                _emit_close(conn, int(nid), 3)
+                invocation.return_value(None)
+                return
+            if method == "GetCapabilities":
+                invocation.return_value(GLib.Variant("(as)", (["body", "actions", "persistence"],)))
+                return
+            if method == "GetServerInformation":
+                invocation.return_value(GLib.Variant("(ssss)", ("gdtk", "gdtk", "1.0", SPEC_VERSION)))
+                return
+        except Exception as e:  # noqa: BLE001
+            log("serve/std %s: %s" % (method, e))
+        invocation.return_value(None)
+
+    def handle_custom(conn, sender, path, iface, method, params, invocation):
+        try:
+            if method == "Clear":
+                state["items"] = []
+                save()
+                invocation.return_value(None)
+                return
+            if method == "Invoke":
+                nid, action = params.unpack()
+                _emit_action(conn, int(nid), str(action))
+                remove(int(nid), 2)
+                _emit_close(conn, int(nid), 2)
+                invocation.return_value(None)
+                return
+        except Exception as e:  # noqa: BLE001
+            log("serve/custom %s: %s" % (method, e))
+        invocation.return_value(None)
+
+    def _on_expire(nid):
+        timers.pop(nid, None)
+        remove(int(nid), 1)
+        conn = state.get("conn")
+        if conn is not None:
+            _emit_close(conn, int(nid), 1)
+        return False
+
+    def on_bus_acquired(conn, name):
+        state["conn"] = conn
+        conn.register_object(STD_PATH, std_info, handle_std, None, None)
+        conn.register_object(CUSTOM_PATH, custom_info, handle_custom, None, None)
+
+    def on_name_lost(conn, name):
+        log("serve: nombre perdido: %s" % name)
+
+    Gio.bus_own_name(Gio.BusType.SESSION, IFACE, Gio.BusNameOwnerFlags.NONE,
+                     on_bus_acquired, None, on_name_lost)
+    log("serve: daemon iniciado")
+    GLib.MainLoop().run()
+    return 0
+
+
+def _pairs_to_actions(actions):
+    out = []
+    try:
+        for i in range(0, len(actions) - 1, 2):
+            out.append({"key": str(actions[i]), "label": str(actions[i + 1])})
+    except (TypeError, IndexError):
+        pass
+    return out
+
+
+def _emit_close(conn, nid, reason):
+    try:
+        import gi
+        gi.require_version("Gio", "2.0")
+        from gi.repository import Gio, GLib
+        conn.emit_signal(None, STD_PATH, IFACE, "NotificationClosed",
+                         GLib.Variant("(uu)", (int(nid), int(reason))))
+    except Exception as e:  # noqa: BLE001
+        log("emit_close: %s" % e)
+
+
+def _emit_action(conn, nid, action):
+    try:
+        import gi
+        gi.require_version("Gio", "2.0")
+        from gi.repository import Gio, GLib
+        conn.emit_signal(None, STD_PATH, IFACE, "ActionInvoked",
+                         GLib.Variant("(us)", (int(nid), str(action))))
+    except Exception as e:  # noqa: BLE001
+        log("emit_action: %s" % e)
+
+
+# --- cliente -----------------------------------------------------------------
+
+def _bus():
+    import gi
+    gi.require_version("Gio", "2.0")
+    from gi.repository import Gio
+    return Gio.bus_get_sync(Gio.BusType.SESSION, None)
+
+
+def cmd_push(path):
+    if not path or not os.path.isfile(path):
+        return 2
+    try:
+        with open(path) as f:
+            rec = json.load(f)
+    except (OSError, ValueError):
+        return 2
+    rec = normalize(rec)
+    try:
+        import gi
+        gi.require_version("Gio", "2.0")
+        from gi.repository import Gio, GLib
+        conn = _bus()
+        actions = []
+        for a in rec["actions"]:
+            actions.append(a["key"])
+            actions.append(a["label"])
+        hints = {
+            "urgency": GLib.Variant("y", {"low": 0, "normal": 1, "critical": 2}.get(rec["urgency"], 1)),
+            "x-gdtk-source": GLib.Variant("s", rec["source"] or "rpc"),
+        }
+        if rec["app_id"]:
+            hints["desktop-entry"] = GLib.Variant("s", rec["app_id"])
+        args = GLib.Variant("(susssasa{sv}i)", (
+            rec["app"], 0, rec["icon"], rec["summary"], rec["body"], actions, hints,
+            int(rec["expires_ms"]) if rec["expires_ms"] > 0 else 0))
+        conn.call_sync(IFACE, STD_PATH, IFACE, "Notify", args, None,
+                       Gio.DBusCallFlags.NONE, 2000, None)
+        return 0
+    except Exception as e:  # noqa: BLE001
+        log("push: %s" % e)
+        return 2
+
+
+def cmd_dismiss(nid):
+    try:
+        import gi
+        gi.require_version("Gio", "2.0")
+        from gi.repository import Gio, GLib
+        conn = _bus()
+        conn.call_sync(IFACE, STD_PATH, IFACE, "CloseNotification",
+                       GLib.Variant("(u)", (int(nid),)), None,
+                       Gio.DBusCallFlags.NONE, 2000, None)
+        return 0
+    except Exception as e:  # noqa: BLE001
+        log("dismiss: %s" % e)
+        return 2
+
+
+def cmd_clear():
+    try:
+        import gi
+        gi.require_version("Gio", "2.0")
+        from gi.repository import Gio, GLib
+        conn = _bus()
+        conn.call_sync(IFACE, CUSTOM_PATH, CUSTOM_IFACE, "Clear",
+                       GLib.Variant("()", ()), None, Gio.DBusCallFlags.NONE, 2000, None)
+        return 0
+    except Exception as e:  # noqa: BLE001
+        log("clear: %s" % e)
+        return 2
+
+
+def cmd_invoke(nid, action):
+    try:
+        import gi
+        gi.require_version("Gio", "2.0")
+        from gi.repository import Gio, GLib
+        conn = _bus()
+        conn.call_sync(IFACE, CUSTOM_PATH, CUSTOM_IFACE, "Invoke",
+                       GLib.Variant("(us)", (int(nid), str(action))), None,
+                       Gio.DBusCallFlags.NONE, 2000, None)
+        return 0
+    except Exception as e:  # noqa: BLE001
+        log("invoke: %s" % e)
+        return 2
+
+
+def cmd_list():
+    doc = load_store()
+    doc["items"] = prune_expired(doc["items"], int(time.time() * 1000))
+    sys.stdout.write(serialize_store(doc["revision"], doc["items"]) + "\n")
+    return 0
+
+
+# --- selftest ----------------------------------------------------------------
+
+def cmd_selftest():
+    fails = 0
+
+    def check(cond, msg):
+        nonlocal fails
+        if not cond:
+            fails += 1
+            print("FAIL " + msg)
+        else:
+            print("ok " + msg)
+
+    a = apply_push([], {"id": 1, "summary": "uno"}, 3)
+    a = apply_push(a, {"id": 2, "summary": "dos"}, 3)
+    a = apply_push(a, {"id": 3, "summary": "tres"}, 3)
+    check([int(i["id"]) for i in a] == [3, 2, 1], "orden más nuevo primero")
+    a = apply_push(a, {"id": 4, "summary": "cuatro"}, 3)
+    check(len(a) == 3 and int(a[0]["id"]) == 4 and int(a[2]["id"]) == 2, "cap recorta el más viejo")
+    r = apply_push(a, {"replaces_id": 2, "summary": "dos nuevo"}, 3)
+    check(int(r[0]["id"]) == 2 and r[0]["summary"] == "dos nuevo", "replaces_id reemplaza y sube")
+    n = apply_push([], {"summary": "sin id"}, 5)
+    check(int(n[0]["id"]) == 1 and int(apply_push(n, {"summary": "otro"}, 5)[0]["id"]) == 2,
+          "id autogenerado")
+    check(len(apply_dismiss(n, 1)) == 0, "dismiss borra")
+    items = [{"id": 1, "expires_ms": 0}, {"id": 2, "expires_ms": 1500}]
+    check(len(prune_expired(items, 1000)) == 2 and len(prune_expired(items, 1600)) == 1,
+          "expiración por expires_ms")
+    doc = parse_store(serialize_store(7, items))
+    check(int(doc["revision"]) == 7 and len(doc["items"]) == 2, "store round-trip")
+    check(parse_store("basura")["items"] == [], "store corrupto no rompe")
+    check(normalize({"urgency": "URGENTE"})["urgency"] == "normal", "urgencia inválida")
+    check(next_id([{"id": 9}]) == 10, "next_id")
+    print("gdtk-notify selftest: %s" % ("ok" if fails == 0 else "FAIL"))
+    return 1 if fails else 0
+
+
+def main(argv):
+    if len(argv) < 2:
+        sys.stderr.write(__doc__ or "")
+        return 2
+    cmd = argv[1]
+    if cmd == "serve":
+        return cmd_serve()
+    if cmd == "push":
+        return cmd_push(argv[2] if len(argv) > 2 else "")
+    if cmd == "dismiss":
+        return cmd_dismiss(int(argv[2])) if len(argv) > 2 else 2
+    if cmd == "clear":
+        return cmd_clear()
+    if cmd == "invoke":
+        return cmd_invoke(int(argv[2]), argv[3]) if len(argv) > 3 else 2
+    if cmd == "list":
+        return cmd_list()
+    if cmd == "selftest":
+        return cmd_selftest()
+    sys.stderr.write("uso: %s serve|push|dismiss|clear|invoke|list|selftest\n" % argv[0])
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

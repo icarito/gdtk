@@ -46,6 +46,20 @@ func _init():
 		and server.find("clipboardSharing=true") >= 0)
 	check("servidor [security] tlsEnabled=false", server.find("tlsEnabled=false") >= 0)
 	check("servidor sin [client] ni [gui]", server.find("[client]") < 0 and server.find("[gui]") < 0)
+	# Deskflow >= 1.27 resuelve las pantallas de `[computer_<nombre>]` (knownComputers).
+	check("servidor [computer_] del local", server.find("[computer_tengu]") >= 0
+		and server.find("name=tengu") >= 0)
+	check("servidor sin screens en internalConfig", server.find("screens\\") < 0)
+
+	var multi = S.build_server_settings("tengu", layout, 24800, ["tengu", "cupid", "bastion"])
+	check("servidor [computer_] de cada pantalla",
+		multi.find("[computer_tengu]") >= 0 and multi.find("[computer_cupid]") >= 0
+		and multi.find("[computer_bastion]") >= 0)
+	check("servidor dedupe local", multi.count("[computer_tengu]") == 1)
+	check("servidor screens dedupe determinista",
+		multi == S.build_server_settings("tengu", layout, 24800, ["cupid", "bastion", "tengu"]))
+	check("servidor rechaza pantalla invalida",
+		S.build_server_settings("tengu", layout, 24800, ["bad name"]) == "")
 
 	# El ini sólo admite rutas locales válidas (sin "~" ni traversal).
 	check("servidor rechaza ruta con tilde", S.build_server_settings("tengu", "~/bad.conf") == "")

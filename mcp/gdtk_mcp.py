@@ -125,6 +125,7 @@ TOOLS = [
     tool("gdtk_scroll", "Scroll the wheel at (x, y); positive dy scrolls down.", {"x": {"type": "number"}, "y": {"type": "number"}, "dy": {"type": "number"}}, ["x", "y", "dy"]),
     tool("gdtk_type", "Type text as synthetic key events.", {"text": {"type": "string"}}, ["text"]),
     tool("gdtk_key", "Press a key or combo such as Enter, Escape, ctrl+c or alt+Tab.", {"combo": {"type": "string"}}, ["combo"]),
+    tool("gdtk_notify", "Notification bus (SPEC-notificaciones). action=push|list|dismiss|clear|silence|attention|panel|urgency; extra fields: summary, body, icon, urgency, id, on, window, text, source, severity, ttl_ms.", {"action": {"type": "string"}, "summary": {"type": "string"}, "body": {"type": "string"}, "icon": {"type": "string"}, "urgency": {"type": "string"}, "id": {"type": "integer"}, "on": {"type": "boolean"}, "window": {"type": "integer"}, "text": {"type": "string"}, "source": {"type": "string"}, "severity": {"type": "string"}, "ttl_ms": {"type": "integer"}}, ["action"]),
     tool("gdtk_metrics", "Get the debug HUD metrics snapshot: latest values plus min/max/avg of each series. With since_frame only the new samples are returned.", {"since_frame": {"type": "integer"}}),
     tool("gdtk_console", "Run a HUD console command and return its output (help, fps, vsync, timescale; eval only in debug builds).", {"line": {"type": "string"}}, ["line"]),
 ]
@@ -143,6 +144,7 @@ TOOL_METHOD = {
     "gdtk_scroll": "scroll",
     "gdtk_type": "type",
     "gdtk_key": "key",
+    "gdtk_notify": "notify",
     "gdtk_metrics": "hud_snapshot",
     "gdtk_console": "hud_command",
 }

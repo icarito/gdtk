@@ -62,8 +62,13 @@ func settings_path():
 
 
 # Argumentos para lanzar la app de Configuración como cualquier actividad wayland.
-func launch_argv():
-	return [OS.get_executable_path(), "--path", settings_dir()]
+# `page` (opcional) abre directo una página concreta (`--page <id>`).
+func launch_argv(page = ""):
+	var argv = [OS.get_executable_path(), "--path", settings_dir()]
+	if String(page) != "":
+		argv.append("--page")
+		argv.append(String(page))
+	return argv
 
 
 # --- Lectura no bloqueante ----------------------------------------------------
@@ -204,6 +209,17 @@ func span():
 	if model == null or not model.has_method("span"):
 		return {"enabled": false, "primary": "", "order": []}
 	return model.span(settings.get("span", {}))
+
+
+# Ajustes del sistema de notificaciones (SPEC-notificaciones). Defaults sanos si el
+# modelo es viejo o el archivo no trae la clave.
+func notifications():
+	if model == null or not model.has_method("notifications"):
+		return {
+			"enabled": true, "toast_transitorio": true, "atencion_foco": true,
+			"urgencia": true, "history_max": 100, "columna_modo": false, "silencio": false,
+		}
+	return model.notifications(settings.get("notifications", {}))
 
 
 func has_wallpaper_image():

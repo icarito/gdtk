@@ -69,6 +69,17 @@ func _draw():
 		draw_rect(Rect2(h.x - 4.0, cy - 16.0, 8.0, 32.0), _acc(0.9))
 		for k in range(3):
 			draw_circle(Vector2(h.x, cy - 7.0 + float(k) * 7.0), 1.3, Color(1, 1, 1, 0.95))
+	# Pedido de atención (xdg-activation): contorno pulsante sobre cada tesela en
+	# atención, sin cambiar el foco (SPEC-notificaciones).
+	if shell.notify != null and shell.view.visible:
+		var pa = shell.notify.pulse_alpha()
+		for id in shell.notify.attention_ids():
+			var node = shell.tile_nodes.get(id)
+			if node == null or not is_instance_valid(node) or not node.visible:
+				continue
+			var r = shell._node_footprint(node)
+			var col = _acc(0.30 + 0.60 * pa)
+			draw_rect(r.grow(4.0), col, false, 2.5)
 	# Resize diferido: mientras se arrastra un borde sólo se ve este fantasma (la
 	# ventana real no se redimensiona hasta soltar). Sin input: tiles_ui es IGNORE.
 	if shell.drag_overlay != null:

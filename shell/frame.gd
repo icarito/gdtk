@@ -89,6 +89,7 @@ const APPLETS = [
 	{"id": "teclado", "name": "Teclado", "short": "TEC"},
 	{"id": "volumen", "name": "Volumen", "short": "VOL"},
 	{"id": "portapapeles", "name": "Portapapeles", "short": "CLIP"},
+	{"id": "notificaciones", "name": "Notificaciones", "short": "NOTIF", "span": 2},
 ]
 const APPLET_DEFAULT = ["recursos", "termico", "reloj", "teclado"]
 # Look WindowMaker de los menús verticales (popups ImGui). Sólo estilo.
@@ -106,6 +107,10 @@ const BEVEL_MAX_W = 6.0
 # líneas en vez de recortar a 10 caracteres.
 const LABEL_SCALE = 0.78
 const LABEL_LINES = 2
+# Urgencia térmica (SPEC-notificaciones): umbral de aviso (sólo muy caliente) y vida
+# del aviso. El pulso rojo se reserva para >95 °C.
+const TEMP_ALERT_C = 95.0
+const URGENCY_TTL_MS = 180000
 
 onready var shell = get_parent()
 
@@ -122,6 +127,9 @@ var swallowed = {}
 var hot_timer = false
 # Pulsación de Super retenida mientras no se sepa si es un toque solo.
 var super_press = null
+# Si durante el toque de Super se rotó el teclado (Super+Espacio): los toques
+# repetidos siguen rotando y soltar Super NO abre el exposé.
+var super_rotated = false
 # Pin/autohide de cada barra (K19): por defecto AMBAS con autohide (se ocultan
 # solas y se muestran al acercar el mouse, superponiéndose a las ventanas sin
 # redimensionarlas). Una barra fijada (pin) queda siempre visible y RESERVA su
@@ -160,6 +168,7 @@ var keyboard = Host.sc("res://applet_keyboard.gd").new()
 var bluetooth = Host.sc("res://applet_bluetooth.gd").new()
 var clipboard = Host.sc("res://applet_clipboard.gd").new()
 var volume = Host.sc("res://applet_volume.gd").new()
+var notif_applet = Host.sc("res://applet_notif.gd").new()
 # Modelo PURO de las posiciones de bloque ancladas al costado (izquierda/derecha): al
 # cambiar `n` (rotar pantalla, otro monitor) los bloques vuelven a su borde. Se carga
 # con Host.sc (no `const preload`) para que la recarga en caliente tome el .gd nuevo.
@@ -167,7 +176,8 @@ var bar_slots = Host.sc("res://bar_slots.gd")
 # Applets con módulo propio (contrato en .operator-shared/guides/dockapp.md): el Frame
 # les pide state/value/detail, los refresca mientras están a la vista y los para al
 # salir. Sumar una dockapp = un archivo + su entrada en APPLETS + una línea acá.
-var applet_mods = {"teclado": keyboard, "portapapeles": clipboard, "volumen": volume}
+var applet_mods = {"teclado": keyboard, "portapapeles": clipboard, "volumen": volume,
+	"notificaciones": notif_applet}
 var items_layout = []
 var drawn = false
 # Applets del borde inferior: orden visible persistido (no es items_layout, que sigue
@@ -262,11 +272,19 @@ var shared_menu_want = ""
 var shared_menu_open = false
 var shared_menu_block = null
 var shared_press = ""
+# Interruptor retro I/O del DockApp "Compartiendo" (2026-10-08): rect de la placa en
+# el último frame (ZERO = no dibujada) y pulsación cruda en curso. El estado real del
+# intercambio lo lleva el shell (`share_enabled`); acá sólo el gesto y el dibujo.
+var shared_power_rect = Rect2()
+var shared_power_press = false
 func _ready():
 	_load_applets()
 	# Host (autoload), no shell.compositor: el onready del padre aún no corrió.
 	if Host.compositor != null:
 		clipboard.wayland_display = Host.compositor.start()
+	# El bus de notificaciones vive en el shell (creado antes que este Frame).
+	if shell != null and shell.notify != null:
+		notif_applet.notif = shell.notify
 
 
 # Los applets consultan en workers; al salir del árbol no deben quedar hilos vivos.
@@ -298,7 +316,63 @@ func _applet_known(id):
 
 func _applet_span(id):
 	var a = _applet_def(id)
-	return max(1, int(a.span)) if a != null and a.has("span") else 1
+	var declared = max(1, int(a.span)) if a != null and a.has("span") else 1
+	return applet_span_override(declared, applets_raw.get("span", {}), id)
+
+
+# Span efectivo de un applet dados su declarado y los overrides persistidos
+# (`applets_raw["span"][id]`). Puro y testeable.
+static func applet_span_override(declared, overrides, id):
+	if typeof(overrides) == TYPE_DICTIONARY and overrides.has(id):
+		var n = int(overrides[id])
+		if n >= 1:
+			return n
+	return max(1, int(declared))
+
+
+# Cambia el ancho (span) de un applet y lo persiste. Si el bloque está visible se
+# reubica con el ancho nuevo; si no cabe en la barra no se toca nada y devuelve false.
+func _applet_set_span(id, n):
+	var span = max(1, int(n))
+	if span == _applet_span(id):
+		return false
+	var tok = _tok_applet(id)
+	for zone in ["top", "dock"]:
+		if bar_order[zone].has(tok):
+			# Celda inicial actual del token (número de celdas ocupadas antes que él);
+			# al ensanchar se conserva esa posición.
+			var spans = {}
+			for t in bar_order[zone]:
+				if t != "":
+					spans[t] = _token_span(t)
+			var start = 0
+			for c in seq_to_cells(bar_order[zone], spans):
+				if String(c) == tok:
+					break
+				start += 1
+			var saved = {"top": bar_order["top"].duplicate(), "dock": bar_order["dock"].duplicate()}
+			if not _place_token_cell(zone, tok, start, span):
+				bar_order = saved
+				_sync_pins()
+				return false
+			break
+	var sp = applets_raw.get("span", {})
+	if typeof(sp) != TYPE_DICTIONARY:
+		sp = {}
+	sp[id] = span
+	applets_raw["span"] = sp
+	applets_dirty = true
+	_save_applets()
+	shell.request_redraw()
+	return true
+
+
+# Span efectivo de un token consultando el override persistido (los call sites de
+# layout usan esto; la versión estática `token_span` es solo el valor declarado).
+func _token_span(tok):
+	if typeof(tok) == TYPE_STRING and String(tok).begins_with("a:"):
+		return _applet_span(String(tok).substr(2))
+	return token_span(tok)
 
 
 func _applet_width(id, side):
@@ -373,7 +447,7 @@ func _order_insert(zone, tok, index):
 # orden. NO mueve otros bloques; si no hay lugar, no toca nada y devuelve false.
 func _place_token_cell(zone, tok, target, span = -1):
 	if span < 0:
-		span = token_span(tok)
+		span = _token_span(tok)
 	span = max(1, int(span))
 	var g = _grid_for(zone)
 	var max_cells = int(g.n) - 1 - bar_fixed_cells(zone)
@@ -386,7 +460,7 @@ func _place_token_cell(zone, tok, target, span = -1):
 	var spans = {}
 	for t in bar_order[zone]:
 		if t != "":
-			spans[t] = token_span(t)
+			spans[t] = _token_span(t)
 	var cells = seq_to_cells(bar_order[zone], spans)
 	var tgt = int(target)
 	if tgt < 0:
@@ -433,7 +507,7 @@ func _next_free_slot(zone, span):
 	var spans = {}
 	for t in bar_order[zone]:
 		if t != "":
-			spans[t] = token_span(t)
+			spans[t] = _token_span(t)
 	return next_free_slot(seq_to_cells(bar_order[zone], spans), span, max_cells, WINDOW_TOKEN)
 
 
@@ -442,7 +516,7 @@ func _next_free_slot(zone, span):
 # `zone`, luego la barra superior, luego el dock. false = no hubo lugar en ninguna.
 func _place_new_token(tok, span = -1, zone = "", cell = -1):
 	if span < 0:
-		span = token_span(tok)
+		span = _token_span(tok)
 	var zones = [zone] if zone != "" else []
 	for z in ["top", "dock"]:
 		if not zones.has(z):
@@ -468,11 +542,13 @@ func _sync_shared_token():
 		shared_menu_id = ""
 		shared_drag = false
 		shared_press = ""
+		shared_power_rect = Rect2()
+		shared_power_press = false
 		if zone != "":
 			var spans = {}
 			for t in bar_order[zone]:
 				if t != "":
-					spans[t] = token_span(t)
+					spans[t] = _token_span(t)
 			shared_pref = {"zone": zone, "cell": seq_to_cells(bar_order[zone], spans).find(SHARED_TOKEN)}
 			_order_remove(SHARED_TOKEN)
 			applets_dirty = true
@@ -764,7 +840,7 @@ func _normalize_order(zone):
 	var spans = {}
 	for t in bar_order[zone]:
 		if t != "":
-			spans[t] = token_span(t)
+			spans[t] = _token_span(t)
 	var cells = seq_to_cells(bar_order[zone], spans)
 	var out = []
 	for c in cells:
@@ -843,7 +919,7 @@ func _sync_anchor():
 		var spans = {}
 		for t in bar_order[zone]:
 			if t != "":
-				spans[t] = token_span(t)
+				spans[t] = _token_span(t)
 		bar_order_anchor[zone] = bar_slots.to_saved(seq_to_cells(bar_order[zone], spans), _order_n(zone))
 
 
@@ -1304,11 +1380,11 @@ func _seq_with_drag(zone, drag_tok, mouse_x, grid, prev, x0):
 	var cell = float(grid.pitch)
 	var max_cells = int(grid.n) - 1 - bar_fixed_cells(zone)
 	var target = cell_from_x(mouse_x, x0, cell)
-	var span = token_span(drag_tok)
+	var span = _token_span(drag_tok)
 	var spans = {}
 	for t in bar_order[zone]:
 		if t != "":
-			spans[t] = token_span(t)
+			spans[t] = _token_span(t)
 	var cells = seq_to_cells(bar_order[zone], spans)
 	var placed = place_cells(cells, drag_tok, target, span, max_cells)
 	if placed == null:
@@ -1565,6 +1641,8 @@ static func applet_menu(id):
 		return "volumen"
 	if id == "portapapeles":
 		return "portapapeles"
+	if id == "notificaciones":
+		return "notificaciones"
 	return ""
 
 
@@ -1606,6 +1684,11 @@ func _applet_primary(id):
 		if shell.system_osd != null and shell.system_osd.has_method("toggle_mute"):
 			shell.system_osd.toggle_mute()
 			volume.refresh(true)
+			shell.request_redraw()
+	elif id == "notificaciones":
+		# Clic izquierdo = mostrar/ocultar la columna overlay de bloques.
+		if shell.notify != null:
+			shell.notify.panel_open = not shell.notify.panel_open
 			shell.request_redraw()
 
 
@@ -1753,7 +1836,12 @@ func _shared_snapshot():
 	var focus = {"capturing": false}
 	if shell.get("remote_input") != null and shell.remote_input.has_method("is_capturing"):
 		focus.capturing = bool(shell.remote_input.is_capturing())
-	var _res = SHARED_BLOCK.diagram(sessions, remote, windows, placements, focus)
+	# Interruptor general del intercambio: cortado aunque no haya sesiones deja el
+	# bloque a la vista (stub apagado) para que se pueda volver a encender.
+	var master_on = true
+	if shell.has_method("_share_enabled"):
+		master_on = bool(shell._share_enabled())
+	var _res = SHARED_BLOCK.diagram(sessions, remote, windows, placements, focus, master_on)
 	_shared_cache = _res
 	_shared_cache_ver = _ver
 	_shared_cache_ms = _now
@@ -1791,6 +1879,11 @@ func _shared_primary(_block):
 # existentes del shell; nunca crea uno paralelo.
 func _shared_action(_diagram, action_id):
 	var a = String(action_id)
+	# Interruptor general del intercambio (fila superior del menú del radar).
+	if a == "master_on" or a == "master_off":
+		if shell != null and shell.has_method("_share_all_enable"):
+			shell._share_all_enable(a == "master_on")
+		return
 	if a == "open_group":
 		_shared_primary(null)
 		return
@@ -1859,7 +1952,13 @@ func _draw_shared_tile(ui, pos, side, diagram, ghost = false):
 		if bool(p.get("input", false)):
 			tip += "\n" + SHARED_BLOCK.focus_text(diagram.radial, bool(diagram.get("local_focus", true)))
 			break
-	if hovered and not ghost and not shared_drag and tip != "":
+	# Sobre la placa del interruptor manda SU texto, no el del radar.
+	var master_tip = "Interruptor del intercambio: enciende o corta de una vez " \
+		+ "la pantalla, el teclado y mouse y el audio con el grupo"
+	if hovered and not ghost and not shared_drag and shared_power_rect.size.x > 0.0 \
+			and shared_power_rect.has_point(mouse_pos):
+		ui.set_tooltip(master_tip)
+	elif hovered and not ghost and not shared_drag and tip != "":
 		ui.set_tooltip(tip)
 	return rect
 
@@ -1899,9 +1998,11 @@ func _draw_shared_face(ui, pos, rect, diagram, side):
 	var bw = _bevel_w(ui)
 	var u = float(side)
 	var c = rect.position + Vector2(u * 0.5, u * 0.5)
+	# Interruptor general cortado: scope muerto (sin barrido ni anillos vivos).
+	var off = String(diagram.get("master", "on")) == "off"
 	# Fondo de radar viejo (scope, anillos, retícula, marcas y barrido). El centro es
 	# "este equipo" y cada par cae como un blip en su ángulo.
-	_draw_radar(ui, c, u * 0.46)
+	_draw_radar(ui, c, u * 0.46, off)
 	var half = u * 0.14
 	var accent = shell.accent if shell != null else NX_CUR
 	var e = max(1.0, bw * 0.5)
@@ -1945,17 +2046,23 @@ func _draw_shared_face(ui, pos, rect, diagram, side):
 				kind, col)
 		if focused:
 			_draw_shared_pointer(ui, nc + Vector2(ns * 0.5, ns * 0.5), ns)
+	# Interruptor retro I/O: única salida para cortar/rearmar todo el intercambio
+	# (pantalla, teclado y mouse, audio) de una vez. Vive en la esquina inferior
+	# derecha, fuera del alcance del arrastre del bloque.
+	_draw_share_power(ui, rect, u, off)
 
 
 # Scope de radar viejo: disco oscuro con retícula, tres anillos concéntricos, marcas
 # del borde y un barrido giratorio con estela. Puramente decorativo; da contexto a los
-# blips (los pares) que se dibujan encima.
-func _draw_radar(ui, c, R):
+# blips (los pares) que se dibujan encima. Con `dead` (intercambio cortado) queda
+# atenuado y sin barrido: el scope "apagado" que setea el interruptor.
+func _draw_radar(ui, c, R, dead = false):
 	if R < 6.0:
 		return
-	var teal = Color(0.36, 0.95, 0.74, 1.0)
-	var grid = Color(0.36, 0.95, 0.74, 0.07)
-	var dim = Color(0.36, 0.95, 0.74, 0.15)
+	var damp = 0.4 if dead else 1.0
+	var teal = Color(0.36, 0.95, 0.74, damp)
+	var grid = Color(0.36, 0.95, 0.74, 0.07 * damp)
+	var dim = Color(0.36, 0.95, 0.74, 0.15 * damp)
 	ui.imgui_draw_circle_filled(c, R + 2.0, NX_LCD_DEEP, 48)
 	ui.imgui_draw_circle_filled(c, R, NX_LCD_TOP, 48)
 	# Retícula.
@@ -1970,6 +2077,8 @@ func _draw_radar(ui, c, R):
 		var d = Vector2(cos(a), sin(a))
 		var r0 = R * (0.84 if i % 6 == 0 else 0.91)
 		ui.imgui_draw_polyline(PoolVector2Array([c + d * r0, c + d * R]), dim, 1.0)
+	if dead:
+		return
 	# Barrido lento: ala con estela corta y tenue, y línea guía apenas más viva.
 	var lead = fmod(float(OS.get_ticks_msec()) * 0.00036, TAU)
 	for k in range(10):
@@ -1979,6 +2088,43 @@ func _draw_radar(ui, c, R):
 		ui.imgui_draw_polyline(PoolVector2Array([c, c + d * R]), Color(teal.r, teal.g, teal.b, alpha), 1.5)
 	var ld = Vector2(cos(lead), sin(lead))
 	ui.imgui_draw_polyline(PoolVector2Array([c, c + ld * R]), Color(0.62, 1.0, 0.82, 0.35), 1.5)
+
+
+# Placa del interruptor retro (I/O) del DockApp "Compartiendo": placa rehundida con
+# palanca — arriba encendido (pomo verde LCD con barra "I"), abajo cortado (pomo gris
+# con aro "O"). El hit es crudo (`_input` arma shared_power_press) para no pelear con
+# el arrastre del bloque; el estado real del intercambio lo lleva el shell
+# (`share_enabled`). Escribe `shared_power_rect` (cero durante el drag fantasma).
+func _draw_share_power(ui, rect, side, on):
+	if shared_drag:
+		shared_power_rect = Rect2()
+		return
+	var d = max(14.0, side * 0.20)
+	var inset = max(3.0, _bevel_w(ui) * 0.9)
+	var btn = Rect2(rect.position + rect.size - Vector2(d + inset, d + inset), Vector2(d, d))
+	shared_power_rect = btn
+	var c = btn.position + Vector2(d, d) * 0.5
+	var r = d * 0.5
+	# Botón redondo: base rehundida + aro de estado (encendido = acento, apagado = gris).
+	ui.imgui_draw_circle_filled(c, r, NX_LCD_DEEP, 32)
+	var col = NX_LCD_CYAN if on else NX_FACE_DIM
+	if shared_power_press:
+		col = col.linear_interpolate(NX_DARK, 0.30)
+	ui.imgui_draw_circle(c, max(1.0, r - max(1.0, d * 0.06)), col, 32, max(1.6, d * 0.10))
+	# Glifo de encendido (arco abierto arriba + barra), legible a tamaño chico.
+	_draw_power_glyph(ui, c, r * 0.52, col if on else NX_TEXT_DIM)
+
+
+# Glifo de encendido: arco de ~3/4 de círculo con la abertura arriba y una barra
+# vertical saliendo del centro (símbolo universal de power).
+func _draw_power_glyph(ui, c, s, col):
+	var pts = PoolVector2Array()
+	for i in range(25):
+		var a = -PI * 0.5 + PI * 0.28 + TAU * 0.72 * float(i) / 24.0
+		pts.append(c + Vector2(cos(a), sin(a)) * s)
+	ui.imgui_draw_polyline(pts, col, max(1.4, s * 0.30), true)
+	ui.imgui_draw_rect_filled(Rect2(c + Vector2(-max(1.0, s * 0.15), -s * 1.02),
+		Vector2(max(2.0, s * 0.30), s * 0.72)), col, 0.0)
 
 
 # Flecha de puntero dibujada con franjas (blanca con contorno oscuro): marca qué equipo# tiene el mouse y el teclado ahora. `at` es la punta, en coords de pantalla.
@@ -2343,6 +2489,8 @@ func set_visible(v):
 		win_scroll_press = false
 		shared_press = ""
 		shared_drag = false
+		shared_power_press = false
+		shared_power_rect = Rect2()
 	# Desde _input (tecla tragada, ImGui no la ve) nadie más pide el frame que lo muestra.
 	shell.request_redraw()
 	shell.last_activity = OS.get_ticks_msec()
@@ -2492,7 +2640,51 @@ func _super_used():
 	super_press = null
 
 
+# ¿El Frame está a la vista (alguna barra)? Home, mostrado a mano, fijado o exposé.
+# Con las dos barras fuera NO debe atender mouse: sus widgets conservan los rects del
+# último dibujo y se comen clics que van a la ventana de abajo.
+func bars_shown():
+	return shell.current_activity == null or visible or pin_top_bar or pin_bottom_bar or shell.expose
+
+
+# Descarta el estado de interacción de mouse del Frame (presses, arrastres y rects
+# del último dibujo). Se llama cuando las barras no están a la vista.
+func drop_mouse_interaction():
+	mouse_down = false
+	lifted = null
+	dragging = null
+	drag_candidate = null
+	app_press = null
+	app_drag = null
+	applet_press = null
+	applet_drag = null
+	shared_press = ""
+	shared_drag = false
+	shared_power_press = false
+	shared_power_rect = Rect2()
+	win_dock_press = false
+	win_dock_drag = false
+	win_scroll_press = false
+	win_drag = null
+	place_rects = []
+	items_layout = []
+	applets_layout = []
+	applets_drawn = false
+	shared_layout = []
+	shared_drawn = false
+	_clear_zone_layout("top")
+	_clear_zone_layout("dock")
+
+
 func _input(event):
+	# Con el Frame oculto no hay widgets que atiendan mouse: descartar el estado del
+	# último dibujo (si no, el interruptor del radar se come clics y dispara el corte
+	# del intercambio). Los gestos globales (Super+rueda, pinch, vchain, Super+arrastrar)
+	# siguen su curso abajo; por eso no hay `return` acá.
+	if (event is InputEventMouseMotion or event is InputEventMouseButton \
+			or event is InputEventPanGesture or event is InputEventMagnifyGesture) \
+			and not bars_shown():
+		drop_mouse_interaction()
 	# Mouse: además del borde/esquina, sigue el arrastre de ítems para tilear.
 	if event is InputEventMouseMotion:
 		mouse_pos = event.position
@@ -2664,6 +2856,15 @@ func _input(event):
 					shell.request_redraw()
 					get_tree().set_input_as_handled()
 					return
+				# Interruptor I/O del DockApp "Compartiendo": press crudo propio; no
+				# arma arrastre ni primaria del bloque. El toggle se resuelve al soltar
+				# todavía encima.
+				if not shared_drag and shared_power_rect.size.x > 0.0 \
+						and shared_power_rect.has_point(mouse_pos):
+					shared_power_press = true
+					shell.request_redraw()
+					get_tree().set_input_as_handled()
+					return
 				# Bloque "Compartido": la primaria (detalle) se resuelve al soltar.
 				var hit_shared = _shared_at(mouse_pos)
 				if hit_shared != null and not shared_menu_open:
@@ -2708,6 +2909,16 @@ func _input(event):
 					drag_grab = mouse_pos - Vector2(drag_candidate.x, drag_candidate.y)
 				dragging = null
 			else:
+				# Soltar el interruptor I/O del radar: si sigue encima, corta o rearma
+				# todo el intercambio (el shell decide por estado, no por gesto).
+				if shared_power_press:
+					var fired = shared_power_rect.size.x > 0.0 \
+						and shared_power_rect.has_point(mouse_pos)
+					shared_power_press = false
+					if fired and shell != null and shell.has_method("_share_all_toggle"):
+						shell._share_all_toggle()
+					get_tree().set_input_as_handled()
+					return
 				# Soltar el DockApp "Compartiendo": si hubo arrastre se reubica; si no,
 				# primaria (ver detalle) si sigue bajo el puntero.
 				if shared_press != "":
@@ -2780,10 +2991,12 @@ func _input(event):
 		return
 	var code = event.scancode
 	# Esc cancela el arrastre de un applet (conserva el orden) antes de ocultar el Frame.
-	if event.pressed and code == KEY_ESCAPE and (applet_drag != null or shared_drag):
+	if event.pressed and code == KEY_ESCAPE and (applet_drag != null or shared_drag \
+			or shared_power_press):
 		applet_drag = null
 		shared_drag = false
 		shared_press = ""
+		shared_power_press = false
 		applet_press = null
 		shell.request_redraw()
 		_gulp(code)
@@ -2846,16 +3059,25 @@ func _input(event):
 	if SUPER_KEYS.has(code) or SUPER_KEYS.has(event.physical_scancode):
 		if event.pressed:
 			super_press = event
+			super_rotated = false
 		elif super_press != null:
 			super_press = null
-			if shell.pan_active:
-				shell._snap_pan()  # cae a la pantalla más cercana
-			elif win_drag == null:
+			if not super_rotated:
 				# Toque de Super (sin combo): entra/sale del exposé (zoom out del
 				# escritorio). Super+W cierra la ventana enfocada.
-				shell._toggle_expose(not shell.expose)
+				if shell.pan_active:
+					shell._snap_pan()  # cae a la pantalla más cercana
+				elif win_drag == null:
+					shell._toggle_expose(not shell.expose)
+			# Tras rotar con Super+Espacio, soltar Super no hace más nada.
 		else:
 			return  # Suelta tras un combo: va a la app.
+		get_tree().set_input_as_handled()
+		return
+	# Suelta de Espacio bajo Super: nuestra (la distribución ya rotó en la
+	# presionada); el goteo a la app rompería la rotación con toques repetidos.
+	if super_press != null and not event.pressed \
+			and (code == KEY_SPACE or int(event.physical_scancode) == KEY_SPACE):
 		get_tree().set_input_as_handled()
 		return
 	if event.pressed and super_press != null:
@@ -2887,7 +3109,9 @@ func _input(event):
 			return
 		if code == KEY_SPACE and not event.echo:
 			# Super+Espacio: siguiente distribución de teclado de la lista activa.
-			super_press = null
+			# NOSOTROS siempre; NO se limpia super_press: mientras se mantenga
+			# Super, cada otro toque de Espacio rota de nuevo (GNOME).
+			super_rotated = true
 			_keyboard_set(keyboard.next_layout())
 			shell.request_redraw()
 			_gulp(code)
@@ -3456,18 +3680,64 @@ func _draw_frame_popups(ui, mouse, side):
 		else:
 			for it in clipboard.items:
 				var name = String(it.get("name", ""))
+				# Imagen: miniatura a la izquierda, encajada en un cuadro ~32 px.
+				var icon = null
+				var isize = Vector2(16.0, 16.0)
+				if String(it.get("kind", "text")) == "image":
+					icon = shell._load_png_file(clipboard.thumb_file(name))
+					if icon != null:
+						var thumb_side = 32.0
+						var tw = max(1.0, float(icon.get_width()))
+						var th = max(1.0, float(icon.get_height()))
+						var k = min(thumb_side / tw, thumb_side / th)
+						isize = Vector2(tw * k, th * k)
 				# ID único por entrada: dos copias con el mismo texto (o resumen
 				# vacío) comparten etiqueta y el ID de ImGui choca ("IDs duplicados"),
 				# dejando el ítem inservible. El nombre de archivo sí es único.
 				var hit = false
 				if name != "":
 					ui.push_id(name)
-				hit = MENU_STYLE.item(ui, clipboard.item_label(String(it.get("summary", ""))))
+				hit = MENU_STYLE.item(ui, clipboard.item_label(String(it.get("summary", ""))),
+					"", false, icon, isize)
 				if name != "":
 					ui.pop_id()
 				if hit:
 					if clipboard.pick(name):
 						shell.request_redraw()
+		ui.end_popup()
+	MENU_STYLE.end(ui)
+	# Notificaciones: ancho del bloque, columna overlay, modo, silencio y limpieza.
+	MENU_STYLE.begin(ui)
+	if ui.begin_popup("##applet_notificaciones"):
+		MENU_STYLE.chrome(ui, "Notificaciones")
+		var n = shell.notify if shell != null else null
+		if n == null:
+			ui.text_disabled("sin bus de notificaciones")
+		else:
+			ui.text_disabled("Ancho del bloque")
+			if MENU_STYLE.item(ui, "2 celdas", "", _applet_span("notificaciones") == 2):
+				_applet_set_span("notificaciones", 2)
+			if MENU_STYLE.item(ui, "3 celdas", "", _applet_span("notificaciones") == 3):
+				_applet_set_span("notificaciones", 3)
+			ui.separator()
+			if MENU_STYLE.item(ui, "Cerrar columna" if n.panel_open else "Abrir columna"):
+				n.panel_open = not n.panel_open
+				shell.request_redraw()
+			var modo = MENU_STYLE.item(ui, "Dejar la columna abierta", "", n.panel_mode)
+			if modo != n.panel_mode:
+				n.panel_mode = modo
+				shell.request_redraw()
+			ui.separator()
+			var sil = MENU_STYLE.item(ui, "Silenciar (no molestar)", "", n.silenced())
+			if sil != n.silenced():
+				n.set_silenced(sil)
+			if MENU_STYLE.item(ui, "Limpiar historial"):
+				n.dismiss_all()
+				shell.request_redraw()
+			ui.separator()
+			if MENU_STYLE.item(ui, "Configuración…"):
+				if shell.has_method("_open_settings_page"):
+					shell._open_settings_page("notifications")
 		ui.end_popup()
 	MENU_STYLE.end(ui)
 
@@ -3645,6 +3915,14 @@ func _draw_applet(ui, id, pos, scr, w, side, is_sel, mouse, is_ghost = false):
 	elif id == "termico" and sysmon.has_temp:
 		accent = _temp_color()
 		glow = 0.22
+		# Urgencia térmica: mientras la temperatura supera el umbral se renueva el TTL
+		# (una sola notificación por episodio) y la placa pulsa en rojo.
+		if sysmon.temp_c > TEMP_ALERT_C and shell != null and shell.notify != null:
+			shell.notify.raise_urgency("termico", "critical", URGENCY_TTL_MS,
+				"Temperatura %d°C" % int(round(sysmon.temp_c)))
+		if shell != null and shell.notify != null and not shell.notify.urgency_for("termico").empty():
+			accent = Color(0.95, 0.30, 0.24, 1.0)
+			glow = 0.30 + 0.35 * (0.5 + 0.5 * sin(float(OS.get_ticks_msec()) * 0.008))
 	elif id == "reloj":
 		accent = NX_LCD_CYAN
 	elif id == "volumen":
@@ -3755,19 +4033,42 @@ func _temp_color():
 func _draw_thermal(ui, scr, loc, w, h):
 	var col = _lcd(_temp_color(), "on")
 	var tf = clamp((sysmon.temp_c - 30.0) / 70.0, 0.0, 1.0) if sysmon.has_temp else 0.0
-	_draw_thermo(ui, Vector2(scr.x + w * 0.28, scr.y + h * 0.12), h * 0.52, tf, col)
+	_draw_thermo(ui, Vector2(scr.x + w * 0.20, scr.y + h * 0.10), h * 0.50, tf, col)
 	if sysmon.has_battery:
-		_draw_battery_icon(ui, Rect2(scr.x + w * 0.58, scr.y + h * 0.12, w * 0.22, h * 0.52),
+		_draw_battery_icon(ui, Rect2(scr.x + w * 0.40, scr.y + h * 0.10, w * 0.18, h * 0.50),
 			clamp(sysmon.battery_pct / 100.0, 0.0, 1.0), sysmon.battery_charging())
-	# Governor (la selección se hace con clic izquierdo; ver _applet_primary). Fuente
-	# de etiqueta (más chica que la de UI) para que no compita con los símbolos.
+	# Ventilador: gira a velocidad proporcional a las rpm (la animación es la lectura).
+	if sysmon.has_fan:
+		_draw_fan(ui, Vector2(scr.x + w * 0.80, scr.y + h * 0.35), h * 0.17, sysmon.fan_rpm, _lcd(col, "off"))
+		shell.request_redraw()  # animación continua
+	# Governor (clic izquierdo; ver _applet_primary) y rpm al pie. Fuente de etiqueta.
 	var gov = sysmon.governor if sysmon.has_governor else "sin dato"
 	var small = _push_label_font(ui)
-	gov = _truncate_w(ui, gov, w - 8.0)
-	ui.set_cursor_pos(loc + Vector2(4.0, h * 0.72))
-	ui.text_colored(col, gov)
+	ui.set_cursor_pos(loc + Vector2(4.0, h * 0.64))
+	ui.text_colored(col, _truncate_w(ui, gov, w - 8.0))
+	var rpm = ("%d rpm" % int(round(sysmon.fan_rpm))) if sysmon.has_fan else "vent. s/d"
+	ui.set_cursor_pos(loc + Vector2(4.0, h * 0.80))
+	ui.text_colored(_lcd(col, "dim"), _truncate_w(ui, rpm, w - 8.0))
 	if small:
 		ui.pop_font()
+
+
+# Ventilador: buje + aspas que giran a velocidad proporcional a las rpm. El ángulo
+# sale del reloj absoluto, así la velocidad no depende del frame rate.
+func _draw_fan(ui, c, r, rpm, col):
+	var spd = clamp(rpm / 3000.0, 0.0, 1.0)
+	var rev = 0.5 + 3.5 * spd
+	var a0 = fposmod(float(OS.get_ticks_msec()) * 0.001 * rev * TAU, TAU)
+	var thin = max(1.0, r * 0.16)
+	for i in range(4):
+		var a = a0 + TAU * float(i) / 4.0
+		var pts = PoolVector2Array([
+			c + Vector2(cos(a), sin(a)) * (r * 0.26),
+			c + Vector2(cos(a + 0.5), sin(a + 0.5)) * (r * 0.92),
+			c + Vector2(cos(a - 0.22), sin(a - 0.22)) * (r * 0.82),
+			c + Vector2(cos(a), sin(a)) * (r * 0.26)])
+		ui.imgui_draw_polyline(pts, col, thin, true)
+	ui.imgui_draw_circle(c, max(1.6, r * 0.20), col, 12, thin)
 
 
 # Termómetro: tubo + bulbo, con mercurio hasta `frac` (0..1) en color de rango.

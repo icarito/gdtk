@@ -68,6 +68,28 @@ case "${DESKTOP_SESSION:-}${XDG_SESSION_DESKTOP:-}" in
 esac
 export XDG_CURRENT_DESKTOP=gdtk
 if command -v systemctl >/dev/null 2>&1; then
+	# El gestor de systemd --user es user-wide y PERSISTENTE: sobrevive al cierre de
+	# esta sesion. Dejar XDG_CURRENT_DESKTOP=gdtk ahi hace que el portal que arranca
+	# el proximo login (GNOME/xfce) herede gdtk y RemoteDesktop/InputCapture caigan en
+	# el backend gdtk muerto (Deskflow roto en GNOME). Se pina gdtk solo lo necesario
+	# para el reinicio del portal y luego se restaura el valor previo (o se desmete).
+	_prev="$(systemctl --user show-environment 2>/dev/null | sed -n 's/^XDG_CURRENT_DESKTOP=//p')"
 	systemctl --user set-environment XDG_CURRENT_DESKTOP=gdtk 2>/dev/null || true
 	systemctl --user try-restart xdg-desktop-portal.service 2>/dev/null || true
+	# Esperar la fork del portal nuevo (acotado): el entorno se copia al proceso cuando
+	# systemd lo lanza, y ese punto debe llegar con gdtk aun en pie. Comparar con el PID
+	# viejo para saltar el hueco propio del restart (MainPID=0 entre stop y start).
+	_old="$(systemctl --user show -p MainPID --value xdg-desktop-portal.service 2>/dev/null || true)"
+	_n=0
+	while [ "$_n" -lt 30 ]; do
+		_mp="$(systemctl --user show -p MainPID --value xdg-desktop-portal.service 2>/dev/null || true)"
+		[ -n "$_mp" ] && [ "$_mp" != 0 ] && [ "$_mp" != "$_old" ] && break
+		sleep 0.1
+		_n=$((_n + 1))
+	done
+	if [ -n "$_prev" ]; then
+		systemctl --user set-environment "XDG_CURRENT_DESKTOP=$_prev" 2>/dev/null || true
+	else
+		systemctl --user unset-environment XDG_CURRENT_DESKTOP 2>/dev/null || true
+	fi
 fi

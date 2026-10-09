@@ -76,21 +76,15 @@ cosas; **B** frena trabajo; **C** higiene.
 
 ## B.2 — Activas (2026-10-06)
 
-- **Crash de Firefox con video (UAF en camino EGL/Gallium del proceso padre).**
-  Firma `SIGSEGV/SI_KERNEL 0xe5e5e5e5e5e5e635` en 3/3 dumps (Socorro
-  bp-e73ce027…, bp-04a4a9a1…, bp-02ee0f05…), con spam crónico de GDK
-  «Couldn't map window as subsurface because its parent is not mapped»
-  (clase de bugs Firefox 1890074/1564076/2036975: configures/monitores con el
-  frame clock GTK roto). El 2026-10-06 se arregló del lado gdtk: (a)
-  `wl_server_frame_done` responde a toda ventana mapeada, visible o no (antes
-  congelaba el frame clock de GTK en actividad oculta); (b)
-  `handle_toplevel_destroy` apaga scanout y pone en 0 los `surface_state.id`
-  del toplevel muerto; (c) el wrapper ya no re-inserta ids muertos en
-  `get_ids()` (`_on_title`/`_toplevel_entry` find-only, frame/dmabuf de ids
-  muertos son no-op); (d) el shell barre actividades dinámicas muertas
-  (`_process_unmanaged`) y guardas en `_open_unmanaged_window` y
-  `switch_to`. QUEDA PENDIENTE: si vuelve el spam GDK, capturar
-  `WAYLAND_DEBUG=1` del firefox y ver qué configure/enter queda roto.
+- **Crash de Firefox (UAF de escala/monitores en el hilo Renderer).**
+  El diagnóstico anterior de EGL/Gallium queda corregido por el desensamblado
+  del 2026-10-07: `ScreenHelperGTK::GetGTKMonitorFractionalScaleFactor()` accede
+  a un Screen liberado desde `WaylandSurface::GetScale()`. Sigue ocurriendo
+  después de los fixes de frame callbacks/ids muertos del 2026-10-06.
+  Mitigación opt-in: launcher `session/gdtk-firefox` por Xwayland; falta validar
+  reuniones prolongadas y aislar la carrera nativa. Evidencia, límites y operación
+  en `guides/firefox-crashes.md`. Mantener separada la familia de reportes por
+  pérdida del compositor; ni ella ni el spam GTK prueban la causa del UAF.
 - **El supervisor marcó el shell «hung» a las 14:57 (pid 1962160) y no hizo
   nada más hasta el reinicio pedido 15:38.** Coincide con los crashes de
   Firefox de la tarde (shell vivo pero sin dibujar = sin frame_done para

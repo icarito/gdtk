@@ -53,7 +53,8 @@ texto**, nunca sólo por color.
 | `teclado` | `~/.config/gdtk/keyboard` y `localectl status` | abrir selector de distribución | mostrar variante/opciones |
 | `deskflow` | `shell.service_pids` + `_service_running` | prender/apagar (`_toggle_service`) | detalle en Vecindario (cuando exista) |
 | `enlace` | `nmcli -t -f TYPE,STATE,CONNECTION dev` | abrir Vecindario | — (sólo indicador) |
-| `portapapeles` | `$XDG_RUNTIME_DIR/gdtk/clipboard` (lo llena `session/gdtk-clipboard` vía `wl-paste --watch` + `ext-data-control-v1` del compositor embebido) | último ítem (resumen de una línea; texto en tooltip) | — (historial navegable más adelante) |
+| `portapapeles` | `$XDG_RUNTIME_DIR/gdtk/clipboard` (lo llena `session/gdtk-clipboard` vía dos vigías `wl-paste --watch`, texto e `image/png`, + `ext-data-control-v1` del compositor embebido; miniaturas en `gdtk/clipboard-thumbs`) | último ítem: texto en una línea o miniatura si es imagen (tooltip con texto) | historial navegable (texto e imágenes; la imagen se pega como `image/png`) |
+| `notificaciones` | `$XDG_RUNTIME_DIR/gdtk/notifications.json` (lo llena `session/gdtk-notify`, dueño de `org.freedesktop.Notifications`) + bus interno del shell (`shell/notify.gd`) | última notificación: ícono de la app + resumen de una línea | columna overlay de bloques (scroll, hover expande), ancho 2/3 elegible, silencio y acciones (`SPEC-notificaciones.md`) |
 
 - **Wi-Fi no es un applet de control.** Su gestión pertenece a Vecindario
   (`SPEC-sugar-journal-neighborhood.md`). En el Frame sólo puede aparecer el bloque

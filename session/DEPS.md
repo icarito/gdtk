@@ -16,7 +16,7 @@ relanza lo que ya corre.
 | Agente polkit | `polkit-gnome` | Alternativas aceptadas: `lxqt-policykit`, `mate-polkit`, `xfce-polkit`. Sin ninguno, las apps que piden privilegios con PolicyKit no muestran diálogo. |
 | Llavero | `gnome-keyring` | `gnome-keyring-daemon --start --components=secrets,pkcs11`. |
 | API de secretos | `libsecret` | Lo usan las apps (no lo lanza el script); complemento del llavero. |
-| Notificaciones | `mako` | Daemon de notificaciones layer-shell (Wayland). En X11 no aplica y se omite. |
+| Notificaciones | `python3-gi` (PyGObject + Gio) | Daemon `session/gdtk-notify serve` que posee `org.freedesktop.Notifications` y escribe `$XDG_RUNTIME_DIR/gdtk/notifications.json`; reemplaza a `mako`. Requiere `python3`. |
 | Ejecutor de `.desktop` | `dex` | Opcional. Si está, el script lo usa para lanzar `~/.config/autostart` respetando `Hidden`/`OnlyShowIn`/`NotShowIn`; si no, hace el parseo y filtrado él mismo. |
 | Publicación de entorno | `dbus` (`dbus-update-activation-environment`) | Necesario para que los servicios activados por D-Bus/systemd vean `GNOME_KEYRING_CONTROL` y `SSH_AUTH_SOCK`. |
 
@@ -52,10 +52,12 @@ no el sway donde corre el shell fullscreen.
 | Servidor multimedia | `pipewire` (+ `pipewire-pulse`) | El ScreenCast viaja por PipeWire. Debe estar corriendo. |
 | Gestor de sesión PipeWire | `wireplumber` | Necesario para los nodos de PipeWire. |
 | Captura CLI | `grim` (≥1.5) | `session/gdtk-screenshot` lo usa (ext-image-copy-capture con fallback a wlr-screencopy) y si falla cae al RPC `screenshot` del shell. |
+| Copia de pantallazos | `wl-clipboard` (`wl-copy`) | `session/gdtk-screenshot copy` pone el PNG en el portapapeles del compositor embebido (pegable en las apps). |
 | Selector de archivos | `xdg-desktop-portal-gtk` | Ya usado (`FileChooser=gtk`). |
 
-PrintScreen lo atiende el shell (no depende del portal): guarda el viewport compuesto
-(todo el escritorio, apps anidadas incluidas) en `<Imágenes>/Pantallazos/`.
+PrintScreen lo atiende el shell (no depende del portal): abre el selector
+(ventana/pantalla/selección) y guarda en `<Imágenes>/Pantallazos/` + copia al
+portapapeles embebido. `Ctrl+PrintScreen` captura toda la pantalla directo.
 
 ## Governor de CPU (helper polkit)
 

@@ -93,6 +93,9 @@ func _draw():
 	var content = Rect2(node.rect_position, node.rect_size * node.rect_scale)
 	if content.size.x < 6.0 or content.size.y < 6.0:
 		return
+	# Pedido de atención (xdg-activation): contorno pulsante SIN robar el foco.
+	if shell.notify != null and shell.notify.has_attention(id):
+		_draw_attention(content, shell.get_imgui_scale())
 	# En exposé el nodo va escalado a su miniatura: el chrome (barras, botones y
 	# sombra) acompaña esa escala para no dibujarse gigante sobre la tarjeta.
 	var node_scale = max(node.rect_scale.x, 0.01)
@@ -159,6 +162,15 @@ func _draw_peer_outline(rect, scale):
 		return
 	var w = max(2.0, 3.0 * scale)
 	draw_rect(rect.grow(w * 0.5), acc, false, w)
+
+
+# Contorno pulsante de un pedido de atención (xdg-activation), sin cambiar el foco.
+func _draw_attention(rect, scale):
+	var base = shell.accent if shell.accent != null else Color(0.55, 0.80, 1.0)
+	var a = shell.notify.pulse_alpha() if shell.notify != null else 1.0
+	var col = Color(base.r, base.g, base.b, 0.30 + 0.60 * a)
+	var w = max(2.0, 3.0 * scale)
+	draw_rect(rect.grow(w), col, false, w)
 
 
 func _draw_csd(rect, scale, active, reveal = 1.0, hovered = true, inside = false):

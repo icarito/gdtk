@@ -276,6 +276,7 @@ static func deskflow_service_for(hosts, key):
 	var want = String(key).strip_edges().to_lower()
 	if want == "" or typeof(hosts) != TYPE_ARRAY:
 		return {}
+	var matches = []
 	for h in hosts:
 		for svc in h.get("services", []):
 			if typeof(svc) != TYPE_DICTIONARY or String(svc.get("service", "")) != SERVICE_DESKFLOW:
@@ -287,8 +288,19 @@ static func deskflow_service_for(hosts, key):
 			var addr = String(svc.get("address", "")).strip_edges()
 			if want == nm or want == label or want == short or want == addr \
 					or want == hostname or want == nm + ".local" or want == label + ".local":
-				return svc
-	return {}
+				matches.append(svc)
+	# Avahi entrega interfaces/familias en orden variable. Preferir IPv4 y elegir
+	# siempre igual dentro de una familia; nunca depender del primer anuncio.
+	var best = {}
+	var best_key = ""
+	for svc in matches:
+		var addr = String(svc.get("address", ""))
+		var ipv4 = addr.is_valid_ip_address() and addr.find(":") < 0
+		var rank = ("0|" if ipv4 else "1|") + addr + "|" + String(svc.get("host", ""))
+		if best.empty() or rank < best_key:
+			best = svc
+			best_key = rank
+	return best
 
 
 # Nombre de pantalla del vecino Deskflow por id/hid (estable ante cambios de IP).
