@@ -5,7 +5,7 @@ name: release
 #   gdtk-<version>-linux-x86_64.tar.gz (+ .sha256)
 #
 # Fuentes (todas públicas; override opcional con Repository variables GDTK_*):
-#   motor:  icarito/godot          @ gdtk-release   (aaf46b8772 + fix de brightness/rich_text)
+#   motor:  icarito/godot          @ box3d-3.6      (línea del motor gdtk; incluye brightness + rich_text)
 #   frt:    icarito/godot-frt      @ main           (capa de plataforma, se copia a platform/frt)
 #   imgui:  icarito/godot-box3d-3  @ eddf969        (módulo ImGui con el parche gdtk)
 #
@@ -45,7 +45,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ vars.GDTK_ENGINE_REPO || 'icarito/godot' }}
-          ref: ${{ vars.GDTK_ENGINE_REF || 'gdtk-release' }}
+          ref: ${{ vars.GDTK_ENGINE_REF || 'box3d-3.6' }}
           path: engine
 
       - name: Checkout del módulo ImGui

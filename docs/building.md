@@ -83,7 +83,7 @@ container and clones the engine from public refs:
 
 | Component | Repo | Ref |
 |---|---|---|
-| Engine (with `platform/frt` + shell fixes) | `icarito/godot` | `gdtk-release` |
+| Engine (with `platform/frt` + shell fixes) | `icarito/godot` | `box3d-3.6` |
 | `platform/frt` (copied into `engine/platform/frt`) | `icarito/godot-frt` | `main` |
 | ImGui module | `icarito/godot-box3d-3` | `eddf969` |
 
