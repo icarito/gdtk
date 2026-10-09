@@ -1,0 +1,129 @@
+name: release
+
+# Compila el motor (fork de Godot 3.6 + ImGui) junto con este repo y publica el
+# tarball que consume install.sh: gdtk-<version>-linux-x86_64.tar.gz (+ .sha256).
+#
+# REQUISITO: el árbol del motor y el módulo ImGui deben estar en repos públicos
+# clonables desde Actions. Definí estas Repository variables (Settings → Secrets
+# and variables → Actions → Variables):
+#   GDTK_ENGINE_REPO   p. ej. icarito/godot3-box3d
+#   GDTK_ENGINE_REF    rama/tag/commit del motor (p. ej. main)
+#   GDTK_IMGUI_REPO    p. ej. icarito/godot-box3d-3-gdtk
+#   GDTK_IMGUI_REF     rama/tag/commit del módulo ImGui (p. ej. main)
+# Mientras esas variables no existan, el job de build se saltea (con un warning) en
+# vez de fallar: así se puede publicar un release con el tarball hecho a mano
+# (tools/make-release.sh + `gh release create`) sin que el tag ponga el CI en rojo.
+# Nota: hoy el árbol del motor NO es público (`platform/frt` está gitignoreado y no
+# está en ninguna rama), así que el build automático no puede funcionar hasta que se
+# publique ese árbol; hasta entonces, usá tools/make-release.sh localmente.
+#
+# Se compila dentro de un contenedor Arch porque el binario enlaza wlroots 0.20,
+# libei y sdl2, que en las runners de Ubuntu no están a esa versión.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Versión (sin la v; default: del tag)'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    outputs:
+      ok: ${{ steps.check.outputs.ok }}
+    steps:
+      - id: check
+        env:
+          ENGINE_REPO: ${{ vars.GDTK_ENGINE_REPO }}
+          ENGINE_REF: ${{ vars.GDTK_ENGINE_REF }}
+          IMGUI_REPO: ${{ vars.GDTK_IMGUI_REPO }}
+          IMGUI_REF: ${{ vars.GDTK_IMGUI_REF }}
+        run: |
+          missing=""
+          [ -n "$ENGINE_REPO" ] || missing="$missing GDTK_ENGINE_REPO"
+          [ -n "$ENGINE_REF" ] || missing="$missing GDTK_ENGINE_REF"
+          [ -n "$IMGUI_REPO" ] || missing="$missing GDTK_IMGUI_REPO"
+          [ -n "$IMGUI_REF" ] || missing="$missing GDTK_IMGUI_REF"
+          if [ -n "$missing" ]; then
+            echo "::warning::Faltan Repository variables:$missing. El build automático queda deshabilitado; publicá el tarball a mano con tools/make-release.sh o definí las variables (ver la cabecera del workflow)."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: guard
+    if: needs.guard.outputs.ok == 'true'
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Dependencias de build (Arch)
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git python scons pkgconf rsync binutils \
+            wlroots0.20 wayland libxkbcommon libei systemd-libs sdl2-compat mesa libglvnd \
+            vulkan-icd-loader pixman libdrm
+
+      - uses: actions/checkout@v4
+        with:
+          path: gdtk
+
+      - name: Checkout del motor
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.GDTK_ENGINE_REPO }}
+          ref: ${{ vars.GDTK_ENGINE_REF }}
+          path: engine
+          submodules: recursive
+
+      - name: Checkout del módulo ImGui
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.GDTK_IMGUI_REPO }}
+          ref: ${{ vars.GDTK_IMGUI_REF }}
+          path: imgui
+
+      - name: Compilar el motor + shell
+        env:
+          SCONS_CACHE: /tmp/scons-cache
+          SCONS_CACHE_LIMIT: '30000'
+        run: |
+          cd engine
+          scons -j"$(nproc)" platform=frt arch=x86_64 target=release_debug tools=no \
+            frt_desktop_gl=yes production=yes lto=none use_static_cpp=no progress=no \
+            extra_suffix=gdtklite imgui_implot3d=yes \
+            custom_modules="$GITHUB_WORKSPACE/imgui,$GITHUB_WORKSPACE/gdtk/modules" \
+            $(for m in bullet csg gridmap enet upnp webrtc websocket webxr mobile_vr gdnative \
+                visual_script theora webm vorbis opus ogg stb_vorbis minimp3 gltf jsonrpc camera \
+                opensimplex raycast box3d decal; do printf 'module_%s_enabled=no ' "$m"; done)
+
+      - name: Empaquetar
+        id: pack
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          elif [ "${GITHUB_REF_TYPE}" = tag ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(date +%Y.%m.%d)-$(git -C gdtk rev-parse --short HEAD)"
+          fi
+          GDTK_NO_BUILD=1 GDTK_BIN="$GITHUB_WORKSPACE/engine/bin/godot.frt.opt.debug.x86_64.gdtklite" \
+            GDTK_DIST="$GITHUB_WORKSPACE/dist" gdtk/tools/make-release.sh "$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gdtk-linux-x86_64
+          path: dist/*.tar.gz*
+
+      - name: Publicar release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz*
+          generate_release_notes: true

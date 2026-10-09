@@ -1,5 +1,25 @@
 # Installing the session
 
+## Automated install (releases)
+
+`install.sh` (repo root) installs a published release on a user's machine: it
+installs the runtime dependencies, unpacks the prebuilt binary and scripts into
+`~/gdtk`, regenerates the session `.desktop` entries with the real `$HOME`, and
+copies the portal configuration.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/icarito/gdtk/main/install.sh | sh
+# or: sh install.sh --help   (--home, --version, --driver, --no-deps, --minimal,
+#                             --no-session, --from ARCHIVO, -y)
+```
+
+The tarball it consumes (`gdtk-<version>-linux-x86_64.tar.gz`, plus `.sha256`) is
+produced by the `release` GitHub Actions workflow on a `v*` tag, or locally with
+`tools/make-release.sh` (which compiles the engine, or reuses `GDTK_BIN` with
+`GDTK_NO_BUILD=1`). The tarball layout is `bin/godot-gdtk`, `shell/`, `addons/`,
+`settings/`, `mcp/`, `tools/`, `session/` and `VERSION`; `install.sh` regenerates
+the `.desktop` files, so they are not shipped.
+
 ## Layout on disk
 
 - **Repository**: where the code is edited (e.g. `~/Proyectos/gdtk`).
@@ -32,6 +52,7 @@ and skipped. Full tables (Spanish) in [`session/DEPS.md`](../session/DEPS.md).
 
 | Area | Packages |
 |---|---|
+| Binary (engine) | `wlroots0.20`, `libei`, `sdl2-compat`, `libglvnd`, `libxkbcommon`, `wayland`, `systemd-libs`, `mesa`, `vulkan-icd-loader` |
 | Session | `sway`, `dbus` |
 | Portals and screen capture | `xdg-desktop-portal`, `xdg-desktop-portal-wlr`, `xdg-desktop-portal-gtk`, `pipewire`, `wireplumber`, `grim` |
 | Desktop services | a polkit agent (`polkit-gnome` or similar), `gnome-keyring`, `mako`, optionally `dex` |

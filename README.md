@@ -71,10 +71,47 @@ mcp/      = MCP bridge to the shell's JSON-RPC control port
 Machines find each other over mDNS (DNS-SD); pairing is trust-on-first-use with a
 per-pair token. Details in [docs/architecture.md](docs/architecture.md).
 
-## Getting started
+## Install
 
-gdtk needs its Godot 3.6 fork (with the ImGui module) compiled together with this
-repository's `modules/`. Building and deploying are covered in
+gdtk targets **x86_64 Arch Linux (or derivatives)** with a Wayland session. There
+are two paths: install a published release (no compiler, the normal way for a
+user) or build from source (contributors).
+
+### A. From a published release (recommended)
+
+The installer downloads a prebuilt binary (engine + shell) from GitHub Releases,
+installs the runtime dependencies, and sets up `~/gdtk` and the login entry:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/icarito/gdtk/main/install.sh | sh
+```
+
+It is a plain POSIX script; read it first if you prefer:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/icarito/gdtk/main/install.sh -o install.sh
+less install.sh
+sh install.sh
+```
+
+It uses `sudo` only to install packages with `pacman` and to copy the session
+entry into `/usr/share/wayland-sessions`. Useful options: `--home DIR`,
+`--version V`, `--driver GLES2|GLES3`, `--no-deps`, `--minimal`, `--no-session`,
+`--from ARCHIVO` (install a local tarball or tree), `-y`. `sh install.sh --help`.
+
+Then log out and pick **gdtk** at the login screen. The installer prints a command
+to try it first in a nested window without logging out. Logs live in
+`~/.local/state/gdtk/`.
+
+> Release tarballs are built by the `release` GitHub Actions workflow on a `v*`
+> tag, or locally with `tools/make-release.sh`. Both need the engine fork; see
+> [docs/building.md](docs/building.md).
+
+### B. From source (contributors)
+
+gdtk is not a stock Godot project: it needs a Godot 3.6 fork that provides
+`ImGuiCanvas`, `SlugVector2D`, `WaylandCompositor` and `RemoteInput`, compiled
+together with this repository's `modules/`. Building and deploying are covered in
 [docs/building.md](docs/building.md); installing the session and its runtime
 dependencies in [docs/installing.md](docs/installing.md).
 
@@ -84,6 +121,21 @@ Quick look without installing a session (after building):
 ./run_shell.sh         # the shell in a nested window
 tools/verify_all.sh    # the test suite, isolated from any live session
 ```
+
+### Dependencies
+
+On Arch the installer takes care of these. Only the first row is required to run
+the binary; the session degrades gracefully when any of the rest is missing.
+
+| Area | Packages |
+|---|---|
+| Binary (engine) | `wlroots0.20 libei sdl2-compat libglvnd libxkbcommon wayland systemd-libs mesa vulkan-icd-loader` |
+| Session | `sway dbus` |
+| Portals / screen capture | `xdg-desktop-portal xdg-desktop-portal-wlr xdg-desktop-portal-gtk pipewire pipewire-pulse wireplumber grim wl-clipboard` |
+| Desktop services | `polkit polkit-gnome gnome-keyring libsecret python python-gobject avahi` |
+| Sharing / hardware (optional) | `deskflow libpulse gstreamer gst-plugins-{base,good,bad,ugly} gst-libav gst-plugin-va iio-sensor-proxy brightnessctl dex` |
+
+Full tables (Spanish) in [`session/DEPS.md`](session/DEPS.md).
 
 ## Repository layout
 

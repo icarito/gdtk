@@ -5,6 +5,8 @@ demo/imgui.ini
 !shell/icons/np/*.png
 *.o
 __pycache__/
+# Tarballs y checksums de tools/make-release.sh (público vía GitHub Releases).
+/dist/
 kilo_run.log
 kilo_*.log
 .frt-baseline/
