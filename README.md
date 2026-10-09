@@ -103,8 +103,8 @@ Then log out and pick **gdtk** at the login screen. The installer prints a comma
 to try it first in a nested window without logging out. Logs live in
 `~/.local/state/gdtk/`.
 
-> Release tarballs are built by the `release` GitHub Actions workflow on a `v*`
-> tag, or locally with `tools/make-release.sh`. Both need the engine fork; see
+> Release tarballs are built by the `release` GitHub Actions workflow on a `v*` tag
+> (it compiles the public engine forks) or locally with `tools/make-release.sh`. See
 > [docs/building.md](docs/building.md).
 
 ### B. From source (contributors)

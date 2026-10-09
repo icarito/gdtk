@@ -74,3 +74,26 @@ The development binary lacks the native classes, so scripts that use them
 (`shell.gd`) report a known parse error when loaded by unrelated tests; check for
 the `ok`/`FAIL` lines. `tests/parse_check.gd`, run with the installed binary,
 checks that those scripts compile.
+
+## Release pipeline (CI)
+
+`.github/workflows/release.yml` builds the prebuilt tarball that `install.sh`
+consumes. On a `v*` tag (or manually via `workflow_dispatch`) it runs in an Arch
+container and clones the engine from public refs:
+
+| Component | Repo | Ref |
+|---|---|---|
+| Engine (with `platform/frt` + shell fixes) | `icarito/godot` | `gdtk-release` |
+| `platform/frt` (copied into `engine/platform/frt`) | `icarito/godot-frt` | `main` |
+| ImGui module | `icarito/godot-box3d-3` | `eddf969` |
+
+The refs can be overridden with Repository variables `GDTK_ENGINE_REPO/REF`,
+`GDTK_FRT_REPO/REF`, `GDTK_IMGUI_REPO/REF`. To cut a release:
+
+```sh
+git tag v0.1.1 && git push origin v0.1.1   # CI compila y publica el release
+```
+
+`platform/frt` is not part of the engine tree (it is gitignored there), so it lives
+in its own repo and is copied in at build time. Locally, `tools/make-release.sh`
+does the same packaging from a `GDTK_BIN` you built (`GDTK_NO_BUILD=1`).
