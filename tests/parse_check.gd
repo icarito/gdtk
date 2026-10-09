@@ -11,7 +11,7 @@ func _init():
 	var paths = [
 		"res://wm_units.gd", "res://wm_hybrid.gd", "res://wm_drag.gd",
 		"res://float_layout.gd", "res://window_chrome.gd", "res://window_deco.gd",
-		"res://tiles_ui.gd", "res://frame.gd", "res://remote.gd", "res://shell.gd",
+		"res://tiles_ui.gd", "res://frame.gd", "res://bar_slots.gd", "res://remote.gd", "res://shell.gd",
 		"res://system_osd.gd", "res://expose_bg.gd", "res://applet_clipboard.gd",
 		"res://audio_send.gd", "res://window_cast.gd", "res://peer_control.gd", "res://neighborhood_ui.gd",
 		"res://output_layout.gd", "res://span_layout.gd", "res://menu_style.gd",

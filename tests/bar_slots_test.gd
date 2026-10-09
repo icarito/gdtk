@@ -76,8 +76,8 @@ func _init():
 	var col = B.to_cells([anchor("x", 3), anchor("y", 3)], 10)
 	check("colision corre al que choca hacia el centro",
 		col[3] == "x" and col[4] == "y")
-	# Desde 5 (lado derecho) el centro queda a la izquierda -> 4.
-	var col2 = B.to_cells([anchor("x", 5), anchor("y", 5)], 10)
+	# Desde el lado derecho (offset negativo) el choque se corre hacia la izquierda.
+	var col2 = B.to_cells([anchor("x", 5), anchor("y", -5)], 10)
 	check("colision del lado derecho va a la izquierda", col2[5] == "x" and col2[4] == "y")
 	# Fuera de rango a la derecha: se corre hacia el centro si el borde está ocupado.
 	var oor = B.to_cells([anchor("a", 9), anchor("z", 12)], 10)
@@ -95,6 +95,64 @@ func _init():
 	# --- casos límite -----------------------------------------------------------
 	check("sin anclas = todas libres", B.to_cells([], 4) == ["", "", "", ""])
 	check("n=0 no explota y conserva el bloque", B.to_cells([anchor("a", 0)], 0) == ["a"])
+
+	# --- buscador ÚNICO de hueco (`nearest_free`) ------------------------------
+	check("nearest_free usa el destino libre",
+		B.nearest_free(["a", "", "", "b"], 1, 1, 4) == 1)
+	check("nearest_free empate -> derecha (prefer +1)",
+		B.nearest_free(["", "X", ""], 1, 1, 3, 1) == 2)
+	check("nearest_free prefer -1 -> izquierda",
+		B.nearest_free(["", "X", ""], 1, 1, 3, -1) == 0)
+	check("nearest_free respeta el span (2 contiguas)",
+		B.nearest_free(["X", "Y", "", "", "Z"], 1, 2, 5, 1) == 2)
+	check("nearest_free barra llena = -1", B.nearest_free(["a", "b"], 0, 1, 2, 1) == -1)
+
+	# --- lado ESTABLE: un colapso no reclasifica el ancla -----------------------
+	# Bloque anclado a la derecha con offset grande (n=20 -> celda 12, at=-8).
+	var big_right = B.to_saved(cells_at(20, {12: "c"}), 20)
+	check("ancla derecha con offset grande", big_right[0].tok == "c" and big_right[0].at == -8)
+	# Colapsa a n=6: no entra en su slot y queda del lado izquierdo de la barra.
+	var collapsed = B.to_cells(big_right, 6)
+	check("colapsa dentro de la barra", collapsed.has("c"))
+	# Al re-guardar con n=6 el LADO se conserva (signo negativo) y al volver a n=20
+	# retoma la mitad derecha en vez de quedar pegado a la izquierda.
+	var re_saved = B.to_saved(collapsed, 6, big_right)
+	check("el lado derecha se conserva al re-guardar", re_saved[0].tok == "c" and re_saved[0].at < 0)
+	var restored = B.to_cells(re_saved, 20)
+	check("al volver a n grande sigue en la mitad derecha", restored.find("c") >= 10)
+	# Sin la ancla previa, el mismo colapso se reclasificaría como izquierda.
+	var without = B.to_saved(collapsed, 6)
+	check("sin prev se reclasifica (contraste)", without[0].at >= 0)
+
+	# --- invariante: nunca dos bloques en el mismo slot -------------------------
+	# Dos bloques de span 2 anclados en celdas contiguas: reservan su ancho y no se
+	# superponen (el segundo corre al hueco libre).
+	var spans2 = {"a": 2, "b": 2}
+	var overlap = B.to_cells([anchor("a", 0), anchor("b", 1)], 8, spans2)
+	var starts = {}
+	var dup = false
+	for i in range(overlap.size()):
+		var t = String(overlap[i])
+		if t == "":
+			continue
+		if starts.has(t) and int(starts[t]) > 1:
+			dup = true
+		if not starts.has(t):
+			starts[t] = 0
+		starts[t] = int(starts[t]) + 1
+	check("span: no hay dos bloques solapados", int(starts.get("a", 0)) == 2 and int(starts.get("b", 0)) == 2 and not dup)
+	# Colapso de muchos bloques angostos: cada celda ocupada una sola vez.
+	var many = B.to_cells([anchor("a", 0), anchor("b", 0), anchor("c", 0), anchor("d", 0)], 3)
+	var used = {}
+	var clash = false
+	for i in range(many.size()):
+		var t = String(many[i])
+		if t == "":
+			continue
+		if used.has(t):
+			clash = true
+		used[t] = true
+	check("colapso: un bloque por slot en la barra", not clash)
 
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

@@ -96,6 +96,10 @@ const APPLET_DEFAULT = ["recursos", "termico", "reloj", "teclado"]
 const MENU_STYLE = preload("res://menu_style.gd")
 # K10b: modelo PURO de los bloques "Compartido" (sesiones activas con vecinos).
 const SHARED_BLOCK = preload("res://shared_block.gd")
+# Modelo PURO de anclaje de slots al costado (lado izquierda/derecha + buscador de
+# hueco único). Se preloadea para poder llamar a sus `static` desde los métodos
+# `static` de este script (los tests los ejercen sin instanciar el Frame).
+const BAR_SLOTS = preload("res://bar_slots.gd")
 # Grosor de la barra de estado del bloque "Compartido".
 const SHARED_W = 3.0
 # Relieve (bisel) de los bloques: el ancho base ya no es fijo en píxeles. Escala
@@ -470,6 +474,9 @@ func _place_token_cell(zone, tok, target, span = -1):
 		bar_order = saved
 		return false
 	bar_order[zone] = cells_to_seq(placed)
+	# Fija el LADO del bloque que acaba de soltarse (mitad izquierda/derecha por el
+	# centro de la barra): al re-guardar, `to_saved` lo conserva y no se reclasifica.
+	_anchor_set_side(zone, tok, placed.find(tok), max_cells)
 	_sync_pins()
 	applets_dirty = true
 	_save_applets()
@@ -639,26 +646,10 @@ static func cells_to_seq(cells):
 # Primera celda de un tramo de `span` celdas contiguas libres más cercano a `target`,
 # dentro de [0, max_cells - span]. Empate de distancia -> el de la DERECHA. -1 si no
 # hay ningún tramo libre (barra llena). Las celdas fuera del arreglo cuentan como libres.
-static func nearest_free(cells, target, span, max_cells):
-	span = max(1, int(span))
-	max_cells = max(0, int(max_cells))
-	var last = max_cells - span
-	if last < 0:
-		return -1
-	target = int(clamp(int(target), 0, last))
-	for d in range(max_cells + 1):
-		for s in [target + d, target - d]:
-			if s < 0 or s > last:
-				continue
-			var ok = true
-			for i in range(span):
-				var idx = s + i
-				if idx < cells.size() and String(cells[idx]) != "":
-					ok = false
-					break
-			if ok:
-				return s
-	return -1
+# Delega en el ÚNICO buscador de hueco (`bar_slots.nearest_free`); `prefer` (+1/-1)
+# elige el orden de barrido/desempate.
+static func nearest_free(cells, target, span, max_cells, prefer = 1):
+	return BAR_SLOTS.nearest_free(cells, target, span, max_cells, prefer)
 
 
 # Saca `tok` de las celdas (si estaba), lo coloca en el tramo libre de `span` celdas
@@ -884,6 +875,21 @@ func _resolve_order(zone):
 	bar_order_n[zone] = _order_n(zone)
 	var anchor = bar_order_anchor.get(zone, [])
 	var prev = bar_order[zone].duplicate()
+	# Ancho real de cada token: `to_cells` lo reserva para no dejar dos bloques en el
+	# mismo slot ni telescopar uno ancho sobre el de al lado.
+	var spans = {}
+	if typeof(anchor) == TYPE_ARRAY:
+		for e in anchor:
+			var at = ""
+			if typeof(e) == TYPE_DICTIONARY:
+				at = String(e.get("tok", ""))
+			elif typeof(e) == TYPE_STRING:
+				at = String(e)
+			if at != "" and not spans.has(at):
+				spans[at] = _token_span(at)
+	for t in prev:
+		if t != "" and not spans.has(t):
+			spans[t] = _token_span(t)
 	if _anchor_is_legacy(anchor):
 		var seq = []
 		for tok in anchor:
@@ -891,7 +897,7 @@ func _resolve_order(zone):
 				seq.append(String(tok))
 		bar_order[zone] = _with_missing(seq, prev)
 		return
-	bar_order[zone] = cells_to_seq(bar_slots.to_cells(anchor, int(bar_order_n[zone])))
+	bar_order[zone] = cells_to_seq(bar_slots.to_cells(anchor, int(bar_order_n[zone]), spans))
 	_normalize_order(zone)
 	bar_order[zone] = _with_missing(bar_order[zone], prev)
 
@@ -920,7 +926,28 @@ func _sync_anchor():
 		for t in bar_order[zone]:
 			if t != "":
 				spans[t] = _token_span(t)
-		bar_order_anchor[zone] = bar_slots.to_saved(seq_to_cells(bar_order[zone], spans), _order_n(zone))
+		# El ancla previa fija el LADO de cada bloque (no se reclasifica al colapsar).
+		bar_order_anchor[zone] = bar_slots.to_saved(seq_to_cells(bar_order[zone], spans), _order_n(zone), bar_order_anchor[zone])
+
+
+# Fija el LADO (izquierda/derecha) de un bloque recién soltado en la grilla de `n`
+# celdas movibles: mitad izquierda desde el borde izquierdo, mitad derecha desde el
+# derecho. `to_saved` conserva ese signo entre guardados (aunque el bloque colapse).
+func _anchor_set_side(zone, tok, index, n):
+	var arr = bar_order_anchor.get(zone, null)
+	if typeof(arr) != TYPE_ARRAY:
+		return
+	var t = String(tok)
+	var half = int(n) / 2
+	for e in arr:
+		if typeof(e) == TYPE_DICTIONARY and String(e.get("tok", "")) == t:
+			e["at"] = int(index) if int(index) < half else int(index) - int(n)
+			return
+	for e in arr:
+		if typeof(e) == TYPE_STRING and String(e) == t:
+			return   # formato viejo: el lado se decide al migrar en el próximo guardado
+	arr.append({"tok": t, "at": (int(index) if int(index) < half else int(index) - int(n))})
+	bar_order_anchor[zone] = arr
 
 
 # El DockApp de ventanas existe exactamente una vez (la barra que eligió el usuario o,
@@ -1028,6 +1055,12 @@ func _applet_move(id, dir):
 			return
 		seq.remove(i)
 		seq.insert(j, tok)
+		# El bloque cambió de celda: se re-decide su lado (izquierda/derecha).
+		var spans = {}
+		for t in seq:
+			if t != "":
+				spans[t] = _token_span(t)
+		_anchor_set_side(zone, tok, seq_to_cells(seq, spans).find(tok), _order_n(zone))
 		applets_dirty = true
 		_save_applets()
 		shell.request_redraw()
