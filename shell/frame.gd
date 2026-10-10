@@ -176,7 +176,6 @@ var vol_pan = 0.0          # pan de touchpad acumulado sobre la dockapp de Volum
 # Layout del último frame dibujado (para el control remoto / tests).
 var sysmon = Host.sc("res://sysmon.gd").new()
 var keyboard = Host.sc("res://applet_keyboard.gd").new()
-var bluetooth = Host.sc("res://applet_bluetooth.gd").new()
 var clipboard = Host.sc("res://applet_clipboard.gd").new()
 var volume = Host.sc("res://applet_volume.gd").new()
 var notif_applet = Host.sc("res://applet_notif.gd").new()
@@ -307,7 +306,6 @@ func _ready():
 func _exit_tree():
 	for m in applet_mods.values():
 		m.stop()
-	bluetooth.stop()
 
 
 # Ruta del archivo de applets: $XDG_CONFIG_HOME/gdtk/frame-applets.json

@@ -17,10 +17,6 @@ cosas; **B** frena trabajo; **C** higiene.
   especiales en `_applet_state/_applet_value/_draw_applet`. Desde 2026-10-04 los
   applets con módulo pasan por `applet_mods` (`guides/dockapp.md`). Salida: mover los
   incorporados a módulos con el mismo contrato cuando se toquen.
-- **`applet_bluetooth.gd` es código muerto.** El Frame lo instancia y lo para, pero no
-  está en `APPLETS` y la migración de config descarta el id `bluetooth`. Salida:
-  registrarlo en `applet_mods` (y `APPLETS`) o borrarlo.
-
 ## A — Portapapeles y entrada
 
 - **Portapapeles partido en dos.** Las apps viven en el compositor embebido y el shell
@@ -110,10 +106,6 @@ cosas; **B** frena trabajo; **C** higiene.
 
 ## C — Higiene
 
-- `README.md` describe el plan original (cage, XMPP, «Fase 2/3») y no el shell actual;
-  remitir a `specs/SPEC-architecture.md`.
 - `shell/activities/` está vacío.
-- `shell/design_check.gd` es un script `extends SceneTree` (un test) dentro de `shell/`
-  y sin cabecera; va en `tests/`.
 - `.frt-baseline/` e `icarito-none/` en la raíz (ignorados); capturas y logs de Kilo
   viejos movidos a `.attic/` (ignorado) el 2026-10-04.
