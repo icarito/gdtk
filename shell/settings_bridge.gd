@@ -218,8 +218,21 @@ func notifications():
 		return {
 			"enabled": true, "toast_transitorio": true, "atencion_foco": true,
 			"urgencia": true, "history_max": 100, "columna_modo": false, "silencio": false,
+			"iconos": true, "hover_card": true, "bounce": true,
+			"toast_ms_low": 4000, "toast_ms_normal": 5000, "toast_ms_critical": 8000,
+			"history_ttl_ms": 0,
 		}
 	return model.notifications(settings.get("notifications", {}))
+
+
+# Apps por defecto: {"terminal","browser","files"}, cada valor es el id de un .desktop
+# (p. ej. "Alacritty.desktop") o "" = automático. Reusa la normalización del modelo si
+# está disponible; si falta la clave o el modelo es viejo, devuelve los valores vacíos.
+func defaults():
+	var d = settings.get("defaults", {})
+	if model != null and model.has_method("defaults_field"):
+		return model.defaults_field(d)
+	return {"terminal": "", "browser": "", "files": ""}
 
 
 func has_wallpaper_image():

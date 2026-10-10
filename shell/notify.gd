@@ -23,6 +23,7 @@ const HISTORY_MAX = 100          # tope de entradas en el historial
 const ATTENTION_MS = 10000       # cuánto dura el pedido de foco (pulso de borde)
 const TOAST_MS = 4000            # bloque transitorio a plena opacidad
 const TOAST_FADE_MS = 400        # desvanecido del bloque transitorio
+const BOUNCE_MS = 900            # duración del "salto" al llegar un aviso / atención
 const RECORD_MAX = 400           # recorte de summary/body
 const URGENCY_DEFAULT_MS = 180000
 
@@ -52,9 +53,19 @@ var panel_scroll = 0.0
 var history_max = HISTORY_MAX
 var toast_id = 0
 var toast_since = 0
+var daemon_ok = false            # último estado conocido del daemon (de la fuente)
+var iconos = true                # mostrar el ícono de la app
+var hover_card = true            # mostrar el texto completo al pasar el puntero
+var bounce_enabled = true        # animar ("salto") avisos y atención
+var toast_ms_low = 4000          # default cuando la app manda expire_timeout = -1
+var toast_ms_normal = 5000
+var toast_ms_critical = 8000
+var history_ttl_ms = 0           # edad máxima en el historial (0 = sin TTL)
+var bounce = {}                  # id -> ms de inicio del salto
 var _seen_id = 0
 var _primed = false            # el primer snapshot no dispara transitorio (recarga)
 var _flash_since = 0             # último pedido de atención (para el pulso)
+var _daemon_check_ms = 0         # throttle de la verificación del daemon
 
 
 func setup(shell):
@@ -85,9 +96,15 @@ func stop():
 func poll():
 	var redraw = false
 	var now = OS.get_ticks_msec()
+	var wall = OS.get_system_time_msecs()
 	_mutex.lock()
 	var snap = _snap
 	_mutex.unlock()
+	# El daemon se verifica en el hilo principal (pidfile + /proc), con throttle para no
+	# tocar disco cada frame; no depende del worker.
+	if now - _daemon_check_ms > 2000:
+		_daemon_check_ms = now
+		daemon_ok = _daemon_alive(_paths())
 	var rev = int(snap.get("revision", 0))
 	if rev != revision:
 		revision = rev
@@ -97,9 +114,19 @@ func poll():
 		if not silenced_flag and toast_enabled and _primed and newest_id > 0 and newest_id != _seen_id:
 			toast_id = newest_id
 			toast_since = now
+			if bounce_enabled:
+				bounce[newest_id] = now
 		_seen_id = max(_seen_id, newest_id)
 		_primed = true
 		redraw = true
+	# TTL del historial: caducan por antigüedad (sólo presentación; el store lo
+	# recorta el daemon/worker por `expires_ms` y el tope).
+	if history_ttl_ms > 0 and not items.empty():
+		var kept = prune_by_ttl(items, wall, history_ttl_ms)
+		if kept.size() != items.size():
+			items = kept
+			latest = items[0] if not items.empty() else {}
+			redraw = true
 	# Expiración de atención/urgencia.
 	var att2 = prune_attention(attention, now)
 	if att2.size() != attention.size():
@@ -109,6 +136,12 @@ func poll():
 	if urg2.size() != urgency.size():
 		redraw = true
 	urgency = urg2
+	# Salto (bounce).
+	var b2 = prune_bounce(bounce, now)
+	if b2.size() != bounce.size():
+		bounce = b2
+	if not bounce.empty():
+		redraw = true
 	# Transitorio.
 	if toast_id != 0 and now - toast_since > TOAST_MS + TOAST_FADE_MS:
 		toast_id = 0
@@ -126,6 +159,11 @@ func latest():
 
 func items():
 	return items
+
+
+# Acceso al shell (los dockapps le piden helpers de ícono, etc.).
+func shell():
+	return _shell
 
 
 # Registro de notificación como nuevo evento interno (encolado; nunca I/O acá).
@@ -164,15 +202,19 @@ func request_attention(window_id, texto):
 	if not enabled or not atencion_enabled:
 		return false
 	var now = OS.get_ticks_msec()
+	var wall = OS.get_system_time_msecs()
 	attention[id] = {"hasta_ms": now + ATTENTION_MS, "texto": String(texto)}
 	_flash_since = now
+	if bounce_enabled:
+		bounce[id] = now
 	push_internal({
 		"source": "activacion",
 		"app": String(texto),
 		"summary": String(texto),
 		"target_window": id,
 		"urgency": "normal",
-		"expires_ms": 0,
+		"created_ms": wall,
+		"expires_ms": wall + ATTENTION_MS,
 	})
 	if _shell != null:
 		_shell.request_redraw()
@@ -200,6 +242,48 @@ func has_attention(id):
 	return int(id) in attention_ids()
 
 
+# Marca una notificación como leída (la persiste el daemon/worker vía CLI).
+func mark_read(id):
+	_mutex.lock()
+	_cmds.append({"op": "read", "id": int(id)})
+	_mutex.unlock()
+
+
+func mark_all_read():
+	_mutex.lock()
+	_cmds.append({"op": "readall"})
+	_mutex.unlock()
+
+
+func unread_count():
+	var n = 0
+	for it in items:
+		if typeof(it) == TYPE_DICTIONARY and not bool(it.get("read", false)):
+			n += 1
+	return n
+
+
+# Estado para diagnóstico (RPC `notify status`).
+func status():
+	return {
+		"daemon": daemon_ok,
+		"items": items.size(),
+		"unread": unread_count(),
+		"store": _paths().get("store", ""),
+	}
+
+
+# Envolvente 0..1 del "salto" de un aviso/atención (0 = sin animación).
+func bounce_alpha(id):
+	if not bounce_enabled or not bounce.has(int(id)):
+		return 0.0
+	var age = OS.get_ticks_msec() - int(bounce[int(id)])
+	if age < 0 or age > BOUNCE_MS:
+		return 0.0
+	var x = float(age) / float(BOUNCE_MS)
+	return (1.0 - x) * abs(sin(x * PI * 3.0))
+
+
 # Eleva (o renueva) una urgencia con TTL. Devuelve true si cambió el estado visible.
 # Sólo encola una notificación en el primer episodio, no en cada renovación.
 func raise_urgency(fuente, severidad, ttl_ms, texto):
@@ -216,13 +300,15 @@ func raise_urgency(fuente, severidad, ttl_ms, texto):
 	urgency[src] = {"severidad": String(severidad), "hasta_ms": now + ttl, "texto": String(texto)}
 	var new_episode = prev.empty()
 	if new_episode:
+		var wall = OS.get_system_time_msecs()
 		push_internal({
 			"source": "urgencia",
 			"app": src,
 			"summary": String(texto),
 			"body": "Urgencia: " + String(severidad),
 			"urgency": "critical",
-			"expires_ms": now + ttl,
+			"created_ms": wall,
+			"expires_ms": wall + ttl,
 		})
 	if _shell != null:
 		_shell.request_redraw()
@@ -277,6 +363,8 @@ func rpc_action(params):
 	var action = String(params.get("action", ""))
 	match action:
 		"push":
+			var wall = OS.get_system_time_msecs()
+			var dur = int(params.get("expires_ms", 0))
 			push_internal({
 				"source": "rpc",
 				"app": String(params.get("app", "gdtk")),
@@ -284,14 +372,25 @@ func rpc_action(params):
 				"summary": String(params.get("summary", "")),
 				"body": String(params.get("body", "")),
 				"urgency": String(params.get("urgency", "normal")),
-				"expires_ms": int(params.get("expires_ms", 0)),
+				"resident": bool(params.get("resident", false)),
+				"created_ms": wall,
+				"expires_ms": (wall + dur) if dur > 0 else 0,
 			})
 			return true
 		"list":
 			return items
+		"status":
+			return status()
 		"dismiss":
 			if params.has("id"):
 				dismiss(int(params.get("id", 0)))
+			return true
+		"read":
+			if params.has("id"):
+				mark_read(int(params.get("id", 0)))
+			return true
+		"readall":
+			mark_all_read()
 			return true
 		"clear":
 			dismiss_all()
@@ -340,7 +439,9 @@ static func normalize_record(rec):
 		"target_window": int(r.get("target_window", 0)),
 		"created_ms": int(r.get("created_ms", 0)),
 		"expires_ms": int(r.get("expires_ms", 0)),
+		"resident": bool(r.get("resident", false)),
 		"read": bool(r.get("read", false)),
+		"read_at_ms": int(r.get("read_at_ms", 0)),
 	}
 
 
@@ -396,6 +497,47 @@ static func prune_expired(list, now_ms):
 	return out
 
 
+# Fuera las entradas más viejas que el TTL del historial (`created_ms` es epoch ms).
+static func prune_by_ttl(list, now_ms, ttl_ms):
+	var out = []
+	var ttl = int(ttl_ms)
+	if ttl <= 0:
+		return list
+	for it in list:
+		if typeof(it) != TYPE_DICTIONARY:
+			continue
+		var c = int(it.get("created_ms", 0))
+		if c > 0 and int(now_ms) - c > ttl:
+			continue
+		out.append(it)
+	return out
+
+
+static func apply_read(list, id):
+	var out = []
+	for it in list:
+		if typeof(it) != TYPE_DICTIONARY:
+			continue
+		if int(it.get("id", 0)) == int(id):
+			var c = it.duplicate(true)
+			c["read"] = true
+			out.append(c)
+		else:
+			out.append(it)
+	return out
+
+
+static func apply_read_all(list):
+	var out = []
+	for it in list:
+		if typeof(it) != TYPE_DICTIONARY:
+			continue
+		var c = it.duplicate(true)
+		c["read"] = true
+		out.append(c)
+	return out
+
+
 static func parse_store(text):
 	var doc = {"revision": 0, "items": []}
 	if typeof(text) != TYPE_STRING or text.strip_edges() == "":
@@ -438,6 +580,16 @@ static func prune_urgency(urg, now_ms):
 	return out
 
 
+static func prune_bounce(b, now_ms):
+	var out = {}
+	if typeof(b) != TYPE_DICTIONARY:
+		return out
+	for id in b.keys():
+		if int(b[id]) + BOUNCE_MS > int(now_ms):
+			out[id] = b[id]
+	return out
+
+
 static func urgency_for_(urg, fuente, now_ms):
 	if typeof(urg) != TYPE_DICTIONARY:
 		return {}
@@ -454,13 +606,47 @@ func _paths():
 	if run == "":
 		run = "/tmp"
 	var dir = run + "/gdtk"
+	var store = OS.get_environment("GDTK_NOTIFY_STORE")
+	if store == "":
+		var base = OS.get_environment("XDG_STATE_HOME")
+		if base == "":
+			base = OS.get_environment("HOME").plus_file(".local").plus_file("state")
+		store = base.plus_file("gdtk").plus_file(STORE_NAME)
 	return {
 		"dir": dir,
-		"store": dir + "/" + STORE_NAME,
+		"store": store,
+		"legacy": dir + "/" + STORE_NAME,
+		"pid": dir + "/gdtk-notify.pid",
 		"tmp": dir + "/notify-push.json",
 		"script": ProjectSettings.globalize_path("res://").plus_file("../session/gdtk-notify").simplify_path(),
 		"log": run + "/gdtk-notify.log",
 	}
+
+
+# ¿El daemon está vivo? Lee su pidfile y verifica /proc (el pidfile puede quedar
+# obsoleto tras una caída).
+func _daemon_alive(p):
+	var pf = String(p.get("pid", ""))
+	if pf == "":
+		return false
+	var f = File.new()
+	if f.open(pf, File.READ) != OK:
+		return false
+	var pid = int(f.get_as_text().strip_edges())
+	f.close()
+	if pid <= 0:
+		return false
+	# /proc/<pid> existe también para zombis (hijos no reapeados): mirar el estado en
+	# /proc/<pid>/stat y tratarlos como muertos (Z).
+	var st = File.new()
+	if st.open("/proc/%d/stat" % pid, File.READ) != OK:
+		return false
+	var line = st.get_line()   # procfs: get_as_text() da vacío (size 0)
+	st.close()
+	var close = line.find_last(")")
+	if close < 0 or close + 2 >= line.length():
+		return false
+	return line.substr(close + 2, 1) != "Z"
 
 
 func _stopped():
@@ -493,15 +679,18 @@ func _on_fs_changed():
 
 
 func _work(p):
-	var local = []            # historial en memoria si el daemon no corre
-	var daemon_ok = File.new().file_exists(p.store)
+	var local = _seed_local(p)     # historial local (fallback) sembrado del store
 	var last_sig = null
+	var last_daemon = null
 	var rev = 0
+	var rev_local = 0
 	Directory.new().make_dir_recursive(p.dir)
 	while not _stopped():
 		# Ojo: se leen TODOS los comandos antes de decidir la fuente, así un push
 		# local reciente no se pisa con el store viejo.
+		var daemon_ok = _daemon_alive(p)
 		var cmds = _drain_cmds()
+		var persist = false
 		for c in cmds:
 			var op = String(c.get("op", ""))
 			if op == "push":
@@ -510,38 +699,94 @@ func _work(p):
 				else:
 					daemon_ok = false
 					local = apply_push(local, c.get("record", {}), history_max)
+					persist = true
 			elif op == "dismiss":
 				if not _run_cli(p, ["dismiss", str(c.get("id", 0))]):
 					daemon_ok = false
 					local = apply_dismiss(local, c.get("id", 0))
+					persist = true
+			elif op == "read":
+				if not _run_cli(p, ["read", str(c.get("id", 0))]):
+					daemon_ok = false
+					local = apply_read(local, c.get("id", 0))
+					persist = true
+			elif op == "readall":
+				if not _run_cli(p, ["readall"]):
+					daemon_ok = false
+					local = apply_read_all(local)
+					persist = true
 			elif op == "clear":
 				if not _run_cli(p, ["clear"]):
 					daemon_ok = false
 					local = []
+					persist = true
 			elif op == "invoke":
 				_run_cli(p, ["invoke", str(c.get("id", 0)), String(c.get("key", "default"))])
 		var file_items = []
 		var file_exists = File.new().file_exists(p.store)
 		if file_exists:
 			file_items = parse_store(_read(p.store)).get("items", [])
-		# Fuente: si un comando CLI anduvo, el store manda (aunque esté vacío tras un
-		# clear); si no, un store con ítems indica un daemon vivo (p. ej. notificación
-		# externa) y también manda; si no, historial local.
+		# Fuente: si el daemon corre, el store manda; si un comando CLI falló (daemon
+		# caído), el historial local manda y se persiste para sobrevivir reloads; si no,
+		# un store con ítems (p. ej. de una sesión previa) también sirve.
 		var source = local
-		if daemon_ok or (file_exists and not file_items.empty()):
+		if daemon_ok:
+			source = file_items if file_exists else local
+			# El fallback (local) sigue al store: si el daemon muere, no se pisa con
+			# un historial viejo.
+			local = source
+		elif persist:
+			rev_local += 1
+			_write_store(p.store, rev_local, local)
+			source = local
+		elif file_exists and not file_items.empty():
 			source = file_items
-		var merged = prune_expired(source, OS.get_ticks_msec())
+		var merged = prune_expired(source, OS.get_system_time_msecs())
 		if merged.size() > history_max:
 			merged = merged.slice(0, history_max)
 		var sig = JSON.print(merged)
-		if sig != last_sig:
+		if sig != last_sig or daemon_ok != last_daemon:
 			last_sig = sig
+			last_daemon = daemon_ok
 			rev += 1
-			_publish(rev, merged)
+			_publish(rev, merged, daemon_ok, p.store)
 		var waited = 0
 		while waited < PERIOD_MS and not _stopped():
 			OS.delay_msec(SLEEP_STEP_MS)
 			waited += SLEEP_STEP_MS
+
+
+# Siembra el historial local del worker desde el store persistente (o migra el viejo
+# store de tmpfs). Así, con el daemon caído, un reload no pierde nada.
+func _seed_local(p):
+	var local = []
+	var f = File.new()
+	if not f.file_exists(p.store) and f.file_exists(p.legacy):
+		var doc = parse_store(_read(p.legacy))
+		var items = doc.get("items", [])
+		if not items.empty():
+			_write_store(p.store, int(doc.get("revision", 1)), items)
+			return items
+	if f.file_exists(p.store):
+		local = parse_store(_read(p.store)).get("items", [])
+	return local
+
+
+func _write_store(path, rev, list):
+	var dir = path.get_base_dir()
+	if dir != "":
+		Directory.new().make_dir_recursive(dir)
+	var tmp = path + ".tmp"
+	var f = File.new()
+	if f.open(tmp, File.WRITE) != OK:
+		return false
+	f.store_string(serialize_store(rev, list))
+	f.close()
+	var d = Directory.new()
+	if d.rename(tmp, path) != OK:
+		d.remove(tmp)
+		return false
+	return true
 
 
 func _drain_cmds():
@@ -552,12 +797,14 @@ func _drain_cmds():
 	return out
 
 
-func _publish(rev, list):
+func _publish(rev, list, daemon, store):
 	_mutex.lock()
 	_snap = {
 		"revision": rev,
 		"items": list,
 		"latest": (list[0] if not list.empty() else {}),
+		"daemon": bool(daemon),
+		"store": String(store),
 	}
 	_mutex.unlock()
 
@@ -566,7 +813,7 @@ func _publish(rev, list):
 func _push_remote(p, record):
 	var rec = normalize_record(record)
 	if int(rec.get("created_ms", 0)) <= 0:
-		rec["created_ms"] = OS.get_ticks_msec()
+		rec["created_ms"] = OS.get_system_time_msecs()
 	Directory.new().make_dir_recursive(p.dir)
 	var f = File.new()
 	if f.open(p.tmp, File.WRITE) != OK:
@@ -632,4 +879,15 @@ static func selftest():
 	var urg = {"termico": {"severidad": "critical", "hasta_ms": 2000, "texto": "t"}}
 	assert(urgency_for_(urg, "termico", 1000).severidad == "critical")
 	assert(urgency_for_(urg, "termico", 3000).empty())
+	# TTL del historial.
+	var tl = [{"id": 1, "created_ms": 1000}, {"id": 2, "created_ms": 5000}]
+	assert(prune_by_ttl(tl, 4000, 0).size() == 2, "sin TTL no recorta")
+	assert(prune_by_ttl(tl, 4000, 2000).size() == 1, "TTL recorta por antigüedad")
+	# read / readall.
+	assert(apply_read(tl, 1)[0].read and int(apply_read(tl, 1)[0].id) == 1)
+	assert(apply_read(tl, 1)[0].read)
+	assert(apply_read_all(tl)[1].read)
+	# bounce.
+	assert(prune_bounce({3: 1000}, 1200).size() == 1)
+	assert(prune_bounce({3: 1000}, 1000 + BOUNCE_MS + 1).empty())
 	print("notify selftest ok")

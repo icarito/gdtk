@@ -48,6 +48,9 @@ var _outbox = []
 var _last_received = ""
 # Pedidos de pick() (nombres de archivo) que el worker convierte en copia local nueva.
 var _picks = []
+# Copia local nueva detectada por el worker (una vez): {"summary", "kind"}; el shell
+# la drena con take_copy_event() para mostrar un aviso temporal.
+var _copied = {}
 
 
 # --- API del Frame -----------------------------------------------------------
@@ -61,7 +64,13 @@ func refresh(_force := false):
 	var s = _snap
 	_mutex.unlock()
 	var s_items = s.get("items", [])
-	var changed = state != s.state or value != s.value or detail != s.detail or items != s_items \
+	# Godot 3 compara Dictionary (y Array de Dictionary) por REFERENCIA, no por contenido:
+	# `items` es un duplicado de `s_items`, así que `items != s_items` daba true SIEMPRE y
+	# el Frame pedía un redraw en cada vuelta del loop aunque nada cambiara (costo de CPU
+	# en reposo; SPEC-rendimiento-compositor, issue B). La firma de string sí compara
+	# contenido, así que sólo marca cambio cuando el historial cambió de verdad.
+	var changed = state != s.state or value != s.value or detail != s.detail \
+		or str(items) != str(s_items) \
 		or latest_name != s.get("latest_name", "") or latest_kind != s.get("latest_kind", "")
 	state = s.state
 	value = s.value
@@ -79,6 +88,16 @@ func take_outbox():
 	_outbox = []
 	_mutex.unlock()
 	return out
+
+
+# Evento de "se copió algo nuevo" desde la última llamada ({} si no hubo). Lo consume
+# el shell para mostrar un aviso temporal; no incluye la primera lectura del directorio.
+func take_copy_event():
+	_mutex.lock()
+	var c = _copied
+	_copied = {}
+	_mutex.unlock()
+	return c
 
 
 # Texto que llegó de otro equipo: pasa a ser la selección local. No se reenvía
@@ -302,6 +321,7 @@ func _work(p):
 		var sig = PoolStringArray(ordered).join("\n")
 		var cur_items = snap.get("items", [])
 		if last_name == null or sig != last_sig:
+			var prev = last_name
 			# Sincronizar al Grupo sólo texto; las imágenes no viajan por el canal peer.
 			if last_name != null and name != "" and name != last_name and not is_image(name):
 				_queue_sync(_read(p.dir.plus_file(name), SYNC_MAX))
@@ -320,6 +340,12 @@ func _work(p):
 				var text = _read(p.dir.plus_file(name))
 				lv = summary(text)
 				ld = "Portapapeles: %s\n\n%d en el historial" % [text.substr(0, 300), names.size()]
+			# Copia local nueva (no la primera lectura del directorio): evento para el aviso.
+			if prev != null and name != "" and name != prev:
+				var cs = lv if lv != "" else image_label(_image_dims(p, name))
+				_mutex.lock()
+				_copied = {"summary": cs, "kind": lk}
+				_mutex.unlock()
 			snap = {"state": "activo" if name != "" else "listo",
 				"value": lv, "detail": ld, "items": cur_items,
 				"latest_name": name, "latest_kind": lk}

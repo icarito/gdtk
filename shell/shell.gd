@@ -370,6 +370,7 @@ var system_osd = null
 # Bus de notificaciones (ver notify.gd): historial, atención, urgencia y panel.
 var notify = null
 var notifications_panel = null
+var _notify_relaunch_ms = 0
 
 # Selector de pantallazos (ver screenshot_ui.gd): null si nunca se abrió.
 var screenshot_ui = null
@@ -434,6 +435,7 @@ var tiles = []           # orden de las ventanas visibles (una por entrada, sin 
 var wm_units = []
 var minimized = {}       # id -> true
 var unit_focus = {}      # id-líder de la pantalla -> último miembro enfocado
+var focus_parent = -1    # ventana enfocada ANTES de una flotante: a la que volver al cerrarla
 var focused_tile = -1
 var tile_mode = false
 var tile_nodes = {}      # id -> Control (contenedor de capas de la ventana)
@@ -443,6 +445,10 @@ var tile_fit = {}        # id -> {"scale", "offset"}: transform del contenido (p
 var tile_anim = {}       # id -> {"from": Rect2 footprint visible, "since": int}
 var tile_fade = {}       # id -> ms en que apareció (fade-in)
 var tile_intro = {}      # id -> true: falta su primera textura para animar la entrada
+# Foco de teclado diferido (L): id -> true mientras la ventana no tenga su primera
+# textura. Al crearse se pidió el foco, pero si el toplevel aún no estaba mapeado el
+# compositor no pudo entregar el teclado; se re-afirma una vez al primer contenido.
+var focus_pending = {}
 var expose = false
 var expose_sel = 0
 var expose_cards = {}    # id -> Rect2 de la ventana en exposé (coords de vista)
@@ -557,10 +563,26 @@ var home_slide_to = 0.0
 var window_dragging = false  # Super+arrastre de una ventana: el view no reenvía al cliente
 var instant_switch = false   # Alt+Tab: reubicar las pantallas sin animación (1 frame)
 var focus_flash = 0      # ms del último cambio de foco (borde que destella)
+# Focus-follows-mouse: mientras `OS.get_ticks_msec() < ffm_suppress_until` el hover
+# NO cambia el foco. Lo setea un cambio de foco por TECLADO (Alt+Tab/Super+Tab/
+# Super+H-L/flechas): al soltar las teclas el puntero no debe robar el foco recién dado.
+var ffm_suppress_until = 0
+const FFM_KEYBOARD_GRACE_MS = 700  # duración de la gracia de FFM tras foco por teclado
+# Destello del cursor al cambiar de pantalla/exposé: anillo breve en la posición
+# del puntero (ver _flash_cursor/_tick_ripple). Se dibuja en una CanvasLayer alta.
+var ripple_layer = null
+var ripple_ring = null   # Line2D del anillo que se expande y se desvanece
+var ripple_since = -1    # ms del disparo; -1 = inactivo
 var tiles_ui = null
 var expose_bg = null     # fondo oscuro de exposé, detrás de los tiles
 const TILE_GAP = 3.0
 const TILE_ANIM_MS = 320
+# Destello del cursor al cambiar de pantalla/exposé: onda breve (~0.5 s) dibujada en
+# la posición del puntero (anillo que se expande y se desvanece).
+const RIPPLE_MS = 500
+const RIPPLE_R0 = 6.0
+const RIPPLE_R1 = 46.0
+const RIPPLE_SEGMENTS = 40
 # Transición tiled<->flotante (K13): misma familia de ease que el resto.
 const WM_SWITCH_MS = 320
 const TILE_FADE_MS = 440
@@ -739,6 +761,18 @@ func frame_bar_h(vp):
 	if vp.y >= 3.0 * u:
 		return ceil(u)
 	return max(64.0, floor(u * 0.5))
+
+
+# ¿El puntero cae en la banda de una barra del Frame que se está dibujando? La barra
+# se pinta encima de las ventanas: ahí no hay resize y el hover no debe cambiar el foco.
+func _over_frame_bar(pos):
+	if pos == null or frame == null or not is_instance_valid(frame):
+		return false
+	if not (frame.bars_shown() and frame.drawn):
+		return false
+	var vp = _screen_size()
+	var bh = frame_bar_h(vp)
+	return pos.y <= bh or pos.y >= vp.y - bh
 
 
 # --- K12/K19: hueco del Frame ------------------------------------------------
@@ -1389,6 +1423,7 @@ func _ready():
 	capture_input.shell = self
 	add_child(capture_input)
 	eis_cursor = _make_eis_cursor()
+	_make_ripple()
 	# Volumen/brillo: el worker resuelve backends y lee el estado inicial; el OSD se
 	# dibuja al final de _imgui_frame.
 	system_osd = SYSTEM_OSD.new()
@@ -1402,9 +1437,14 @@ func _ready():
 	# request_redraw() (commits Wayland, señales, control remoto) o al cambiar el minuto (reloj).
 	# Los tests con --screenshot cuentan frames: ahí se deja el modo histórico.
 	if screenshot_path == "":
-		# Piso liviano para que el control remoto TCP y los workers sigan respirando
-		# aun sin input ni commits Wayland. El sleep idle ya limita esto a ~4 Hz.
-		update_hz = 4.0
+		# Sin redibujo continuo por vuelta del loop: ImGui se rearma con request_redraw()
+		# (commits Wayland, señales, input, cambio de minuto) o por este piso liviano.
+		# El piso era 4 Hz, igual que el loop de reposo (~4 vueltas/s): cada vuelta
+		# rearmaba ImGui y el motor redibujaba en reposo (B). Bajarlo a 1 Hz desacopla el
+		# piso del loop: en reposo `drawn/s << loop/s`; el input sigue a input_hz y los
+		# commits/sysmon piden frame cuando cambian. En tests (--screenshot) queda el modo
+		# histórico (update_hz <= 0 = cada frame).
+		update_hz = 1.0
 		input_hz = 60.0
 		_arm_clock()
 	# El colector del HUD corría en cada vuelta del loop (60/s) aunque nada cambie.
@@ -1608,6 +1648,11 @@ func release_modifiers():
 
 
 var last_commits = 0
+# Conteo de capas por ventana del último frame completo: un popup de app agrega una
+# capa al árbol del toplevel, pero el commit entra por el camino liviano
+# (_present_commit) que no crea el nodo de la capa nueva. Si el conteo cambia, hay que
+# escalar a un frame completo o el popup queda invisible hasta el próximo tick (~250 ms).
+var layer_counts = {}
 # Loop del motor: sin input, commits ni animación por IDLE_MS, duerme más entre vueltas
 # (60 -> 4 vueltas/s en reposo). El primer evento tras el reposo tarda hasta SLEEP_IDLE.
 const IDLE_MS = 3000
@@ -1624,6 +1669,11 @@ var last_commit_ms = 0
 # (SPEC-rendimiento-compositor).
 var present_light = 0
 var present_full = 0
+# Diagnóstico del loop (SPEC-rendimiento-compositor): por qué corre rápido y con qué sleep.
+# GDTK_FORCE_IDLE=1 fuerza busy=false para A/B del reposo sin tocar la lógica.
+var loop_busy = false
+var loop_sleep_usec = 0
+var loop_force_idle = OS.get_environment("GDTK_FORCE_IDLE") != ""
 # Logs de entrada en caliente ([cursor], arrastre Deskflow): sólo con GDTK_DEBUG_INPUT=1.
 # Sin la variable no escriben a shell.log en cada cambio de cursor/motion del cliente.
 var debug_input = OS.get_environment("GDTK_DEBUG_INPUT") != ""
@@ -1678,10 +1728,21 @@ func _process(_delta):
 	if screenshot_ui != null and screenshot_ui.is_active():
 		last_activity = now
 		request_redraw()
-	if hover_hit != null:
+	if hover_hit != null and not _over_frame_bar(last_pointer_pos):
 		_focus_follow(hover_hit)
 	_poll_force_close(now)
 	_sync_capture_cursor()
+	# Destello del cursor: avanza sólo mientras la onda está activa (sin I/O).
+	_tick_ripple(now)
+	# Cursor de resize pegado: si una barra del Frame quedó dibujada encima del puntero
+	# (o el chrome desapareció) sin que llegue otro motion, devolverlo a flecha ya. Sólo
+	# fuera de un arrastre activo y sin romper el cursor que pide la app. El guard evita
+	# re-setear la forma en cada vuelta (Godot inyecta un motion falso al cambiarla).
+	if chrome_drag == null and not window_dragging and resize_handle == null \
+			and last_pointer_pos != null and _over_frame_bar(last_pointer_pos) \
+			and (_client_cursor_applied != null or view == null \
+				or view.mouse_default_cursor_shape != Input.CURSOR_ARROW):
+		_reset_cursor()
 	# Asa de mover CSD: deslizamiento de entrada/salida (pide frames mientras anima).
 	_tick_csd_grip(now)
 	# Transición de zoom Hogar <-> Grupo <-> Vecindario (metáfora del ícono central).
@@ -1761,10 +1822,15 @@ func _process(_delta):
 	# los frames mientras haya un transitorio o un pulso pendiente.
 	if notify != null and notify.poll():
 		request_redraw()
+	_notify_supervise(now)
 	_scanout_tick()
 	if screenshot_path == "":
 		var busy = now - last_activity <= IDLE_MS or now - last_commit_ms <= COMMIT_ACTIVE_MS
+		if loop_force_idle:
+			busy = false
 		var sleep = SLEEP_ACTIVE if busy else SLEEP_IDLE
+		loop_busy = busy
+		loop_sleep_usec = sleep
 		if OS.low_processor_usage_mode_sleep_usec != sleep:
 			OS.low_processor_usage_mode_sleep_usec = sleep
 
@@ -1779,6 +1845,14 @@ func _present_commit():
 		present_full += 1
 		request_redraw()
 		return
+	# Popup nuevo/cerrado en alguna ventana: el camino liviano (`view.update`) no crea
+	# ni destruye el nodo de la capa, así que el popup de la app quedaría invisible
+	# hasta el próximo frame completo. Si el conteo de capas cambió, escalar a full.
+	for id in tiles:
+		if int(layer_counts.get(id, -1)) != compositor.get_layers(id).size():
+			present_full += 1
+			request_redraw()
+			return
 	present_light += 1
 	if view != null and is_instance_valid(view):
 		view.update()
@@ -1797,6 +1871,10 @@ func _scanout_overlay_active():
 	if screenshot_ui != null and screenshot_ui.is_active():
 		return true
 	if system_osd != null and system_osd.is_active():
+		return true
+	# Columna de notificaciones (bloques/transitorio): debe quedar POR ENCIMA de la
+	# ventana a pantalla completa, así que también pausa el scanout directo.
+	if notifications_panel != null and not notifications_panel.blocks.empty():
 		return true
 	if frame != null and is_instance_valid(frame) and frame.visible:
 		return true
@@ -2886,6 +2964,14 @@ func _update_tile(id, now):
 	var node = _tile_node(id)
 	var geo = compositor.get_geometry(id)
 	var layers = compositor.get_layers(id)
+	layer_counts[id] = layers.size()
+	# Foco de teclado diferido (L): se re-afirma UNA vez cuando llega el primer
+	# contenido (textura lista). Sin re-elevar ni reordenar (raise=false): no toca el
+	# FFM ni el Z. Sólo si sigue siendo la enfocada (no robar foco).
+	if focus_pending.has(id) and layers.size() > 0 and layers[0].texture != null:
+		focus_pending.erase(id)
+		if focused_tile == id:
+			_compositor_focus(id, false)
 	var rect = tile_rects.get(id, Rect2(Vector2.ZERO, view.rect_size))
 	# Arrastre en exposé: la miniatura toma ya el tamaño que tendrá al soltar (pantalla
 	# entera sobre un hueco, su parte de la franja sobre otro escritorio) y la app se
@@ -3300,6 +3386,14 @@ func _focus_tile(id, raise_window = true):
 	# Enfocar otra ventana sale de pantalla completa.
 	if fullscreen_id >= 0 and fullscreen_id != id:
 		fullscreen_id = -1
+	# Memoria del "padre" (E): al enfocar una flotante recordar la ventana que tenía
+	# el foco para volver a ella al cerrarla; al enfocar una tiled se limpia. No se
+	# pisa si ya era la enfocada (re-tile/restore del mismo id).
+	if hybrid.is_floating(id):
+		if focused_tile >= 0 and focused_tile != id:
+			focus_parent = focused_tile
+	else:
+		focus_parent = -1
 	focused_tile = id
 	# En flotante, elevar es una consecuencia del foco explícito (clic, selector,
 	# atajo), no del mero cambio de foco. Lazy focus pasa false para conservar Z.
@@ -3322,12 +3416,21 @@ func _focus_tile(id, raise_window = true):
 	request_redraw()
 
 
+# Cambio de foco por teclado/gesto deliberado (Alt+Tab, Super+Tab, Super+H-L,
+# Super/Ctrl+Alt+flechas, swipe): abre una ventana de gracia en la que el
+# focus-follows-mouse no roba el foco por hover. NO llamar desde el propio FFM
+# (que enfoca con _focus_tile(id, false)): sería realimentación y lo desactivaría.
+func _keyboard_focus_grace():
+	ffm_suppress_until = OS.get_ticks_msec() + FFM_KEYBOARD_GRACE_MS
+
+
 # Navegación de pantallas (una sola fila por default, con el Hogar al final).
 # dir: -1 izq, 1 der. ←/→ cambian de pantalla (franja); desde la última, → llega al
 # Hogar y desde el Hogar, ← vuelve a la última pantalla que tuvo el foco.
 func _focus_dir(dir):
 	if dir != -1 and dir != 1:
 		return
+	_keyboard_focus_grace()
 	if _home_anim_active():
 		return
 	pan = 0.0
@@ -3636,6 +3739,7 @@ func _snap_pan(step = null):
 		home_slide_since = OS.get_ticks_msec()
 	elif int(target) != int(a) and n > 0:
 		_focus_unit(units, int(target))
+	_flash_cursor()
 	request_redraw()
 
 
@@ -3860,12 +3964,19 @@ func _focused_unit_index_of(units, id):
 	return -1
 
 
+# ¿Se puede devolver el foco a `id` al cerrar una flotante/diálogo? Vivo, todavía en
+# pantalla y no minimizado (una minimizada no se restaura sola; caso de _focus_tile).
+func _can_restore_focus(id):
+	return id >= 0 and _id_alive(id) and tiles.has(id) and not minimized.has(id)
+
+
 # Enfoca la pantalla u (recordando su último miembro enfocado). El Escritorio (u=0)
 # no tiene miembros tiled: enfoca la flotante más arriba anclada ahí (o suelta el foco).
 func _focus_unit(units, u):
 	if u < 0 or u >= units.size():
 		return
 	var members = units[u]
+	_flash_cursor()  # cambiar de pantalla: onda breve en el puntero (orienta la mirada)
 	if members.empty():
 		var fid = -1
 		for id in float_layout.ids_z():
@@ -3923,6 +4034,8 @@ func _toggle_expose(on):
 	expose_drag_gap = -1
 	_reset_cursor()
 	if on:
+		# Entrar al exposé también destella el puntero (la vista cambia de golpe).
+		_flash_cursor()
 		# Ningún cliente (pointer lock) ni captura remota debe quedarse con el mouse:
 		# en exposé todo el mouse va al shell, o el arrastre entre escritorios se pierde.
 		if client_pointer_locked:
@@ -4040,6 +4153,7 @@ func _minimize_window(id):
 		chrome_drag = null
 		drag_overlay = null
 		window_dragging = false
+		_reset_cursor()
 	minimized[id] = true
 	tiles.erase(id)
 	tile_fade.erase(id)
@@ -4086,28 +4200,34 @@ func _toggle_minimize_focused():
 
 
 # Super+W / botón de cerrar del exposé: cierre educado (xdg_toplevel.close). La app
-# puede preguntar antes de irse.
+# puede preguntar antes de irse (p. ej. "guardar cambios") y decidir quedarse; por eso
+# el primer pedido NO tiene timeout. Un segundo pedido seguido sobre la misma ventana
+# (dentro de CLOSE_REASK_MS) fuerza el cierre (cliente colgado o que ignora el close).
+const CLOSE_REASK_MS = 1500
+
 func _close_window_id(id):
-	if id >= 0 and _id_alive(id):
-		# Cerrar la «Pantalla compartida» = la persona deja de mirar: corta al emisor.
-		# (gvd recv por sí solo reinicia su ventana, así que también se lo termina.)
-		if _pantalla_sender != "" and _pantalla_window_ids().has(id):
-			_pantalla_closed_here()
-		compositor.close(id)
-		# Si el cliente no responde (ventana residual), forzar en ~700 ms.
-		_force_close_at[int(id)] = OS.get_ticks_msec() + 700
+	if id < 0 or not _id_alive(id):
+		return
+	if _force_close_at.has(int(id)):
+		# Segundo pedido seguido: forzar.
+		_force_close_at.erase(int(id))
+		_force_close_window_id(id)
+		return
+	# Cerrar la «Pantalla compartida» = la persona deja de mirar: corta al emisor.
+	# (gvd recv por sí solo reinicia su ventana, así que también se lo termina.)
+	if _pantalla_sender != "" and _pantalla_window_ids().has(id):
+		_pantalla_closed_here()
+	compositor.close(id)
+	_force_close_at[int(id)] = OS.get_ticks_msec() + CLOSE_REASK_MS
 	request_redraw()
 
 
-# Avanza los cierres que quedaron pendientes: si el id sigue vivo, se saca a la
-# fuerza (cliente muerto que nunca procesó el close).
+# Sólo poda los pedidos educados vencidos: si la app no cerró, se queda (puede estar
+# mostrando un diálogo). El cierre forzado exige un segundo pedido.
 func _poll_force_close(now):
 	for id in _force_close_at.keys():
-		if now < int(_force_close_at[id]):
-			continue
-		_force_close_at.erase(id)
-		if _id_alive(int(id)):
-			_force_close_window_id(int(id))
+		if now >= int(_force_close_at[id]):
+			_force_close_at.erase(id)
 
 
 func _force_close_window_id(id):
@@ -4531,6 +4651,7 @@ func _draw_home(offset = 0.0):
 			text_colored(HOME_BLOCK_TEXT, "H")
 		if center_right:
 			open_popup("##home_session")
+			request_redraw()  # frame de asiento: ImGui re-mide el popup al frame siguiente
 		MENU_STYLE.begin(self)
 		if begin_popup("##home_session"):
 			MENU_STYLE.chrome(self, "Este equipo")
@@ -5049,6 +5170,19 @@ func _load_png_file(path):
 	tex.create_from_image(img, Texture.FLAG_FILTER)
 	sugar_icons[key] = tex
 	return tex
+
+
+# Ícono de una notificación: cadena desktop-entry/icon -> path real del tema, reusando
+# `apps.resolve_icon` (prefiere `icon`, cae a `app_id`). "" si no hay o no se resuelve.
+func resolve_notify_icon(record):
+	if record == null or typeof(record) != TYPE_DICTIONARY:
+		return ""
+	var name = String(record.get("icon", ""))
+	if name == "":
+		name = String(record.get("app_id", ""))
+	if name == "" or apps == null or not apps.has_method("resolve_icon"):
+		return ""
+	return String(apps.resolve_icon(name))
 
 
 # Rasteriza un SVG de Sugar a ImageTexture cacheada. Reemplaza las entidades
@@ -5980,10 +6114,14 @@ func _open_wayland(activity):
 	view.rect_clip_content = true
 	compositor.default_size = _tile_rect(vp).size
 
-	var cmd = activity.wayland[0]
+	# Terminal: comando del .desktop configurado, no el "alacritty" fijo del anillo.
+	var wayland = activity.wayland
+	if name == "Terminal":
+		wayland = _terminal_wayland()
+	var cmd = wayland[0]
 	var args = PoolStringArray()
-	for i in range(1, activity.wayland.size()):
-		args.push_back(activity.wayland[i])
+	for i in range(1, wayland.size()):
+		args.push_back(wayland[i])
 
 	# Godot hace chdir a su proyecto (~/gdtk/shell): las apps arrancan desde $HOME.
 	args.insert(0, cmd)
@@ -6037,6 +6175,103 @@ func _apply_settings():
 		_apply_deskflow_settings()
 		_apply_span_settings()
 		_apply_notifications_settings()
+		_apply_defaults_settings()
+
+
+# Apps por defecto (K-shell): resuelve el terminal configurado y lo publica en la
+# grilla de apps. Si cambió, invalida el scan para re-envolver las apps Terminal=true.
+func _apply_defaults_settings():
+	if apps == null:
+		return
+	var cmd = _default_terminal_cmd()
+	if cmd != apps.terminal_cmd:
+		apps.terminal_cmd = cmd
+		apps.scanned = false  # re-parsear los .desktop con el nuevo terminal
+
+
+# Comando de la terminal por defecto: el Exec del .desktop elegido, sin placeholders
+# (%f/%U/...), o "alacritty" si está en automático / no se encontró.
+func _default_terminal_cmd():
+	var id = ""
+	if settings_bridge != null:
+		id = String(settings_bridge.defaults().get("terminal", ""))
+	if id != "":
+		var exec = _desktop_exec(id)
+		if exec != "":
+			return exec
+	return "alacritty"
+
+
+# Exec (limpio) de un .desktop por su id, buscándolo en los dirs de aplicaciones.
+func _desktop_exec(desktop_id):
+	var fname = String(desktop_id).strip_edges()
+	if fname == "":
+		return ""
+	for d in apps.data_dirs():
+		var path = d.plus_file("applications").plus_file(fname)
+		if File.new().file_exists(path):
+			return _exec_from_desktop(path)
+	return ""
+
+
+# Lee el Exec de la sección [Desktop Entry]; limpia field codes con apps.clean_exec.
+func _exec_from_desktop(path):
+	var f = File.new()
+	if f.open(path, File.READ) != OK:
+		return ""
+	var e = {}
+	var in_entry = false
+	for line in f.get_as_text().split("\n"):
+		line = line.strip_edges()
+		if line.begins_with("["):
+			if in_entry:
+				break
+			in_entry = (line == "[Desktop Entry]")
+		elif in_entry and not line.begins_with("#"):
+			var eq = line.find("=")
+			if eq > 0:
+				e[line.substr(0, eq).strip_edges()] = line.substr(eq + 1).strip_edges()
+	f.close()
+	var exec = String(e.get("Exec", ""))
+	if apps != null:
+		exec = apps.clean_exec(exec)
+	return exec.strip_edges()
+
+
+# argv de la actividad Terminal con el terminal configurado (puede traer argumentos).
+func _terminal_wayland():
+	var parts = Array(_default_terminal_cmd().strip_edges().split(" ", false))
+	if parts.empty():
+		parts = ["alacritty"]
+	return parts
+
+
+# Abre o reusa la actividad Terminal en la pantalla actual (misma vía que el anillo).
+func _launch_terminal():
+	var i = _activity_named("Terminal")
+	if i < 0:
+		return
+	_activate(i)
+	request_redraw()
+
+
+# Relanza el daemon de notificaciones si no corre (cooldown amplio; el `flock` del
+# daemon lo hace idempotente, así que un intento extra no arranca un segundo proceso).
+func _notify_supervise(now):
+	if notify == null or notify.daemon_ok:
+		return
+	if now - _notify_relaunch_ms < 15000:
+		return
+	_notify_relaunch_ms = now
+	var script = ProjectSettings.globalize_path("res://").plus_file("../session/gdtk-notify").simplify_path()
+	if not File.new().file_exists(script):
+		return
+	# `setsid` desacopla el daemon del shell (sobrevive a una recarga y no queda como
+	# hijo zombi de Godot). Fallback a arrancarlo directo si no está.
+	if File.new().file_exists("/usr/bin/setsid"):
+		OS.execute("/usr/bin/setsid", ["--fork", script, "serve"], false)
+	else:
+		OS.execute(script, ["serve"], false)
 
 
 # Sincroniza el bus de notificaciones con settings.json (SPEC-notificaciones).
@@ -6050,6 +6285,13 @@ func _apply_notifications_settings():
 	notify.toast_enabled = bool(nf.get("toast_transitorio", true))
 	notify.history_max = int(nf.get("history_max", 100))
 	notify.panel_mode = bool(nf.get("columna_modo", false))
+	notify.iconos = bool(nf.get("iconos", true))
+	notify.hover_card = bool(nf.get("hover_card", true))
+	notify.bounce_enabled = bool(nf.get("bounce", true))
+	notify.toast_ms_low = int(nf.get("toast_ms_low", 4000))
+	notify.toast_ms_normal = int(nf.get("toast_ms_normal", 5000))
+	notify.toast_ms_critical = int(nf.get("toast_ms_critical", 8000))
+	notify.history_ttl_ms = int(nf.get("history_ttl_ms", 0))
 	notify.set_silenced(bool(nf.get("silencio", false)))
 
 
@@ -8773,6 +9015,20 @@ func _clip_sync_poll():
 	# los applets ubicados); refresh() arranca el worker la primera vez.
 	if frame.clipboard.get("_thread") == null:
 		frame.clipboard.refresh()
+	# Aviso temporal al copiar (SPEC-notificaciones v2): también sin Grupo.
+	var copied = frame.clipboard.take_copy_event()
+	if not copied.empty() and notify != null:
+		var wall = OS.get_system_time_msecs()
+		notify.push_internal({
+			"source": "portapapeles",
+			"app": "Portapapeles",
+			"summary": "Copiado",
+			"body": String(copied.get("summary", "")),
+			"icon": "edit-copy",
+			"urgency": "low",
+			"created_ms": wall,
+			"expires_ms": wall + 4000,
+		})
 	var texts = frame.clipboard.take_outbox()
 	if texts.empty():
 		return
@@ -10380,6 +10636,7 @@ func _draw_wifi_psk_popup():
 	if wifi_psk_want:
 		open_popup("##clave_wifi")
 		wifi_psk_want = false
+		request_redraw()  # frame de asiento: ImGui re-mide el popup al frame siguiente
 	if not wifi_psk_open:
 		return
 	var submitted = false
@@ -11187,6 +11444,7 @@ func _add_tile(id, origin_name = ""):
 			hybrid.set_floating(id, _current_float_anchor())
 		tiles.append(id)
 		tile_intro[id] = _new_intro(false, origin_name)
+		focus_pending[id] = true  # L: re-afirmar el teclado al llegar el primer contenido
 	request_redraw()
 
 
@@ -11275,6 +11533,8 @@ func _activity_named(name):
 
 func _on_toplevel_removed(id):
 	print("toplevel_removed ", id)
+	_force_close_at.erase(int(id))  # si iba un pedido educado, ya no aplica
+	focus_pending.erase(int(id))  # L: no dejar el re-afirmado pendiente de un id muerto
 	if notify != null:
 		notify.clear_attention(id)
 		notify.clear_attention(_root_of(id))
@@ -11309,6 +11569,8 @@ func _on_toplevel_removed(id):
 	# grupo/minimizado y, si era la enfocada y no estamos en una actividad de script,
 	# pasa el foco al vecino.
 	var had_tile = tiles.has(id)
+	var was_floating = hybrid.is_floating(id)
+	var parent = focus_parent
 	if had_tile:
 		_spawn_ghost(id, _panel_rect_for(id))
 	if fullscreen_id == id:
@@ -11320,6 +11582,7 @@ func _on_toplevel_removed(id):
 		chrome_drag = null
 		drag_overlay = null
 		window_dragging = false
+		_reset_cursor()
 	float_memory.erase(id)
 	hybrid.forget(id)
 	float_layout.remove(id)
@@ -11333,7 +11596,11 @@ func _on_toplevel_removed(id):
 	if focused_tile == id:
 		focused_tile = -1
 		if not script_active:
-			if tiles.empty():
+			# Al cerrar una FLOTANTE enfocada, volver al "padre" que estaba detrás
+			# (E) en vez de saltar a la última ventana de la fila (otra pantalla).
+			if was_floating and _can_restore_focus(parent):
+				_focus_tile(parent)
+			elif tiles.empty():
 				_go_home()
 			else:
 				_focus_tile(tiles[tiles.size() - 1])
@@ -11342,6 +11609,8 @@ func _on_toplevel_removed(id):
 			_go_home()
 		else:
 			_focus_tile(tiles[tiles.size() - 1])
+	if focus_parent == id:
+		focus_parent = -1
 
 
 # Al cerrarse un dialogo el foco vuelve al que quede arriba: otro dialogo o la raiz.
@@ -11461,12 +11730,16 @@ func _on_view_input(event):
 	if event is InputEventMouseMotion:
 		last_pointer_pos = event.position
 		_sync_drag_icon()
+		var over_bar = _over_frame_bar(event.position)
 		var hit = _view_hit_test(event.position)
 		hover_handle = _handle_at(event.position) if resize_handle == null else null
 		# UNA decisión de cursor por motion: sobre una app, el que ella pidió; si no,
-		# flecha. Godot inyecta un motion falso en cada cambio de forma, así que dos
-		# caminos que se pisaban (app -> flecha -> app...) colgaban el shell.
-		if hit.id >= 0 and resize_handle == null and hover_handle == null:
+		# flecha. Sobre la barra del Frame (dibujada encima) siempre flecha. Godot
+		# inyecta un motion falso en cada cambio de forma, así que dos caminos que se
+		# pisaban (app -> flecha -> app...) colgaban el shell.
+		if over_bar:
+			_reset_cursor()
+		elif hit.id >= 0 and resize_handle == null and hover_handle == null:
 			_apply_client_cursor()
 		else:
 			_reset_cursor()
@@ -11485,7 +11758,12 @@ func _on_view_input(event):
 			if client_drag_active:
 				compositor.pointer_clear_focus()
 			return
-		_focus_follow(hit)
+		# La barra del Frame manda: la ventana que está debajo no toma el foco por hover.
+		if over_bar:
+			hover_pend = {}
+			hover_hit = null
+		else:
+			_focus_follow(hit)
 		compositor.pointer_motion(hit.id, hit.pos)
 	elif event is InputEventMouseButton:
 		# Super+clic: mover (izquierdo) o redimensionar (derecho o medio) la ventana bajo
@@ -11631,6 +11909,7 @@ func _draw_window_menu():
 	if wm_menu_want:
 		open_popup("##wm_menu")
 		wm_menu_want = false
+		request_redraw()  # frame de asiento: ImGui re-mide el popup al frame siguiente
 	if wm_menu_id < 0:
 		return
 	MENU_STYLE.begin(self)
@@ -11681,6 +11960,10 @@ func _on_chrome_input(event):
 		if chrome_drag != null:
 			_chrome_drag_motion(event.position)
 			return true
+		# La barra del Frame se dibuja encima del chrome: no insinuar resize bajo ella.
+		if _over_frame_bar(event.position):
+			_reset_cursor()
+			return false
 		_update_csd_hover(event.position)
 		var pick = _chrome_pick(event.position)
 		if pick != null:
@@ -11895,6 +12178,7 @@ func _chrome_drag_motion(pos):
 		chrome_drag = null
 		drag_overlay = null
 		window_dragging = false
+		_reset_cursor()
 		return
 	var box = _span_float_box(id)
 	var kind = String(chrome_drag.kind)
@@ -11994,6 +12278,12 @@ func _apply_live_float_move(id, frame_rect):
 # con movimiento real del puntero (ver _on_view_input), nunca al abrir una ventana
 # bajo un cursor quieto. La decisión vive en focus_follow.gd (puro, testeable).
 func _focus_follow(hit):
+	# Gracia tras un cambio de foco por teclado (Alt+Tab/Super+Tab/Super+H-L/
+	# flechas): el puntero quieto o un motion residual no debe robar el foco dado.
+	if OS.get_ticks_msec() < ffm_suppress_until:
+		hover_pend = {}
+		hover_hit = null
+		return
 	var d = FOCUS_FOLLOW.decide(focused_tile, focused_dialog, hit.id, hit.dialog, minimized.has(hit.id))
 	if int(d.target) < 0:
 		hover_pend = {}
@@ -12941,6 +13231,63 @@ func _make_eis_cursor():
 	cursor.visible = false
 	layer.add_child(cursor)
 	return cursor
+
+
+# --- Destello del cursor (cambio de pantalla / exposé) -----------------------
+# Anillo breve dibujado en la posición del puntero. Va en una CanvasLayer alta (por
+# debajo del cursor EIS) y se actualiza en _process sólo mientras la onda está viva.
+
+func _make_ripple():
+	var layer = CanvasLayer.new()
+	layer.name = "RippleLayer"
+	layer.layer = 127
+	add_child(layer)
+	var ring = Line2D.new()
+	ring.width = 2.0
+	ring.antialiased = true
+	ring.visible = false
+	layer.add_child(ring)
+	ripple_layer = layer
+	ripple_ring = ring
+
+
+# Dispara la onda; sin posición usa el último punto del puntero (o el centro).
+func _flash_cursor(pos = null):
+	if ripple_ring == null:
+		return
+	var p = pos
+	if p == null:
+		p = last_pointer_pos if last_pointer_pos != null else _screen_size() * 0.5
+	ripple_ring.position = Vector2(p)
+	ripple_since = OS.get_ticks_msec()
+	ripple_ring.visible = true
+	_tick_ripple(ripple_since)
+
+
+# Avanza el anillo: radio con ease-out y alfa que cae. Sólo regenera los pocos
+# puntos de la circunferencia mientras está activo; al terminar se apaga.
+func _tick_ripple(now):
+	if ripple_since < 0 or ripple_ring == null:
+		return
+	var t = float(now - ripple_since) / float(RIPPLE_MS)
+	if t >= 1.0:
+		ripple_since = -1
+		if ripple_ring.visible:
+			ripple_ring.visible = false
+		return
+	var r = RIPPLE_R0 + (RIPPLE_R1 - RIPPLE_R0) * ease(t, -2.0)
+	ripple_ring.points = _ring_points(r)
+	ripple_ring.width = 2.0 + 2.0 * (1.0 - t)
+	ripple_ring.default_color = Color(accent.r, accent.g, accent.b, (1.0 - t) * 0.55)
+	request_redraw()
+
+
+func _ring_points(r):
+	var pts = PoolVector2Array()
+	for i in range(RIPPLE_SEGMENTS + 1):
+		var a = PI * 2.0 * float(i) / float(RIPPLE_SEGMENTS)
+		pts.append(Vector2(cos(a), sin(a)) * r)
+	return pts
 
 
 # En X11 se mueve el puntero real (warp). En Wayland/gdtk el módulo usa el cursor

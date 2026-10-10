@@ -5,14 +5,17 @@
 #                                     sesión y es el ÚNICO escritor del store
 #   gdtk-notify push <archivo.json>   encola un evento interno (cuerpo por archivo)
 #   gdtk-notify dismiss <id>          cierra/descarta una notificación
+#   gdtk-notify read <id>             marca una notificación como leída
+#   gdtk-notify readall               marca todo el historial como leído
 #   gdtk-notify clear                 vacía el historial
 #   gdtk-notify invoke <id> <acción>  dispara la acción de una notificación
 #   gdtk-notify list                  imprime el store actual (JSON)
 #   gdtk-notify selftest              valida el modelo puro sin bus (sale 0)
 #
-# El store vive en $XDG_RUNTIME_DIR/gdtk/notifications.json (tmpfs, sin secretos) y se
-# escribe atómico (tmp+rename). El log va a $XDG_RUNTIME_DIR/gdtk-notify.log.
-# El cuerpo NUNCA viaja por argv: `push` lo recibe por archivo.
+# El store persiste en $XDG_STATE_HOME/gdtk/notifications.json (o $GDTK_NOTIFY_STORE)
+# y se escribe atómico (tmp+rename); migra una vez el viejo store de tmpfs. El log va
+# a $XDG_RUNTIME_DIR/gdtk-notify.log. El cuerpo NUNCA viaja por argv. `expire_timeout`
+# sigue la spec: -1 = default por urgencia, 0 = nunca, >0 = ms.
 
 import json
 import os
@@ -21,11 +24,14 @@ import time
 
 STORE_NAME = "notifications.json"
 HISTORY_MAX = 100
-SPEC_VERSION = "1.2"
+SPEC_VERSION = "1.3"
 STD_PATH = "/org/freedesktop/Notifications"
 CUSTOM_PATH = "/org/gdtk/Notify"
 IFACE = "org.freedesktop.Notifications"
 CUSTOM_IFACE = "org.gdtk.Notify"
+
+# expire_timeout: -1 = default del servidor por urgencia; 0 = nunca; >0 = ms.
+URGENCY_DEFAULT_MS = {"low": 4000, "normal": 5000, "critical": 8000}
 
 
 # --- rutas -------------------------------------------------------------------
@@ -38,7 +44,22 @@ def run_dir():
     return os.path.join(runtime_dir(), "gdtk")
 
 
+def state_dir():
+    base = os.environ.get("XDG_STATE_HOME")
+    if not base:
+        base = os.path.join(os.path.expanduser("~"), ".local", "state")
+    return os.path.join(base, "gdtk")
+
+
 def store_path():
+    # Override para pruebas/instancias aisladas; si no, store persistente en state.
+    override = os.environ.get("GDTK_NOTIFY_STORE")
+    if override:
+        return override
+    return os.path.join(state_dir(), STORE_NAME)
+
+
+def legacy_store_path():
     return os.path.join(run_dir(), STORE_NAME)
 
 
@@ -56,6 +77,22 @@ def log(msg):
 
 
 # --- modelo puro (testeable sin bus) -----------------------------------------
+
+def resolve_ttl(expire, urgency, resident=False):
+    # Spec freedesktop: -1 = default del servidor (por urgencia), 0 = nunca, >0 ms.
+    # `resident` (hint) nunca expira.
+    if resident:
+        return 0
+    try:
+        e = int(expire)
+    except (TypeError, ValueError):
+        e = -1
+    if e == 0:
+        return 0
+    if e < 0:
+        return URGENCY_DEFAULT_MS.get(urgency, 5000)
+    return e
+
 
 def normalize(rec):
     rec = rec if isinstance(rec, dict) else {}
@@ -82,7 +119,9 @@ def normalize(rec):
         "target_window": int(rec.get("target_window", 0) or 0),
         "created_ms": int(rec.get("created_ms", 0) or 0),
         "expires_ms": int(rec.get("expires_ms", 0) or 0),
+        "resident": bool(rec.get("resident", False)),
         "read": bool(rec.get("read", False)),
+        "read_at_ms": int(rec.get("read_at_ms", 0) or 0),
     }
 
 
@@ -141,6 +180,18 @@ def serialize_store(revision, items):
 
 def load_store(path=None):
     path = path or store_path()
+    legacy = legacy_store_path()
+    if path != legacy and not os.path.exists(path) and os.path.exists(legacy):
+        # Migración one-shot del store efímero de tmpfs al persistente de state.
+        try:
+            with open(legacy) as f:
+                doc = parse_store(f.read())
+            if doc["items"]:
+                write_store(doc["items"], doc["revision"])
+                log("load_store: migrado %d ítems desde %s" % (len(doc["items"]), legacy))
+            return doc
+        except OSError:
+            pass
     try:
         with open(path) as f:
             return parse_store(f.read())
@@ -201,6 +252,13 @@ IFACE_XML = """
   </interface>
   <interface name="org.gdtk.Notify">
     <method name="Clear"/>
+    <method name="Push">
+      <arg type="s" name="record" direction="in"/>
+    </method>
+    <method name="Read">
+      <arg type="u" name="id" direction="in"/>
+    </method>
+    <method name="ReadAll"/>
     <method name="Invoke">
       <arg type="u" name="id" direction="in"/>
       <arg type="s" name="action" direction="in"/>
@@ -219,6 +277,16 @@ def hint_value(hints, key, default=None):
 def _hint_str(hints, key):
     v = hint_value(hints, key, "")
     return v if isinstance(v, str) else ""
+
+
+def _hint_bool(hints, key):
+    v = hint_value(hints, key, False)
+    if isinstance(v, bool):
+        return v
+    try:
+        return bool(int(v))
+    except (TypeError, ValueError):
+        return False
 
 
 def _hint_urgency(hints):
@@ -248,6 +316,16 @@ def cmd_serve():
     except (OSError, ImportError) as e:
         log("serve: ya hay un daemon (lock): %s" % e)
         return 0
+
+    # Pidfile (además del flock): el shell lo verifica en /proc para saber si el
+    # daemon está vivo y decidir si relanzarlo.
+    pidfile = os.path.join(run_dir(), "gdtk-notify.pid")
+    try:
+        os.makedirs(run_dir(), exist_ok=True)
+        with open(pidfile, "w") as f:
+            f.write(str(os.getpid()))
+    except OSError:
+        pass
 
     doc = load_store()
     state = {"items": doc["items"], "rev": int(doc["revision"])}
@@ -283,6 +361,13 @@ def cmd_serve():
             if method == "Notify":
                 app_name, replaces_id, app_icon, summary, body, actions, hints, expire = params.unpack()
                 hints = hints or {}
+                urg = _hint_urgency(hints)
+                acts = _pairs_to_actions(actions)
+                resident = _hint_bool(hints, "resident")
+                if urg == "critical" and acts:
+                    resident = True  # urgencia crítica con acciones: no autocerrar
+                now = int(time.time() * 1000)
+                ttl = resolve_ttl(expire, urg, resident)
                 rec = {
                     "source": _hint_str(hints, "x-gdtk-source") or "dbus",
                     "app": app_name,
@@ -290,19 +375,26 @@ def cmd_serve():
                     "icon": app_icon or _hint_str(hints, "desktop-entry"),
                     "summary": summary,
                     "body": body,
-                    "urgency": _hint_urgency(hints),
-                    "actions": _pairs_to_actions(actions),
-                    "created_ms": int(time.time() * 1000),
-                    "expires_ms": int(expire) if int(expire) > 0 else 0,
+                    "urgency": urg,
+                    "actions": acts,
+                    "created_ms": now,
+                    "resident": resident,
+                    "expires_ms": (now + ttl) if ttl > 0 else 0,
                 }
                 if int(replaces_id) > 0:
                     rec["replaces_id"] = int(replaces_id)
-                state["items"] = prune_expired(state["items"], int(time.time() * 1000))
+                state["items"] = prune_expired(state["items"], now)
                 state["items"] = apply_push(state["items"], rec)
                 save()
                 nid = int(state["items"][0]["id"])
-                if int(expire) > 0:
-                    timers[nid] = GLib.timeout_add(int(expire), _on_expire, nid)
+                old = timers.pop(nid, None)
+                if old is not None:
+                    try:
+                        GLib.source_remove(old)
+                    except Exception:  # noqa: BLE001
+                        pass
+                if ttl > 0:
+                    timers[nid] = GLib.timeout_add(ttl, _on_expire, nid)
                 invocation.return_value(GLib.Variant("(u)", (nid,)))
                 return
             if method == "CloseNotification":
@@ -321,11 +413,69 @@ def cmd_serve():
             log("serve/std %s: %s" % (method, e))
         invocation.return_value(None)
 
+    def _mark_read(nid):
+        changed = False
+        for it in state["items"]:
+            if int(it.get("id", 0)) == int(nid) and not it.get("read", False):
+                it["read"] = True
+                it["read_at_ms"] = int(time.time() * 1000)
+                changed = True
+        if changed:
+            save()
+        return changed
+
+    def _mark_all_read():
+        changed = False
+        for it in state["items"]:
+            if not it.get("read", False):
+                it["read"] = True
+                it["read_at_ms"] = int(time.time() * 1000)
+                changed = True
+        if changed:
+            save()
+        return changed
+
     def handle_custom(conn, sender, path, iface, method, params, invocation):
         try:
             if method == "Clear":
                 state["items"] = []
                 save()
+                invocation.return_value(None)
+                return
+            if method == "Push":
+                # Push interno: registro JSON completo (preserva target_window, resident
+                # y un expires_ms absoluto), sin pasar por las reglas de Notify.
+                (payload,) = params.unpack()
+                try:
+                    raw = json.loads(payload) if payload else {}
+                except ValueError:
+                    raw = {}
+                rec = normalize(raw)
+                now = int(time.time() * 1000)
+                if int(rec.get("created_ms", 0)) <= 0:
+                    rec["created_ms"] = now
+                exp = int(rec.get("expires_ms", 0))
+                state["items"] = prune_expired(state["items"], now)
+                state["items"] = apply_push(state["items"], rec)
+                save()
+                nid = int(state["items"][0]["id"])
+                old = timers.pop(nid, None)
+                if old is not None:
+                    try:
+                        GLib.source_remove(old)
+                    except Exception:  # noqa: BLE001
+                        pass
+                if exp > now:
+                    timers[nid] = GLib.timeout_add(exp - now, _on_expire, nid)
+                invocation.return_value(None)
+                return
+            if method == "Read":
+                (nid,) = params.unpack()
+                _mark_read(int(nid))
+                invocation.return_value(None)
+                return
+            if method == "ReadAll":
+                _mark_all_read()
                 invocation.return_value(None)
                 return
             if method == "Invoke":
@@ -347,6 +497,15 @@ def cmd_serve():
             _emit_close(conn, int(nid), 1)
         return False
 
+    # Rearma expiraciones de ítems persistidos que aún no vencieron (tras definir
+    # _on_expire). Así una notificación con timeout sobrevive a un reinicio del daemon.
+    now0 = int(time.time() * 1000)
+    for it in state["items"]:
+        exp = int(it.get("expires_ms", 0))
+        nid = int(it.get("id", 0))
+        if exp > now0 and nid not in timers:
+            timers[nid] = GLib.timeout_add(exp - now0, _on_expire, nid)
+
     def on_bus_acquired(conn, name):
         state["conn"] = conn
         conn.register_object(STD_PATH, std_info, handle_std, None, None)
@@ -357,8 +516,14 @@ def cmd_serve():
 
     Gio.bus_own_name(Gio.BusType.SESSION, IFACE, Gio.BusNameOwnerFlags.NONE,
                      on_bus_acquired, None, on_name_lost)
-    log("serve: daemon iniciado")
+    log("serve: daemon iniciado (store=%s, %d ítems)" % (store_path(), len(state["items"])))
     GLib.MainLoop().run()
+    log("serve: daemon terminó")
+    try:
+        if os.path.exists(pidfile):
+            os.remove(pidfile)
+    except OSError:
+        pass
     return 0
 
 
@@ -417,20 +582,10 @@ def cmd_push(path):
         gi.require_version("Gio", "2.0")
         from gi.repository import Gio, GLib
         conn = _bus()
-        actions = []
-        for a in rec["actions"]:
-            actions.append(a["key"])
-            actions.append(a["label"])
-        hints = {
-            "urgency": GLib.Variant("y", {"low": 0, "normal": 1, "critical": 2}.get(rec["urgency"], 1)),
-            "x-gdtk-source": GLib.Variant("s", rec["source"] or "rpc"),
-        }
-        if rec["app_id"]:
-            hints["desktop-entry"] = GLib.Variant("s", rec["app_id"])
-        args = GLib.Variant("(susssasa{sv}i)", (
-            rec["app"], 0, rec["icon"], rec["summary"], rec["body"], actions, hints,
-            int(rec["expires_ms"]) if rec["expires_ms"] > 0 else 0))
-        conn.call_sync(IFACE, STD_PATH, IFACE, "Notify", args, None,
+        # Push interno por la interfaz privada: preserva todos los campos (target_window,
+        # resident, expires_ms absoluto) sin reinterpretarlos como Notify externo.
+        conn.call_sync(IFACE, CUSTOM_PATH, CUSTOM_IFACE, "Push",
+                       GLib.Variant("(s)", (json.dumps(rec),)), None,
                        Gio.DBusCallFlags.NONE, 2000, None)
         return 0
     except Exception as e:  # noqa: BLE001
@@ -482,6 +637,36 @@ def cmd_invoke(nid, action):
         return 2
 
 
+def cmd_read(nid):
+    try:
+        import gi
+        gi.require_version("Gio", "2.0")
+        from gi.repository import Gio, GLib
+        conn = _bus()
+        conn.call_sync(IFACE, CUSTOM_PATH, CUSTOM_IFACE, "Read",
+                       GLib.Variant("(u)", (int(nid),)), None,
+                       Gio.DBusCallFlags.NONE, 2000, None)
+        return 0
+    except Exception as e:  # noqa: BLE001
+        log("read: %s" % e)
+        return 2
+
+
+def cmd_readall():
+    try:
+        import gi
+        gi.require_version("Gio", "2.0")
+        from gi.repository import Gio, GLib
+        conn = _bus()
+        conn.call_sync(IFACE, CUSTOM_PATH, CUSTOM_IFACE, "ReadAll",
+                       GLib.Variant("()", ()), None,
+                       Gio.DBusCallFlags.NONE, 2000, None)
+        return 0
+    except Exception as e:  # noqa: BLE001
+        log("readall: %s" % e)
+        return 2
+
+
 def cmd_list():
     doc = load_store()
     doc["items"] = prune_expired(doc["items"], int(time.time() * 1000))
@@ -522,6 +707,18 @@ def cmd_selftest():
     check(parse_store("basura")["items"] == [], "store corrupto no rompe")
     check(normalize({"urgency": "URGENTE"})["urgency"] == "normal", "urgencia inválida")
     check(next_id([{"id": 9}]) == 10, "next_id")
+    # expire_timeout (spec): -1 = default por urgencia, 0 = nunca, >0 = ms, resident = nunca.
+    check(resolve_ttl(-1, "normal") == 5000, "-1 usa el default normal")
+    check(resolve_ttl(-1, "low") == 4000, "-1 usa el default low")
+    check(resolve_ttl(-1, "critical") == 8000, "-1 usa el default critical")
+    check(resolve_ttl(0, "normal") == 0, "0 = nunca")
+    check(resolve_ttl(2500, "normal") == 2500, ">0 = ese valor")
+    check(resolve_ttl(-1, "normal", resident=True) == 0, "resident = nunca")
+    check(resolve_ttl("basura", "normal") == 5000, "valor inválido = default")
+    n2 = normalize({"summary": "x"})
+    check(n2["read"] is False and n2["resident"] is False and n2["read_at_ms"] == 0,
+          "normalize agrega read/resident")
+    check(normalize({"resident": True})["resident"] is True, "normalize preserva resident")
     print("gdtk-notify selftest: %s" % ("ok" if fails == 0 else "FAIL"))
     return 1 if fails else 0
 
@@ -537,6 +734,10 @@ def main(argv):
         return cmd_push(argv[2] if len(argv) > 2 else "")
     if cmd == "dismiss":
         return cmd_dismiss(int(argv[2])) if len(argv) > 2 else 2
+    if cmd == "read":
+        return cmd_read(int(argv[2])) if len(argv) > 2 else 2
+    if cmd == "readall":
+        return cmd_readall()
     if cmd == "clear":
         return cmd_clear()
     if cmd == "invoke":
@@ -545,7 +746,7 @@ def main(argv):
         return cmd_list()
     if cmd == "selftest":
         return cmd_selftest()
-    sys.stderr.write("uso: %s serve|push|dismiss|clear|invoke|list|selftest\n" % argv[0])
+    sys.stderr.write("uso: %s serve|push|dismiss|read|readall|clear|invoke|list|selftest\n" % argv[0])
     return 2
 
 

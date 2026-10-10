@@ -30,6 +30,9 @@ const HOT_MS = 250
 # Entrada/salida del Frame deslizándose desde arriba (ease-out).
 const SLIDE_MS = 130
 const SUPER_KEYS = [KEY_META, KEY_SUPER_L, KEY_SUPER_R]
+# Modificadores que no disparan el reenvío del Alt retenido: pueden ser parte de un
+# combo (Ctrl+Alt+flecha) y su orden respecto de Alt no debe descartarlo.
+const ALT_HOLD_MODS = [KEY_CONTROL, KEY_SHIFT, KEY_META, KEY_SUPER_L, KEY_SUPER_R]
 const PAD = 0.0          # sin separación entre bloques del Frame (pegados al borde)
 # Mínimo de celdas de la grilla regular de barra: 4 fijas (esquina/Vecindario/Grupo/Hogar),
 # la celda del pin a la derecha y al menos cuatro de contenido.
@@ -131,6 +134,10 @@ var swallowed = {}
 var hot_timer = false
 # Pulsación de Super retenida mientras no se sepa si es un toque solo.
 var super_press = null
+# Pulsación de Alt retenida mientras no se sepa si es un toque solo (se reenvía a la
+# app) o un combo del shell (Alt+Tab/F4/M/F10/F11, Ctrl+Alt+flechas: se descarta para
+# que la app no abra su menú). Mismo patrón que `super_press`.
+var alt_press = null
 # Si durante el toque de Super se rotó el teclado (Super+Espacio): los toques
 # repetidos siguen rotando y soltar Super NO abre el exposé.
 var super_rotated = false
@@ -184,6 +191,11 @@ var applet_mods = {"teclado": keyboard, "portapapeles": clipboard, "volumen": vo
 	"notificaciones": notif_applet}
 var items_layout = []
 var drawn = false
+# Estado de dibujo por barra del frame anterior: al dejar de submitir una barra, ImGui
+# todavía calcula WantCaptureMouse con ella viva (un frame de atraso) y se come el
+# primer clic; se fuerza un frame extra al ocultarse para que lo recalcule.
+var bar_top_drawn = false
+var bar_bottom_drawn = false
 # Applets del borde inferior: orden visible persistido (no es items_layout, que sigue
 # siendo sólo de ventanas para el control remoto). `applets_future` conserva ids
 # desconocidos del archivo para una versión futura.
@@ -1455,11 +1467,14 @@ func _bar_set(id, x):
 
 
 func _zone_at(pos):
+	# Zona sólo si ESA franja está dibujada. Un `drawn` global no alcanza: con la barra
+	# superior fijada y la inferior oculta, esta devolvía "dock" para la franja inferior
+	# invisible y algún consumidor (p. ej. el selector de Controles) se activaba solo.
 	var bh = _vh()
 	if pos.y <= bh:
-		return "top"
+		return "top" if bar_top_drawn else ""
 	if pos.y >= get_viewport().size.y - bh:
-		return "dock"
+		return "dock" if bar_bottom_drawn else ""
 	return ""
 
 
@@ -2006,6 +2021,7 @@ func _draw_shared_menu(ui, diagram):
 		shared_menu_id = shared_menu_want
 		shared_menu_want = ""
 		ui.open_popup("##shared_menu")
+		shell.request_redraw()  # frame de asiento: ImGui re-mide el popup al frame siguiente
 	if shared_menu_id == "":
 		return
 	MENU_STYLE.begin(ui)
@@ -2646,6 +2662,8 @@ func cycle(step):
 	sel = at
 	shell.instant_switch = true
 	switch_to(items[at], true)
+	# Foco por teclado: el hover no debe robar la ventana recién elegida al soltar Alt.
+	shell._keyboard_focus_grace()
 	set_visible(true)
 	show_until = OS.get_ticks_msec() + 1200  # se auto-oculta al terminar la gracia
 	shell.last_activity = OS.get_ticks_msec()
@@ -2674,6 +2692,38 @@ func _super_used():
 	if super_press != null and shell._current_wayland_id() >= 0:
 		shell.compositor.key(super_press)
 	super_press = null
+
+
+# Alt dejó de ser un toque solo: la app recibe la pulsación retenida (Alt+tecla
+# común, p. ej. Alt+A de los menús). Sin ventana destino solo se limpia el estado.
+func _alt_used():
+	if alt_press != null and shell._current_wayland_id() >= 0:
+		shell.compositor.key(alt_press)
+	alt_press = null
+
+
+# Combo del shell con el Alt retenido: la app no debe ver el Alt (abriría su menú).
+# Se descarta la pulsación retenida y se marca su suelta en `swallowed` para que el
+# bloque de releases la trague (mecanismo swallowed/_gulp).
+func _alt_combo():
+	if alt_press != null:
+		alt_press = null
+		swallowed[KEY_ALT] = true
+
+
+# ¿Este press forma un combo del shell con el Alt retenido? Sólo se llama con Alt
+# apretado. Cubre Alt+Tab, Alt+M, Alt+F4, Alt+F10/F11 y Ctrl+Alt+flecha.
+func _is_alt_combo(code, event):
+	if code == KEY_TAB:
+		return true
+	if event.control and code == KEY_T:
+		return true  # Ctrl+Alt+T: terminal por defecto
+	if event.control and _arrow_dir(code) != 0:
+		return true
+	if not event.control and (code == KEY_M or code == KEY_F4 \
+			or code == KEY_F10 or code == KEY_F11):
+		return true
+	return false
 
 
 # ¿El Frame está a la vista (alguna barra)? Home, mostrado a mano, fijado o exposé.
@@ -2708,8 +2758,23 @@ func drop_mouse_interaction():
 	applets_drawn = false
 	shared_layout = []
 	shared_drawn = false
+	# Controles del DockApp de ventanas y franja inferior: si quedaran del último
+	# dibujo, un clic con la barra oculta podría resolverlos (clic fantasma).
+	_win_pick = null
+	_win_close = null
+	_win_min = null
+	applets_bar_rect = Rect2()
 	_clear_zone_layout("top")
 	_clear_zone_layout("dock")
+
+
+# Al ganar/perder el foco de teclado (cambio de VT, captura, otra ventana de sway) la
+# suelta real de Alt puede no llegar nunca. shell.release_modifiers() limpia
+# super_press; acá se descarta la pulsación de Alt retenida para no reenviarla pegada.
+func _notification(what):
+	if what == MainLoop.NOTIFICATION_WM_FOCUS_IN \
+			or what == MainLoop.NOTIFICATION_WM_FOCUS_OUT:
+		alt_press = null
 
 
 func _input(event):
@@ -2765,6 +2830,11 @@ func _input(event):
 		return
 	if event is InputEventMouseButton:
 		mouse_pos = event.position
+		# Alt retenido + clic: la app necesita el Alt ANTES del botón (Alt+clic/drag
+		# como modificador de mouse). Se reenvía la pulsación retenida y el Alt sigue
+		# su curso normal (la suelta ya no encuentra `alt_press`).
+		if event.pressed and alt_press != null:
+			_alt_used()
 		# Rueda: con Super, o sobre la barra del Frame visible, avanza entre workspaces
 		# de la franja. La SUELTA de la rueda se ignora (si cayera al final del bloque
 		# llamaría a _super_used y limpiaría super_press, cortando el paneo).
@@ -2838,6 +2908,7 @@ func _input(event):
 				if it != null and it.id >= 0:
 					shell.wm_menu_id = it.id
 					shell.wm_menu_want = true
+					shell.request_redraw()  # sin esto el menú espera el tick de update_hz (~250 ms)
 					get_tree().set_input_as_handled()
 					return
 				if _applet_bar_at(mouse_pos) and not _bar_occupied_at(mouse_pos):
@@ -3184,6 +3255,14 @@ func _input(event):
 			shell.request_redraw()
 			_gulp(code)
 			return
+		if code == KEY_TAB or int(event.physical_scancode) == KEY_TAB:
+			# Super+Tab: foco entre pantallas (igual que Super+H/L); con Shift, hacia
+			# atrás. Consume el combo, así no llega al Tab solo del Hogar.
+			super_press = null
+			shell._focus_dir(-1 if event.shift else 1)
+			shell.request_redraw()
+			_gulp(code)
+			return
 		if code == KEY_LEFT or code == KEY_RIGHT:
 			# Super+←/→: tiling a la mitad izquierda/derecha. En el Hogar, ← vuelve
 			# a la última pantalla con foco y → no hace nada (Home es la ranura final).
@@ -3210,6 +3289,21 @@ func _input(event):
 			toggle_pin("bottom" if event.shift else "top")
 			_gulp(code)
 			return
+	# Alt: se retiene la pulsación (como Super) hasta saber si es un toque solo o un
+	# combo del shell, para que la app no abra su menú con Alt+Tab/F4/M.
+	if event.pressed and (code == KEY_ALT or int(event.physical_scancode) == KEY_ALT):
+		alt_press = event
+		get_tree().set_input_as_handled()
+		return
+	# Con Alt retenido, un press que forme combo del shell lo descarta (press y
+	# suelta); si no es combo, la app recibe la pulsación retenida (Alt+tecla común).
+	# Las pulsaciones de modificadores se dejan pasar sin resolver: Ctrl/Shift pueden
+	# llegar antes que la flecha en Ctrl+Alt+flecha.
+	if event.pressed and alt_press != null and not ALT_HOLD_MODS.has(code):
+		if _is_alt_combo(code, event):
+			_alt_combo()
+		else:
+			_alt_used()
 	if event.pressed:
 		_super_used()
 	if not event.pressed:
@@ -3217,6 +3311,17 @@ func _input(event):
 		if swallowed.has(code):
 			swallowed.erase(code)
 			get_tree().set_input_as_handled()
+			return
+		# Toque solo de Alt (sin combo): la app recibe la pulsación retenida y su
+		# suelta, para que Alt solo siga funcionando (p. ej. el menú de la app).
+		if alt_press != null and (code == KEY_ALT or int(event.physical_scancode) == KEY_ALT):
+			if shell._current_wayland_id() >= 0:
+				_alt_used()
+				shell.compositor.key(event)
+			else:
+				alt_press = null
+			get_tree().set_input_as_handled()
+			return
 		return
 	# Alt+M: minimizar/restaurar la ventana enfocada, sin depender de que el Frame esté
 	# a la vista (el botón "-" del bloque hace lo mismo cuando el Frame se muestra).
@@ -3240,6 +3345,12 @@ func _input(event):
 		set_visible(false)
 	elif code == KEY_TAB and event.alt:
 		cycle(-1 if event.shift else 1)
+	elif event.control and event.alt and not event.shift and code == KEY_T:
+		# Ctrl+Alt+T: abrir/reusar la Terminal configurada en la pantalla actual.
+		shell._launch_terminal()
+		shell.request_redraw()
+		_gulp(code)
+		return
 	elif event.control and event.alt and not event.shift and _arrow_dir(code) != 0:
 		# Ctrl+Alt+flecha: cambiar de pantalla (desliza; arriba/abajo mueve la franja).
 		shell._focus_dir(_arrow_dir(code))
@@ -3373,10 +3484,15 @@ func _applet_hit(pos):
 # Franja del Frame (superior o inferior) del último dibujo: clic derecho abre el
 # selector de controles sobre cualquiera de las dos barras.
 func _applet_bar_at(pos):
-	if not applets_drawn:
-		return false
+	# Por franja dibujada: con la superior fijada y la inferior oculta, `applets_drawn`
+	# era true y esto devolvía true para la franja inferior invisible → clic derecho
+	# fantasma abría el selector de Controles.
 	var h = _vh()
-	return pos.y <= h or pos.y >= get_viewport().size.y - h
+	if pos.y <= h:
+		return bar_top_drawn
+	if pos.y >= get_viewport().size.y - h:
+		return bar_bottom_drawn
+	return false
 
 
 # ¿El punto cae sobre un bloque ya dibujado de la barra (applet, pin, ventana,
@@ -3605,11 +3721,13 @@ func _draw_frame_popups(ui, mouse, side):
 		applet_picker_want = false
 		applet_action_want = ""
 		ui.open_popup("##applets_add")
+		shell.request_redraw()  # frame de asiento del popup
 	elif applet_action_want != "":
 		var act = applet_action_want
 		applet_action_want = ""
 		applet_picker_want = false
 		ui.open_popup("##applet_" + act)
+		shell.request_redraw()  # frame de asiento del popup
 	applet_picker_open = false
 	MENU_STYLE.begin(ui)
 	if ui.begin_popup("##applets_add"):
@@ -3923,8 +4041,18 @@ func _draw_applet(ui, id, pos, scr, w, side, is_sel, mouse, is_ghost = false):
 	if a == null:
 		return
 	var state = _applet_state(id)
+	# Aviso recién llegado: la dockapp de notificaciones se ELEVA brevemente (salto).
+	if id == "notificaciones" and not is_ghost and shell != null and shell.notify != null \
+			and shell.notify.bounce_enabled:
+		var l = shell.notify.latest()
+		if not l.empty():
+			var by = -7.0 * float(shell.notify.bounce_alpha(int(l.get("id", 0))))
+			pos += Vector2(0.0, by)
+			scr += Vector2(0.0, by)
 	var b = _tile(ui, pos, w, "app_" + id, NX_FACE, side)
 	var rect = b.rect
+	if id == "notificaciones" and not is_ghost:
+		applet_mods[id].hovered = b.hover
 	if applet_drag == id and not is_ghost:
 		return
 	var line = NX_LIGHT
@@ -3981,7 +4109,10 @@ func _draw_applet(ui, id, pos, scr, w, side, is_sel, mouse, is_ghost = false):
 		ui.set_cursor_pos(gp_loc + Vector2(max(3.0, (gp_w - vw) * 0.5), gp_h * 0.45))
 		ui.text_colored(_lcd(accent, "on"), v)
 	if b.hover and not is_ghost and applet_mods.has(id) and applet_mods[id].detail != "":
-		ui.set_tooltip(applet_mods[id].detail)
+		# La dockapp de notificaciones usa su propia tarjeta (con fondo); no duplicar
+		# con el tooltip de ImGui, que va sin fondo.
+		if not (id == "notificaciones" and shell != null and shell.notify != null and shell.notify.hover_card):
+			ui.set_tooltip(applet_mods[id].detail)
 	var pct = _applet_pct(id)
 	if pct >= 0.0:
 		var bar_w = (w - 8.0) * clamp(pct, 0.0, 1.0)
@@ -4799,6 +4930,14 @@ func draw(ui):
 	var top_drawn = off_top > -bh
 	var bottom_drawn = off_bottom > -bh
 	drawn = top_drawn or bottom_drawn
+	# Una barra que recién deja de submitirse: ImGui aún no recalculó WantCaptureMouse
+	# (lo hace en el NewFrame del frame siguiente con las ventanas del frame anterior,
+	# donde la barra seguía viva). Sin este frame extra, el shell queda idle con
+	# capture=true y se come el próximo clic ("clic fantasma" del Frame oculto).
+	if (bar_top_drawn and not top_drawn) or (bar_bottom_drawn and not bottom_drawn):
+		shell.request_redraw()
+	bar_top_drawn = top_drawn
+	bar_bottom_drawn = bottom_drawn
 	if not drawn:
 		items_layout = []
 		applets_layout = []
@@ -4906,6 +5045,17 @@ func draw(ui):
 				toggle_pin("top")
 				entered = true
 			_draw_inner_shadow(ui, Vector2(0.0, off_top + bh - 1.0), vp.x, -1.0)
+			# Ventana que pide atención (xdg-activation): franja pulsante en el borde
+			# inferior de la barra, visible aunque la ventana esté minimizada o en otra
+			# actividad/workspace (donde no hay tesela que pulsar).
+			if shell.notify != null and not shell.notify.attention_ids().empty():
+				var pa = shell.notify.pulse_alpha()
+				var boA = 0.0
+				for aid in shell.notify.attention_ids():
+					boA = max(boA, float(shell.notify.bounce_alpha(int(aid))))
+				var hA = 3.0 + 5.0 * boA
+				ui.imgui_draw_rect_filled(Rect2(Vector2(0.0, bh - hA), Vector2(vp.x, hA)),
+					Color(NX_SEL.r, NX_SEL.g, NX_SEL.b, 0.25 + 0.55 * pa), 0.0)
 		ui.end()
 		ui.pop_style_var()
 
@@ -5172,6 +5322,9 @@ func _slide(want, now, key = "top"):
 	var p = 1.0 - pow(1.0 - k, 3.0)
 	if not shown:
 		p = 1.0 - p
+		# Empujar 1 px más allá del canto: el alto entero + antialiasing dejaba una
+		# línea de 1 px del Frame pegada al borde de la pantalla (y su región de clic).
+		return -bh * (1.0 - p) - 1.0
 	return -bh * (1.0 - p)
 
 

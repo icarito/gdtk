@@ -21,8 +21,12 @@ const HOLD_MS = 5200
 const FADE_OUT_MS = 650
 const STAGGER_MS = 320
 const ROW_GAP = 3.0
+const CARD_W = 320.0
+const CARD_PAD = 8.0
+const CARD_LINE = 16.0
 # ImGuiCanvas no expone esta constante (sólo WINDOW_NO_SCROLLBAR): valor fijado.
 const WINDOW_NO_MOUSE_INPUTS = 512
+const WINDOW_TOP_LAYER = 33554432
 
 var blocks = []                # [{"rect": Rect2 (pantalla), "id": int}]
 var hover_index = -1
@@ -48,9 +52,17 @@ func draw(shell):
 		return
 	var now = OS.get_ticks_msec()
 	var vp = shell._screen_size()
-	var side = max(48.0, shell.frame_bar_h(vp))
-	var scale = shell.get_imgui_scale()
 	var bar_h = shell.frame_bar_h(vp)
+	# Misma grilla que el Frame: bloque = una unidad (pitch/side, PAD=0), pegado al
+	# borde; sin margen extra alrededor.
+	var frame = shell.frame
+	var grid = {"side": bar_h, "pitch": bar_h, "margin": 0.0}
+	if frame != null and frame.has_method("bar_grid"):
+		grid = frame.bar_grid(vp.x, bar_h, 0.0)
+	var side = float(grid.side)
+	var pitch = float(grid.pitch)
+	var margin = float(grid.margin)
+	var scale = shell.get_imgui_scale()
 	var pinned = n.panel_open or (n.panel_mode and not n.items().empty())
 	var items = n.items()
 	# Asigna nacimiento a los ítems nuevos y descarta la animación de los que ya no
@@ -79,7 +91,7 @@ func draw(shell):
 	# Arma la lista visible (más nuevo primero) con su alpha de ciclo de vida.
 	var shown = []
 	var animating = false
-	var avail = max(1, int((vp.y - 2.0 * bar_h - 8.0) / (side + ROW_GAP)))
+	var avail = max(1, int((vp.y - 2.0 * bar_h - 8.0) / pitch))
 	var maxn = min(MAX_BLOCKS, avail)
 	for it in items:
 		var id = int(it.get("id", 0))
@@ -98,30 +110,33 @@ func draw(shell):
 		return
 	if animating:
 		shell.request_redraw()
-	var h = shown.size() * (side + ROW_GAP)
-	var w = side
-	shell.set_next_window_pos(Vector2(4.0, bar_h + 4.0), true)
-	shell.set_next_window_size(Vector2(w, h), true)
+	var h = shown.size() * pitch
+	# El borde de la ventana ImGui recorta ~1 px del contenido: se deja 1 px de relleno
+	# transparente para que el bloque use TODA su unidad sin que se le coma el borde.
+	var edge = 1.0
+	shell.set_next_window_pos(Vector2(margin - edge, bar_h - edge), true)
+	shell.set_next_window_size(Vector2(side + 2.0 * edge, h + 2.0 * edge), true)
 	shell.set_next_window_bg_alpha(0.0)
 	shell.push_style_var_vec2(shell.STYLE_VAR_WINDOW_PADDING, Vector2.ZERO)
 	var flags = shell.WINDOW_NO_DECORATION | shell.WINDOW_NO_BACKGROUND | shell.WINDOW_NO_MOVE \
 		| shell.WINDOW_NO_RESIZE | shell.WINDOW_NO_SAVED_SETTINGS | shell.WINDOW_NO_TITLE_BAR \
 		| shell.WINDOW_NO_COLLAPSE | shell.WINDOW_NO_BRING_TO_FRONT_ON_FOCUS \
-		| shell.WINDOW_NO_SCROLLBAR | WINDOW_NO_MOUSE_INPUTS
+		| shell.WINDOW_NO_SCROLLBAR | WINDOW_NO_MOUSE_INPUTS | WINDOW_TOP_LAYER
 	if shell.begin("##gdtk_notif_col", flags):
 		var win = shell.get_window_pos()
-		_rect = Rect2(win, Vector2(w, h))
+		_rect = Rect2(win, Vector2(side + 2.0 * edge, h + 2.0 * edge))
 		blocks = []
-		var y = 0.0
+		var y = edge
 		var idx = 0
 		for e in shown:
-			var local = Vector2(0.0, y)
+			var local = Vector2(edge, y)
 			_draw_block(shell, n, e["it"], win + local, local, side, e["alpha"], scale, idx == hover_index)
 			blocks.append({"rect": Rect2(win + local, Vector2(side, side)), "id": int(e["it"].get("id", 0))})
-			y += side + ROW_GAP
+			y += pitch
 			idx += 1
 	shell.end()
 	shell.pop_style_var()
+	_draw_hover_card(shell)
 
 
 # Alpha del ciclo de vida de un bloque (0 sin aparecer, 1 pleno, 0 ya salido).
@@ -144,7 +159,15 @@ func _draw_block(shell, n, it, scr, local, side, alpha, scale, hovered):
 	var frame = shell.frame
 	if frame == null or alpha <= 0.0:
 		return
+	# Salto del aviso recién llegado (desplaza el bloque unos px).
+	if n != null and n.has_method("bounce_alpha"):
+		var bo = float(n.bounce_alpha(int(it.get("id", 0))))
+		scr += Vector2(4.0 * bo, 0.0)
+		local += Vector2(4.0 * bo, 0.0)
 	var face = frame.NX_FACE_SEL if hovered else frame.NX_FACE
+	# Fondo del bloque explícito (por si el bisel no rellena en la ventana overlay).
+	shell.imgui_draw_rect_filled(Rect2(scr, Vector2(side, side)),
+		Color(face.r, face.g, face.b, alpha), 0.0)
 	frame._bevel(shell, Rect2(scr, Vector2(side, side)),
 		Color(face.r, face.g, face.b, alpha), false, hovered)
 	var m = max(3.0, 4.0 * scale)
@@ -249,6 +272,7 @@ func _item_by_id(n, id):
 func _activate(shell, n, it):
 	if it.empty():
 		return
+	n.mark_read(int(it.get("id", 0)))
 	var win = int(it.get("target_window", 0))
 	if win > 0 and shell.has_method("_focus_tile"):
 		shell._focus_tile(win)
@@ -284,3 +308,124 @@ func _label(it):
 	if s == "":
 		s = "(sin texto)"
 	return s.replace("##", "# #")
+
+
+# --- tarjeta de texto al pasar el puntero ------------------------------------
+
+# Muestra summary + body completo (multilínea) del bloque bajo el puntero o de la
+# última notificación cuando el puntero está sobre el dockapp. Se dibuja como ventana
+# propia (top layer, sin mouse inputs) para no depender del tooltip de ImGui.
+func _draw_hover_card(shell):
+	var n = shell.notify
+	if n == null or not n.hover_card:
+		return
+	var frame = shell.frame
+	if frame == null:
+		return
+	var it = {}
+	var anchor = Vector2.ZERO
+	var above = false
+	if hover_index >= 0 and hover_index < blocks.size():
+		it = _item_by_id(n, int(blocks[hover_index]["id"]))
+		var r = blocks[hover_index]["rect"]
+		anchor = Vector2(r.position.x + r.size.x + 6.0, r.position.y)
+	else:
+		if not frame.applet_mods.has("notificaciones"):
+			return
+		var ap = frame.applet_mods["notificaciones"]
+		if ap == null or not ap.hovered:
+			return
+		it = n.latest()
+		var hr = ap.hover_rect
+		if hr.size.x <= 0.0:
+			return
+		anchor = Vector2(hr.position.x + hr.size.x * 0.5 - CARD_W * 0.5, hr.position.y)
+		above = true
+	if it.empty():
+		return
+	var vp = shell._screen_size()
+	anchor.x = clamp(anchor.x, 6.0, max(6.0, vp.x - CARD_W - 6.0))
+	var rows = _card_rows(frame, shell, it)
+	var h = CARD_PAD * 2.0 + float(rows.size()) * CARD_LINE
+	if above:
+		anchor.y -= h + 6.0
+	anchor.y = clamp(anchor.y, 6.0, max(6.0, vp.y - h - 6.0))
+	shell.set_next_window_pos(anchor, true)
+	shell.set_next_window_size(Vector2(CARD_W, h), true)
+	shell.set_next_window_bg_alpha(0.0)
+	shell.push_style_var_vec2(shell.STYLE_VAR_WINDOW_PADDING, Vector2.ZERO)
+	var flags = shell.WINDOW_NO_DECORATION | shell.WINDOW_NO_BACKGROUND | shell.WINDOW_NO_MOVE \
+		| shell.WINDOW_NO_RESIZE | shell.WINDOW_NO_SAVED_SETTINGS | shell.WINDOW_NO_TITLE_BAR \
+		| shell.WINDOW_NO_COLLAPSE | shell.WINDOW_NO_BRING_TO_FRONT_ON_FOCUS \
+		| shell.WINDOW_NO_SCROLLBAR | WINDOW_NO_MOUSE_INPUTS | WINDOW_TOP_LAYER
+	if shell.begin("##gdtk_notif_card", flags):
+		# Fondo sólido propio (la ventana no trae background) + borde, para que el
+		# texto se lea sobre cualquier cosa de abajo (p. ej. ventana fullscreen).
+		# OJO: imgui_draw_rect_filled usa coordenadas de PANTALLA, no locales.
+		var bg = frame.NX_BG
+		shell.imgui_draw_rect_filled(Rect2(anchor, Vector2(CARD_W, h)),
+			Color(bg.r, bg.g, bg.b, 0.97), 4.0)
+		var hi = frame.NX_LIGHT
+		var lo = frame.NX_DARK
+		shell.imgui_draw_rect_filled(Rect2(anchor, Vector2(CARD_W, 1.0)), hi, 0.0)
+		shell.imgui_draw_rect_filled(Rect2(anchor, Vector2(1.0, h)), hi, 0.0)
+		shell.imgui_draw_rect_filled(Rect2(anchor + Vector2(0.0, h - 1.0), Vector2(CARD_W, 1.0)), lo, 0.0)
+		shell.imgui_draw_rect_filled(Rect2(anchor + Vector2(CARD_W - 1.0, 0.0), Vector2(1.0, h)), lo, 0.0)
+		var icon = _icon(shell, it)
+		var x0 = CARD_PAD
+		if icon != null:
+			var g = CARD_LINE * 1.6
+			shell.set_cursor_pos(Vector2(CARD_PAD, CARD_PAD))
+			shell.image(icon, Vector2(g, g), Color(1, 1, 1, 1.0))
+			x0 = CARD_PAD + g + 6.0
+		var y = CARD_PAD
+		for k in range(rows.size()):
+			var x = x0 if k == 0 else CARD_PAD
+			shell.set_cursor_pos(Vector2(x, y))
+			shell.text_colored(rows[k].get("color", frame.NX_TEXT), String(rows[k].get("text", "")))
+			y += CARD_LINE
+	shell.end()
+	shell.pop_style_var()
+
+
+func _card_rows(frame, ui, it):
+	var rows = []
+	var app = String(it.get("app", ""))
+	if app != "":
+		rows.append({"text": frame._truncate_w(ui, app, CARD_W - 2.0 * CARD_PAD), "color": frame.NX_TEXT_DIM})
+	var summary = String(it.get("summary", "")).strip_edges()
+	if summary != "":
+		rows.append({"text": frame._truncate_w(ui, summary, CARD_W - 2.0 * CARD_PAD), "color": frame.NX_TEXT})
+	var body = String(it.get("body", "")).strip_edges()
+	if body != "" and body != summary:
+		for line in _wrap(frame, ui, body, CARD_W - 2.0 * CARD_PAD):
+			rows.append({"text": line, "color": frame.NX_TEXT})
+	var stamp = _stamp(it)
+	if stamp != "":
+		rows.append({"text": stamp, "color": frame.NX_TEXT_DIM})
+	if rows.empty():
+		rows.append({"text": "(sin texto)", "color": frame.NX_TEXT_DIM})
+	return rows
+
+
+func _wrap(frame, ui, text, maxw):
+	var out = []
+	for raw in String(text).split("\n"):
+		var line = ""
+		for word in String(raw).split(" ", false):
+			var cand = word if line == "" else line + " " + word
+			if line != "" and frame._text_w(ui, cand) > maxw:
+				out.append(line)
+				line = word
+			else:
+				line = cand
+		out.append(line)
+	return out
+
+
+func _stamp(it):
+	var c = int(it.get("created_ms", 0))
+	if c <= 0:
+		return ""
+	var d = OS.get_datetime_from_unix_time(int(c / 1000))
+	return "%02d:%02d" % [int(d.get("hour", 0)), int(d.get("minute", 0))]

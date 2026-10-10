@@ -109,9 +109,15 @@ const CONTROL_DEFAULT = {
 const SPAN_DEFAULT = {"enabled": false, "primary": "", "order": []}
 # Notificaciones (SPEC-notificaciones): interruptor global, transitorio, atención de
 # foco, urgencia, tope de historial, modo de la columna y silencio. history_max entre
-# 1 y 1000 para no dejar el store sin tope.
+# 1 y 1000 para no dejar el store sin tope. toast_ms_* es el default cuando la app
+# manda expire_timeout = -1 (por urgencia; 0 = nunca). history_ttl_ms es la edad
+# máxima de una entrada en el historial (0 = sin TTL, sólo el tope).
 const NOTIF_HISTORY_MIN = 1
 const NOTIF_HISTORY_MAX = 1000
+const NOTIF_TOAST_MS_MIN = 0
+const NOTIF_TOAST_MS_MAX = 60000
+const NOTIF_TTL_MS_MIN = 0
+const NOTIF_TTL_MS_MAX = 604800000
 const NOTIFICATIONS_DEFAULT = {
 	"enabled": true,
 	"toast_transitorio": true,
@@ -120,11 +126,22 @@ const NOTIFICATIONS_DEFAULT = {
 	"history_max": 100,
 	"columna_modo": false,
 	"silencio": false,
+	"iconos": true,
+	"hover_card": true,
+	"bounce": true,
+	"toast_ms_low": 4000,
+	"toast_ms_normal": 5000,
+	"toast_ms_critical": 8000,
+	"history_ttl_ms": 0,
 }
 const HOST_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.:-_%[]"
 const NAME_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
 
-const FIELDS = ["keyboard", "locale", "accent", "wallpaper", "natural_scroll", "deskflow", "appearance", "ui_scale", "span", "notifications"]
+# Apps por defecto: id de un .desktop (p. ej. "Alacritty.desktop") o "" = el sistema
+# decide. "terminal" no es un mime; se guarda para el lanzador, no en mimeapps.list.
+const DEFAULTS_DEFAULT = {"terminal": "", "browser": "", "files": ""}
+
+const FIELDS = ["keyboard", "locale", "accent", "wallpaper", "natural_scroll", "deskflow", "appearance", "ui_scale", "span", "notifications", "defaults"]
 
 const HEX_CHARS = "0123456789abcdef"
 
@@ -145,6 +162,7 @@ func defaults():
 		"ui_scale": UI_SCALE_DEFAULT,
 		"span": SPAN_DEFAULT.duplicate(true),
 		"notifications": NOTIFICATIONS_DEFAULT.duplicate(true),
+		"defaults": DEFAULTS_DEFAULT.duplicate(true),
 	}
 
 
@@ -167,6 +185,7 @@ func normalize(data):
 	out["ui_scale"] = ui_scale_value(data.get("ui_scale", null))
 	out["span"] = span(data.get("span", {}))
 	out["notifications"] = notifications(data.get("notifications", {}))
+	out["defaults"] = defaults_field(data.get("defaults", {}))
 	for k in data.keys():
 		if not out.has(k):
 			out[k] = data[k]
@@ -408,7 +427,14 @@ func notifications(v):
 	out.urgencia = bool_value(v.get("urgencia", out.urgencia), out.urgencia)
 	out.columna_modo = bool_value(v.get("columna_modo", out.columna_modo), out.columna_modo)
 	out.silencio = bool_value(v.get("silencio", out.silencio), out.silencio)
+	out.iconos = bool_value(v.get("iconos", out.iconos), out.iconos)
+	out.hover_card = bool_value(v.get("hover_card", out.hover_card), out.hover_card)
+	out.bounce = bool_value(v.get("bounce", out.bounce), out.bounce)
 	out.history_max = notif_history(v.get("history_max", out.history_max))
+	out.toast_ms_low = notif_ms(v.get("toast_ms_low", out.toast_ms_low), out.toast_ms_low)
+	out.toast_ms_normal = notif_ms(v.get("toast_ms_normal", out.toast_ms_normal), out.toast_ms_normal)
+	out.toast_ms_critical = notif_ms(v.get("toast_ms_critical", out.toast_ms_critical), out.toast_ms_critical)
+	out.history_ttl_ms = notif_ttl_ms(v.get("history_ttl_ms", out.history_ttl_ms), out.history_ttl_ms)
 	return out
 
 
@@ -419,6 +445,37 @@ func notif_history(v):
 	if n > NOTIF_HISTORY_MAX:
 		n = NOTIF_HISTORY_MAX
 	return n
+
+
+func notif_ms(v, fallback):
+	var n = int(v)
+	if n < NOTIF_TOAST_MS_MIN:
+		return int(fallback)
+	if n > NOTIF_TOAST_MS_MAX:
+		n = NOTIF_TOAST_MS_MAX
+	return n
+
+
+func notif_ttl_ms(v, fallback):
+	var n = int(v)
+	if n < NOTIF_TTL_MS_MIN:
+		return int(fallback)
+	if n > NOTIF_TTL_MS_MAX:
+		n = NOTIF_TTL_MS_MAX
+	return n
+
+
+# Apps por defecto normalizadas: sólo strings recortados; cualquier otro tipo cae a
+# "". El modelo no toca el disco: no verifica que el .desktop exista.
+func defaults_field(v):
+	if typeof(v) != TYPE_DICTIONARY:
+		v = {}
+	var out = DEFAULTS_DEFAULT.duplicate(true)
+	for k in out.keys():
+		var val = v.get(k, out[k])
+		if val is String:
+			out[k] = val.strip_edges()
+	return out
 
 
 # Variables de entorno para que el resto del escritorio escale igual que el shell.
@@ -515,7 +572,7 @@ func locale_file_content(locale):
 func is_live(field):
 	return field == "accent" or field == "wallpaper" or field == "natural_scroll" \
 		or field == "deskflow" or field == "appearance" or field == "ui_scale" \
-		or field == "span" or field == "notifications"
+		or field == "span" or field == "notifications" or field == "defaults"
 
 
 func restart_notice(field):
@@ -640,5 +697,23 @@ func selftest():
 	assert(not nf1.enabled and nf1.silencio and nf1.history_max == NOTIF_HISTORY_MAX and not nf1.urgencia)
 	assert(notifications({"history_max": 0}).history_max == NOTIF_HISTORY_MIN)
 	assert(normalize({}).notifications.history_max == 100)
+	var nf2 = notifications({})
+	assert(nf2.iconos and nf2.hover_card and nf2.bounce)
+	assert(nf2.toast_ms_low == 4000 and nf2.toast_ms_normal == 5000 and nf2.toast_ms_critical == 8000)
+	assert(nf2.history_ttl_ms == 0)
+	var nf3 = notifications({"iconos": "off", "hover_card": "no", "bounce": "off",
+		"toast_ms_normal": 999999, "toast_ms_low": -4, "history_ttl_ms": 12345})
+	assert(not nf3.iconos and not nf3.hover_card and not nf3.bounce)
+	assert(nf3.toast_ms_normal == NOTIF_TOAST_MS_MAX, "toast acotado al máximo")
+	assert(nf3.toast_ms_low == 4000, "toast negativo conserva el default")
+	assert(nf3.history_ttl_ms == 12345)
 	assert(is_live("notifications"))
+	var df0 = defaults_field({})
+	assert(df0.terminal == "" and df0.browser == "" and df0.files == "")
+	var df1 = defaults_field({"terminal": "Alacritty.desktop", "browser": "  firefox.desktop  ", "files": 5})
+	assert(df1.terminal == "Alacritty.desktop" and df1.browser == "firefox.desktop" and df1.files == "")
+	assert(d.defaults.browser == "")
+	assert(normalize({"defaults": {"browser": "org.mozilla.firefox.desktop"}}).defaults.browser == "org.mozilla.firefox.desktop")
+	assert(normalize({"defaults": {"terminal": 7}}).defaults.terminal == "")
+	assert(is_live("defaults"))
 	print("settings_model selftest ok")

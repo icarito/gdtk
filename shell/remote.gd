@@ -5,6 +5,10 @@ extends Node
 
 const DEFAULT_PORT = 7777
 const LINE_FEED = 10
+# Métodos de SOLO LECTURA: no deben despertar el loop. Antes cualquier RPC ponía
+# last_activity + request_redraw, así que un poll de estado dejaba la shell a 60 fps
+# ~3 s (IDLE_MS) sin necesidad (SPEC-rendimiento-compositor). Los interactivos sí.
+const READONLY_METHODS = ["state", "peers", "hud_snapshot"]
 
 var shell = null  # lo setea Host/Main (sobrevive a la recarga del shell)
 
@@ -224,12 +228,14 @@ func _handle_line(conn, line):
 		conn.close = true
 		return
 
-	# Lo que pida el control remoto puede cambiar la UI (open, home, cerrar...).
+	# Lo que pida el control remoto interactivo puede cambiar la UI (open, home,
+	# cerrar...): despierta el loop. Un lector puro (state/peers/hud_snapshot) no.
 	if shell == null or not is_instance_valid(shell):
 		_fail(conn, id, -32002, "shell recargando")
 		return
-	shell.last_activity = OS.get_ticks_msec()
-	shell.request_redraw()
+	if not READONLY_METHODS.has(method):
+		shell.last_activity = OS.get_ticks_msec()
+		shell.request_redraw()
 	match method:
 		"reload_shell":
 			_reply(conn, id, true)
@@ -421,6 +427,9 @@ func _state():
 			"parent": shell.compositor.get_parent_id(window_id),
 			"mode": shell.hybrid.mode(window_id),
 			"anchor": shell.hybrid.anchor(window_id),
+			# Scanout directo por ventana (P4): {active, reason}. El global
+			# compositor.scanout_reason lo pisa el commit de cualquier ventana.
+			"scanout": shell.compositor.scanout_of(window_id) if shell.compositor.has_method("scanout_of") else {},
 		})
 
 	var activities = []
@@ -453,6 +462,16 @@ func _state():
 		"geom": shell.geom_state(),
 		# Vueltas del loop, pasos de física y frames dibujados: para medir el reposo.
 		"engine": [Engine.get_idle_frames(), Engine.get_physics_frames(), Engine.get_frames_drawn()],
+		# Reposo del loop (SPEC-rendimiento-compositor): si `busy` queda pegado en true, el
+		# shell no baja a SLEEP_IDLE y quema CPU en reposo. `sleep_usec` es el valor aplicado.
+		"loop": {"busy": shell.loop_busy, "sleep_usec": shell.loop_sleep_usec,
+			"low_mode": OS.is_in_low_processor_usage_mode(),
+			"fps": Engine.get_frames_per_second()},
+		# Armado de ImGui (SPEC-rendimiento-compositor B): `builds` cuenta cada `_imgui_frame`
+		# realmente armado; dos lecturas dan armados/s. En reposo debe seguir a `update_hz`
+		# (~1/s) y NO al loop (~4/s): si va pegado al loop, algo pide `request_redraw()` por
+		# vuelta aunque nada cambie (p. ej. un applet cuyo `refresh()` reporta cambio siempre).
+		"imgui": {"update_hz": shell.update_hz, "input_hz": shell.input_hz, "builds": shell.frame_count},
 		# Commits Wayland acumulados: dos lecturas dan commits/s (qué ventana mantiene ocupado el loop).
 		"commits": shell.compositor.commit_count,
 		# Rendimiento del compositor embebido (SPEC-rendimiento-compositor): si "dmabuf" es

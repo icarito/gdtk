@@ -12,8 +12,10 @@ const NOISE_CATS = ["gtk", "qt", "kde", "gnome", "xfce"]
 # Acentos combinantes (NFD, p.ej. "Mu\u0301sica"): la fuente no los tiene.
 const COMPOSE = ["aá", "eé", "ií", "oó", "uú", "AÁ", "EÉ", "IÍ", "OÓ", "UÚ"]
 const FOLD = ["áàäâã", "a", "éèëê", "e", "íìïî", "i", "óòöôõ", "o", "úùüû", "u", "ñ", "n", "ç", "c"]
-# Terminal=true: la misma terminal que la actividad Terminal del anillo.
-const TERMINAL = "alacritty -e "
+# Terminal por defecto (K-shell): comando resuelto por el shell desde el .desktop
+# elegido en Configuración. Es el prefijo con que se envuelven las apps Terminal=true;
+# "alacritty" es el automático de siempre.
+var terminal_cmd = "alacritty"
 
 var apps = []
 var query = ""
@@ -223,9 +225,12 @@ func parse(path, desktops):
 		return null
 	var cmd = "exec " + exec
 	if e.get("Terminal", "") == "true":
-		if not found(TERMINAL.split(" ")[0]):
+		var term = terminal_cmd.strip_edges()
+		if term == "":
+			term = "alacritty"
+		if not found(_program(term)):
 			return null
-		cmd = "exec " + TERMINAL + exec
+		cmd = "exec " + term + " -e " + exec
 	if e.get("Path", "") != "":
 		cmd = "cd '" + e.Path.replace("'", "'\\''") + "' && " + cmd
 	if e.has("OnlyShowIn") and not _any_in(e.OnlyShowIn, desktops):

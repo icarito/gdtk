@@ -19,6 +19,10 @@ var total = 0
 # Lo asigna el Frame: el bus central (`shell.notify`).
 var notif = null
 
+# Hover (lo fija el Frame en `_draw_applet`): el panel dibuja la tarjeta de texto.
+var hovered = false
+var hover_rect = Rect2()
+
 
 func refresh(_force := false):
 	if notif == null:
@@ -38,8 +42,8 @@ func refresh(_force := false):
 	for it in new_items:
 		if not bool(it.get("read", false)):
 			n_unread += 1
-	if not l.empty():
-		n_icon = resolve_icon_name(l.get("icon", ""), l.get("app_id", ""))
+	if not l.empty() and bool(notif.iconos) and notif.shell() != null:
+		n_icon = notif.shell().resolve_notify_icon(l)
 	var changed = state != n_state or value != n_value or detail != n_detail \
 		or icon_path != n_icon or unread != n_unread or total != new_items.size()
 	state = n_state
@@ -57,6 +61,7 @@ func stop():
 
 
 func draw(frame, ui, scr, loc, w, h):
+	hover_rect = Rect2(scr, Vector2(w, h))
 	var g = min(w, h) * 0.46
 	var col = frame._lcd(frame.NX_TEXT, "on" if state == "activo" else "off")
 	var tex = null

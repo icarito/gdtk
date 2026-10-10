@@ -78,8 +78,9 @@ func _draw():
 			if node == null or not is_instance_valid(node) or not node.visible:
 				continue
 			var r = shell._node_footprint(node)
+			var bo = float(shell.notify.bounce_alpha(int(id)))
 			var col = _acc(0.30 + 0.60 * pa)
-			draw_rect(r.grow(4.0), col, false, 2.5)
+			draw_rect(r.grow(4.0 + 6.0 * bo), col, false, 2.5 + 1.5 * bo)
 	# Resize diferido: mientras se arrastra un borde sólo se ve este fantasma (la
 	# ventana real no se redimensiona hasta soltar). Sin input: tiles_ui es IGNORE.
 	if shell.drag_overlay != null:
