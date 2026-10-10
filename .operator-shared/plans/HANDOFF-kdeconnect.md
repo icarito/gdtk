@@ -1,40 +1,54 @@
 # Handoff — KDE Connect (auditoría 2026-10-08)
 
-## Veredicto
+## Estado 2026-10-10 17:45 — MAYORÍA DE BLOQUEANTES RESUELTOS, transporte sigue abierto
 
-Prototipo incompleto, apagado por defecto con un opt-in experimental. No existe
-flujo de emparejamiento en Vecindario/Grupo ni RPC `kdeconnect` en remote.gd,
-aunque los comentarios del receptor afirman que lo hay. No activar el servicio
-principal para probar interoperabilidad: Host conserva explícitamente el opt-in
-por un antecedente de cuelgue TLS, todavía sin resolución verificada.
+Fixes aplicados (commit `ac62ead`, tests e2e reales verdes):
 
-## Bloqueantes para retomar
+- **Errores ejecutados (5)**: resueltos. `String.is_empty()` fuera de
+  `parse_pactl_sinks` (y filas con nombre vacío rechazadas, `:313`);
+  `PK.BATTERY` definida y declarada en `INCOMING_CAPS`; `special_key_code` ahora
+  mapea los índices 1..32 de protocol.md v8 (antes interpretaba códigos Qt), con
+  Linefeed(3) → KEY_ENTER.
+- **Estado de emparejamiento (3)**: resuelto. La respuesta positiva a nuestro pedido
+  saliente COMPLETA el pareo (`_on_pair`, `:597`); los pedidos entrantes quedan
+  pendientes con timestamp ±30 min (`PK.pair_timestamp_ok`) y aceptación/rechazo por
+  RPC `kdeconnect` (nuevo en `remote.gd:263`, ops
+  `state|pair_accept|pair_reject|pair_request|unpair`). El op `pair_request` es la
+  solicitud explícita que faltaba.
+- **Persistencia (4)**: identidad/cert/pareos en `XDG_STATE_HOME`
+  (`~/.local/state/gdtk/kdeconnect-pair.json`), con fallback a `~/.local/state`.
+- **Límites (framing/timeout)**: buffer sin newline respeta `MAX_PACKET_BYTES`
+  (`:444`); el timeout del dial se evalúa antes del branch TLS-wrapped y cierra el
+  stream correcto (`_poll_dial`/`_disconnect_dial`).
+- **remember_device** refresca la IP de un device conocido (`:586`).
+- **Cuelgue de motor hallado y rodeado**: `StreamPeerSSL.put_data` hace busy-loop con
+  write parcial en este fork (`modules/mbedtls/stream_peer_mbedtls.cpp:146`) y colgaba
+  `_process`; ahora hay cola de salida + `put_partial_data` (`_send_packet`/`_flush_conn`).
+  Segunda trampa del engine reportada (sin fix): `accept_stream` entrega
+  `STATUS_CONNECTED` con handshake incompleto (`:127-145`).
+- **Tests**: `kdeconnect_packet_test` 62 ok rc=0 (antes abortaba en `_init` y moría por
+  timeout); `kdeconnect_link_test` es ahora e2e real (listener TCP + TLS en proceso,
+  framing real, gate despareado, pendiente→accept, `pair_request`→completa,
+  specialKey por cable, volumen con stubs `pactl`/`wpctl`, MAX_PACKET_BYTES, timeout de
+  dial) → 32 ok rc=0, sin `auto_pair`.
+- **Comentario stale**: `host.gd:174-176` todavía dice que el handshake TLS entrante
+  puede colgar el motor; tras el fix del busy-loop queda parcialmente obsoleto (queda el
+  trap de `accept_stream`). No se tocó (fuera del write set del fix).
 
-1. **Transporte incompatible**: v8 envía identidad de conexión por TCP sin cifrar,
-   valida el destino, invierte los roles TLS (quien inició TCP es servidor TLS) y
-   luego intercambia identidad cifrada. El prototipo inicia TLS inmediatamente con
-   los roles habituales de TCP. El peer de test imita ese mismo flujo incorrecto.
-2. **Identidad autenticada**: pertenecer al store por `deviceId` declarado habilita
-   input, sin comprobar certificado del par. Un probe sin sockets confirmó esa
-   autorización. El protocolo exige fijar certificados durante el emparejamiento y
-   verificarlos al reconectar. El comentario de la limitación StreamPeerSSL no
-   convierte el ID declarado en autenticación; resolver transporte/certificados
-   antes de exponer el receptor como control autorizado.
-3. **Estado de emparejamiento**: la respuesta positiva al pedido saliente se
-   convierte en otro pedido pendiente, en lugar de completar el pareo. El probe
-   confirmó `paired=false, pending=1`. Falta operación de solicitud explícita y
-   cableado con UI/RPC; el timeout del prompt no valida timestamp del protocolo.
-4. **Persistencia**: en el entorno ordinario se usa XDG_RUNTIME_DIR para identidad,
-   certificados y pareos. Deben persistir entre logins/reboots; XDG_STATE_DIR no es
-   XDG_STATE_HOME. Separar descubrimiento/host y confianza criptográfica.
-5. **Errores ejecutados**: `String.is_empty()` no existe en este Godot 3 y rompe
-   parse_pactl_sinks; el dispatcher evalúa PK.BATTERY, constante inexistente. Ambos
-   scripts compilan, pero fallan al ejecutar esas rutas. No confundir preflight con
-   prueba funcional. `specialKey=4` (Left real) devuelve cero eventos: el prototipo
-   interpreta códigos Qt en lugar de los índices 1..32 del protocolo.
-6. **Verificación engañosa**: el E2E usa auto_pair y peer falso. Timeout/error TCP
-   pueden concluir sin incrementar fallas. El codec test actual abortó su _init en
-   parse_pactl_sinks y terminó por timeout externo; no es verde.
+## Bloqueantes abiertos (transporte — requiere módulo C en el engine)
+
+1. **Transporte incompatible + identidad autenticada (1 y 2)**: sigue. El flujo v8
+   correcto es identity en claro con `targetDeviceId`/`targetProtocolVersion`, el par
+   valida el destino, TLS con ROLES INVERTIDOS (el iniciador TCP pasa a servidor TLS) y
+   recién ahí identity bajo TLS + pinning del cert. El prototipo envuelve TLS enseguida
+   con roles TCP (`kdeconnect_link.gd:_new_inbound:385` accept / `_dial:347` connect),
+   sin identity en claro ni validación de target, y autoriza por el `deviceId`
+   declarado sin verificar certificado (`_on_identity:560`). Implementarlo bien exige
+   que `StreamPeerSSL` exponga el cert del par → módulo C en el engine.
+2. Mientras tanto el control queda gateado a devices pareados vía store JSON (sin
+   secretos) y con aceptación explícita del usuario. No exponer el receptor como canal
+   de control de otra confianza hasta resolver 1.
+
 
 Otros límites observados: el dial deja de tener timeout al envolver TLS; el buffer
 sin newline no respeta MAX_PACKET_BYTES; remember_device no actualiza IP al cambiar
