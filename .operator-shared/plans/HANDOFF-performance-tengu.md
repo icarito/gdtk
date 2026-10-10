@@ -287,11 +287,34 @@ contenido): `or str(items) != str(s_items) or ...`.
 **Nota sobre `update_hz`** (§3.2): bajarlo 4→1 es correcto, pero recién ahora tiene
 efecto; antes el redraw por vuelta del applet lo anulaba.
 
-**Observación en tengu (no es el mismo caso)**: con una terminal ([mosh] tmux)
-commiteando ~19/s, el loop queda `busy=true` a **62 fps** y la CPU del shell ~**68%** de
-un core (render de ~11 ms/frame en GM45/GLES2 a 60 fps: `render` domina, no GDScript).
-Esa es la "fase busy" de §3.2 → **A4** (frame scheduling al vblank, no al loop de Godot)
-es el trabajo pendiente de mayor retorno ahí.
+## 11. Lo que queda (A4/M1 y por qué no es autónomo)
+
+Contexto del retorno: con una terminal commiteando ~19/s el loop queda `busy` a 62 fps
+y la CPU del shell en tengu sube a ~68% de un core (render de ~11 ms/frame en GM45,
+`render` domina, no GDScript) — la "fase busy" de §3.2. A4 apunta justo ahí.
+
+**A4 — Frame scheduling** (`render-parity-gnome.md`): emitir frame callbacks/presentación
+al **vblank de sway y por salida**, no al loop de Godot (anclas:
+`wayland_compositor.cpp:end_frame`, `wl_server_frame_done`). 
+
+**M1 — `wl_surface_damage_buffer` en FRT** (span parcial; prerequisito de A5/multi-output
+default-on). Anclas: `platform/frt` (SDL2), `SPEC-embedded-multi-output` §10.
+
+Por qué quedan (no es falta de ganas):
+- **Ambos reescriben el camino de presentación** del que hoy dependen los frame callbacks
+  de las apps, el supervisor de "shell hung" y la pausa de scanout; una regresión ahí
+  rompe la flota viva (y Firefox UAF ya es sensible a ese campo).
+- **No se pueden validar headless**: el plan exige F0 (medir GPU/frame con video real)
+  antes de generalizar, A5 exige "2 monitores reales", y M1 refactoriza el envío de
+  damage del protocolo. Cada paso necesita observación del usuario.
+- Orden propuesto: F0 (medición con video en bastion/tengu) → M1 (damage buffer en FRT)
+  → A4 (scheduling al vblank) → A5 (activar span default). Marcar F0 como el paso que
+  pide participación del usuario; con esos números se decide si A4/M1 valen o si la
+  ganancia real ya la dio el corte de 4.1→1.1/s + scanout.
+
+Pendientes que exigen presencia física o el usuario: probar hover/bounce con puntero
+real (dockapp/columna), prueba AP en cupid (radio única, riesgo de perder el SSH), 
+`HandlePowerKey=suspend` (sudo en bastion), íconos SVG de apps (limitación del engine).
 
 **Deploy a tengu/cupid (HECHO 2026-10-10)**: se instaló el binario del corte
 (md5 `9f8733…`, `objcopy --remove-section=.note.gnu.property`) en
