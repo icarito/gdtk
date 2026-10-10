@@ -297,6 +297,17 @@ def _hint_urgency(hints):
         return "normal"
 
 
+def _remove_own_pidfile(pidfile):
+    # Sólo borra el pidfile si es NUESTRO: un daemon que pierde el nombre no debe
+    # borrar el pidfile del que sí sirve (dejaría al shell creyendo que no hay daemon).
+    try:
+        with open(pidfile) as f:
+            if f.read().strip() == str(os.getpid()):
+                os.remove(pidfile)
+    except (OSError, ValueError):
+        pass
+
+
 def cmd_serve():
     try:
         import gi
@@ -506,24 +517,34 @@ def cmd_serve():
         if exp > now0 and nid not in timers:
             timers[nid] = GLib.timeout_add(exp - now0, _on_expire, nid)
 
+    loop = GLib.MainLoop()
+    got_name = {"v": False}
+
     def on_bus_acquired(conn, name):
         state["conn"] = conn
         conn.register_object(STD_PATH, std_info, handle_std, None, None)
         conn.register_object(CUSTOM_PATH, custom_info, handle_custom, None, None)
 
+    def on_name_acquired(conn, name):
+        got_name["v"] = True
+
     def on_name_lost(conn, name):
-        log("serve: nombre perdido: %s" % name)
+        # Sin `org.freedesktop.Notifications` no hay nada que servir. Salir (en vez de
+        # quedarse corriendo el MainLoop) evita daemons zombie: con varias sesiones /
+        # runtime dirs, los que no heredaban el nombre quedaban vivos para siempre y se
+        # acumulaban. El flock ya cubre el caso de mismo runtime dir; esto cubre el resto.
+        log("serve: nombre no adquirido o perdido (%s): salgo" % name)
+        loop.quit()
 
     Gio.bus_own_name(Gio.BusType.SESSION, IFACE, Gio.BusNameOwnerFlags.NONE,
-                     on_bus_acquired, None, on_name_lost)
+                     on_bus_acquired, on_name_acquired, on_name_lost)
     log("serve: daemon iniciado (store=%s, %d ítems)" % (store_path(), len(state["items"])))
-    GLib.MainLoop().run()
+    loop.run()
+    _remove_own_pidfile(pidfile)
+    if not got_name["v"]:
+        log("serve: sin %s (¿otro daemon?); salgo" % IFACE)
+        return 1
     log("serve: daemon terminó")
-    try:
-        if os.path.exists(pidfile):
-            os.remove(pidfile)
-    except OSError:
-        pass
     return 0
 
 
