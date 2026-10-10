@@ -4916,7 +4916,14 @@ func draw(ui):
 	# donde la barra seguía viva). Sin este frame extra, el shell queda idle con
 	# capture=true y se come el próximo clic ("clic fantasma" del Frame oculto).
 	if (bar_top_drawn and not top_drawn) or (bar_bottom_drawn and not bottom_drawn):
+		# El WantCaptureMouse de ImGui lo recalcula el NewFrame del BUILD siguiente. Con
+		# el armado de ImGui a 1 Hz en reposo (SPEC-rendimiento compositor, issue B), la
+		# siguiente construcción tarda hasta ~1 s: un clic que caiga donde ESTABA la
+		# dockapp muere en el canvas ("clic fantasma") con el frame ya oculto. Despertar
+		# el bucle un momento hace que los builds en cascada refresquen el WantCapture en
+		# ms y no en segundos; después del pulso el reposo sigue igual.
 		shell.request_redraw()
+		shell.last_activity = OS.get_ticks_msec()
 	bar_top_drawn = top_drawn
 	bar_bottom_drawn = bottom_drawn
 	if not drawn:
