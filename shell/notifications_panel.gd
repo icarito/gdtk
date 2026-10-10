@@ -46,6 +46,24 @@ func active(shell):
 	return n.panel_open and not n.items().empty()
 
 
+# Vida completa de un toast (entrada + sostención + salida, más un escalonado).
+const LIFE_MS = FADE_IN_MS + HOLD_MS + FADE_OUT_MS + STAGGER_MS
+
+
+# ¿Hay un bloque FRESCO (un toast que recién entró y sigue en su ciclo)? Es lo que
+# justifica pausar el scanout directo y mostrar la columna por encima de una ventana
+# fullscreen: pausa por el toast vivo (~6 s). Una columna FIJADA con historial viejo no
+# retiene el video: con esto la pausa duraba para siempre y un video fullscreen no
+# refrescaba con sus hz reales (iba por la textura del shell, a la cadencia del loop).
+func has_fresh(now = -1):
+	if now < 0:
+		now = OS.get_ticks_msec()
+	for k in _anim:
+		if now - int(_anim[k].get("born", 0)) < LIFE_MS:
+			return true
+	return false
+
+
 func draw(shell):
 	var n = shell.notify
 	if n == null:

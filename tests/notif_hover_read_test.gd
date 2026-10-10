@@ -83,6 +83,15 @@ class ShellStub:
 		pass
 
 
+func _read_source():
+	var f = File.new()
+	if f.open("res://shell.gd", File.READ) != OK:
+		return ""
+	var t = f.get_as_text()
+	f.close()
+	return t
+
+
 func _init():
 	var P = load("res://notifications_panel.gd")
 	check("panel carga", P != null)
@@ -119,6 +128,19 @@ func _init():
 	sh.notify.hover_card = false
 	panel._draw_hover_card(sh)
 	check("hover_card apagado no marca", sh.notify.read_marks.size() == 2)
+
+	# Frescura para la pausa del scanout (video fullscreen): un bloque recién nacido es
+	# fresco; uno del historial (_columna fijada) no retiene el video.
+	panel._anim = {7: {"born": OS.get_ticks_msec()}}
+	check("toast recién nacido es fresco", panel.has_fresh())
+	panel._anim = {7: {"born": OS.get_ticks_msec() - 60000}}
+	check("bloque viejo (columna fijada) no es fresco", not panel.has_fresh())
+	panel._anim = {7: {"born": OS.get_ticks_msec() + 400}}
+	check("estalón futuro (stagger) cuenta como fresco", panel.has_fresh())
+	var shellsrc = _read_source()
+	check("overlay de scanout usa has_fresh",
+		shellsrc.find("has_fresh()") >= 0
+		and shellsrc.find("has_fresh()") > shellsrc.find("func _scanout_overlay_active"))
 
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

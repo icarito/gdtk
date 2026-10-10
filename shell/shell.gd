@@ -1872,9 +1872,12 @@ func _scanout_overlay_active():
 		return true
 	if system_osd != null and system_osd.is_active():
 		return true
-	# Columna de notificaciones (bloques/transitorio): debe quedar POR ENCIMA de la
-	# ventana a pantalla completa, así que también pausa el scanout directo.
-	if notifications_panel != null and not notifications_panel.blocks.empty():
+	# Columna de notificaciones: los toasts FRESCOS quedan por encima de una ventana
+	# fullscreen (pausa ~los 6 s del ciclo). Una columna FIJADA con historial viejo NO
+	# retiene el scanout: lo sostenía para siempre y un video fullscreen dejaba de
+	# refrescar con sus hz (iba por la textura del shell, a la cadencia del loop).
+	if notifications_panel != null and not notifications_panel.blocks.empty() \
+			and notifications_panel.has_fresh():
 		return true
 	if frame != null and is_instance_valid(frame) and frame.visible:
 		return true
