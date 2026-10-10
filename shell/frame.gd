@@ -162,7 +162,6 @@ var slide_since_bottom = 0
 # Teclado y drag: selección en el Frame, ventana "levantada" (tileo sin mouse),
 # y arrastre con mouse (soltar sobre otra ventana tilea; soltar fuera deshace).
 var sel = -1
-var lifted = null
 var dragging = null
 var win_drag = null       # Super+arrastre de una ventana hacia el Frame (reordenar/tilear)
 var drag_candidate = null
@@ -2531,7 +2530,6 @@ func set_visible(v):
 		show_until = 0  # mostrado a mano: sin auto-ocultado de Alt+Tab
 	else:
 		sel = -1
-		lifted = null
 		applet_press = null
 		applet_drag = null
 		win_dock_press = false
@@ -2735,7 +2733,6 @@ func bars_shown():
 # del último dibujo). Se llama cuando las barras no están a la vista.
 func drop_mouse_interaction():
 	mouse_down = false
-	lifted = null
 	dragging = null
 	drag_candidate = null
 	app_press = null
@@ -3391,10 +3388,7 @@ func _frame_key(code, event):
 		return false
 	var over_app = shell.current_activity != null
 	if code == KEY_ESCAPE:
-		if lifted != null:
-			lifted = null
-		else:
-			set_visible(false)
+		set_visible(false)
 		shell.request_redraw()
 		_gulp(code)
 		return true
@@ -3411,21 +3405,12 @@ func _frame_key(code, event):
 		sel = posmod(sel + 1, total)
 	elif sel < items.size():
 		# Ventana: comportamiento de siempre (cambiar, tilear, minimizar, cerrar).
-		if code == KEY_ENTER or code == KEY_KP_ENTER:
+		# Space actúa como Enter (activar): el "levantar el bloque con teclado" quedó
+		# fuera — el Frame no necesita control de teclado del tipo arrastrar/soltar
+		# (Alt+Tab, Espacio dejaba el bloque 'levitado' como drag-and-drop fantasma).
+		if code == KEY_ENTER or code == KEY_KP_ENTER or code == KEY_SPACE:
 			var it = items[sel]
-			lifted = null
 			switch_to(it)
-		elif code == KEY_SPACE and over_app:
-			var it = items[sel]
-			if lifted == null:
-				if it.id >= 0 and not it.minimized:
-					lifted = it
-			elif lifted.id == it.id:
-				lifted = null
-			else:
-				if it.id >= 0:
-					shell._tile_drop(lifted.id, it.id)
-				lifted = null
 		elif code == KEY_M and over_app:
 			if items[sel].id >= 0:
 				if shell.minimized.has(items[sel].id):
@@ -4684,8 +4669,6 @@ func _draw_windows(ui, zone, side, y, off, mouse):
 		var t = _item_at(mouse)
 		if t != null and t.id >= 0 and t.id != dragging.id:
 			drop_id = t.id
-	elif lifted != null:
-		drop_id = lifted.id
 	var sub = side * 0.5
 	var entries = []
 	for vi in range(int(rng[0]), int(rng[1])):
@@ -4905,7 +4888,7 @@ func draw(ui):
 		if mouse.y <= bh or mouse.y >= vp.y - bh:
 			entered = true
 		elif entered and mouse.y > bh + 16.0 and mouse.y < vp.y - bh \
-				and dragging == null and lifted == null and win_drag == null \
+				and dragging == null and win_drag == null \
 				and applet_drag == null and applet_press == null \
 				and app_drag == null and app_press == null and now > show_until:
 			set_visible(false)
@@ -5085,6 +5068,11 @@ func draw(ui):
 		shell.request_redraw()
 	elif chosen != null:
 		switch_to(chosen)
+		# Clic en el app-icon de la dockapp = cambio por teclado en lo funcional: el foco
+		# de teclado se va con la app elegida y el hover no se lo roba al volver el
+		# puntero al escritorio (la misma gracia que usa Alt+Tab en cycle()).
+		shell.last_activity = OS.get_ticks_msec()
+		shell._keyboard_focus_grace()
 	suppress_pinned_click = ""
 	# Perfilado A1: desglose de frame.draw.
 	_f_us += _f4 - _f0
@@ -5260,8 +5248,6 @@ func _draw_window_drag_tile(ui, items, side):
 			if it.id == dragging.id:
 				ghost = it
 				break
-	elif lifted != null:
-		ghost = lifted
 	elif win_drag != null:
 		for it in items:
 			if it.id == win_drag.id:

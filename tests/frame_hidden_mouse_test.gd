@@ -42,7 +42,7 @@ func _init():
 	f.close()
 	var harness = "extends Reference\nvar shell\nvar visible = false\n"
 	harness += "var pin_top_bar = false\nvar pin_bottom_bar = false\n"
-	harness += "var mouse_down = false\nvar lifted = null\nvar dragging = null\nvar drag_candidate = null\n"
+	harness += "var mouse_down = false\nvar dragging = null\nvar drag_candidate = null\n"
 	harness += "var app_press = null\nvar app_drag = null\nvar applet_press = null\nvar applet_drag = null\n"
 	harness += "var shared_press = \"\"\nvar shared_drag = false\nvar shared_power_press = false\nvar shared_power_rect = Rect2()\n"
 	harness += "var win_dock_press = false\nvar win_dock_drag = false\nvar win_scroll_press = false\nvar win_drag = null\n"
@@ -89,5 +89,13 @@ func _init():
 	check("reset suelta presses y arrastres",
 		not fr.shared_power_press and not fr.mouse_down \
 		and fr.app_press == null and fr.dragging == null)
+
+	# El switcher del Frame no levanta bloques con el teclado (reporte 2026-10-10:
+	# Alt+Tab + Espacio 'recogía el bloque' como drag-and-drop fantasma). Space activa
+	# (como Enter) y no hay máquina de 'levantado' en el fuente.
+	check("sin máquina de levantado por teclado en el Frame", source.find("lifted") < 0)
+	check("Space del switcher activa la ventana",
+		source.find("elif code == KEY_ENTER or code == KEY_KP_ENTER or code == KEY_SPACE:") >= 0)
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()
