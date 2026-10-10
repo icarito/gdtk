@@ -18,6 +18,9 @@ class FrameProbe:
 class NotifProbe:
 	extends Reference
 	var blocks = []
+	var fresh = true
+	func has_fresh(_now = -1):
+		return fresh
 
 func check(label, ok):
 	print(("ok   " if ok else "FAIL ") + label)
@@ -89,7 +92,9 @@ func _init():
 	shell.notifications_panel = np
 	check("columna sin bloques no pausa", not shell._scanout_overlay_active())
 	np.blocks = [{}]
-	check("columna con bloques pausa", shell._scanout_overlay_active())
+	check("columna con toast fresco pausa", shell._scanout_overlay_active())
+	np.fresh = false
+	check("columna fijada con historial viejo NO pausa (video fullscreen)", not shell._scanout_overlay_active())
 	np.blocks = []
 	shell.notifications_panel = null
 
