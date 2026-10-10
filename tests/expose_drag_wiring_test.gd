@@ -41,7 +41,7 @@ func _init():
 		shell.find("if expose:\n\t\t_on_expose_input(event)\n\t\treturn\n\tif client_pointer_locked:") >= 0)
 	check("captura remota no consume en exposé",
 		shell.find("func _capture_remote_input_event(event):\n\t# En exposé") >= 0 and
-		shell.find("if expose:\n\t\treturn false\n\t# InputCapture") >= 0)
+		shell.find("if expose and expose_drag != null:\n\t\treturn false\n\t# InputCapture") >= 0)
 	check("entrar a exposé suelta el pointer lock del cliente",
 		shell.find("if client_pointer_locked:\n\t\t\t_set_client_pointer_lock(false)") >= 0)
 	check("entrar a exposé suelta la captura remota",

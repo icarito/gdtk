@@ -49,6 +49,8 @@ func _init():
 	harness += "var place_rects = []\nvar items_layout = []\nvar applets_layout = []\nvar applets_drawn = false\n"
 	harness += "var shared_layout = []\nvar shared_drawn = false\n"
 	harness += "var bar_layout = {}\nvar window_region = {}\nvar window_span = {}\n"
+	# Estado del DockApp/Chip de ventanas que `drop_mouse_interaction` descarta.
+	harness += "var _win_pick = null\nvar _win_close = null\nvar _win_min = null\nvar applets_bar_rect = Rect2()\n"
 	for name in ["_clear_zone_layout", "bars_shown", "drop_mouse_interaction"]:
 		harness += "\n" + _function(source, name)
 	var script = GDScript.new()

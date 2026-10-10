@@ -15,6 +15,10 @@ class FrameProbe:
 	extends Reference
 	var visible = false
 
+class NotifProbe:
+	extends Reference
+	var blocks = []
+
 func check(label, ok):
 	print(("ok   " if ok else "FAIL ") + label)
 	if not ok:
@@ -44,7 +48,7 @@ func _init():
 		quit()
 		return
 
-	var harness = "extends Reference\nvar expose = false\nvar neighborhood_view = false\nvar system_osd = null\nvar frame = null\n"
+	var harness = "extends Reference\nvar expose = false\nvar neighborhood_view = false\nvar system_osd = null\nvar frame = null\nvar screenshot_ui = null\nvar notifications_panel = null\n"
 	harness += body
 	var script = GDScript.new()
 	script.set_source_code(harness)
@@ -80,6 +84,14 @@ func _init():
 	check("Frame visible pausa", shell._scanout_overlay_active())
 	frame.visible = false
 	shell.frame = null
+
+	var np = NotifProbe.new()
+	shell.notifications_panel = np
+	check("columna sin bloques no pausa", not shell._scanout_overlay_active())
+	np.blocks = [{}]
+	check("columna con bloques pausa", shell._scanout_overlay_active())
+	np.blocks = []
+	shell.notifications_panel = null
 
 	check("vuelto a reposo no pausa", not shell._scanout_overlay_active())
 
