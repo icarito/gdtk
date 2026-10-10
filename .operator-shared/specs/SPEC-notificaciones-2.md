@@ -183,7 +183,11 @@ conserva su propio volumen). Se reutilizan las teclas multimedia y el OSD existe
   `shell._broadcast_media()` (destinos de `_group_targets()`); no difunde si la captura
   de Deskflow tiene el teclado.
 - Sin peers: sólo local. Brillo: **no** universal (es por equipo).
-- Regresión: `tests/universal_audio_test.gd`.
+- Toggle: Ajustes → **Sonido** («Aplicar el volumen y el silencio a todo el Grupo»,
+  `audio.universal` en settings.json, default activo; `settings_model.audio()` +
+  `settings_bridge.audio()` + `_apply_audio_settings()`). El applet **Volumen** anota en
+  su tooltip «· se aplica a todo el Grupo» cuando está activo.
+- Regresión: `tests/universal_audio_test.gd` (aplica/difunde, el par no rebota,
+  validación, cableado y ajustes).
 
-Pendiente (a definir): toggle en Ajustes para habilitar/deshabilitar la difusión e
-indicador/applet en el Frame. Nace como «universal mute» y se amplió a vol up/down.
+Nace como «universal mute» y se amplió a vol up/down.

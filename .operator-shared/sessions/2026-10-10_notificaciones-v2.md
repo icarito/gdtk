@@ -106,4 +106,7 @@ sincronizado a `~/gdtk` y activado con recarga transaccional en bastion (mismo P
   - Regresión: `tests/universal_audio_test.gd` (14 checks). Sin peers: sólo local.
 - **Pendiente (a definir)**: toggle en Ajustes e indicador/applet en el Frame. Nace como
   «universal mute» y se amplió a vol up/down universal (pedido del usuario, 2026-10-10).
+  → Cerrado 2026-10-10: **Ajustes → Sonido** (`audio.universal`, default activo) frena
+  o habilita la difusión, y el applet Volumen marca en el tooltip «se aplica a todo el
+  Grupo».
 
