@@ -171,11 +171,19 @@ ser instante absoluto (ya lo era). No rompe entradas v1.
 - `ActionInvoked` hacia la app original sigue limitado a su conexión D-Bus viva.
 - Sin cambios de motor (xdg-activation ya emite).
 
-## 6. Pedidos futuros
+## 6. Controles de audio universales (IMPLEMENTADO 2026-10-10)
 
-- **Controles de audio universales** (2026-10-10): mute/unmute + volumen arriba/abajo
-  difundidos a **todos los equipos del Grupo**, **sin sincronizar el nivel** (la acción
-  viaja por el canal peer; cada host conserva su volumen). Accesibles con las teclas
-  multimedia del shell y con OSD de estado. Reutiliza `media`/`system_osd` y el envío
-  peer del Grupo; a definir atajo, indicador/applet en el Frame y comportamiento sin
-  peers. Nace como «universal mute» y se amplió a vol up/down universal.
+Una tecla de volumen (subir/bajar/silencio) se aplica local y se **difunde a todos los
+equipos del Grupo** por el canal peer; **viaja la acción, no el nivel** (cada host
+conserva su propio volumen). Se reutilizan las teclas multimedia y el OSD existentes.
+
+- Canal: método peer `media` (`peer_link.METHODS` + validador `media_action()`),
+  despachado en `peer_control.gd` → `shell._peer_media()` (aplica local, no re-difunde).
+- Emisor: `system_osd.media_action(action)` aplica local y llama a
+  `shell._broadcast_media()` (destinos de `_group_targets()`); no difunde si la captura
+  de Deskflow tiene el teclado.
+- Sin peers: sólo local. Brillo: **no** universal (es por equipo).
+- Regresión: `tests/universal_audio_test.gd`.
+
+Pendiente (a definir): toggle en Ajustes para habilitar/deshabilitar la difusión e
+indicador/applet en el Frame. Nace como «universal mute» y se amplió a vol up/down.

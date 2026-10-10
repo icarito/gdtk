@@ -9079,6 +9079,33 @@ func _peer_expose(on):
 	return true
 
 
+# Controles de audio universales: difunde una acción de volumen/mute a todos los
+# equipos del Grupo (viaja la ACCIÓN; cada equipo conserva su nivel). No difunde si la
+# captura de Deskflow tiene el teclado (la tecla es del equipo remoto, no del Grupo) ni
+# si no hay pares. La llama system_osd.media_action() sólo con fuentes locales.
+func _broadcast_media(action):
+	if remote_input != null and remote_input.has_method("is_capturing") and remote_input.is_capturing():
+		return
+	var targets = _group_targets()
+	if targets.empty():
+		return
+	_peer_send_async(targets, "media", {"action": String(action)})
+
+
+# Handler del método peer `media`: aplica la acción localmente SIN re-difundirla (si no,
+# dos equipos rebotarían la tecla). El nivel de este equipo no se sincroniza.
+func _peer_media(action):
+	if system_osd == null:
+		return false
+	var ok = bool(system_osd.media_action(String(action), false))
+	if ok:
+		# Mismo refresco que el camino local (shell._input): dockapp + frame al toque.
+		if frame != null and frame.volume != null:
+			frame.volume.refresh(true)
+		request_redraw()
+	return ok
+
+
 # Envía `method` a cada destino {id, host, port, token} en un Thread de un solo uso;
 # los tokens nuevos (TOFU) se guardan al reapear en _clip_sync_poll.
 func _peer_send_async(targets, method, params):

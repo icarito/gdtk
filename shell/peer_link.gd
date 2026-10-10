@@ -16,7 +16,7 @@ const VERSION = 1
 # remoto completo, sólo lo necesario para pantalla y el aviso de lados compartidos).
 const METHODS = ["ping", "gvd_recv", "gvd_stop", "gvd_send", "gvd_status",
 	"share_notify", "share_stop", "clip_set", "audio_recv", "audio_stop", "gvd_size",
-	"window_input", "window_input_stream", "gvd_meta", "direction", "expose"]
+	"window_input", "window_input_stream", "gvd_meta", "direction", "expose", "media"]
 
 # Handshake de dirección del Vecindario (antes por ssh): viaja por el canal peer SIN
 # token (es la vinculación inicial del Grupo). Vocabulario del DTO de
@@ -188,6 +188,18 @@ static func valid_method(m):
 	return METHODS.has(String(m))
 
 
+# Controles de audio universales del Grupo: la ACCIÓN viaja por el canal peer, no el
+# nivel (cada equipo conserva su propio volumen). Devuelve la acción normalizada o ""
+# si no es válida. Puro.
+const MEDIA_ACTIONS = ["up", "down", "mute"]
+
+
+static func media_action(params):
+	var p = params if typeof(params) == TYPE_DICTIONARY else {}
+	var a = String(p.get("action", "")).strip_edges()
+	return a if MEDIA_ACTIONS.has(a) else ""
+
+
 static func new_token():
 	return Crypto.new().generate_random_bytes(24).hex_encode()
 
@@ -286,4 +298,9 @@ static func selftest():
 		"to": "61950c8964e60e15", "direction": "up", "accepted": true}).empty()
 	ok = ok and direction_message({"kind": "otra", "from": "a", "to": "b"}).empty()
 	ok = ok and direction_message({"kind": "direction_proposal", "from": "a b", "to": "b"}).empty()
+	ok = ok and valid_method("media")
+	ok = ok and media_action({"action": "mute"}) == "mute"
+	ok = ok and media_action({"action": " up "}) == "up"
+	ok = ok and media_action({"action": "loud"}) == ""
+	ok = ok and media_action({}) == ""
 	return ok

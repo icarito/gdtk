@@ -94,17 +94,35 @@ func handle_input(event):
 	var sc = int(event.physical_scancode) if event.physical_scancode != 0 else int(event.scancode)
 	match sc:
 		KEY_VOLUMEUP:
-			adjust_volume(VOL_STEP)
+			media_action("up")
 		KEY_VOLUMEDOWN:
-			adjust_volume(-VOL_STEP)
+			media_action("down")
 		KEY_VOLUMEMUTE:
-			toggle_mute()
+			media_action("mute")
 		KEY_BRIGHTNESSUP:
 			adjust_brightness(BRI_STEP)
 		KEY_BRIGHTNESSDOWN:
 			adjust_brightness(-BRI_STEP)
 		_:
 			return false
+	return true
+
+
+# Acción de audio: la aplica localmente y, salvo que venga de un par del Grupo
+# (broadcast=false), la difunde para que todos ajusten su propio volumen (controles
+# de audio universales: viaja la ACCIÓN, no el nivel). El brillo no es universal.
+func media_action(action, broadcast := true):
+	match String(action):
+		"up":
+			adjust_volume(VOL_STEP)
+		"down":
+			adjust_volume(-VOL_STEP)
+		"mute":
+			toggle_mute()
+		_:
+			return false
+	if broadcast and _shell != null and _shell.has_method("_broadcast_media"):
+		_shell._broadcast_media(String(action))
 	return true
 
 
@@ -136,11 +154,11 @@ func adjust_brightness(delta):
 func rpc_action(params):
 	match str(params.get("action", "")):
 		"up":
-			adjust_volume(VOL_STEP)
+			media_action("up")
 		"down":
-			adjust_volume(-VOL_STEP)
+			media_action("down")
 		"mute":
-			toggle_mute()
+			media_action("mute")
 		"brightness_up":
 			adjust_brightness(BRI_STEP)
 		"brightness_down":

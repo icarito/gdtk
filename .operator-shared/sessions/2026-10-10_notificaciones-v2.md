@@ -92,13 +92,18 @@ sincronizado a `~/gdtk` y activado con recarga transaccional en bastion (mismo P
   `reload_shell`). Verificado: `notify status` → `daemon:true`, y `push` de prueba
   aparece en `list` en ambos hosts.
 
-## Feature pedido (pendiente de diseñar)
+## Feature: controles de audio universales (IMPLEMENTADO 2026-10-10, tarde)
 
-- **Controles de audio universales**: mute/unmute **y** volumen arriba/abajo aplicados a
-  *todos* los equipos del Grupo (difusión), **sin sincronizar el nivel** (cada equipo
-  mantiene su propio volumen; sólo viaja la acción). Accesible desde el shell con las
-  teclas multimedia y OSD de estado. A definir: atajo, indicador/applet en el Frame,
-  reutilizar `media`/`system_osd` + el canal peer del Grupo, y comportamiento cuando no
-  hay peers. Anotado por pedido del usuario, 2026-10-10 (alcance inicial: mute global;
-  ampliado a vol up/down universal).
+- **Hecho**: mute/unmute **y** volumen arriba/abajo aplicados a *todos* los equipos del
+  Grupo (difusión), **sin sincronizar el nivel** (cada equipo mantiene su propio
+  volumen; sólo viaja la acción). Reusa las teclas multimedia y el OSD de estado.
+  - `peer_link`: método `media` en `METHODS` + validador puro `media_action(params)`.
+  - `peer_control`: despacha `media` → `shell._peer_media(action)`.
+  - `shell`: `_broadcast_media()` difunde la acción a `_group_targets()` (no difunde si
+    Deskflow captura el teclado); `_peer_media()` aplica local sin re-difundir.
+  - `system_osd.media_action(action, broadcast=true)`: aplica local + difunde; lo usan
+    `handle_input` (teclas) y `rpc_action` (RPC `media`). Brillo: NO universal.
+  - Regresión: `tests/universal_audio_test.gd` (14 checks). Sin peers: sólo local.
+- **Pendiente (a definir)**: toggle en Ajustes e indicador/applet en el Frame. Nace como
+  «universal mute» y se amplió a vol up/down universal (pedido del usuario, 2026-10-10).
 

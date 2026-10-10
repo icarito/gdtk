@@ -301,6 +301,18 @@ func _handle(conn, line):
 				ok = bool(shell._peer_expose(bool(params.get("on", false))))
 			else:
 				err = "no disponible"
+		"media":
+			# Controles de audio universales: aplica la acción (up/down/mute) local; el
+			# nivel de este equipo no se toca, sólo se repite la acción del emisor.
+			var mact = LINK.media_action(params)
+			if mact == "":
+				err = "parámetros inválidos"
+			elif shell.has_method("_peer_media"):
+				ok = bool(shell._peer_media(mact))
+				if not ok:
+					err = "no se pudo aplicar"
+			else:
+				err = "no disponible"
 		"audio_recv":
 			# Enviar audio (Grupo): este equipo acepta un túnel de audio SÓLO desde la IP
 			# que hizo el pedido; responde el puerto.
