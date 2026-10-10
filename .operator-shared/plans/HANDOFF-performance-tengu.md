@@ -240,15 +240,17 @@ despreciable en fullscreen (`frame.visible=False` → `frame.draw`≈0). El cuel
    elimina del todo — eso es B2/KMS).
 4. Vigilar que un poll de estado no despierte la shell (fix §3.1) en bastion.
 5. Largo plazo: **B1/B2** (`render-parity-gnome.md`).
-6. **Diagnóstico de scanout por‑ventana (IMPLEMENTADO + build OK 2026-10-10, sin
-   instalar aún)**: `state.compositor.windows[].scanout = {active, reason}` vía
+6. **Diagnóstico de scanout por‑ventana (INSTALADO Y ACTIVO, corte 2026-10-10)**: `state.compositor.windows[].scanout = {active, reason}` vía
    `WaylandCompositor.scanout_of(id)`. Motor: campo `toplevel.scanout_reason` +
    getter `wl_server_scanout_of` (`wl_server.c`/`.h`), binding en
    `wayland_compositor.cpp`/`.h`, y `shell/remote.gd`. Elimina la contradicción
    global `scanout="on"` vs `scanout_reason="otra ventana visible"`. Validado en
    harness aislado: fullscreen `active=true/reason="on"`; hermana
-   `active=false/"otra ventana visible"`. Con el corte se confirma si la peli
-   (Firefox) realmente escanea (y si el video va por subsurface).
+   `active=false/"otra ventana visible"`. **Corte aplicado en bastion, tengu y cupid**
+   (mismo binario md5 `9f8733…`; incluye `imgui_canvas.cpp` del 04:36). En vivo en
+   bastion, la ventana de video aparece con `scanout={active:false, reason:"suspendido
+   (overlay del shell)"}`: el diagnóstico funciona; ese overlay (Frame/barra) es lo que
+   impide el scanout en ese caso.
 
 ## 9. Issue B — causa raíz hallada y CORREGIDA (2026-10-10)
 
@@ -291,13 +293,13 @@ un core (render de ~11 ms/frame en GM45/GLES2 a 60 fps: `render` domina, no GDSc
 Esa es la "fase busy" de §3.2 → **A4** (frame scheduling al vblank, no al loop de Godot)
 es el trabajo pendiente de mayor retorno ahí.
 
-**Deploy a tengu/cupid (pendiente, seguro pero no hecho)**: el fix vive en el repo y en
-breves `~/gdtk` de bastion. Para tengu/cupid sincronizar un **snapshot completo** (no
-sólo un archivo) y recargar suave:
-`rsync -a --delete --exclude '.import' --exclude '*crash*' shell settings ~/gdtk/` +
-`python3 /tmp/ctl.py reload_shell`; verificar mismo PID y `state` responde. No se hizo
-para no empujar un sync parcial (el repo trae cambios sin commitear de notificaciones
-v2, etc.) a sesiones vivas del usuario.
+**Deploy a tengu/cupid (HECHO 2026-10-10)**: se instaló el binario del corte
+(md5 `9f8733…`, `objcopy --remove-section=.note.gnu.property`) en
+`~/gdtk/bin/godot-gdtk` de tengu y cupid (backup en `.prev`) y se reinició la shell
+de cada host (mismo binario en los tres). Nota de método: los `peer_control.gd`/
+`peer_link.gd` con `preload` deben entrar juntos en la recarga; un snapshot completo
+(`rsync -a --delete --exclude '.import' --exclude '*crash*' shell settings ~/gdtk/`) +
+`reload_shell` para scripts, `restart_shell` sólo para motor.
 
 ## 10. Estado del árbol y suite (2026-10-10, turno siguiente)
 
