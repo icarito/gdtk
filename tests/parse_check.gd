@@ -17,6 +17,8 @@ func _init():
 		"res://output_layout.gd", "res://span_layout.gd", "res://menu_style.gd",
 		"res://screenshot_model.gd", "res://screenshot_ui.gd",
 		"res://notify.gd", "res://applet_notif.gd", "res://notifications_panel.gd",
+		"res://applet_volume.gd", "res://peer_link.gd", "res://kdeconnect_link.gd",
+		"res://kdeconnect_packet.gd",
 	]
 	var failed = 0
 	for p in paths:

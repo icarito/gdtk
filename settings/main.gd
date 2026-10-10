@@ -22,6 +22,7 @@ const PAGES = [
 	{"id": "displays", "label": "Pantallas", "path": "res://pages/displays.gd"},
 	{"id": "monitors", "label": "Monitores", "path": "res://pages/monitors.gd"},
 	{"id": "notifications", "label": "Notificaciones", "path": "res://pages/notifications.gd"},
+	{"id": "sound", "label": "Sonido", "path": "res://pages/sound.gd"},
 ]
 
 var model = null

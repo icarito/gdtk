@@ -31,6 +31,9 @@ var detail = ""          # tooltip: nombre de la salida actual
 # Salidas de audio disponibles y la actual; se copian del snapshot en refresh().
 var sinks = []
 var current_sink = ""
+# Audio universal (SPEC-notificaciones-2 §6): el shell la fija desde Ajustes → Sonido.
+# Sólo la lee el worker para armar el tooltip (lectura de bool, benigna entre hilos).
+var universal = false
 
 # Snapshot compartido con el worker (bajo _mutex). `sink` = salida por defecto.
 var _snap = {"state": "sin_dato", "value": "sin dato", "detail": "", "sinks": [], "sink": ""}
@@ -271,6 +274,9 @@ func _build_snapshot():
 	snap.state = "activo"
 	snap.value = "mute" if vol.muted else ("%d%%" % int(round(vol.volume * 100.0)))
 	snap.detail = current if current != "" else "Sin salida de audio detectada"
+	# Indicador de audio universal (SPEC-notificaciones-2 §6): el shell fija `universal`.
+	if universal:
+		snap.detail += " · se aplica a todo el Grupo"
 	return snap
 
 

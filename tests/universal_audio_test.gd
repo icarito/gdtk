@@ -85,5 +85,38 @@ func _init():
 		so.find("KEY_VOLUMEMUTE:\n\t\t\tmedia_action(\"mute\")") >= 0 \
 		and so.find("\"mute\":\n\t\t\tmedia_action(\"mute\")") >= 0)
 
+	# --- ajustes: el toggle de Ajustes → Sonido frena la difusión ---
+	# El modelo vive en el proyecto settings/ y se carga leyendo el fuente (el mismo
+	# camino de settings_bridge; `load()` con res://../ cuelga el binario dev).
+	var msrc = _read("res://../settings/settings_model.gd")
+	check("modelo de ajustes disponible", msrc != "")
+	var mgd = GDScript.new()
+	mgd.set_source_code(msrc)
+	var model = mgd.new() if mgd.reload() == OK else null
+	check("modelo de ajustes compila", model != null)
+	if model == null:
+		OS.exit_code = 1 if failed > 0 else 0
+		quit()
+		return
+	check("modelo de ajustes: audio universal default",
+		model.audio({}).universal == true and model.AUDIO_UNIVERSAL_DEFAULT)
+	check("modelo de ajustes: audio universal respeta false",
+		model.audio({"universal": false}).universal == false)
+	var bridge = _read("res://settings_bridge.gd")
+	check("bridge expone audio()", bridge.find("func audio():") >= 0)
+	check("shell aplica el ajuste de audio",
+		shell.find("func _apply_audio_settings():") >= 0 \
+		and shell.find("settings_bridge.audio().get(\"universal\", true)") >= 0)
+	check("broadcast respeta el ajuste",
+		shell.find("func _broadcast_media(action):\n\tif not _audio_universal:\n\t\treturn") >= 0)
+	var vol = _read("res://applet_volume.gd")
+	check("applet volumen declara universal", vol.find("var universal") >= 0 \
+		and vol.find("se aplica a todo el Grupo") >= 0)
+	var pages = _read("res://../settings/main.gd")
+	check("página Sonido registrada en Ajustes", pages.find("\"sound\"") >= 0)
+	var sound = _read("res://../settings/pages/sound.gd")
+	check("página Sonido pinta el toggle del Grupo",
+		sound.find("todo el Grupo") >= 0 and sound.find("set_field(\"audio\", a)") >= 0)
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

@@ -225,6 +225,14 @@ func notifications():
 	return model.notifications(settings.get("notifications", {}))
 
 
+# Audio (controles de audio universales, SPEC-notificaciones-2 §6): difusión del
+# volumen/silencio al Grupo. Defaults sanos si el modelo es viejo.
+func audio():
+	if model == null or not model.has_method("audio"):
+		return {"universal": true}
+	return model.audio(settings.get("audio", {}))
+
+
 # Apps por defecto: {"terminal","browser","files"}, cada valor es el id de un .desktop
 # (p. ej. "Alacritty.desktop") o "" = automático. Reusa la normalización del modelo si
 # está disponible; si falta la clave o el modelo es viejo, devuelve los valores vacíos.

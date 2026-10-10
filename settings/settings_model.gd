@@ -417,6 +417,19 @@ func span_order(list):
 
 # Ajustes del sistema de notificaciones normalizados (SPEC-notificaciones). Los
 # booleanos son tolerantes ("on"/"1"); `history_max` se acota a [1, 1000].
+# Audio (controles de audio universales, SPEC-notificaciones-2 §6): las teclas de
+# volumen/silencio del shell se difunden a todos los equipos del Grupo; viaja la ACCIÓN,
+# no el nivel (cada equipo conserva su volumen). El default reproduce lo pedido:
+# activado; sin Grupo no cambia nada. El brillo nunca es universal.
+const AUDIO_UNIVERSAL_DEFAULT = true
+
+
+func audio(v):
+	if typeof(v) != TYPE_DICTIONARY:
+		v = {}
+	return {"universal": bool_value(v.get("universal", AUDIO_UNIVERSAL_DEFAULT), AUDIO_UNIVERSAL_DEFAULT)}
+
+
 func notifications(v):
 	if typeof(v) != TYPE_DICTIONARY:
 		v = {}

@@ -33,6 +33,14 @@ func _init():
 		and d.deskflow.port == 24800 and not d.deskflow.auto)
 	check("scroll natural tolera false de texto", S.nat_scroll("false") == false and S.nat_scroll("on") == true)
 	check("scroll natural cae al default con basura", S.nat_scroll("cosa") == S.NATURAL_SCROLL_DEFAULT)
+	check("audio universal es el default",
+		S.audio({}).universal == true and S.AUDIO_UNIVERSAL_DEFAULT == true)
+	check("audio universal tolera false de texto",
+		S.audio({"universal": "false"}).universal == false
+		and S.audio({"universal": "on"}).universal == true)
+	check("audio universal cae al default con basura",
+		S.audio({"universal": "cosa"}).universal == S.AUDIO_UNIVERSAL_DEFAULT
+		and S.audio(null).universal == S.AUDIO_UNIVERSAL_DEFAULT)
 	check("argumentos de scroll natural",
 		S.natural_scroll_cmd(false) == ["input", "type:touchpad", "natural_scroll", "disabled"]
 		and S.natural_scroll_cmd(true) == ["input", "type:touchpad", "natural_scroll", "enabled"])

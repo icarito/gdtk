@@ -6180,7 +6180,20 @@ func _apply_settings():
 		_apply_deskflow_settings()
 		_apply_span_settings()
 		_apply_notifications_settings()
+		_apply_audio_settings()
 		_apply_defaults_settings()
+
+
+# Audio universal (controles de audio universales, SPEC-notificaciones-2 §6): las teclas
+# de volumen/silencio se difunden al Grupo (viaja la acción, no el nivel). El applet
+# Volumen anota en su tooltip si el cambio alcanza a todo el Grupo.
+func _apply_audio_settings():
+	var uni = true
+	if settings_bridge != null:
+		uni = bool(settings_bridge.audio().get("universal", true))
+	_audio_universal = uni
+	if frame != null and frame.volume != null:
+		frame.volume.universal = uni
 
 
 # Apps por defecto (K-shell): resuelve el terminal configurado y lo publica en la
@@ -6280,6 +6293,11 @@ func _notify_supervise(now):
 
 
 # Sincroniza el bus de notificaciones con settings.json (SPEC-notificaciones).
+# Audio universal (controles de audio universales, SPEC-notificaciones-2 §6): el default
+# reproduce lo pedido (difundir volumen/silencio al Grupo); se relee de settings.json.
+var _audio_universal = true
+
+
 func _apply_notifications_settings():
 	if notify == null or settings_bridge == null:
 		return
@@ -9092,6 +9110,8 @@ func _peer_expose(on):
 # captura de Deskflow tiene el teclado (la tecla es del equipo remoto, no del Grupo) ni
 # si no hay pares. La llama system_osd.media_action() sólo con fuentes locales.
 func _broadcast_media(action):
+	if not _audio_universal:
+		return
 	if remote_input != null and remote_input.has_method("is_capturing") and remote_input.is_capturing():
 		return
 	var targets = _group_targets()
