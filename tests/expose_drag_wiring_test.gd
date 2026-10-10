@@ -43,9 +43,16 @@ func _init():
 		shell.find("func _capture_remote_input_event(event):\n\t# En exposé") >= 0 and
 		shell.find("if expose and expose_drag != null:\n\t\treturn false\n\t# InputCapture") >= 0)
 	check("entrar a exposé suelta el pointer lock del cliente",
-		shell.find("if client_pointer_locked:\n\t\t\t_set_client_pointer_lock(false)") >= 0)
+		shell.find("if client_pointer_locked:\n\t\t\t\t_set_client_pointer_lock(false)") >= 0)
 	check("entrar a exposé suelta la captura remota",
-		shell.find("if mouse_locked:\n\t\t\t_set_capture_cursor(false)") >= 0)
+		shell.find("if mouse_locked:\n\t\t\t\t_set_capture_cursor(false)") >= 0)
+	# El exposé sincronizado de un par es PASIVO: no debe soltar la captura local (si no,
+	# el teclado volvía al host server y el search en exposé abría en el host equivocado).
+	check("_toggle_expose distingue entrada local de sincronizada",
+		shell.find("func _toggle_expose(on, local := true):") >= 0)
+	check("_peer_expose no suelta la captura local",
+		shell.find("func _peer_expose(on):") >= 0
+		and shell.find("_toggle_expose(on, false)") >= 0)
 
 	# Press levanta la miniatura; motion mueve el fantasma y marca el destino;
 	# release mueve (o selecciona/sale si no hubo movimiento).

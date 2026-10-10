@@ -4026,7 +4026,7 @@ func _rebuild_tiles(units):
 	request_redraw()
 
 
-func _toggle_expose(on):
+func _toggle_expose(on, local := true):
 	expose = on
 	expose_hover = -1
 	expose_drag = null
@@ -4036,21 +4036,26 @@ func _toggle_expose(on):
 	if on:
 		# Entrar al exposé también destella el puntero (la vista cambia de golpe).
 		_flash_cursor()
+		expose_sel = max(tiles.find(focused_tile), 0)
 		# Ningún cliente (pointer lock) ni captura remota debe quedarse con el mouse:
 		# en exposé todo el mouse va al shell, o el arrastre entre escritorios se pierde.
-		if client_pointer_locked:
-			_set_client_pointer_lock(false)
-		# Deskflow: si el puntero estaba capturado por otro equipo, soltarlo. En
-		# exposé el puntero vive en este equipo y el borde vuelve a cruzar recién
-		# cuando el usuario lo empuja (exposé universal: cambiar de pantalla del Grupo
-		# sin salir de la vista). Sin esto `_sync_capture_cursor` re-lockea cada frame.
-		if remote_input != null and remote_input.has_method("is_capturing") \
-				and remote_input.has_method("release_capture") and remote_input.is_capturing():
-			remote_input.release_capture()
-		if mouse_locked:
-			_set_capture_cursor(false)
-		expose_sel = max(tiles.find(focused_tile), 0)
-		release_modifiers()  # no dejar Ctrl/Shift pegados en la app al entrar
+		# PERO sólo cuando ESTE host disparó el exposé: si la vista llega sincronizada de
+		# un par, este host es pasivo (el cursor está en el otro equipo) y soltar acá la
+		# captura se traía de vuelta el teclado del host server, así que teclear en exposé
+		# abría el buscador en el host del teclado y no en el del puntero.
+		if local:
+			if client_pointer_locked:
+				_set_client_pointer_lock(false)
+			# Deskflow: si el puntero estaba capturado por otro equipo, soltarlo. En
+			# exposé el puntero vive en este equipo y el borde vuelve a cruzar recién
+			# cuando el usuario lo empuja (exposé universal: cambiar de pantalla del Grupo
+			# sin salir de la vista). Sin esto `_sync_capture_cursor` re-lockea cada frame.
+			if remote_input != null and remote_input.has_method("is_capturing") \
+					and remote_input.has_method("release_capture") and remote_input.is_capturing():
+				remote_input.release_capture()
+			if mouse_locked:
+				_set_capture_cursor(false)
+			release_modifiers()  # no dejar Ctrl/Shift pegados en la app al entrar
 	# El pasaje se anima: cada ventana arranca desde su transform actual (pantalla o tarjeta).
 	var now = OS.get_ticks_msec()
 	_seed_view_anim(now)
@@ -9070,12 +9075,15 @@ func _expose_sync_poll():
 		_peer_send_async(targets, "expose", {"on": expose})
 
 
-# Handler del método peer `expose`: _expose_sent primero para no rebotar el eco.
+# Handler del método peer `expose`: _expose_sent primero para no rebotar el eco. La
+# vista llega sincronizada de otro equipo: acá el host es PASIVO (el cursor está donde
+# el emisor), así que no suelta su captura/pointer-lock — suelta de la captura le
+# devolvía el teclado a este host y el search en exposé abría del lado equivocado.
 func _peer_expose(on):
 	on = bool(on)
 	_expose_sent = on
 	if expose != on:
-		_toggle_expose(on)
+		_toggle_expose(on, false)
 	return true
 
 
