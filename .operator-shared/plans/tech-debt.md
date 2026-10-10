@@ -93,6 +93,21 @@ cosas; **B** frena trabajo; **C** higiene.
   de ImGui/`_process`) y decidir si el supervisor debe relanzar en ese caso
   (para scripts siempre es recargable; con engine abierto, no).
 
+## B.3 — Activas (2026-10-09)
+
+- **Diálogos que «quedan detrás» de ventanas tiled/maximizadas (reportado, sin
+  reproducir).** Los child toplevels se dibujan en `dialog_view`, hermana de `view` y
+  agregada después (`shell.gd:1275`, `shell.gd:1346-1350`), así que por orden de hijos
+  de `view_layer` deberían ir siempre encima. Sospecha: no son child toplevels sino
+  **popups/subsurfaces** (`xdg_popup`, combos, tooltips, o diálogos que el cliente pinta
+  como subsurface) que se dibujan como capas **dentro del nodo de la ventana**
+  (`compositor.get_layers` → `_fill_nodes`, `shell.gd:4352`, `shell.gd:2740`) y una
+  ventana tiled/maximizada encima las tapa. Alternativa: `tiles_ui` está **encima** de
+  `dialog_view` (`shell.gd:1360`). Falta reproducir (¿qué app? ¿About/selector real o
+  menú/combo?) para decidir si el fix es en el z-order del compositor o en
+  `dialog_view`. Salida: reproducir con app+pasos, luego promover popups/subsurfaces al
+  apilado de ventanas (o subir `dialog_view` sobre `tiles_ui` si es lo segundo).
+
 ## C — Higiene
 
 - `README.md` describe el plan original (cage, XMPP, «Fase 2/3») y no el shell actual;

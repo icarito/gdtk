@@ -34,7 +34,13 @@ EOF
 fi
 
 SECS="${1:-60}"
-SID=$(loginctl list-sessions --no-legend | awk '$4 == "seat0" {print $1; exit}')
+# En seat0 pueden coexistir la sesión activa y una que se está cerrando (State=closing):
+# elegir preferentemente la activa, no la primera listada.
+SID=
+for _s in $(loginctl list-sessions --no-legend | awk '$4 == "seat0" {print $1}'); do
+	[ "$(loginctl show-session "$_s" -p State --value)" = active ] && { SID=$_s; break; }
+done
+[ -n "$SID" ] || SID=$(loginctl list-sessions --no-legend | awk '$4 == "seat0" {print $1; exit}')
 [ -n "$SID" ] || { echo "no hay sesión en seat0"; exit 1; }
 prop() { loginctl show-session "$SID" -p "$1" --value; }
 DESKTOP=$(prop Desktop); DISPLAY_=$(prop Display); UIDN=$(prop User)

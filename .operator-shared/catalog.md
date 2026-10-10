@@ -92,6 +92,9 @@
 - `SPEC-notificaciones.md`
   - Description: Bus central de notificaciones: daemon `org.freedesktop.Notifications`, store efímero, dockapp + columna overlay, urgencia y atención de foco sin robo.
   - Read If: Tocando `shell/notify.gd`, `applet_notif.gd`, `notifications_panel.gd`, `session/gdtk-notify`, urgencia o pedidos de foco.
+- `SPEC-notificaciones-2.md`
+  - Description: Propuesta v2 (sin implementar): diagnóstico de daemon caído/persistencia, íconos sin resolver en el dockapp, hover sin texto, `expire_timeout=-1` tratado como "nunca", historial sin TTL y atención de ventanas poco visible; diseño de store persistente, expiración toast-vs-historial, tarjeta hover, bounce y atención multi-workspace.
+  - Read If: Se retoma el rework de notificaciones (ícono, texto/ hover, caducidad, persistencia, atención de ventanas).
   - Read If: Tocando `shell/frame.gd` o `shell/applet_*.gd`.
 - `SPEC-screenshot.md`
   - Description: Selector de pantallazos (ventana/pantalla/selección) + guardado a disco y copia al portapapeles embebido; PrintScreen, RPC `screenshot` y `session/gdtk-screenshot`.
@@ -138,8 +141,7 @@
   - Read If: Retomando trabajo de ventanas.
 - `2026-10-04_portapapeles-grupo.md`
   - Description: Portapapeles sin ext-data-control en el binario; «Extender» ausente en Grupo.
-  - Read If: Retomando el applet Portapapeles o el menú de Grupo.
-- `2026-10-04_enviar-audio-ventana.md`
+  - Read If: Retomando el applet Portapapeles o el menú de Grupo.- `2026-10-04_enviar-audio-ventana.md`
   - Description: Grupo: compartir ventanas por gvd y audio por equipo, arrastrando en Grupo; e2e tengu ↔ cupid y pendientes.
   - Read If: Retomando envío de audio/ventanas o el canal peer.
 - `2026-10-04_cuelgue-cursor.md`
@@ -154,6 +156,9 @@
 - `2026-10-06_popup-layout-grupo.md`
   - Description: Popup de revisión del layout al mover un host en Grupo (mini distribución, countdown 10 s, arrastre/resize in-place, snap contra lo solapado) + fixes de Deskflow (reinicio con debounce, vigía con enfriamiento).
   - Read If: Tocando la vista Grupo, el popup ##layout_confirm, screen_layout.gd o el reinicio de Deskflow.
+- `2026-10-10_notificaciones-v2.md`
+  - Description: Rework de notificaciones (SPEC-notificaciones-2): store persistente + daemon supervisado, ícono de app, tarjeta de hover con texto, caducidad fiel a la spec, y atención de ventanas con bounce/franja.
+  - Read If: Tocando `shell/notify.gd`, `applet_notif.gd`, `notifications_panel.gd`, `session/gdtk-notify`, caducidad, persistencia o atención de ventanas.
 
 ### `plans/` - Planes vigentes
 
@@ -169,6 +174,9 @@
 - `render-parity-gnome.md`
   - Description: Plan para acercar el rendering de gdtk a GNOME/Mutter (meta: sesión diaria): F0 medición bloqueante, Track A sin KMS (damage, cursor del host, cobertura P4, multi-output) y Track B KMS real.
   - Read If: Se prioriza rendimiento/paridad de rendering o se decide entre exprimir el anidado y tomar DRM/KMS.
+- `HANDOFF-performance-tengu.md`
+  - Description: Medición en reposo gdtk vs XFCE en tengu (Core2 Duo/GM45): gdtk 17.3% vs XFCE 0.46% de un core; el shell no entra en reposo (60 fps con Escritorio vacío, render=10.95 ms/frame), Godot cae a GLES2, scanout directo no engancha; por qué "otro proceso para dockapps" es bajo retorno.
+  - Read If: Se ataca el CPU en reposo, el loop de presentación o el fallback GLES2/GLES3 en hardware viejo.
 - `HANDOFF-a1-interaccion.md`
   - Description: Handoff de Track A1 (costo de interacción): diagnóstico del armado de ImGui, optimizaciones entregadas (_shared_snapshot, _text_w), hotspot pendiente (_draw_bar_blocks/_item_icon), cómo medir (probe, flags, RPC) y gotchas (reload tumba RPC ~20 s).
   - Read If: Se retoma la optimización del CPU de la shell bajo interacción en sesión nueva.
