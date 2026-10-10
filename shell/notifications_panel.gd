@@ -315,34 +315,61 @@ func _label(it):
 # Muestra summary + body completo (multilínea) del bloque bajo el puntero o de la
 # última notificación cuando el puntero está sobre el dockapp. Se dibuja como ventana
 # propia (top layer, sin mouse inputs) para no depender del tooltip de ImGui.
+#
+# Abrir la tarjeta de la DOCKAPP marca la notificación como leída (se la viste: es el
+# mismo criterio que en el bloque de la columna, que de todos modos marca al activarlo).
+# Se marca en la TRANSICIÓN (cerrada→abierta, o ítem nuevo a la vista) y no cada frame:
+# mark_read encola un comando por llamada.
+var _card_open = false
+var _card_marked_id = -1
+
+
+func _card_closed():
+	_card_open = false
+	_card_marked_id = -1
+
+
 func _draw_hover_card(shell):
 	var n = shell.notify
 	if n == null or not n.hover_card:
+		_card_closed()
 		return
 	var frame = shell.frame
 	if frame == null:
+		_card_closed()
 		return
 	var it = {}
 	var anchor = Vector2.ZERO
 	var above = false
+	var dock_open = false
 	if hover_index >= 0 and hover_index < blocks.size():
 		it = _item_by_id(n, int(blocks[hover_index]["id"]))
 		var r = blocks[hover_index]["rect"]
 		anchor = Vector2(r.position.x + r.size.x + 6.0, r.position.y)
 	else:
 		if not frame.applet_mods.has("notificaciones"):
+			_card_closed()
 			return
 		var ap = frame.applet_mods["notificaciones"]
 		if ap == null or not ap.hovered:
+			_card_closed()
 			return
 		it = n.latest()
 		var hr = ap.hover_rect
 		if hr.size.x <= 0.0:
+			_card_closed()
 			return
 		anchor = Vector2(hr.position.x + hr.size.x * 0.5 - CARD_W * 0.5, hr.position.y)
 		above = true
+		dock_open = true
 	if it.empty():
+		_card_closed()
 		return
+	var iid = int(it.get("id", -1))
+	if dock_open and iid >= 0 and (not _card_open or iid != _card_marked_id):
+		n.mark_read(iid)
+		_card_marked_id = iid
+	_card_open = true
 	var vp = shell._screen_size()
 	anchor.x = clamp(anchor.x, 6.0, max(6.0, vp.x - CARD_W - 6.0))
 	var rows = _card_rows(frame, shell, it)

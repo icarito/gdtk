@@ -51,9 +51,12 @@ sincronizado a `~/gdtk` y activado con recarga transaccional en bastion (mismo P
 
 ## Pendiente / no hecho
 - Sin probar con puntero real: tarjeta de hover y bounce (requieren interacción).
-- Marcado de `read` al abrir la tarjeta de hover del dockapp (hoy sólo al activar bloque).
 - Íconos SVG de apps: `Image.load` no rasteriza SVG; si el tema sólo trae SVG, cae a la
   campana (limitación preexistente).
+- **Cerrado 2026-10-10 tarde**: el marcado de `read` al ABRIR la tarjeta de hover del
+  dockapp (`notifications_panel._draw_hover_card`: transición cerrada→abierta o ítem
+  nuevo a la vista; no cada frame porque mark_read encola un comando). Test:
+  `tests/notif_hover_read_test.gd` (6 ok).
 
 ## Segunda tanda (2026-10-10, tarde)- **Bloques sin margen**: la columna usa la MISMA grilla del Frame (`frame.bar_grid`,
   PAD=0 → bloque = pitch = side), alineada a `grid.margin`, apilada por `pitch` (pegada).
