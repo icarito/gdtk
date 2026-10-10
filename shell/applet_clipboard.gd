@@ -18,11 +18,16 @@ const PERIOD_MS = 1000
 const SLEEP_STEP_MS = 100
 const RELAUNCH_MS = 10000   # cada cuánto se reintenta el vigía si murió
 const MAX_FAILS = 3         # vigía que no arranca N veces -> no_disponible, sin bucle
+const REARM_MS = 300000     # tras rendirse, reintentar cada 5 min (no 'para siempre')
 const READ_MAX = 4096       # bytes leídos de la entrada (sólo para resumir)
 const SYNC_MAX = 65536      # tope de lo que se comparte con el Grupo (= tope de `store`)
 const ITEMS_MAX = 10        # entradas publicadas en `items` (las más nuevas primero)
 const SUMMARY_MAX = 60      # recorte del resumen por ítem
 const IMAGE_EXT = ".png"    # extensión de las entradas de imagen
+# Selección PRIMARIA (.sel): lo que las apps de CLI «copian» al seleccionar. Se guarda
+# en el historial y se puede pegar, pero NO se marca para difusión al Grupo ni aviso:
+# la selección cambia a cada gesto del mouse y no debe inundar a los vecinos.
+const SELECTION_EXT = ".sel"
 const THUMB_MAX = 160       # lado máximo de la miniatura (px); se genera en el worker
 
 var state = "sin_dato"
@@ -223,6 +228,11 @@ static func is_image(name):
 	return String(name).ends_with(IMAGE_EXT)
 
 
+# Entrada nacida de la selección PRIMARIA (copiar al seleccionar en apps CLI).
+static func is_selection(name):
+	return String(name).ends_with(SELECTION_EXT)
+
+
 # Ancho x alto leídos del IHDR de un PNG (primeros 24 bytes), o [] si no es PNG.
 # Puro: recibe los bytes, no toca disco.
 static func png_size(header):
@@ -315,6 +325,17 @@ func _work(p):
 			else:
 				_launch(p)
 				fails += 1   # se confirma vivo en la próxima vuelta (lock tomado)
+		elif fails >= MAX_FAILS and now >= launch_at:
+			# Rearme largo (REARM_MS): "no disponible" NO es para siempre. El atasco del
+			# candado de los vigías puede liberarse (p. ej. un store-image con wl-paste
+			# colgado sobre una oferta muerta lo sostuvo 2 h); sin esto el Portapapeles
+			# quedó muerto hasta el próximo reinicio/reload del shell.
+			launch_at = now + REARM_MS
+			if _watcher_alive(p.dir):
+				fails = 0
+			else:
+				_launch(p)
+				fails += 1
 		var names = _list(p.dir)
 		var ordered = sorted_names(names)
 		var name = ordered[0] if not ordered.empty() else ""
@@ -323,7 +344,8 @@ func _work(p):
 		if last_name == null or sig != last_sig:
 			var prev = last_name
 			# Sincronizar al Grupo sólo texto; las imágenes no viajan por el canal peer.
-			if last_name != null and name != "" and name != last_name and not is_image(name):
+			if last_name != null and name != "" and name != last_name \
+					and not is_image(name) and not is_selection(name):
 				_queue_sync(_read(p.dir.plus_file(name), SYNC_MAX))
 			last_name = name
 			last_sig = sig
@@ -339,9 +361,15 @@ func _work(p):
 			else:
 				var text = _read(p.dir.plus_file(name))
 				lv = summary(text)
-				ld = "Portapapeles: %s\n\n%d en el historial" % [text.substr(0, 300), names.size()]
+				if is_selection(name):
+					# Entra por la selección primaria (copiar al seleccionar en apps CLI).
+					ld = "Portapapeles (selección): %s\n\n%d en el historial" % [text.substr(0, 300), names.size()]
+				else:
+					ld = "Portapapeles: %s\n\n%d en el historial" % [text.substr(0, 300), names.size()]
 			# Copia local nueva (no la primera lectura del directorio): evento para el aviso.
-			if prev != null and name != "" and name != prev:
+			# Las entradas por SELECCIÓN no notifican: llegan a cada gesto del mouse y el
+			# aviso serial «Copiado» por selección sería ruido (y la difusión ni las ve).
+			if prev != null and name != "" and name != prev and not is_selection(name):
 				var cs = lv if lv != "" else image_label(_image_dims(p, name))
 				_mutex.lock()
 				_copied = {"summary": cs, "kind": lk}
@@ -382,7 +410,10 @@ func _build_items(dir, ordered):
 		if is_image(nm):
 			out.append({"name": nm, "summary": image_label(_image_dims_from_dir(dir, nm)), "kind": "image"})
 		else:
-			out.append({"name": nm, "summary": summary(_read(dir.plus_file(nm), READ_MAX)), "kind": "text"})
+			var s = summary(_read(dir.plus_file(nm), READ_MAX))
+			if is_selection(nm):
+				s = "selección — " + s
+			out.append({"name": nm, "summary": s, "kind": "text"})
 	return out
 
 

@@ -19,9 +19,17 @@
 dir="${XDG_RUNTIME_DIR:-/tmp}/gdtk/clipboard"
 max=50
 
+# wl-paste con tope de tiempo: un source que muere a mitad de lectura no debe atascar
+# el flock de los vigías — un `wl-paste --type image/png` colgado (oferta muerta,
+# 17:12) sostuvo el lock 2 h: kill natural de los vigías nuevos (flock -n falla) y el
+# applet se rindió tras MAX_FAILS = Portapapeles muerto hasta el próximo reinicio.
+paste() {
+	timeout "${GDTK_CLIP_PASTE_T:-10}" wl-paste "$@"
+}
+
 # Borra las entradas más viejas por encima del tope (nombres ordenables por reloj).
 prune() {
-	ls -1 "$dir" 2>/dev/null | grep -E '^[0-9]+(\.png)?$' | sort | head -n -"$max" |
+	ls -1 "$dir" 2>/dev/null | grep -E '^[0-9]+(\.png|\.sel)?$' | sort | head -n -"$max" |
 		while IFS= read -r f; do rm -f -- "$dir/$f"; done
 }
 
@@ -35,6 +43,7 @@ watch)
 	# imagen; el de texto se abstiene si hay imagen (ver store-text).
 	exec flock -n "$dir/.lock" sh -c '
 		"$0" wl-text "$1" &
+		"$0" wl-text-primary "$1" &
 		"$0" wl-image "$1" &
 		wait
 	' "$0" "$2"
@@ -43,6 +52,11 @@ wl-text)
 	[ -n "$2" ] || exit 2
 	mkdir -p "$dir" && chmod 700 "$dir" || exit 1
 	WAYLAND_DISPLAY="$2" exec wl-paste --type text --watch "$0" store-text
+	;;
+wl-text-primary)
+	[ -n "$2" ] || exit 2
+	mkdir -p "$dir" && chmod 700 "$dir" || exit 1
+	WAYLAND_DISPLAY="$2" exec wl-paste --primary --type text --watch "$0" store-text-primary
 	;;
 wl-image)
 	[ -n "$2" ] || exit 2
@@ -54,14 +68,14 @@ store-text)
 	# Copiar una imagen suele ofrecer además texto (en el navegador, el HTML
 	# `<meta ...>` que la referencia): eso NO se guarda como texto, lo maneja
 	# store-image. Sin esto el historial mostraba el `<meta ...>` en vez de la imagen.
-	wl-paste --list-types 2>/dev/null | grep -q '^image/' && exit 0
+	paste --list-types 2>/dev/null | grep -q '^image/' && exit 0
 	umask 077
 	tmp="$dir/.in.$$"
 	# Preferir text/plain explícito; si el compositor sólo ofrece text/html, caer a
 	# `--type text` y descartar lo que parezca HTML.
-	if wl-paste --no-newline --type text/plain >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+	if paste --no-newline --type text/plain >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
 		:
-	elif wl-paste --no-newline --type text >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+	elif paste --no-newline --type text >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
 		if head -c 128 "$tmp" | grep -qaiE '<(!doctype|html|meta)'; then
 			rm -f "$tmp"; exit 0
 		fi
@@ -80,7 +94,7 @@ store-image)
 	[ "${CLIPBOARD_STATE:-data}" = data ] || exit 0
 	umask 077
 	tmp="$dir/.in.$$"
-	wl-paste --type image/png >"$tmp" 2>/dev/null || { rm -f "$tmp"; exit 0; }
+	paste --type image/png >"$tmp" 2>/dev/null || { rm -f "$tmp"; exit 0; }
 	[ -s "$tmp" ] || { rm -f "$tmp"; exit 0; }
 	# Firma PNG (\x89PNG\r\n\x1a\n): no guardar un archivo vacío/corrupto como imagen.
 	sig="$(head -c 8 "$tmp" 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')"
@@ -91,6 +105,34 @@ store-image)
 		exit 0
 	fi
 	mv "$tmp" "$dir/$(date +%s%N).png"
+	prune
+	;;
+store-text-primary)
+	# Selección PRIMARIA: lo que las apps de CLI «copian» al seleccionar (el mouse
+	# escribe primary, no clipboard; sin este vigía una selección no dejaba rastro).
+	# Se guarda como texto con sufijo .sel y NO se marca para difusión: la selección
+	# cambia a cada gesto del mouse, no debe inundar el historial del Grupo ni el bus
+	# de notificaciones (el applet la filtra: sin outbox ni aviso).
+	[ "${CLIPBOARD_STATE:-data}" = data ] || exit 0
+	umask 077
+	tmp="$dir/.in.$$"
+	if paste --primary --no-newline --type text/plain >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+		:
+	elif paste --primary --no-newline --type text >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+		if head -c 128 "$tmp" | grep -qaiE '<(!doctype|html|meta)'; then
+			rm -f "$tmp"; exit 0
+		fi
+	else
+		rm -f "$tmp"; exit 0
+	fi
+	# Dedupe contra la última entrada de TEXTO de cualquier origen (clipboard o primary):
+	# un app que copia a las dos selecciones no debe ocupar dos filas del historial.
+	last="$(ls -1 "$dir" 2>/dev/null | grep -E '^[0-9]+(\.sel)?$' | sort | tail -n1)"
+	if [ -n "$last" ] && cmp -s "$tmp" "$dir/$last"; then
+		rm -f "$tmp"
+		exit 0
+	fi
+	mv "$tmp" "$dir/$(date +%s%N).sel"
 	prune
 	;;
 store)
