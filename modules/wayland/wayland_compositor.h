@@ -161,6 +161,8 @@ void pointer_axis_stop();
 	bool scanout_suspended() const;
 	// Motivo (diagnóstico) del último rechazo/aceptación del scanout.
 	String scanout_reason() const;
+	// Diagnóstico POR VENTANA: {"active": bool, "reason": String} para el toplevel `id`.
+	Dictionary scanout_of(int p_id) const;
 
 	// Salidas logicas (multi-output). `p_rect` es la geometria logica global;
 	// `p_scale` se redondea a un entero >=1. add_output devuelve el id (>0) o 0.

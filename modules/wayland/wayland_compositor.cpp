@@ -734,6 +734,7 @@ void WaylandCompositor::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_scanout_suspended", "suspended"), &WaylandCompositor::set_scanout_suspended);
 	ClassDB::bind_method(D_METHOD("scanout_suspended"), &WaylandCompositor::scanout_suspended);
 	ClassDB::bind_method(D_METHOD("scanout_reason"), &WaylandCompositor::scanout_reason);
+	ClassDB::bind_method(D_METHOD("scanout_of", "id"), &WaylandCompositor::scanout_of);
 
 	ClassDB::bind_method(D_METHOD("add_output", "name", "rect", "scale", "primary"), &WaylandCompositor::add_output, DEFVAL(1.0), DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("configure_output", "id", "rect", "scale"), &WaylandCompositor::configure_output, DEFVAL(1.0));
@@ -1316,6 +1317,18 @@ bool WaylandCompositor::scanout_suspended() const {
 
 String WaylandCompositor::scanout_reason() const {
 	return String(wl_server_scanout_reason(server));
+}
+
+Dictionary WaylandCompositor::scanout_of(int p_id) const {
+	Dictionary d;
+	if (server == NULL) {
+		return d;
+	}
+	const char *reason = NULL;
+	int active = wl_server_scanout_of(server, p_id, &reason);
+	d["active"] = active != 0;
+	d["reason"] = String(reason != NULL ? reason : "desconocido");
+	return d;
 }
 
 Dictionary WaylandCompositor::_output_dict(int p_output_id) const {

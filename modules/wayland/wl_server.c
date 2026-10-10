@@ -73,6 +73,9 @@ typedef struct toplevel {
 	bool want_focus;
 	bool visible; // dibujado en el último frame del shell (ver wl_server_set_visible)
 	int output_id; // salida logica asignada (0 = sin asignar; por defecto la principal)
+	// Motivo por-ventana del ultimo `scanout_candidate` (diagnostico por ventana;
+	// s->scanout_reason es global y lo pisa el commit de otra ventana). Literal estatico.
+	const char *scanout_reason;
 
 	struct wl_listener commit;
 	struct wl_listener map;
@@ -434,7 +437,9 @@ static logical_output *scanout_primary_output(struct wl_server *s) {
 // Nada de subsurfaces/popups, Xwayland ni salidas secundarias en el MVP.
 //
 // Se aparta tambien si hay un popup abierto (menu del cliente: lo dibuja Godot y la
-// subsurface del host lo taparia) o si otra ventana visible comparte la principal.
+// subsurface del host lo taparia). El chequeo de "otra ventana visible" NO aplica al
+// fullscreen: un toplevel xdg fullscreen cubre toda la salida principal, asi que las
+// otras ventanas visibles de esa salida quedan detras y no pueden ocluirlo.
 static bool scanout_has_visible_sibling(struct wl_server *s, int self_id) {
 	if (!s->throttle) {
 		return false; // todavia sin la lista de visibilidad del shell
@@ -451,46 +456,67 @@ static bool scanout_has_visible_sibling(struct wl_server *s, int self_id) {
 	return false;
 }
 
+// Fija el motivo del scanout en el server (compatibilidad: state.compositor.scanout_reason)
+// y, si hay toplevel, tambien por-ventana. El global lo pisa el ultimo commit de CUALQUIER
+// ventana, asi que no sirve para diagnostico por ventana.
+static bool scanout_reject(struct wl_server *s, toplevel *t, const char *reason) {
+	s->scanout_reason = reason;
+	if (t != NULL) {
+		t->scanout_reason = reason;
+	}
+	return false;
+}
+
 static bool scanout_candidate(struct wl_server *s, surface_state *st) {
+	toplevel *t = (st != NULL && st->id > 0) ? toplevel_find(s, st->id) : NULL;
 	if (!s->scanout_enabled) {
-		s->scanout_reason = "bridge off";
-		return false;
+		return scanout_reject(s, t, "bridge off");
 	}
 	if (s->scanout_suspended) {
-		s->scanout_reason = "suspendido (overlay del shell)";
-		return false;
+		return scanout_reject(s, t, "suspendido (overlay del shell)");
 	}
-	if (st->surface == NULL || st->id <= 0) {
-		s->scanout_reason = "sin surface/id";
-		return false;
+	if (st == NULL || st->surface == NULL || st->id <= 0) {
+		return scanout_reject(s, t, "sin surface/id");
 	}
-	toplevel *t = toplevel_find(s, st->id);
-	if (t == NULL || !t->mapped || t->tl == NULL) {
-		s->scanout_reason = "toplevel no mapeado";
-		return false;
+	// Un toplevel es xdg (`t->tl`) o Xwayland (`t->xs`); exactamente uno. Xwayland se
+	// acepta desde que Firefox corre por ahi (MOZ_ENABLE_WAYLAND=0): una ventana X es un
+	// solo wl_surface, asi que se escanea entera (video incluido).
+	if (t == NULL || !t->mapped || (t->tl == NULL && t->xs == NULL)) {
+		return scanout_reject(s, t, "toplevel no mapeado");
 	}
-	if (t->tl->base->surface != st->surface) {
-		s->scanout_reason = "surface no raiz (subsurface)";
-		return false;
+	if (t->xs != NULL && t->xs->override_redirect) {
+		// Menus/popups X11: son ventanas override-redirect aparte, no candidatos.
+		return scanout_reject(s, t, "xwayland override-redirect");
+	}
+	struct wlr_surface *root = (t->tl != NULL) ? t->tl->base->surface : t->xs->surface;
+	if (root == NULL || root != st->surface) {
+		return scanout_reject(s, t, "surface no raiz (subsurface)");
 	}
 	if (t->output_id != s->primary_output_id) {
-		s->scanout_reason = "salida no primaria";
-		return false;
+		return scanout_reject(s, t, "salida no primaria");
 	}
-	if (!wl_list_empty(&t->tl->base->popups)) {
-		s->scanout_reason = "popup abierto";
-		return false;
+	// Popups xdg (menu del cliente): lo dibuja Godot y la subsurface del host lo taparia.
+	// Xwayland no expone `base->popups`; sus menus son ventanas override-redirect aparte,
+	// que hoy no se detectan: mientras uno este abierto, el scanout del padre fullscreen
+	// podria taparlo (limitacion conocida, no resuelta en esta fase).
+	if (t->tl != NULL && !wl_list_empty(&t->tl->base->popups)) {
+		return scanout_reject(s, t, "popup abierto");
+	}
+	// El fullscreen cubre toda la salida principal: los siblings quedan detras y no
+	// pueden ocluirlo, asi que no se consulta scanout_has_visible_sibling aca. Validar
+	// fullscreen ANTES del guard de sibling es lo que permite scanout con otras
+	// ventanas visibles detras.
+	bool fullscreen = (t->tl != NULL) ? t->tl->current.fullscreen : t->xs->fullscreen;
+	if (fullscreen) {
+		s->scanout_reason = "on";
+		t->scanout_reason = "on";
+		return true;
 	}
 	if (scanout_has_visible_sibling(s, st->id)) {
-		s->scanout_reason = "otra ventana visible";
-		return false;
+		return scanout_reject(s, t, "otra ventana visible");
 	}
-	if (!t->tl->current.fullscreen) {
-		s->scanout_reason = "xdg no fullscreen";
-		return false;
-	}
-	s->scanout_reason = "on";
-	return true;
+	// Mismo string para xdg y Xwayland (no romper el diagnostico existente).
+	return scanout_reject(s, t, "xdg no fullscreen");
 }
 
 static void scanout_buffer(surface_state *st, struct wlr_buffer *buf,
@@ -528,6 +554,26 @@ static surface_state *scanout_state_for_id(struct wl_server *s, int id) {
 		}
 	}
 	return NULL;
+}
+
+// Diagnostico POR VENTANA del scanout directo: devuelve 1 si la surface raiz del
+// toplevel `id` esta en scanout (st->scanout) y, si `reason` no es NULL, apunta al
+// motivo por-ventana del ultimo `scanout_candidate` ("desconocido" si no hay).
+int wl_server_scanout_of(wl_server *s, int id, const char **reason) {
+	if (reason != NULL) {
+		*reason = "desconocido";
+	}
+	if (s == NULL || id <= 0) {
+		return 0;
+	}
+	surface_state *st = scanout_state_for_id(s, id);
+	if (reason != NULL) {
+		toplevel *t = toplevel_find(s, id);
+		if (t != NULL && t->scanout_reason != NULL) {
+			*reason = t->scanout_reason;
+		}
+	}
+	return st != NULL ? 1 : 0;
 }
 
 // Apaga el scanout de `st` reimportando su ultimo dmabuf como textura de Godot. Es el
