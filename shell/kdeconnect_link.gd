@@ -8,12 +8,14 @@ extends Node
 # Alcance v1 (mouse + mixer + mínimo de protocolo):
 #   - discovery: UDP en 1716 (broadcast saliente + listener) y listener TCP en
 #     1716..1718 (escalera por si otro daemon ocupa 1716)
-#   - TLS autofirmado propio (cert persistido, CN = deviceId) en ambos roles
-#     (listener acepta, dial saliente conecta)
+#   - TLS autofirmado propio (cert persistido en XDG_STATE_HOME, CN = deviceId):
+#     el listener ACCEPTA (servidor TLS) y el dial saliente CONECTA (cliente TLS)
 #   - identity + capabilities; pairing kdeconnect.pair con dos caminos: pedidos
-#     entrantes quedan pendientes y se aceptan con el RPC "kdeconnect" de
-#     remote.gd (auto_pair sólo para tests); y gdtk pide pair apenas descubre
-#     un device nuevo (el usuario acepta en la UI del teléfono)
+#     entrantes del teléfono quedan pendientes (timestamp ±30 min) y se aceptan
+#     con el RPC "kdeconnect" op pair_accept (auto_pair sólo para tests); y gdtk
+#     pide pair con un dial de descubrimiento o con op pair_request — la respuesta
+#     pair:true a ESE pedido completa el pareo (no vuelve a quedar pendiente)
+#   - identidad/cert/pareos persisten en XDG_STATE_HOME (no XDG_RUNTIME_DIR)
 #   - kdeconnect.mousepad.request / kdeconnect.presenter → Input.parse_input_event
 #     (mismo sink que click/move/scroll del control remoto), solo devices pareados
 #   - kdeconnect.systemvolume: lista de sinks, set de volumen/mute/default y
@@ -22,11 +24,19 @@ extends Node
 #     (mismo camino que las teclas multimedia)
 #   - kdeconnect.ping / kdeconnect.battery: contador y estado para el RPC
 #
-# Limitación conocida del engine 3.6 (probada con probe + openssl s_client):
-# StreamPeerSSL no pide ni entrega el client cert del par, así que el pin de
-# device por cert queda para una versión con módulo C; TLS cifra igual y el
-# control libre queda gateado a devices pareados vía store JSON (sin secretos),
-# con aceptación explícita de por medio.
+# NO interoperable con KDE Connect real todavía — transporte (protocol.md v8):
+# el flujo correcto es: (1) el iniciador TCP manda identity en CLARO con
+# targetDeviceId/targetProtocolVersion; (2) el par valida destino; (3) ambos
+# suben a TLS con ROLES INVERTIDOS (quien inició TCP pasa a SERVIDOR TLS); (4) recién
+# bajo TLS se intercambia identity completa y, si ya estaban pareados, se fija el
+# cert (pinning). Este prototipo: el listener envuelve TLS enseguida como servidor
+# (accept_stream) y el dial como cliente (connect_to_stream) — roles TCP, no
+# invertidos —, sin identity en claro, sin validar target y autorizando sólo por el
+# deviceId declarado bajo TLS, sin verificar el certificado del par. Implementarlo
+# bien depende de que el engine exponga el cert del par (StreamPeerSSL hoy no lo
+# entrega); queda pendiente de un módulo C. Mientras tanto el control queda gateado
+# a devices pareados vía store JSON (sin secretos) con aceptación explícita.
+# El timeout de handshake/dial y el tope de paquete SÍ están cubiertos abajo.
 
 const PK = preload("res://kdeconnect_packet.gd")
 
@@ -112,13 +122,14 @@ func _env_port(env, default):
 
 
 func _setup_store_path(opts):
+	# Identidad, cert y pareos deben SOBREVIVIR logins/reboots: XDG_STATE_HOME
+	# (no XDG_RUNTIME_DIR, que es efímero; y no XDG_STATE_DIR, que no existe en
+	# la spec XDG). Sin XDG_STATE_HOME cae al default ~/.local/state.
 	var base = ""
 	if opts.has("store_dir"):
 		base = str(opts.store_dir)
-	elif OS.get_environment("XDG_STATE_DIR") != "":
-		base = OS.get_environment("XDG_STATE_DIR").plus_file("gdtk")
-	elif OS.get_environment("XDG_RUNTIME_DIR") != "":
-		base = OS.get_environment("XDG_RUNTIME_DIR").plus_file("gdtk")
+	elif OS.get_environment("XDG_STATE_HOME") != "":
+		base = OS.get_environment("XDG_STATE_HOME").plus_file("gdtk")
 	else:
 		base = OS.get_environment("HOME").plus_file(".local").plus_file("state").plus_file("gdtk")
 	_store_path = base.plus_file("kdeconnect-pair.json")
@@ -324,6 +335,12 @@ func _dial(ip, port, did):
 
 func _poll_dial(d, now):
 	# true = ya no importa (promovido a conn, muerto o expirado).
+	# El timeout se evalúa ARRIBA, antes del branch wrapped: si no, un dial que ya
+	# envolvió TLS y se cuelga en el handshake no expiraba nunca.
+	if now - int(d.at) > DIAL_TIMEOUT_MS:
+		_disconnect_dial(d)
+		dialing.erase(d.dial_id)
+		return true
 	var st = d.tcp.get_status()
 	if not d.wrapped:
 		if st == StreamPeerTCP.STATUS_CONNECTED:
@@ -332,9 +349,6 @@ func _poll_dial(d, now):
 			if err == OK:
 				return false
 		elif st == StreamPeerTCP.STATUS_ERROR:
-			dialing.erase(d.dial_id)
-			return true
-		elif now - d.at > DIAL_TIMEOUT_MS:
 			dialing.erase(d.dial_id)
 			return true
 		return false
@@ -349,6 +363,15 @@ func _poll_dial(d, now):
 		dialing.erase(d.dial_id)
 		return true
 	return false
+
+
+func _disconnect_dial(d):
+	# Cierra el socket que quedó colgado por timeout; con TLS envuelto hay que
+	# cerrar el stream SSL y no el TCP crudo.
+	if d.wrapped:
+		d.ssl.disconnect_from_stream()
+	else:
+		d.tcp.disconnect_from_host()
 
 
 # --- conexión: TLS + identity + framing ----------------------------------------
@@ -380,7 +403,7 @@ func _new_conn(tcp_stream, ip, outbound, now):
 	# El par `tcp_stream` ya viene envuelto por quien armó el link:
 	# StreamPeerSSL con blocking_handshake=false, listo para su poll por frame.
 	return {
-		"ssl": tcp_stream, "buf": PoolByteArray(), "ip": str(ip),
+		"ssl": tcp_stream, "buf": PoolByteArray(), "out_buf": PoolByteArray(), "ip": str(ip),
 		"outbound": outbound, "device_id": "", "device_name": "", "device_type": "",
 		"paired": false, "identity_sent": false, "pair_sent": false,
 		"close": false, "at": int(now),
@@ -401,6 +424,9 @@ func _poll_conn(conn, now):
 		conn.close = true
 		_clear_session_pair_gate(conn.device_id)
 		return
+	_flush_conn(conn)
+	if conn.close:
+		return
 	if not conn.identity_sent:
 		conn.identity_sent = true
 		_send_packet(conn, PK.identity_packet(device_id, device_name, tcp_port))
@@ -415,6 +441,10 @@ func _poll_conn(conn, now):
 		buf.append_array(data[1])
 		conn.buf = buf
 	_consume_lines(conn)
+	# Buffer sin newline: sin este tope crecería sin límite hasta agotar memoria.
+	if not conn.close and conn.buf.size() > MAX_PACKET_BYTES:
+		conn.close = true
+		_clear_session_pair_gate(conn.device_id)
 
 
 func _consume_lines(conn):
@@ -441,7 +471,35 @@ func _consume_lines(conn):
 func _send_packet(conn, packet):
 	if conn.close:
 		return
-	conn.ssl.put_data((PK.encode(packet) + "\n").to_utf8())
+	# Encolar y escribir con put_partial_data. NO usar put_data: en este fork
+	# (modules/mbedtls/stream_peer_mbedtls.cpp put_data) hace busy-loop si el
+	# socket no acepta todo de una (WANT_WRITE con sent=0) → cuelga el _process.
+	var ob = conn.out_buf
+	ob.append_array((PK.encode(packet) + "\n").to_utf8())
+	conn.out_buf = ob
+	_flush_conn(conn)
+
+
+func _flush_conn(conn):
+	if conn.close or conn.out_buf.size() == 0:
+		return
+	if conn.ssl.get_status() != StreamPeerSSL.STATUS_CONNECTED:
+		return  # el handshake sigue; reintentamos en el próximo poll
+	var ob = conn.out_buf
+	while ob.size() > 0:
+		var r = conn.ssl.put_partial_data(ob)
+		if r[0] != OK:
+			conn.close = true
+			_clear_session_pair_gate(conn.device_id)
+			return
+		var sent = int(r[1])
+		if sent <= 0:
+			break  # WANT_WRITE: queda encolado para el próximo frame
+		if sent >= ob.size():
+			ob = PoolByteArray()
+		else:
+			ob = ob.subarray(sent, ob.size() - 1)
+	conn.out_buf = ob
 
 
 func _clear_session_pair_gate(did):
@@ -503,7 +561,11 @@ func _on_identity(conn, body):
 	print("KdeConnect: %s device %s (%s...) pareado=%s" % [
 		"dial propia" if conn.outbound else "entrante" , conn.device_name,
 		did.substr(0, 8), str(conn.paired)])
-	if not conn.paired and not pair_requested.has(did):
+	# Pedido saliente sólo si NOSOTROS dialamos (descubrimiento → dial). En una
+	# conexión entrante el teléfono es quien pide; ese pedido queda PENDIENTE y
+	# se acepta con el RPC "kdeconnect" (op pair_accept). Ignorar esto convertía
+	# toda respuesta positiva en otro pending (bug del handoff).
+	if not conn.paired and conn.outbound and not pair_requested.has(did):
 		pair_requested[did] = true
 		_send_packet(conn, PK.pair_packet(true))
 		print("KdeConnect: pedido de pair hacia ", conn.device_name)
@@ -523,6 +585,7 @@ func remember_device(did, name, ip, port, now):
 	else:
 		if str(name) != "":
 			rec.name = label
+		rec.ip = str(ip)          # el peer puede cambiar de IP (otra red/DHCP)
 		rec.port = int(port)
 		rec.last_ms = int(now)
 
@@ -534,17 +597,27 @@ func _on_pair(conn, body):
 	if bool(body.get("pair", false)):
 		if conn.paired:
 			return
-		if auto_pair:
-			var ok = _pair_accept_internal(conn)
-			_send_packet(conn, PK.pair_packet(ok))
+		if pair_requested.has(did) or auto_pair:
+			# Respuesta positiva a NUESTRO pedido saliente (o auto_pair de tests):
+			# esto COMPLETA el pareo; no debe volver a quedar pendiente.
+			_pair_accept_internal(conn)
+			pair_requested.erase(did)
+			_send_packet(conn, PK.pair_packet(true))
 		else:
+			# Pedido entrante del teléfono: en v8 trae timestamp y se descarta si
+			# está fuera de ±30 min; si no, queda pendiente del usuario (RPC).
+			if not PK.pair_timestamp_ok(body, OS.get_system_time_secs()):
+				print("KdeConnect: pedido de pair con timestamp inválido; ignorado")
+				return
+			if _has_pending(did):
+				return
 			pair_requests.append({
 				"device_id": did,
 				"name": conn.device_name,
 				"ms": OS.get_ticks_msec(),
 			})
 			print("KdeConnect: pedido de pair PENDIENTE de ", conn.device_name,
-				" (", did.substr(0, 8), "...) — hay aceptarlo con el RPC kdeconnect")
+				" (", did.substr(0, 8), "...) — hay que aceptarlo con el RPC kdeconnect")
 	else:
 		# pair:false = rechazo de nuestro pedido o desparéo del teléfono.
 		_drop_request_for(did)
@@ -554,6 +627,13 @@ func _on_pair(conn, body):
 			_store_remove(did)
 			conn.paired = false
 		conn.close = true
+
+
+func _has_pending(did):
+	for r in pair_requests:
+		if str(r.device_id) == did:
+			return true
+	return false
 
 
 func _drop_request_for(did):
@@ -604,6 +684,16 @@ func control(params = {}):
 					_drop_request_for(did)
 					return {"ok": false, "error": "device desconectado"}
 			return {"ok": false, "error": "sin pedido pendiente"}
+		"pair_request":
+			# Pedido saliente explícito (lo mismo que manda el dial por descubrimiento).
+			for c in conns:
+				if c.device_id == did and not c.close:
+					if c.paired:
+						return {"ok": false, "error": "ya pareado"}
+					pair_requested[did] = true
+					_send_packet(c, PK.pair_packet(true))
+					return {"ok": true}
+			return {"ok": false, "error": "device desconectado"}
 		"pair_reject":
 			_drop_request_for(did)
 			for c in conns:
@@ -773,7 +863,8 @@ func _worker_tool(prog, env, skip_tools):
 		return
 	var out = []
 	var rc = OS.execute("which", [prog], true, out, true)
-	var found = rc == 0 and out.get_string_from_utf8().strip_edges() != ""
+	# OS.execute llena `out` (Array) con un único String; NO es un PoolByteArray.
+	var found = rc == 0 and out.size() > 0 and str(out[0]).strip_edges() != ""
 	if prog == "wpctl":
 		_wpctl = prog if found else ""
 	else:
@@ -834,7 +925,10 @@ func _drain_worker():
 func _run_tool(prog, argv):
 	var out = []
 	var rc = OS.execute(prog, argv, true, out, true)
-	return {"code": rc, "text": out.get_string_from_utf8()}
+	# `out` es un Array con un único String (salida del proceso); no usar
+	# get_string_from_utf8() (método de PoolByteArray, no de Array).
+	var text = str(out[0]) if out.size() > 0 else ""
+	return {"code": rc, "text": text}
 
 
 func _default_sink():

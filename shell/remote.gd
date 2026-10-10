@@ -260,6 +260,13 @@ func _handle_line(conn, line):
 				_reply(conn, id, shell.notify.rpc_action(params))
 			else:
 				_fail(conn, id, -32003, "sin bus de notificaciones")
+		"kdeconnect":
+			# Receptor KDE Connect (opt-in GDTK_KDECONNECT=1): control del link.
+			# {op: pair_accept|pair_reject|pair_request|unpair|state, device: <id>}.
+			if Host.kdeconnect != null and is_instance_valid(Host.kdeconnect):
+				_reply(conn, id, Host.kdeconnect.control(params))
+			else:
+				_fail(conn, id, -32003, "kdeconnect off")
 		"share":
 			# Interruptor maestro del intercambio (radar). {on: bool} o sin campo
 			# para alternar. Devuelve el estado resultante; se graba para persistir.

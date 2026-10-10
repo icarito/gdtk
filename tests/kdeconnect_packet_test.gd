@@ -24,7 +24,8 @@ func _init():
 	check("identity: version v8", ib.protocolVersion == 8)
 	check("identity: capabilities incluidas", PK.INCOMING_CAPS.find(PK.MOUSEPAD_REQUEST) >= 0
 		and PK.OUTGOING_CAPS.find(PK.SYSTEMVOLUME) >= 0
-		and PK.INCOMING_CAPS.find("kdeconnect.battery") < 0)
+		and PK.INCOMING_CAPS.find(PK.BATTERY) >= 0
+		and PK.INCOMING_CAPS.find("kdeconnect.clipboard") < 0)
 
 	check("pair true con timestamp", int(PK.body_of(PK.pair_packet(true)).timestamp) > 0)
 	check("pair false sin timestamp", not PK.body_of(PK.pair_packet(false)).has("timestamp"))
@@ -81,20 +82,37 @@ func _init():
 	var bad = PK.mousepad_events({"key": "¡"})
 	check("mousepad: tecla sin scancode ignorada", bad.size() == 0)
 
-	var spec = PK.mousepad_events({"specialKey": 0x01000012})  # Qt Key_Left
-	check("mousepad: specialKey Left", spec.size() == 1 and spec[0].code == KEY_LEFT)
-	var f5 = PK.mousepad_events({"specialKey": 0x01000034 + 0, "ctrl": true})  # Qt F5
-	check("mousepad: specialKey F5+ctrl", f5.size() == 1 and f5[0].code == KEY_F5
+	# specialKey: índice 1..32 de la tabla del protocolo v8 (no códigos Qt).
+	var spec = PK.mousepad_events({"specialKey": 4})   # protocolo: Left
+	check("mousepad: specialKey 4 = Left", spec.size() == 1 and spec[0].code == KEY_LEFT)
+	check("mousepad: specialKey tabla", PK.special_key_code(1) == KEY_BACKSPACE
+		and PK.special_key_code(12) == KEY_ENTER and PK.special_key_code(14) == KEY_ESCAPE
+		and PK.special_key_code(20) == KEY_META and PK.special_key_code(32) == KEY_F12)
+	var f5 = PK.mousepad_events({"specialKey": 25, "ctrl": true})  # protocolo: F5
+	check("mousepad: specialKey 25 = F5+ctrl", f5.size() == 1 and f5[0].code == KEY_F5
 		and f5[0].ctrl)
-	check("mousepad: specialKey raro ignorado", PK.mousepad_events({"specialKey": 7}).size() == 0)
+	check("mousepad: specialKey fuera de rango ignorado",
+		PK.mousepad_events({"specialKey": 0}).size() == 0
+		and PK.mousepad_events({"specialKey": 33}).size() == 0
+		and PK.mousepad_events({"specialKey": 7.0}).size() == 1
+		and PK.mousepad_events({"specialKey": 7.0})[0].code == KEY_DOWN)
 
 	# echo: sólo con sendAck.
 	check("echo: sin sendAck null", PK.mousepad_echo({"key": "a"}) == null)
 	var ec = PK.mousepad_echo({"key": "a", "sendAck": true, "ctrl": false})
 	check("echo: con sendAck key+isAck", ec != null and PK.packet_type(ec) == PK.MOUSEPAD_ECHO
 		and PK.body_of(ec).isAck and PK.body_of(ec).key == "a")
-	var ecs = PK.mousepad_echo({"specialKey": 0x01000012, "sendAck": true})
-	check("echo: specialKey echo", PK.body_of(ecs).specialKey == 0x01000012)
+	var ecs = PK.mousepad_echo({"specialKey": 4, "sendAck": true})
+	check("echo: specialKey echo", PK.body_of(ecs).specialKey == 4)
+
+	# battery: constante del dispatcher y helper de timestamp de pair.
+	check("battery: tipo y cap incoming", PK.BATTERY == "kdeconnect.battery"
+		and PK.packet_type(PK.packet(PK.BATTERY, {"currentCharge": 42})) == PK.BATTERY)
+	var now_s = 1000000
+	check("pair ts: fresco aceptado", PK.pair_timestamp_ok({"timestamp": now_s - 60}, now_s))
+	check("pair ts: viejo/faltante rechazado",
+		not PK.pair_timestamp_ok({"timestamp": now_s - 1801}, now_s)
+		and not PK.pair_timestamp_ok({}, now_s))
 
 	# presenter: motion relativo; stop no genera nada.
 	var pr = PK.presenter_events({"dx": 2.0, "dy": 5.0})
@@ -134,6 +152,9 @@ func _init():
 	check("parse_sinks: 2 y por TAB", ss.size() == 2 and ss[0].index == "49"
 		and ss[0].name == "alsa_output.pci.stub" and ss[1].name == "otro_sink_name")
 	check("parse_sinks: basura fuera", PK.parse_pactl_sinks("# comment\n\n\n").size() == 0)
+	check("parse_sinks: fila sin nombre saltada",
+		PK.parse_pactl_sinks("basura\t\t\t\notro\tname\tx").size() == 1
+		and PK.parse_pactl_sinks("basura\t\t\t\notro\tname\tx")[0].name == "name")
 	check("default_sink: texto real", PK.parse_pactl_default_sink(
 		"Variable: X\nDefault Sink: alsa_output.pci.stub\n") == "alsa_output.pci.stub")
 	check("default_sink: ausente ''", PK.parse_pactl_default_sink("Ün solo .\n") == "")

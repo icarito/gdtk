@@ -14,6 +14,7 @@ extends Reference
 const PROTOCOL_VERSION = 8
 const IDENTITY = "kdeconnect.identity"
 const PAIR = "kdeconnect.pair"
+const BATTERY = "kdeconnect.battery"
 const MOUSEPAD_REQUEST = "kdeconnect.mousepad.request"
 const MOUSEPAD_ECHO = "kdeconnect.mousepad.echo"
 const PRESENTER = "kdeconnect.presenter"
@@ -21,10 +22,14 @@ const PING = "kdeconnect.ping"
 const SYSTEMVOLUME = "kdeconnect.systemvolume"
 const SYSTEMVOLUME_REQ = "kdeconnect.systemvolume.request"
 
+# Skew máximo aceptado del timestamp de un pedido de pair (protocol.md v8: 30 min).
+const PAIR_MAX_SKEW_S = 1800
+
 # incomingCapabilities: packets que gdtk consume; outgoingCapabilities: los que
-# emite. Declarar battery/clipboard como incoming sólo cuando se implementen:
-# el app Android habilita sus plugins según estas listas.
-const INCOMING_CAPS = [IDENTITY, PAIR, MOUSEPAD_REQUEST, PRESENTER, SYSTEMVOLUME_REQ, PING]
+# emite. El app Android habilita sus plugins según estas listas. battery va en
+# incoming porque el dispatcher de kdeconnect_link.gd lo consume (estado para el
+# RPC); clipboard sigue fuera hasta implementarlo.
+const INCOMING_CAPS = [IDENTITY, PAIR, BATTERY, MOUSEPAD_REQUEST, PRESENTER, SYSTEMVOLUME_REQ, PING]
 const OUTGOING_CAPS = [IDENTITY, PAIR, MOUSEPAD_ECHO, SYSTEMVOLUME, PING]
 
 # Caracteres que el spec prohíbe en deviceName (se sanea quitando).
@@ -87,6 +92,14 @@ static func pair_packet(accept):
 	if accept:
 		body["timestamp"] = int(_now_ms() / 1000.0)
 	return packet(PAIR, body)
+
+
+# protocol.md v8: el pedido de pair trae timestamp (segundos epoch) y se descarta
+# si está fuera de ±30 min. Aplicar sólo a PEDIDOS entrantes, no a respuestas.
+static func pair_timestamp_ok(body, now_sec):
+	if typeof(body) != TYPE_DICTIONARY or not body.has("timestamp"):
+		return false
+	return abs(int(now_sec) - int(body.timestamp)) <= PAIR_MAX_SKEW_S
 
 
 # deviceId = 32-38 chars de [A-z0-9_-] (doc: típicamente UUIDv4 sin guiones).
@@ -227,26 +240,19 @@ static func char_key_events(text, mods):
 	return out
 
 
-static func special_key_code(qt_value):
-	# specialKey viaja como valor de Qt::Key (0x01000000+). Mapeo lo que el
-	# shell admite; fuera de tablas → 0 (ignorado).
+static func special_key_code(index):
+	# specialKey viaja como ÍNDICE 1..32 de la tabla de protocol.md (v8), no como
+	# código Qt. Mapeo a las teclas de Godot; 0/fuera de rango → 0 (ignorado).
+	# Ojo: Linefeed (3) no tiene tecla propia en Godot 3, se mapea a KEY_ENTER.
 	var map = {
-		0x01000000: KEY_ESCAPE, 0x01000001: KEY_TAB, 0x01000002: KEY_BACKTAB,
-		0x01000003: KEY_BACKSPACE, 0x01000004: KEY_ENTER, 0x01000005: KEY_KP_ENTER,
-		0x01000006: KEY_INSERT, 0x01000007: KEY_DELETE, 0x01000008: KEY_PAUSE,
-		0x01000009: KEY_PRINT, 0x0100000a: KEY_SYSREQ, 0x0100000b: KEY_CLEAR,
-		0x01000010: KEY_HOME, 0x01000011: KEY_END, 0x01000012: KEY_LEFT,
-		0x01000013: KEY_UP, 0x01000014: KEY_RIGHT, 0x01000015: KEY_DOWN,
-		0x01000016: KEY_PAGEUP, 0x01000017: KEY_PAGEDOWN,
-		0x01000020: KEY_SHIFT, 0x01000021: KEY_CONTROL, 0x01000022: KEY_META,
-		0x01000023: KEY_ALT, 0x01000024: KEY_CAPSLOCK, 0x01000025: KEY_NUMLOCK,
-		0x01000026: KEY_SCROLLLOCK,
+		1: KEY_BACKSPACE, 2: KEY_TAB, 3: KEY_ENTER, 4: KEY_LEFT, 5: KEY_UP,
+		6: KEY_RIGHT, 7: KEY_DOWN, 8: KEY_PAGEUP, 9: KEY_PAGEDOWN, 10: KEY_HOME,
+		11: KEY_END, 12: KEY_ENTER, 13: KEY_DELETE, 14: KEY_ESCAPE, 15: KEY_SYSREQ,
+		16: KEY_SCROLLLOCK, 17: KEY_CONTROL, 18: KEY_ALT, 19: KEY_SHIFT, 20: KEY_META,
+		21: KEY_F1, 22: KEY_F2, 23: KEY_F3, 24: KEY_F4, 25: KEY_F5, 26: KEY_F6,
+		27: KEY_F7, 28: KEY_F8, 29: KEY_F9, 30: KEY_F10, 31: KEY_F11, 32: KEY_F12,
 	}
-	if map.has(qt_value):
-		return map[qt_value]
-	if qt_value >= 0x01000030 and qt_value <= 0x0100003b:
-		return KEY_F1 + (qt_value - 0x01000030)  # KEY_F1..KEY_F12 consecutivos
-	return 0
+	return map[int(index)] if map.has(int(index)) else 0
 
 
 # --- systemvolume -----------------------------------------------------------
@@ -307,12 +313,13 @@ static func build_stream_state(name, pct, muted, is_default):
 static func parse_pactl_sinks(text):
 	var out = []
 	for line in str(text).split("\n"):
-		if line.is_empty() or line.begins_with("#"):
+		if line.strip_edges() == "" or line.begins_with("#"):
 			continue
 		var parts = line.split("\t")
-		if parts.size() < 2:
+		# Sin nombre de sink la fila no sirve (p.ej. líneas de basura con tabs).
+		if parts.size() < 2 or parts[1].strip_edges() == "":
 			continue
-		out.append({"index": parts[0], "name": parts[1]})
+		out.append({"index": parts[0].strip_edges(), "name": parts[1].strip_edges()})
 	return out
 
 
