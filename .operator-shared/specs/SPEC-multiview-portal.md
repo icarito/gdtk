@@ -466,3 +466,26 @@ F1–F4 son scripts recargables. F5 necesita motor y no entra en el primer corte
 - `/usr/share/dbus-1/interfaces/org.freedesktop.impl.portal.ScreenCast.xml` (backend, v6)
 - `modules/wayland/eis_server.c:1042-1061,1296`, `modules/wayland/SCsub:44-51`
 - `shell/window_cast.gd`, `shell/remote.gd:571`, `tools/gvd/README.md`, `tools/gvd/gvd.py`
+
+## Actualización 2026-10-13 — pulido de la composición (§9 N1)
+
+- **Zoom alejable**: `zoom` 0.5..6 (antes 1..6). Alejar bajo x1 muestra el layout
+  completo alrededor de la pantalla enfocada, no sólo ésta.
+- **Zoom animado**: el cámara (centro+escala) lerp-ea cada frame (`CAM_LERP` 0.14) y
+  se asienta (`CAM_EPS`); el paso de una pantalla a otra es transición suave.
+- **Envío techo al feed**: el empuje al portal se capúa a ~20 fps (`PUSH_MIN_MS`);
+  la animación a 60 fps copiaba MB por frame y coincidió con cuelgues del loop
+  principal (se ven 3 en bastión). `EXT scan` marca los lecturas de shm persistentes
+  (handle abierto una vez; `gvd.py` escribe con O_TRUNC sobre el mismo path).
+- **Zoom por rueda**: dockapp MV (rueda sobre ella) y **Alt+rueda global** (evento con
+  modifier real; Super ya es el zoom Sugar de niveles y no se pisa).
+- **Pin del dockapp**: cuadradito en la esquina sup. derecha del applet; clic fija la
+  vista a la pantalla enfocada, otro clic suelta. Persistido en
+  `settings["multiview"].pin` (hid o `__local`, "" = sigue al puntero; normalizado en
+  settings_model).
+- **Corte garantizado de gvd en peers**: los reloads vacían el mapa rastreado y los
+  emisores (argv `--cursor-mode embedded`) quedaban colgados mandando a puertos
+  muertos. Barridos: al arrancar el shell (receptores `[g]dtk/mv/` + emisores),
+  en `mv_slot` antes de relanzar (evita dobles al mismo puerto), en `mv_stop`, y un
+  broadcast one-shot `mv_stop` ~20 s tras arrancar el shell para la sesión que la
+  instancia anterior pudo dejar sin avisar.
