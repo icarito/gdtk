@@ -48,6 +48,14 @@ func _init():
 	var up = F.shadow_rows(Vector2(0, 10), 100.0, -1.0, 3.0, 0.18)
 	check("shadow_rows arriba: y decrece", up[0].rect.position.y == 10 and up[2].rect.position.y == 8)
 
+	# Alta de dockapps por el selector: el dockapp se coloca en la BARRA cuyo popup
+	# pidió el alta (SPEC-frame-add-popup-bar.md); sin origen conocido cae a la
+	# inferior (default histórico).
+	check("picker_zone: barra invocadora",
+		F.picker_zone("top") == "top" and F.picker_zone("dock") == "dock")
+	check("picker_zone: sin origen cae a inferior",
+		F.picker_zone("") == "dock" and F.picker_zone("basura") == "dock")
+
 	# Applets vivos (sysmon/teclado) mientras una franja esté a la vista, no sólo con
 	# Home o el Frame enfocados: una barra fijada (pin) también los mantiene al día.
 	check("applets_live: Inicio", F.applets_live(true, false, false, false))

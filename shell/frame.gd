@@ -270,6 +270,10 @@ var applets_drawn = false
 var applets_bar_rect = Rect2()  # franja inferior del último dibujo (clic derecho: controles)
 var applet_picker_want = false
 var applet_picker_open = false
+# Zona ("top"/"dock") de la barra cuyo popup (selector ##applets_add) pidió el alta;
+# un dockapp nuevo se coloca en ESA barra (SPEC-frame-add-popup-bar.md), no siempre en
+# la inferior como pasaba. "" = sin origen conocido (alta programática).
+var applet_picker_zone = ""
 var applet_action_want = ""
 var clock_analog = false       # reloj: digital (7 seg, por defecto) o analógico
 var clock_saved = false
@@ -1058,12 +1062,21 @@ func _save_applets():
 	applets_dirty = false
 
 
+# Barra donde colocar un dockapp nuevo: la del MENÚ que lo invocó. Puro para test;
+# "" o basura cae a `fallback` (alta programática / compatibilidad).
+static func picker_zone(recorded, fallback = "dock"):
+	return String(recorded) if (recorded == "top" or recorded == "dock") else fallback
+
+
 func _applet_set_visible(id, v):
 	if v:
 		if not applets_visible.has(id):
-			# Primero se intenta colocar (primera celda libre, ver `_next_free_slot`); sólo si
-			# entra se marca visible. Barra llena: no se añade y el estado no cambia.
-			if not _place_new_token(_tok_applet(id), _applet_span(id), "dock"):
+			# Primero se intenta colocar (primera celda libre, ver `_next_free_slot`) en
+			# la BARRA cuyo popup pidió el alta (SPEC-frame-add-popup-bar.md); sólo si
+			# entra se marca visible. Barra llena: no se añade y el estado no cambia
+			# (honesto: se repite el alta desde la barra donde haya lugar).
+			if not _place_new_token(_tok_applet(id), _applet_span(id),
+					picker_zone(applet_picker_zone)):
 				return
 			applets_visible.append(id)
 			if applet_mods.has(id):
@@ -3245,6 +3258,7 @@ func _input(event):
 					get_tree().set_input_as_handled()
 					return
 				if _applet_bar_at(mouse_pos) and not _bar_occupied_at(mouse_pos):
+					applet_picker_zone = _zone_at(mouse_pos)
 					applet_picker_want = true
 					applet_action_want = ""
 					shell.request_redraw()

@@ -26,6 +26,9 @@
 - `SPEC-power-governor.md`
   - Description: Control seguro y verificable del governor con helper mínimo, acción PolicyKit dedicada y provisión explícita.
   - Read If: Tocando el DockApp de energía, `sysmon.gd`, governors, pkexec o reglas de privilegios.
+- `SPEC-frame-add-popup-bar.md`
+  - Description: Todo alta de bloque nuevo al Frame (dockapps por el selector de Controles) se coloca en la barra cuyo popup lo pidió; drop y altas automáticas con su propia zona; barra llena = fallo honesto.
+  - Read If: Tocando `_place_new_token`, `_applet_set_visible`, el selector `##applets_add` o el alta de bloques de barra.
 - `MOCKUP-sugar-frame.svg`
   - Description: Mockup del Frame Sugar (bordes y bloques).
   - Read If: Diseño visual del Frame.
