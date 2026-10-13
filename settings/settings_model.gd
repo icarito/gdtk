@@ -107,11 +107,13 @@ const CONTROL_DEFAULT = {
 }
 # Vista del grupo / multiview (SPEC-multiview-portal): `enabled` publica la vista
 # compuesta por el portal ScreenCast; `pan` habilita el paneo siguiendo el mouse;
-# `zoom` es el zoom de la composición sobre el "fit" del layout (1.0 = entra todo).
-# Persistido; el shell lo relee en vivo.
-const MULTIVIEW_ZOOM_MIN = 1.0
+# `zoom` escala la composición sobre el "cover" de la pantalla enfocada (permitido
+# alejar bajo 1.0 para ver el layout completo alrededor); `pin` fija la vista a una
+# pantalla (hid o "__local"; "" = sigue al puntero). Persistido; el shell lo relee
+# en vivo.
+const MULTIVIEW_ZOOM_MIN = 0.5
 const MULTIVIEW_ZOOM_MAX = 6.0
-const MULTIVIEW_DEFAULT = {"enabled": false, "pan": true, "zoom": 1.7}
+const MULTIVIEW_DEFAULT = {"enabled": false, "pan": true, "zoom": 1.7, "pin": ""}
 # Multi-monitor (SPEC-physical-multi-monitor): escritorio extendido en una sola
 # ventana (span). `enabled` activa/desactiva; `primary` es el nombre de la salida
 # principal ("" = automática: externa > interna); `order` es el orden izquierda->
@@ -330,7 +332,8 @@ func deskflow(v):
 	return out
 
 
-# Vista del grupo (multiview): valida enabled/pan (bool) y zoom (1..6).
+# Vista del grupo (multiview): valida enabled/pan (bool), zoom (0.5..6) y pin
+# (átomo seguro, "" = sin pin).
 func multiview(v):
 	if typeof(v) != TYPE_DICTIONARY:
 		v = {}
@@ -339,7 +342,21 @@ func multiview(v):
 		"pan": bool_value(v.get("pan", MULTIVIEW_DEFAULT.pan), MULTIVIEW_DEFAULT.pan),
 		"zoom": clamp(num_value(v.get("zoom", MULTIVIEW_DEFAULT.zoom), MULTIVIEW_DEFAULT.zoom),
 			MULTIVIEW_ZOOM_MIN, MULTIVIEW_ZOOM_MAX),
+		"pin": multiview_pin(v.get("pin", MULTIVIEW_DEFAULT.pin)),
 	}
+
+
+# Token del pin del multiview: hid o "__local" —átomos seguros del resto del repo—,
+# vacío = sin pin. Inválido -> "" (honesto: el pin se suelta antes que inventar).
+static func multiview_pin(s) -> String:
+	var t = String(s).strip_edges()
+	if t == "" or t.length() > 64:
+		return ""
+	var safe = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+	for i in range(t.length()):
+		if safe.find(t.substr(i, 1)) < 0:
+			return ""
+	return t
 
 
 func host_name(v):

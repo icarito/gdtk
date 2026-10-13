@@ -17,7 +17,8 @@ const HEADER = 64
 const INTERVAL_MS = 100         # composición/lectura ~10 fps (barato para peers lentos)
 const STALE_MS = 2500           # un tile sin frames frescos sale de la vista
 const BG = Color(0.06, 0.06, 0.08, 1.0)
-const CAM_LERP = 0.14           # suavizado de la cámara (por tick): anima el paso
+const CAM_LERP = 0.14           # suavizado de la cámara (por frame): anima el paso
+const CAM_EPS = 0.0006          # residuo relativo por debajo del cual la cámara descansa
 
 var _vp = null
 var _canvas = null
@@ -90,7 +91,7 @@ func set_focus_rect(phys):
 
 
 func set_zoom(z):
-	_zoom = clamp(float(z), 0.5, 8.0)
+	_zoom = clamp(float(z), 0.5, 6.0)
 
 
 func get_zoom():
@@ -171,32 +172,44 @@ func _view_target():
 	return {"scale": s2, "center": _bbox_pos + sz * 0.5}
 
 
-# Avanza la cámara hacia el objetivo (o la fija si `snap`).
+# Avanza la cámara hacia el objetivo (o la fija si `snap`). Devuelve true mientras
+# siga animando (residuo sobre CAM_EPS): esos frames están cambiando visualmente.
 func _layout_cam(snap = false):
 	var t = _view_target()
+	var ts = float(t.scale)
+	var tc = Vector2(t.center)
 	if snap or not _cam_ready:
-		_cam_scale = float(t.scale)
-		_cam_center = Vector2(t.center)
+		_cam_scale = ts
+		_cam_center = tc
 		_cam_ready = true
-	else:
-		_cam_scale = lerp(_cam_scale, float(t.scale), CAM_LERP)
-		_cam_center = _cam_center.linear_interpolate(Vector2(t.center), CAM_LERP)
+		return false
+	var dc = (_cam_center - tc).length() / max(1.0, _composite.length())
+	_cam_scale = lerp(_cam_scale, ts, CAM_LERP)
+	_cam_center = _cam_center.linear_interpolate(tc, CAM_LERP)
+	return dc > CAM_EPS or abs(ts - _cam_scale) / max(0.0001, ts) > CAM_EPS
 
 
 func _process(_delta):
 	if _vp == null:
 		return
 	var now = OS.get_ticks_msec()
-	if now - _last_ms < INTERVAL_MS:
-		return
-	_last_ms = now
-	for s in _slots:
-		_read_slot(s)
-	_recompute_bbox()
-	_layout_cam(false)
-	_canvas.update()
-	_vp.render_target_update_mode = Viewport.UPDATE_ONCE
-	_frame_seq += 1
+	# El lerp de cámara corre CADA frame (la animación entre pantallas se ve suave a la
+	# tasa de refresco); la lectura del shm sigue cada INTERVAL_MS (peers lentos).
+	var changed = false
+	if _layout_cam(false):
+		changed = true
+	if now - _last_ms >= INTERVAL_MS:
+		_last_ms = now
+		for s in _slots:
+			_read_slot(s)
+		_recompute_bbox()
+		_layout_cam(false)
+		changed = true
+	if changed:
+		_canvas.update()
+		_vp.render_target_update_mode = Viewport.UPDATE_ONCE
+		# La vista "salió": el consumidor del feed debe recibir la composición nueva.
+		_frame_seq += 1
 
 
 func _read_slot(s):

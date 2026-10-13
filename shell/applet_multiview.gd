@@ -8,11 +8,15 @@ extends Reference
 # Interacción (la rutea el Frame):
 #   - clic izquierdo  -> prende/apaga la Vista del grupo (multiview). Al apagarla, el
 #     shell corta los gvd (receptores locales + emisores de los peers).
-#   - rueda del mouse -> zoom in/out.
+#   - rueda del mouse -> zoom in/out (también Super+rueda en cualquier lado).
+#   - clic en el cuadradito del pin (esquina superior derecha) -> fija/suelta la vista
+#     a la pantalla enfocada en ese momento (respecto del orden de la primera pantalla
+#     clicada, mira multiview_pin_toggle).
 var shell = null
 var state = "apagado"
 var value = ""
 var detail = ""
+var pin_rect = Rect2()   # zona de golpe del pin (coords de viewport); vacía = sin pin
 var _st = {}
 
 
@@ -33,19 +37,21 @@ func refresh(_force := false):
 	var en = bool(st.get("enabled", false))
 	var zoom = float(st.get("zoom", 1.7))
 	var pan = bool(st.get("pan", true))
+	var pin = String(st.get("pin", ""))
 	if on:
 		state = "activo"
-		value = ("PAN " if pan else "FIJ ") + "x%.1f" % zoom
+		value = ("PIN " if pin != "" else ("PAN " if pan else "FIJ ")) + "x%.1f" % zoom
 	elif en:
 		state = "listo"
 		value = "armado"
 	else:
 		state = "apagado"
 		value = "off"
-	detail = "Vista del grupo %s · portal=%s · %d peers · zoom x%.1f · pan %s" % [
+	detail = "Vista del grupo %s · portal=%s · %d peers · zoom x%.1f · pan %s%s" % [
 		("encendida" if on else ("armada" if en else "apagada")),
 		("compartiendo" if bool(st.get("share", false)) else "off"),
-		int(st.get("peers", 0)), zoom, ("sí" if pan else "no")]
+		int(st.get("peers", 0)), zoom, ("sí" if pan else "no"),
+		(" · fijada a " + String(st.get("pin_name", "")) if pin != "" else "")]
 	return state != os_state or value != os_value or detail != os_detail
 
 
@@ -63,6 +69,14 @@ func draw(frame, ui, scr, loc, w, h):
 	var box = Rect2(Vector2(scr.x + pad, scr.y + top),
 		Vector2(max(4.0, w - pad * 2.0), max(4.0, h - top - pad)))
 	ui.imgui_draw_rect_filled(box, Color(0.04, 0.05, 0.06, 0.65), 2.0)
+	# Pin (esquina superior derecha): cuadradito ámbar cuando la vista está fijada a
+	# la pantalla enfocada, tenue cuando no. El Frame casar el clic con pin_rect y
+	# manda multiview_pin_toggle (no el prende/apagar general).
+	var pinned = on and String(st.get("pin", "")) != ""
+	pin_rect = Rect2(Vector2(box.position.x + box.size.x - 15.0, box.position.y + 2.0),
+		Vector2(12.0, 12.0))
+	ui.imgui_draw_rect_filled(pin_rect,
+		Color(1.0, 0.72, 0.2, 0.95) if pinned else Color(0.45, 0.50, 0.60, 0.45), 2.0)
 	var mini = st.get("mini", {})
 	var rects = mini.get("rects", []) if typeof(mini) == TYPE_DICTIONARY else []
 	for r in rects:

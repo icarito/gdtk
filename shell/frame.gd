@@ -1773,6 +1773,22 @@ func _applet_primary(id):
 			shell.request_redraw()
 
 
+# Soltar el clic en la zona del pin del dockapp de la Vista del grupo: fija/suelta la
+# vista a la pantalla enfocada (el pin lo dibuja el applet; sin pin visible nunca
+# consume y el clic normal cae en _applet_primary). Devuelve si lo consumió.
+func _multiview_pin_release(id, pos):
+	if id != "multiview":
+		return false
+	var r = multiview.pin_rect
+	if r.size.x <= 0.0 or not r.has_point(pos):
+		return false
+	if shell != null and shell.has_method("multiview_pin_toggle"):
+		shell.multiview_pin_toggle()
+		multiview.refresh(true)
+		shell.request_redraw()
+	return true
+
+
 # Menú contextual del applet (clic derecho). Mismo destino que el equivalente de
 # teclado en _frame_key (Enter/Espacio). El selector genérico no aparece acá: sólo en
 # un slot vacío de la barra.
@@ -3160,6 +3176,14 @@ func _input(event):
 				get_tree().set_input_as_handled()
 				return
 			if super_press != null:
+				# Vista del grupo prendida: Super+rueda controla el zoom de la
+				# composición desde cualquier lado (alejar bajo 1 muestra todo).
+				if shell.multiview_on and shell.has_method("multiview_scroll_zoom"):
+					shell.multiview_scroll_zoom(
+						1 if event.button_index == BUTTON_WHEEL_UP else -1)
+					multiview.refresh(true)
+					get_tree().set_input_as_handled()
+					return
 				# En el Hogar o dentro del zoom (Grupo/Vecindario) la rueda VERTICAL
 				# aleja/acerca un nivel Sugar (el ícono central se achica/agranda).
 				# Fuera de ahí el paneo de la franja sigue igual.
@@ -3362,7 +3386,8 @@ func _input(event):
 				if applet_drag != null:
 					_finish_applet_drag()
 				elif applet_press != null:
-					_applet_primary(applet_press)
+					if not _multiview_pin_release(applet_press, mouse_pos):
+						_applet_primary(applet_press)
 				applet_press = null
 				applet_drag = null
 				if win_dock_drag:

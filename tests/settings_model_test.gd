@@ -122,6 +122,17 @@ func _init():
 	check("span es en vivo", S.is_live("span"))
 	check("restart_notice de span vacio", S.restart_notice("span") == "")
 
+	# Vista del grupo (multiview): zoom 0.5..6 (el aleje bajo 1 ve todo el layout),
+	# pan bool y pin como átomo seguro ("" = sin pin).
+	var mvz = S.multiview({"zoom": 0.2})
+	check("multiview zoom min 0.5", mvz.zoom == 0.5)
+	check("multiview zoom max 6", S.multiview({"zoom": 99}).zoom == 6.0)
+	check("multiview default apagado", not S.multiview({}).enabled and S.multiview({}).pin == "")
+	check("multiview pin atomo", S.multiview({"pin": "abc_-12.3"}).pin == "abc_-12.3")
+	check("multiview pin local", S.multiview({"pin": "__local"}).pin == "__local")
+	check("multiview pin basura suelta", S.multiview({"pin": "a b!"}).pin == "")
+	check("multiview pin largo suelta", S.multiview({"pin": "x".repeat(65)}).pin == "")
+
 	# Vocabulario de producto: nada de nombres internos en lo visible.
 	var forbidden = ["gvd", "deskflow", "mdns", "dns-sd", "recv", "server", "client", "hid", "role"]
 	var labels = []

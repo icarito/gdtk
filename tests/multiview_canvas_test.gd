@@ -38,6 +38,29 @@ func _init():
 	check("tex nulo -> rect original",
 		S.fit_rect(Vector2(), Rect2(Vector2(5, 5), Vector2(10, 10))).size == Vector2(10, 10))
 
+	# Cámara: la pantalla enfocada LLENA el viewport (cover: usa el ancho o el alto
+	# según su aspecto) x zoom; el paso entre pantallas ANIMA (lerp) hasta asentarse.
+	# Puro: sin _vp, sólo matemática de cámara.
+	var C = S.new()
+	C._composite = Vector2(1920, 1080)
+	C._zoom = 1.0
+	C._focus_phys = Rect2(Vector2(0, 0), Vector2(1440, 2160))   # portrait (cupid)
+	var tv = C._view_target()
+	check("cover llena el ancho portrait", abs((tv.scale as float) - 1920.0 / 1440.0) < 1e-6)
+	check("cover centra la pantalla enfocada", (tv.center as Vector2) == Vector2(720, 1080))
+	C.set_zoom(0.1)
+	check("zoom mínimo 0.5 (se ve todo el layout)", C.get_zoom() == 0.5)
+	C.set_zoom(99.0)
+	check("zoom máximo 6", C.get_zoom() == 6.0)
+	C._zoom = 1.0
+	check("snap inicial no anima", C._layout_cam(true) == false)
+	C._focus_phys = Rect2(Vector2(960, 0), Vector2(1920, 1080))  # paisaje en otra posición
+	var frames = 0
+	while C._layout_cam(false) and frames < 400:
+		frames += 1
+	check("la cámara anima y se asienta", frames > 0 and frames < 400)
+	check("settled: escala en cover del paisaje", abs((C._cam_scale as float) - 1.0) < 0.01)
+
 	# Enteros little-endian a mano (el contrato del archivo shm). OJO: resize() no
 	# pone a cero la memoria en este fork, hay que inicializar explícitamente.
 	var b4 = PoolByteArray()

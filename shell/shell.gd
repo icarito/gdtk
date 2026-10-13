@@ -339,6 +339,13 @@ var _mv_off_plans = {}
 var _mv_phys_map = {}
 # Reintento del arranque automático del multiview (por si el Vecindario no estaba listo).
 var _mv_retry_at = 0
+# Barrido one-shot de gvd multiview huérfanos (receptores + emisores de una instancia
+# previa: el shell nuevo no conoce esos pids rastreados y son doble-fork).
+var _mv_initial_sweep = false
+# Broadcast one-shot de `mv_stop` a los peers ~20 s tras arrancar el shell: si la
+# instancia anterior murió sin avisar (crash/reload), sus emisores siguen mandando a
+# puertos muertos en los peers.
+var _mv_boot_bcast_at = 0
 # K17: vínculo Deskflow suspendido temporalmente mientras gvd extiende el monitor
 # virtual hacia ese vecino/dirección. Se guarda para restaurarlo al cortar la
 # sesión de pantalla (SPEC-ui-rework-2026-10, decisión 2026-10-01).
@@ -1826,6 +1833,26 @@ const VIDEO_COOLDOWN_MS = 1500
 # no se entera de que cambió el contenido): se rearma el frame siguiente.
 func _process(_delta):
 	var now = OS.get_ticks_msec()
+	# Al arrancar (o tras un reload), barrer gvd multiview huérfanos de una instancia
+	# anterior: receptores (paths del dir shm) y emisores (argv `--cursor-mode
+	# embedded`). El shell nuevo no conoce sus pids rastreados y son doble-fork.
+	# El patrón [g]/[c] evita que pkill se auto-matchee.
+	if not _mv_initial_sweep:
+		_mv_initial_sweep = true
+		OS.execute("sh", ["-c", "pkill -f '[g]dtk/mv/' >/dev/null 2>&1; "
+			+ "pkill -f '[c]ursor-mode embedded' >/dev/null 2>&1"], true)
+	# Si este shell arrancó tumbando una sesión multiview previa, avisar una vez a los
+	# peers (mejor esfuerzo): sus emisores siguen mandando hasta que alguien los corte.
+	if _mv_boot_bcast_at == 0 and now >= 20000 and neighborhood != null \
+			and not neighborhood.hosts.empty() and not multiview_on:
+		_mv_boot_bcast_at = now
+		var btargets = []
+		for bhid in _mv_desired_peers():
+			var bt = _mv_peer_target(bhid)
+			if not bt.empty():
+				btargets.append(bt)
+		if not btargets.empty():
+			_peer_send_async(btargets, "mv_stop", {})
 	# Selector de pantallazo abierto: se mantiene el loop activo y se pide frame cada
 	# vuelta (el overlay sigue al puntero; sin esto el reposo lo dejaría a 4 Hz).
 	if screenshot_ui != null and screenshot_ui.is_active():
@@ -1838,15 +1865,13 @@ func _process(_delta):
 	# Settings del multiview (enabled/pan/zoom) reaplicados en vivo.
 	_mv_apply_settings()
 	# Snap del pan del multiview: encuadra la pantalla bajo el puntero (dueno via
-	# pointer_owner; local por defecto).
+	# pointer_owner; local por defecto). Con el pin fijado (dockapp) manda el pin y
+	# el puntero deja de mover la vista.
 	if multiview_on and _mv_canvas != null and is_instance_valid(_mv_canvas) \
 			and _mv_canvas.has_method("set_focus_rect"):
-		var po = pointer_owner()
-		var ph = String(po.get("peer", "")) if typeof(po) == TYPE_DICTIONARY else ""
-		var fr = _mv_phys_map.get(ph, null)
-		if typeof(fr) != TYPE_RECT2:
-			fr = _mv_phys_map.get("__local", null)
-		_mv_canvas.set_focus_rect(fr)
+		var cfgf = _mv_mvcfg()
+		_mv_canvas.set_focus_rect(
+			_mv_phys_map.get(_mv_focus_key(String(cfgf.get("pin", ""))), null))
 	# ScreenCast nativo (multiview): si el backend del portal tiene una fuente PipeWire
 	# activa, empujar el viewport a ~15 fps. Sin fuente activa no se captura nada.
 	# Misma orientación que remote.gd (_screenshot hace flip_y).
@@ -10894,13 +10919,9 @@ func multiview_start(hids) -> Dictionary:
 			slots.append({"path": String(entry.get("path", "")), "rect": pr})
 		out.append({"hid": hid, "slot": slot, "port": port})
 		# Aviso al peer por el canal autorizado (async: nunca bloquea el render).
-		var ep = _peer_endpoint_for(hid)
-		if bool(ep.get("ok", false)):
-			var ctl = int(ep.get("port", 0))
-			if ctl <= 0:
-				ctl = _peer_port()
-			_peer_send_async([{"id": hid, "host": String(ep.get("peer", "")),
-				"port": ctl, "token": _peer_token_get(hid)}],
+		var tgt = _mv_peer_target(hid)
+		if not tgt.empty():
+			_peer_send_async([tgt],
 				"mv_slot", {"port": port, "host": _mv_announce_host(hid), "slot": slot})
 	if out.empty():
 		return {"ok": false, "error": "multiview: sin receptores válidos", "slots": []}
@@ -10936,13 +10957,9 @@ func multiview_stop() -> Dictionary:
 	for hid in hids:
 		var id = String(hid)
 		_stop_tracked(GVD_SESSION.multiview_recv_key(id))
-		var ep = _peer_endpoint_for(id)
-		if bool(ep.get("ok", false)):
-			var ctl = int(ep.get("port", 0))
-			if ctl <= 0:
-				ctl = _peer_port()
-			_peer_send_async([{"id": id, "host": String(ep.get("peer", "")),
-				"port": ctl, "token": _peer_token_get(id)}], "mv_stop", {})
+		var tgt = _mv_peer_target(id)
+		if not tgt.empty():
+			_peer_send_async([tgt], "mv_stop", {})
 	multiview_on = false
 	_mv_stop_canvas()
 	# Barrido: cualquier receptor rastreado del multiview que haya quedado (aunque
@@ -11055,12 +11072,16 @@ func multiview_status():
 	if multiview_on and _mv_canvas != null and is_instance_valid(_mv_canvas):
 		mini["rects"] = _mv_canvas.mini_rects()
 		mini["viewport"] = _mv_canvas.viewport_frac()
+	var pin = String(cfg.get("pin", ""))
 	return {
 		"on": multiview_on,
 		"enabled": bool(cfg.get("enabled", false)),
 		"share": share_enabled,
 		"pan": bool(cfg.get("pan", true)),
 		"zoom": float(cfg.get("zoom", 1.7)),
+		"pin": pin,
+		"pin_name": "Este equipo" if pin == "__local" else \
+			(_peer_name_for(pin) if pin != "" else ""),
 		"peers": multiview_slots.size(),
 		"mini": mini,
 	}
@@ -11087,11 +11108,73 @@ func multiview_set_pan(v):
 
 func multiview_set_zoom(z):
 	var cfg = _mv_mvcfg()
-	cfg["zoom"] = clamp(float(z), 1.0, 6.0)
+	# Mínimo 0.5: al alejar por debajo de 1, se ve toda la composición (el layout
+	# completo alrededor de la pantalla enfocada) y no sólo la pantalla enfocada.
+	cfg["zoom"] = clamp(float(z), 0.5, 6.0)
 	_mv_write_cfg(cfg)
 	if _mv_canvas != null and is_instance_valid(_mv_canvas):
 		_mv_canvas.set_zoom(float(cfg["zoom"]))
 	request_redraw()
+
+
+# Paso de zoom por rueda (dockapp o Super+rueda en cualquier lado). Sólo consume la
+# vista: con el multiview apagado no toca nada. Devuelve si correspondió refrescar la
+# dockapp.
+func multiview_scroll_zoom(step):
+	if not multiview_on:
+		return false
+	var cfg = _mv_mvcfg()
+	multiview_set_zoom(float(cfg.get("zoom", 1.7)) + 0.2 * float(step))
+	return true
+
+
+# Reparto del multiview:
+# - _mv_peer_target(hid)   -> dict de canal peer ({id,host,port,token}); {} si no hay.
+# - _mv_focus_key(pin)     -> clave de pantalla enfocada: el pin persistente si está
+#                            fijado, si no el hid bajo el puntero ("__local" por
+#                            defecto). La clave SIEMPRE tiene rect en _mv_phys_map.
+# - _mv_sweep_emitters()   -> mata emisores multiview huérfanos en este equipo (argv
+#                            `--cursor-mode embedded`; los emisores comunes no lo
+#                            llevan). Cubre recargas de shell (mapa rastreado vacío)
+#                            y emisores dobles al reintentar un slot.
+func _mv_peer_target(hid):
+	var id = String(hid)
+	var ep = _peer_endpoint_for(id)
+	if not bool(ep.get("ok", false)):
+		return {}
+	var host = String(ep.get("peer", ""))
+	if host.find(".") < 0 and not host.is_valid_ip_address():
+		host += ".local"
+	var ctl = int(ep.get("port", 0))
+	if ctl <= 0:
+		ctl = _peer_port()
+	return {"id": id, "host": host, "port": ctl, "token": _peer_token_get(id)}
+
+
+func _mv_focus_key(pin = ""):
+	var k = pin if String(pin) != "" else ""
+	if k == "":
+		var po = pointer_owner()
+		k = String(po.get("peer", "")) if typeof(po) == TYPE_DICTIONARY else ""
+	if typeof(_mv_phys_map.get(k, null)) != TYPE_RECT2:
+		return "__local"
+	return k
+
+
+func _mv_sweep_emitters():
+	OS.execute("sh", ["-c", "pkill -f '[c]ursor-mode embedded' >/dev/null 2>&1"], true)
+
+
+# Pin del dockapp: fija la vista a la pantalla enfocada en el momento del clic (otro
+# clic en el pin la suelta). Puro ajuste de config: el foco real lo resuelve el bloque
+# de foco de _process a partir del pin. Sobrevive al ciclo prender/apagar de la vista.
+func multiview_pin_toggle():
+	var cfg = _mv_mvcfg()
+	var cur = String(cfg.get("pin", ""))
+	cfg["pin"] = "" if cur != "" else _mv_focus_key()
+	_mv_write_cfg(cfg)
+	request_redraw()
+	return String(cfg["pin"]) != ""
 
 
 func multiview_toggle():
@@ -11199,8 +11282,11 @@ func _peer_mv_slot(hid, p):
 	var id = String(hid)
 	var key = GVD_SESSION.multiview_send_key(id)
 	# Reintentar no apila emisores: se corta el anterior de ese hid antes de reabrir.
+	# El barrido cubre el caso de un shell recargado (el mapa rastreado quedó vacío y
+	# el emisor viejo sigue mandando al mismo puerto del host: frames mezclados).
 	if _has_tracked(key):
 		_stop_tracked(key)
+	_mv_sweep_emitters()
 	var plan = GVD_LAUNCH.local_send_argv(path, String(p.get("host", "")),
 		int(p.get("port", 0)), "")
 	if not bool(plan.get("ok", false)):
@@ -11211,9 +11297,12 @@ func _peer_mv_slot(hid, p):
 	return true
 
 
-# Handler del método peer `mv_stop`: corta el emisor rastreado hacia ese host.
+# Handler del método peer `mv_stop`: corta el emisor rastreado hacia ese host. El
+# barrido cubre a los huérfanos de una recarga de shell (su clave ya no está en el
+# mapa rastreado): nada de emisores mandando a puertos muertos.
 func _peer_mv_stop(hid):
 	_stop_tracked(GVD_SESSION.multiview_send_key(String(hid)))
+	_mv_sweep_emitters()
 	return true
 
 
