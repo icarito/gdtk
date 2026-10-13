@@ -194,21 +194,15 @@ func _layout():
 	_bbox_pos = minp
 	var sz = maxp - minp
 	_sz = sz
-	if _focus_phys != null and _focus_phys.size.x > 0.0 and _focus_phys.size.y > 0.0:
-		# Encaje al foco (cover): la pantalla enfocada LLENA la vista (aspecto
-		# respetado) y el eje que sobra PANEA. Para una pantalla portrait = encaja al
-		# ancho y panea vertical; landscape = encaja al alto y panea horizontal.
-		_scale = max(_composite.x / _focus_phys.size.x, _composite.y / _focus_phys.size.y)
-		_origin = -(_focus_phys.position - _bbox_pos) * _scale
-		var cf = _focus_phys.size * _scale
-		_pan_max = Vector2(max(0.0, cf.x - _composite.x), max(0.0, cf.y - _composite.y))
-	else:
-		var fit = min(_composite.x / sz.x, _composite.y / sz.y) if sz.x > 0.0 and sz.y > 0.0 else 1.0
-		_scale = fit * _zoom
-		var content = sz * _scale
-		_origin = Vector2(max(0.0, (_composite.x - content.x) * 0.5),
-			max(0.0, (_composite.y - content.y) * 0.5))
-		_pan_max = Vector2(max(0.0, content.x - _composite.x), max(0.0, content.y - _composite.y))
+	# Escala = "fit" del layout * zoom. Con zoom > 1 el contenido excede la vista y el
+	# pan navega; se ven varias pantallas a la vez. El foco NO cambia la escala (antes
+	# un "cover" al foco llenaba la vista y ocultaba el resto sin dejar panear).
+	var fit = min(_composite.x / sz.x, _composite.y / sz.y) if sz.x > 0.0 and sz.y > 0.0 else 1.0
+	_scale = fit * _zoom
+	var content = sz * _scale
+	_origin = Vector2(max(0.0, (_composite.x - content.x) * 0.5),
+		max(0.0, (_composite.y - content.y) * 0.5))
+	_pan_max = Vector2(max(0.0, content.x - _composite.x), max(0.0, content.y - _composite.y))
 	_pan = Vector2(clamp(_pan.x, 0.0, _pan_max.x), clamp(_pan.y, 0.0, _pan_max.y))
 
 
@@ -223,6 +217,11 @@ func _update_pan():
 			var mn = _local_vp.get_mouse_position() / vs
 			target = Vector2(clamp(mn.x, 0.0, 1.0) * _pan_max.x,
 				clamp(mn.y, 0.0, 1.0) * _pan_max.y)
+	elif _focus_phys != null:
+		# Pan apagado: encuadra (centra) la pantalla bajo el puntero.
+		var r = _scaled_rect_nopan(_focus_phys)
+		target = r.position + r.size * 0.5 - _composite * 0.5
+	target = Vector2(clamp(target.x, 0.0, _pan_max.x), clamp(target.y, 0.0, _pan_max.y))
 	_pan = _pan.linear_interpolate(target, SNAP_LERP)
 
 
