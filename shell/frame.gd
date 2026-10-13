@@ -1764,10 +1764,11 @@ func _applet_primary(id):
 			shell.notify.panel_open = not shell.notify.panel_open
 			shell.request_redraw()
 	elif id == "multiview":
-		# Clic izquierdo = prender/apagar el pan de la composición.
-		if shell != null and shell.has_method("multiview_status"):
-			var mst = shell.multiview_status()
-			shell.multiview_set_pan(not bool(mst.get("pan", true)))
+		# Clic izquierdo = prender/apagar la Vista del grupo. Al apagarla, el shell
+		# corre multiview_stop(): mata los gvd locales (receptores) y avisa `mv_stop` a
+		# los peers para que corten sus emisores (nada de gvd colgados).
+		if shell != null and shell.has_method("multiview_toggle"):
+			shell.multiview_toggle()
 			multiview.refresh(true)
 			shell.request_redraw()
 

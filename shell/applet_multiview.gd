@@ -6,9 +6,9 @@ extends Reference
 # resaltada) y un marco ámbar = viewport (ventana) de la composición.
 #
 # Interacción (la rutea el Frame):
-#   - clic izquierdo  -> prende/apaga el pan.
+#   - clic izquierdo  -> prende/apaga la Vista del grupo (multiview). Al apagarla, el
+#     shell corta los gvd (receptores locales + emisores de los peers).
 #   - rueda del mouse -> zoom in/out.
-#   - clic derecho    -> menú (prender/apagar vista, pan, reset de zoom).
 var shell = null
 var state = "apagado"
 var value = ""

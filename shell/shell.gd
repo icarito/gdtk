@@ -10945,6 +10945,16 @@ func multiview_stop() -> Dictionary:
 				"port": ctl, "token": _peer_token_get(id)}], "mv_stop", {})
 	multiview_on = false
 	_mv_stop_canvas()
+	# Barrido: cualquier receptor rastreado del multiview que haya quedado (aunque
+	# multiview_slots se haya vaciado antes) -> nada de gvd colgados.
+	_gvd_mutex.lock()
+	var stray = []
+	for k in gvd_session_pids.keys():
+		if String(k).begins_with("mvrecv:"):
+			stray.append(String(k))
+	_gvd_mutex.unlock()
+	for k in stray:
+		_stop_tracked(String(k))
 	_multiview_restore()
 	multiview_windows = {}
 	multiview_follow = false
@@ -11088,6 +11098,10 @@ func multiview_toggle():
 	var cfg = _mv_mvcfg()
 	cfg["enabled"] = not bool(cfg.get("enabled", false))
 	_mv_write_cfg(cfg)
+	# Al apagar, cortar YA los gvd (receptores locales + emisores de los peers), sin
+	# esperar al próximo tick.
+	if not bool(cfg["enabled"]) and multiview_on:
+		multiview_stop()
 	request_redraw()
 
 
