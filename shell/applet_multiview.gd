@@ -8,10 +8,9 @@ extends Reference
 # Interacción (la rutea el Frame):
 #   - clic izquierdo  -> prende/apaga la Vista del grupo (multiview). Al apagarla, el
 #     shell corta los gvd (receptores locales + emisores de los peers).
-#   - rueda del mouse -> zoom in/out (también Super+rueda en cualquier lado).
+#   - rueda del mouse -> zoom in/out, donde esté el dockapp (sin atajo global).
 #   - clic en el cuadradito del pin (esquina superior derecha) -> fija/suelta la vista
-#     a la pantalla enfocada en ese momento (respecto del orden de la primera pantalla
-#     clicada, mira multiview_pin_toggle).
+#     a la pantalla enfocada en ese momento.
 var shell = null
 var state = "apagado"
 var value = ""

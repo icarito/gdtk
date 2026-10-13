@@ -3164,16 +3164,6 @@ func _input(event):
 			# el evento como manejado (con Super sigue mandando el zoom/alejar).
 			if shell.apps_view and super_press == null:
 				return
-			# Alt + rueda: el zoom de la Vista del grupo desde cualquier lado (alejar
-			# bajo x1 muestra todo el layout). Super ya es el zoom Sugar de niveles y
-			# no se pisa; ALT+WHEEL es libre en el Frame (el Alt+clic de apps pasa con
-			# su reenvío normal, acá no hay botón).
-			if event.alt and shell.multiview_on and shell.has_method("multiview_scroll_zoom"):
-				shell.multiview_scroll_zoom(
-					1 if event.button_index == BUTTON_WHEEL_UP else -1)
-				multiview.refresh(true)
-				get_tree().set_input_as_handled()
-				return
 			# Sobre Vecindario/Grupo/Hogar o el ícono central: un paso de la misma cadena
 			# vertical que el gesto de 3 dedos (rueda arriba = acercar / dedos abajo).
 			if super_press == null and (_over_place(mouse_pos) or shell._over_center_icon(mouse_pos)):
@@ -3207,11 +3197,12 @@ func _input(event):
 				shell.request_redraw()
 				get_tree().set_input_as_handled()
 				return
-			# Rueda sobre la dockapp de la Vista del grupo: zoom in/out de la composición.
+			# Rueda sobre la dockapp de la Vista del grupo: zoom in/out de la
+			# composición. Sin atajo global (Super/Alt ya tienen su rol acá): el
+			# dockapp responde la rueda donde esté.
 			if _applet_at(mouse_pos) == "multiview":
-				var mst = shell.multiview_status()
-				var dz = 0.2 if event.button_index == BUTTON_WHEEL_UP else -0.2
-				shell.multiview_set_zoom(float(mst.get("zoom", 1.7)) + dz)
+				shell.multiview_scroll_zoom(
+					1 if event.button_index == BUTTON_WHEEL_UP else -1)
 				multiview.refresh(true)
 				get_tree().set_input_as_handled()
 				return

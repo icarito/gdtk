@@ -142,6 +142,62 @@ Procedimiento reproducible: stage de `shell/*.gd` en `assets/`, `zip` sobre el A
 autoloads `Host`/`DebugHud` no cambiaron). Si se cambia el proyecto o el engine, hay
 que reconstruir el APK, no parchear.
 
+## Redmi: franja derecha del mouse — límite del cliente Deskflow Android (2026-10-13)
+Tras estabilizar el layout, el cursor cubre casi toda la pantalla salvo una franja derecha.
+Medido con adb: display `2400x1080` (landscape, cutout a la IZQUIERDA 102px), área de app
+= `2166x1080` (`nonDecorFrame=[102,0][2268,1080]`); a la derecha el sistema reserva
+`2268..2400` (132px) como `mandatorySystemGestures`/`navigationBars` (sideHint=RIGHT).
+`policy_control immersive.full=*` y `navigation_mode` (ya 0=3 botones) NO liberan esa
+franja. El cliente es la app de terceros `org.tfv.deskflow` (v1.0.14, no debuggable): usa
+el área segura (2166) como espacio de inyección mientras el display es 2400 → el tramo
+derecho queda inalcanzable. NO es algo que gdtk pueda arreglar (el server Deskflow usa el
+tamaño que reporta el cliente, no el `res=` de gdtk). Opciones: app Deskflow más nueva /
+que inyecte en el display completo, o convivir con la franja.
+
+## #4 layout — DESACTIVADO (2026-10-13)
+La propagación absoluta de layout resultó INCORRECTA: cada host difunde su layout en SU
+marco de coordenadas y el receptor lo aplicaba crudo (x/y de otro marco) → se
+desacomodaban solos. `_peer_layout` quedó no-op y `_maybe_broadcast_layout` no difunde.
+El layout se sincroniza por `screen_res` (resolución) y por el editor local. Propagación
+correcta requeriría un marco canónico (relaciones de adyacencia), no coordenadas.
+Redmi re-patcheado con esta versión (no difunde layout). Disposición del usuario
+(cupid west, redmi debajo de cupid, tengu south) quedó estable y el server reiniciado.
+
+## Redmi landscape / mismatch Deskflow — RESUELTO 2026-10-13
+Con adb de nuevo (USB `456afc8d`): auto-rotate ON, ventana del app en landscape
+(`cur=2400x1080 app=2166x1080`) y Redmi ahora anuncia `res=2400x1080` (antes 1080x2400
+porque estaba en portrait y el APK viejo no publicaba res). Bastion actualizó su pantalla
+`redmi` a `px 2400x1080`.
+
+El "no pasa de 1/3 y salta a tengu" era la geometría descolgada: `redmi` había quedado
+flotando (x -480..0, y 689..905, sin contacto) porque su `w/h` cambió con la resolución y
+`apply_resolution` no tenía contacto para anclar (`dir==""` → sólo cambia el tamaño). El
+conf de Deskflow lo dejaba sin vínculos. Se reposicionó `redmi` al **este** de bastion
+(como el `.bak` previo: `bastion right=redmi`). Conf resultante:
+`bastion: down=tengu, left=cupid, right=redmi`; `redmi: left=bastion`; sin bordes
+compartidos. Direcciones: cupid west, tengu south, redmi east.
+
+Pendiente/observación: `apply_resolution` con `dir==""` (sin contacto) deja la pantalla
+donde estaba (sólo escala) — correcto, pero si un resize la despega no la re-ancla. No se
+tocó.
+
+## Tanda 2026-10-13 (tarde) — popup layout, Grupo stale, redmi landscape
+- **#C popup de layout**: usaba `WINDOW_NO_BRING_TO_FRONT_ON_FOCUS` y se posicionaba
+  pegado al mouse (arriba) → la barra del Frame lo tapaba (botones inalcanzables/ilegible).
+  FIX: se quitó ese flag (sube al frente) y `_layout_confirm_place` clava `y >=
+  frame_bar_h(vp)+8` (debajo de la barra).
+- **#B Grupo no reflejaba Pantallas**: `host_directions` tiene DOS claves por host (nombre
+  legacy + hid); la proyección del layout (`_sync_directions_from_screen_layout`) escribía
+  la clave por NOMBRE, pero el Grupo indexa por HID → quedaba stale (y generaba bordes
+  compartidos: redmi y tengu ambos "south" → el puntero cruzaba a tengu a 1/3). FIX:
+  espeja la dirección a la otra clave (nombre<->hid) con `_host_hid_for_label`. Verificado:
+  mover redmi a este en `settings.json` actualiza name y hid; al restaurar, ambos. Bastion
+  quedó consistente: cupid west, redmi south, tengu east.
+- **#1 Redmi portrait/landscape + mismatch Deskflow**: pendiente de diagnóstico en vivo —
+  el `adb` de Redmi se desconectó. Manifiesto = `fullUser` (debería rotar); Redmi anuncia
+  `res=1080x2400` (portrait) aunque físicamente esté landscape → probable auto-rotate
+  apagado o `_screen_size()` no siguiendo la rotación. Sin adb no se puede confirmar.
+
 ## Verificación 1º tanda (hecha, verde)
 - Puros con binario dev: `deskflow_presence_test` (nuevo), `deskflow_settings_test`,
   `settings_model_test`, `deskflow_watch_test`, `neighborhood_hosts_test`,

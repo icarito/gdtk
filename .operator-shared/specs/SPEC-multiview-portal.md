@@ -477,8 +477,9 @@ F1–F4 son scripts recargables. F5 necesita motor y no entra en el primer corte
   la animación a 60 fps copiaba MB por frame y coincidió con cuelgues del loop
   principal (se ven 3 en bastión). `EXT scan` marca los lecturas de shm persistentes
   (handle abierto una vez; `gvd.py` escribe con O_TRUNC sobre el mismo path).
-- **Zoom por rueda**: dockapp MV (rueda sobre ella) y **Alt+rueda global** (evento con
-  modifier real; Super ya es el zoom Sugar de niveles y no se pisa).
+- **Zoom por rueda**: sólo la rueda sobre la dockapp MV —donde esté: cualquier barra/
+  pantalla— y ningún atajo global (Super ya es el zoom Sugar de niveles; Alt queda
+  libre; descartado literalmente tras probar que pisaba gestos existentes).
 - **Pin del dockapp**: cuadradito en la esquina sup. derecha del applet; clic fija la
   vista a la pantalla enfocada, otro clic suelta. Persistido en
   `settings["multiview"].pin` (hid o `__local`, "" = sigue al puntero; normalizado en

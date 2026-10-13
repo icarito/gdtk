@@ -11117,9 +11117,9 @@ func multiview_set_zoom(z):
 	request_redraw()
 
 
-# Paso de zoom por rueda (dockapp o Super+rueda en cualquier lado). Sólo consume la
-# vista: con el multiview apagado no toca nada. Devuelve si correspondió refrescar la
-# dockapp.
+# Paso de zoom por la rueda del dockapp (en cualquier barra/pantalla donde esté).
+# Sin atajo global: Super/Alt ya tienen su rol en el Frame. Con el multiview apagado
+# no toca nada. Devuelve si correspondió refrescar la dockapp.
 func multiview_scroll_zoom(step):
 	if not multiview_on:
 		return false
