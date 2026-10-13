@@ -21,6 +21,10 @@ const INTERVAL_MS = 66          # cadencia de composición/lectura (~15 fps)
 const BG = Color(0.06, 0.06, 0.08, 1.0)
 # Margen relativo entre pantallas del layout físico (mm): 0 = pegadas.
 const LAYOUT_MARGIN = 0.0
+# Zoom sobre el "fit" (1.0 = entra todo el layout). >1 acerca: el contenido excede el
+# feed y el pan navega. Tunable.
+const ZOOM = 1.7
+const PAN_LERP = 0.12           # suavizado del pan (por tick)
 
 var _vp = null
 var _canvas = null
@@ -32,6 +36,8 @@ var _composite = Vector2()
 var _bbox_pos = Vector2()
 var _scale = 1.0
 var _origin = Vector2()
+var _pan = Vector2()
+var _pan_max = Vector2()
 var _last_ms = 0
 
 
@@ -123,13 +129,31 @@ func _layout():
 		maxp = Vector2.ONE
 	_bbox_pos = minp
 	var sz = maxp - minp
-	_scale = min(_composite.x / sz.x, _composite.y / sz.y) if sz.x > 0.0 and sz.y > 0.0 else 1.0
-	_origin = (_composite - sz * _scale) * 0.5
+	var fit = min(_composite.x / sz.x, _composite.y / sz.y) if sz.x > 0.0 and sz.y > 0.0 else 1.0
+	_scale = fit * ZOOM
+	var content = sz * _scale
+	_origin = Vector2(max(0.0, (_composite.x - content.x) * 0.5),
+		max(0.0, (_composite.y - content.y) * 0.5))
+	_pan_max = Vector2(max(0.0, content.x - _composite.x), max(0.0, content.y - _composite.y))
+	_pan = Vector2(clamp(_pan.x, 0.0, _pan_max.x), clamp(_pan.y, 0.0, _pan_max.y))
+
+
+# Pan: sigue al mouse de la pantalla local (0..1 -> 0..pan_max), suave. Sin zoom el
+# contenido entra entero (pan_max=0) y queda centrado.
+func _update_pan():
+	var target = _pan_max * 0.5
+	if _has_local and _local_vp != null and is_instance_valid(_local_vp):
+		var vs = _local_vp.get_size()
+		if vs.x > 1.0 and vs.y > 1.0:
+			var mn = _local_vp.get_mouse_position() / vs
+			target = Vector2(clamp(mn.x, 0.0, 1.0) * _pan_max.x,
+				clamp(mn.y, 0.0, 1.0) * _pan_max.y)
+	_pan = _pan.linear_interpolate(target, PAN_LERP)
 
 
 # Rect en pantalla (composite) de un rect físico del layout.
 func _scaled_rect(phys):
-	var p = (phys.position - _bbox_pos) * _scale + _origin
+	var p = (phys.position - _bbox_pos) * _scale + _origin - _pan
 	return Rect2(p, phys.size * _scale)
 
 
@@ -148,6 +172,7 @@ func _process(_delta):
 			changed = true
 	if changed:
 		_layout()
+		_update_pan()
 		_canvas.update()
 		_vp.render_target_update_mode = Viewport.UPDATE_ONCE
 
