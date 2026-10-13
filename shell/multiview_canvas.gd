@@ -21,7 +21,7 @@ const MAGIC = [0x47, 0x56, 0x44, 0x53, 0x48, 0x4d, 0x31, 0x00]  # "GVDSHM1\0"
 const HEADER = 64
 const INTERVAL_MS = 66          # cadencia de composición/lectura (~15 fps)
 const BG = Color(0.06, 0.06, 0.08, 1.0)
-const CELL_FRACTION = 0.7       # cada celda = 70% de la vista (deja recorrido de pan)
+const CELL_FRACTION = 1.0       # cada pantalla llena la vista; el pan navega entre ellas
 const PAN_LERP = 0.12           # suavizado del pan (por tick)
 
 var _vp = null
@@ -172,16 +172,18 @@ func _process(_delta):
 
 
 func _update_pan():
+	# Pan = sigue el MOUSE de la pantalla local (0..1 -> 0..pan_max), suave. Si no hay
+	# pantalla local, usa el foco (dueño del puntero) como respaldo.
 	var target = _pan
-	if _focus_cell != null:
-		var fr = _base_rect(_focus_cell)
-		target = fr.position + fr.size * 0.5 - _composite * 0.5
-	elif _has_local and _local_vp != null and is_instance_valid(_local_vp):
+	if _has_local and _local_vp != null and is_instance_valid(_local_vp):
 		var vsize = _local_vp.get_size()
 		if vsize.x > 1.0 and vsize.y > 1.0:
 			var mn = _local_vp.get_mouse_position() / vsize
 			target = Vector2(clamp(mn.x, 0.0, 1.0) * _pan_max.x,
 				clamp(mn.y, 0.0, 1.0) * _pan_max.y)
+	elif _focus_cell != null:
+		var fr = _base_rect(_focus_cell)
+		target = fr.position + fr.size * 0.5 - _composite * 0.5
 	target = Vector2(clamp(target.x, 0.0, _pan_max.x), clamp(target.y, 0.0, _pan_max.y))
 	_pan = _pan.linear_interpolate(target, PAN_LERP)
 
