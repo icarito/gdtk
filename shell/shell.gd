@@ -10865,10 +10865,10 @@ func multiview_start(hids) -> Dictionary:
 	var plans = GVD_LAUNCH.multiview_offscreen_plans(path, peers,
 		MULTIVIEW_BASE_PORT, MULTIVIEW_MAX_SLOTS, labels, _mv_shm_dir(),
 		int(tile.x), int(tile.y), MULTIVIEW_SHM_FPS)
-	# Grilla: el primer tile es la pantalla LOCAL (bastion) y luego los peers, así la
-	# vista unificada incluye SIEMPRE el escritorio propio.
-	var rects = MULTIVIEW.tile_rects(plans.size() + 1, comp, MULTIVIEW_GUTTER)
-	var local_rect = rects[0] if not rects.empty() else Rect2()
+	# Disposición espacial (brújula): la pantalla local va en la celda (0,0) y cada peer
+	# en su celda según su dirección física (cupid al oeste -> izquierda, etc.). Sin
+	# dirección o celda ocupada -> primera celda libre.
+	var cells = _mv_cells_for(peers)
 	var slots = []
 	var out = []
 	for entry in plans:
@@ -10887,8 +10887,7 @@ func multiview_start(hids) -> Dictionary:
 		multiview_slots[hid] = {"slot": slot, "port": port, "label": label}
 		_gvd_mutex.unlock()
 		_mv_off_plans[hid] = entry
-		var rect = rects[slot + 1] if (slot >= 0 and slot + 1 < rects.size()) else Rect2()
-		slots.append({"path": String(entry.get("path", "")), "rect": rect})
+		slots.append({"path": String(entry.get("path", "")), "cell": cells.get(hid, Vector2())})
 		out.append({"hid": hid, "slot": slot, "port": port})
 		# Aviso al peer por el canal autorizado (async: nunca bloquea el render).
 		var ep = _peer_endpoint_for(hid)
@@ -10903,7 +10902,7 @@ func multiview_start(hids) -> Dictionary:
 		return {"ok": false, "error": "multiview: sin receptores válidos", "slots": []}
 	_mv_canvas = MULTIVIEW_CANVAS.new()
 	add_child(_mv_canvas)
-	if not _mv_canvas.start(comp, slots, get_viewport(), local_rect):
+	if not _mv_canvas.start(comp, slots, get_viewport(), Vector2(0, 0)):
 		_mv_stop_canvas()
 		return {"ok": false,
 			"error": "multiview: no pude abrir la composición fuera de pantalla", "slots": []}
@@ -10948,6 +10947,48 @@ func _mv_shm_dir():
 	if rt == "":
 		rt = "/tmp"
 	return rt.plus_file("gdtk").plus_file("mv")
+
+
+# Celda de la grilla espacial para una dirección cardinal (o null si none/desconocida).
+func _mv_cell_for_dir(d):
+	match String(d):
+		"west": return Vector2(-1, 0)
+		"east": return Vector2(1, 0)
+		"north": return Vector2(0, -1)
+		"south": return Vector2(0, 1)
+	return null
+
+
+func _cell_key(cell):
+	return "%d,%d" % [int(cell.x), int(cell.y)]
+
+
+# Celda por hid según su dirección física (del layout de pantallas). Los peers sin
+# dirección (o con la celda ocupada) van a la primera celda libre. La local es (0,0).
+func _mv_cells_for(hids):
+	var dirs = {}
+	for l in _settings_deskflow_links():
+		var p = String(l.get("peer", "")).strip_edges().to_lower()
+		var d = String(l.get("direction", "")).strip_edges()
+		if p != "" and d != "":
+			dirs[p] = d
+	var free = [Vector2(-1, 0), Vector2(1, 0), Vector2(0, -1), Vector2(0, 1),
+		Vector2(-1, -1), Vector2(1, -1), Vector2(-1, 1), Vector2(1, 1),
+		Vector2(-2, 0), Vector2(2, 0), Vector2(0, -2), Vector2(0, 2)]
+	var used = {"0,0": true}
+	var fi = 0
+	var out = {}
+	for h in (hids if typeof(hids) == TYPE_ARRAY else []):
+		var hid = String(h)
+		var cell = _mv_cell_for_dir(dirs.get(_peer_name_for(hid).to_lower(), ""))
+		if cell == null or used.has(_cell_key(cell)):
+			while fi < free.size() and used.has(_cell_key(free[fi])):
+				fi += 1
+			cell = free[fi] if fi < free.size() else Vector2.ZERO
+			fi += 1
+		used[_cell_key(cell)] = true
+		out[hid] = cell
+	return out
 
 
 # Tamaño del canvas de composición: EXACTAMENTE el del escritorio (OS.get_window_size),

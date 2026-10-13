@@ -4,43 +4,47 @@ extends Node
 #
 # Cada peer publica sus frames en un archivo shm (contrato GVDSHM1, escrito por
 # `gvd recv --sink shmout`); este nodo los lee, los sube como ImageTexture y los
-# dibuja en una GRILLA dentro de un Viewport FUERA DE PANTALLA. El feed del portal
-# (F5) empuja el texture de ESE viewport, nunca el del shell: así el escritorio no
-# se espeja (no incluye la ventana de Meet), no hay toplevels que roben foco y la
-# carga no toca el camino de render del escritorio.
+# dispone en una GRILLA espacial alrededor de la pantalla LOCAL (según la dirección
+# física del layout) dentro de un Viewport FUERA DE PANTALLA. El feed del portal (F5)
+# empuja el texture de ESE viewport, nunca el del shell: el escritorio no se espeja.
 #
-# Nunca bloquea de forma grave: lectura de archivo por tick (tmpfs) y re-render a
-# demanda; sólo se re-renderiza cuando llegó un frame nuevo.
+# Disposición: la pantalla local va en la celda (0,0); cada peer en su celda según su
+# dirección (west=(-1,0), east=(1,0), north=(0,-1), south=(0,1)). Cada celda mide media
+# vista, así se ven hasta ~4 pantallas y el conjunto puede exceder la vista: un PAN
+# suave sigue al mouse para revelar el resto (lerp por tick).
 #
-# Formato del archivo (little endian, espeja shell/window_cast.gd y gvd.py
-# shm_capture): magic[8] | seq u64 | width u32 | height u32 | stride u32 |
-# fourcc[4] | relleno hasta 64 | frame RGBA. `seq` impar = frame a medio escribir
-# (seqlock): se descarta.
+# Nunca bloquea: lectura de archivo por tick (tmpfs) y re-render a demanda.
 
 const MAGIC = [0x47, 0x56, 0x44, 0x53, 0x48, 0x4d, 0x31, 0x00]  # "GVDSHM1\0"
 const HEADER = 64
-# Cadencia de composición/lectura (no la del emisor): ~15 fps.
-const INTERVAL_MS = 66
-# Fondo opaco del canvas: el feed no debe salir con alfa.
+const INTERVAL_MS = 66          # cadencia de composición/lectura (~15 fps)
 const BG = Color(0.06, 0.06, 0.08, 1.0)
+# Tamaño de cada celda como fracción de la vista: 0.5 = 2x2 visibles; el pan revela el
+# resto cuando la disposición es más ancha/alta que la vista.
+const CELL_FRACTION = 0.5
+const CELL_GUTTER = 8.0
+const PAN_LERP = 0.14           # suavizado del pan (por tick)
 
 var _vp = null
 var _canvas = null
-var _slots = []        # [{path, rect, tex, img, seq}]
-var _last_ms = 0
+var _slots = []                 # [{path, cell, tex, img, seq}]
+var _local_vp = null            # Viewport raíz del shell (pantalla local)
+var _local_cell = Vector2()
 var _composite = Vector2()
-# Pantalla LOCAL del host (el escritorio real): su viewport raíz se dibuja como un tile
-# más, siempre fresco (a diferencia de los peers, que llegan por shm). Null = sin tile
-# local. `_local_rect` en coordenadas del composite.
-var _local_vp = null
-var _local_rect = null
+var _pan = Vector2()
+var _pan_max = Vector2()
+var _cell = Vector2()
+var _arr = Vector2()
+var _min_cell = Vector2()
+var _last_ms = 0
+var _has_local = false
 
 
-# `composite` (Vector2) es el tamaño del viewport de composición; `slots` es un
-# Array de {"path": String, "rect": Rect2} (rect en coordenadas del composite).
-# `local_viewport` (Viewport raíz del shell) + `local_rect` (Rect2) agregan el tile de
-# la pantalla local; se pasan como null para no incluirlo.
-func start(composite, slots, local_viewport = null, local_rect = null):
+# `composite` (Vector2): tamaño del viewport de composición.
+# `tiles`: Array de {"path": String, "cell": Vector2} (celda de la grilla).
+# `local_viewport` (Viewport raíz del shell) + `local_cell` (Vector2): tile de la
+# pantalla local; se pasan como null para no incluirlo.
+func start(composite, tiles, local_viewport = null, local_cell = null):
 	stop()
 	_composite = Vector2(composite)
 	if _composite.x < 2.0 or _composite.y < 2.0:
@@ -57,18 +61,19 @@ func start(composite, slots, local_viewport = null, local_rect = null):
 	_vp.add_child(_canvas)
 	add_child(_vp)
 	_local_vp = local_viewport
-	_local_rect = local_rect if typeof(local_rect) == TYPE_RECT2 else null
+	_has_local = local_viewport != null and typeof(local_cell) == TYPE_VECTOR2
+	_local_cell = Vector2(local_cell) if _has_local else Vector2()
 	_slots = []
-	for s in (slots if typeof(slots) == TYPE_ARRAY else []):
-		if typeof(s) != TYPE_DICTIONARY:
+	for t in (tiles if typeof(tiles) == TYPE_ARRAY else []):
+		if typeof(t) != TYPE_DICTIONARY:
 			continue
-		var path = String(s.get("path", "")).strip_edges()
-		var rect = s.get("rect", null)
-		if path == "" or typeof(rect) != TYPE_RECT2:
+		var path = String(t.get("path", "")).strip_edges()
+		if path == "":
 			continue
-		_slots.append({"path": path, "rect": rect, "tex": null, "img": null, "seq": -1})
-	# Fuerzo un primer render (fondo) para que el texture exista aunque aún no
-	# haya frames.
+		var cell = t.get("cell", Vector2())
+		_slots.append({"path": path, "cell": Vector2(cell) if typeof(cell) == TYPE_VECTOR2 else Vector2(),
+			"tex": null, "img": null, "seq": -1})
+	_layout()
 	_canvas.update()
 	_vp.render_target_update_mode = Viewport.UPDATE_ONCE
 	return true
@@ -77,7 +82,7 @@ func start(composite, slots, local_viewport = null, local_rect = null):
 func stop():
 	_slots = []
 	_local_vp = null
-	_local_rect = null
+	_has_local = false
 	if _vp != null:
 		_vp.queue_free()
 		_vp = null
@@ -103,6 +108,33 @@ func _exit_tree():
 		_vp = null
 
 
+# Recalcula la disposición (celdas -> rects) y el recorrido del pan. Puro salvo estado.
+func _layout():
+	_cell = Vector2(max(16.0, _composite.x * CELL_FRACTION),
+		max(16.0, _composite.y * CELL_FRACTION))
+	var minc = _local_cell if _has_local else Vector2(1e9, 1e9)
+	var maxc = _local_cell if _has_local else Vector2(-1e9, -1e9)
+	for s in _slots:
+		minc = Vector2(min(minc.x, s.cell.x), min(minc.y, s.cell.y))
+		maxc = Vector2(max(maxc.x, s.cell.x), max(maxc.y, s.cell.y))
+	if not _has_local and _slots.empty():
+		minc = Vector2.ZERO
+		maxc = Vector2.ZERO
+	_min_cell = minc
+	_arr = Vector2((maxc.x - minc.x + 1.0) * (_cell.x + CELL_GUTTER),
+		(maxc.y - minc.y + 1.0) * (_cell.y + CELL_GUTTER))
+	_pan_max = Vector2(max(0.0, _arr.x - _composite.x), max(0.0, _arr.y - _composite.y))
+
+
+func _cell_rect(cell):
+	# Posición base + centrado si la disposición es más chica que la vista + pan.
+	var base = Vector2((cell.x - _min_cell.x) * (_cell.x + CELL_GUTTER),
+		(cell.y - _min_cell.y) * (_cell.y + CELL_GUTTER))
+	var center = Vector2(max(0.0, (_composite.x - _arr.x) * 0.5),
+		max(0.0, (_composite.y - _arr.y) * 0.5))
+	return Rect2(base + center - _pan, _cell)
+
+
 func _process(_delta):
 	if _vp == null:
 		return
@@ -110,9 +142,17 @@ func _process(_delta):
 	if now - _last_ms < INTERVAL_MS:
 		return
 	_last_ms = now
+	# Pan suave siguiendo el mouse de la pantalla local (0..1 -> 0..pan_max).
+	if _has_local and _local_vp != null and is_instance_valid(_local_vp):
+		var vsize = _local_vp.get_size()
+		if vsize.x > 1.0 and vsize.y > 1.0:
+			var mn = _local_vp.get_mouse_position() / vsize
+			mn = Vector2(clamp(mn.x, 0.0, 1.0), clamp(mn.y, 0.0, 1.0))
+			var target = Vector2(mn.x * _pan_max.x, mn.y * _pan_max.y)
+			_pan = _pan.linear_interpolate(target, PAN_LERP)
 	var changed = false
-	if _local_vp != null and is_instance_valid(_local_vp):
-		changed = true   # el escritorio local cambia cada frame: se re-renderiza siempre
+	if _has_local:
+		changed = true          # el escritorio local cambia cada frame
 	for s in _slots:
 		if _read_slot(s):
 			changed = true
@@ -152,7 +192,6 @@ func _read_slot(s):
 	f.close()
 	if data.size() != stride * h or seq2 != seq:
 		return false
-	# Godot exige RGBA8 apretado (stride == w*4); si el emisor alineó, se reempaqueta.
 	if stride != w * 4:
 		data = _pack_rows(data, w, h, stride)
 		if data == null:
@@ -203,15 +242,27 @@ func _pack_rows(data, w, h, stride):
 
 func _draw():
 	_canvas.draw_rect(Rect2(Vector2(), _composite), BG)
-	if _local_vp != null and is_instance_valid(_local_vp) and _local_rect != null:
+	if _has_local and _local_vp != null and is_instance_valid(_local_vp):
 		var ltex = _local_vp.get_texture()
 		if ltex != null:
-			_canvas.draw_texture_rect(ltex, _fit_rect(ltex.get_size(), _local_rect), false)
+			# El viewport raíz llega en la orientación opuesta a los frames shm: se
+			# dibuja espejado en vertical para que coincida (ver render_target_v_flip).
+			_draw_tex(ltex, _fit_rect(ltex.get_size(), _cell_rect(_local_cell)), true)
 	for s in _slots:
-		var tex = s.tex
-		if tex == null:
+		if s.tex == null:
 			continue
-		_canvas.draw_texture_rect(tex, _fit_rect(tex.get_size(), s.rect), false)
+		_draw_tex(s.tex, _fit_rect(s.tex.get_size(), _cell_rect(s.cell)), false)
+
+
+# Dibuja una textura en `rect`; `flip_v` la espeja verticalmente (para el tile local).
+func _draw_tex(tex, rect, flip_v):
+	if not flip_v:
+		_canvas.draw_texture_rect(tex, rect, false)
+		return
+	_canvas.draw_set_transform(Vector2(rect.position.x, rect.position.y + rect.size.y),
+		0.0, Vector2(1.0, -1.0))
+	_canvas.draw_texture_rect(tex, Rect2(Vector2(), rect.size), false)
+	_canvas.draw_set_transform(Vector2(), 0.0, Vector2(1.0, 1.0))
 
 
 # Rect de destino con aspecto preservado (letterbox) dentro de `rect`. Puro.
