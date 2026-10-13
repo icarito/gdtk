@@ -1826,11 +1826,6 @@ func _process(_delta):
 		_focus_follow(hover_hit)
 	_poll_force_close(now)
 	_sync_capture_cursor()
-	# Pan del multiview: centra el tile del dueño del puntero (o la pantalla local).
-	if multiview_on and _mv_canvas != null and is_instance_valid(_mv_canvas):
-		var po = pointer_owner()
-		var ph = String(po.get("peer", "")) if typeof(po) == TYPE_DICTIONARY else ""
-		_mv_canvas.set_focus_cell(_mv_cells.get(ph, Vector2(0, 0)))
 	# ScreenCast nativo (multiview): si el backend del portal tiene una fuente PipeWire
 	# activa, empujar el viewport a ~15 fps. Sin fuente activa no se captura nada.
 	# Misma orientación que remote.gd (_screenshot hace flip_y).
@@ -10872,16 +10867,10 @@ func multiview_start(hids) -> Dictionary:
 	var plans = GVD_LAUNCH.multiview_offscreen_plans(path, peers,
 		MULTIVIEW_BASE_PORT, MULTIVIEW_MAX_SLOTS, labels, _mv_shm_dir(),
 		int(tile.x), int(tile.y), MULTIVIEW_SHM_FPS)
-	# Disposición espacial (brújula): la pantalla local va en la celda (0,0) y cada peer
-	# en su celda según su dirección física (cupid al oeste -> izquierda, etc.). Sin
-	# dirección o celda ocupada -> primera celda libre.
-	var cells = _mv_cells_for(peers)
-	_mv_cells = {}
-	for h in peers:
-		var hidk = String(h)
-		var ck = cells.get(hidk, Vector2())
-		_mv_cells[hidk] = ck
-		_mv_cells[_peer_name_for(hidk)] = ck
+	# Layout: MISMAS posiciones/tamaños físicos que la vista Pantallas
+	# (settings["screens"]). El canvas escala el conjunto para entrar en el feed.
+	var phys = _mv_phys_rects(peers)
+	var local_phys = phys.get("__local", Rect2(0, 0, 16, 9))
 	var slots = []
 	var out = []
 	for entry in plans:
@@ -10900,7 +10889,9 @@ func multiview_start(hids) -> Dictionary:
 		multiview_slots[hid] = {"slot": slot, "port": port, "label": label}
 		_gvd_mutex.unlock()
 		_mv_off_plans[hid] = entry
-		slots.append({"path": String(entry.get("path", "")), "cell": cells.get(hid, Vector2())})
+		var pr = phys.get(hid, null)
+		if typeof(pr) == TYPE_RECT2:
+			slots.append({"path": String(entry.get("path", "")), "rect": pr})
 		out.append({"hid": hid, "slot": slot, "port": port})
 		# Aviso al peer por el canal autorizado (async: nunca bloquea el render).
 		var ep = _peer_endpoint_for(hid)
@@ -10915,7 +10906,7 @@ func multiview_start(hids) -> Dictionary:
 		return {"ok": false, "error": "multiview: sin receptores válidos", "slots": []}
 	_mv_canvas = MULTIVIEW_CANVAS.new()
 	add_child(_mv_canvas)
-	if not _mv_canvas.start(comp, slots, get_viewport(), Vector2(0, 0)):
+	if not _mv_canvas.start(comp, slots, get_viewport(), local_phys):
 		_mv_stop_canvas()
 		return {"ok": false,
 			"error": "multiview: no pude abrir la composición fuera de pantalla", "slots": []}
@@ -10962,45 +10953,31 @@ func _mv_shm_dir():
 	return rt.plus_file("gdtk").plus_file("mv")
 
 
-# Celda de la grilla espacial para una dirección cardinal (o null si none/desconocida).
-func _mv_cell_for_dir(d):
-	match String(d):
-		"west": return Vector2(-1, 0)
-		"east": return Vector2(1, 0)
-		"north": return Vector2(0, -1)
-		"south": return Vector2(0, 1)
-	return null
-
-
-func _cell_key(cell):
-	return "%d,%d" % [int(cell.x), int(cell.y)]
-
-
-# Celda por hid según su dirección física (del layout de pantallas). Los peers sin
-# dirección (o con la celda ocupada) van a la primera celda libre. La local es (0,0).
-func _mv_cells_for(hids):
-	var dirs = {}
-	for l in _settings_deskflow_links():
-		var p = String(l.get("peer", "")).strip_edges().to_lower()
-		var d = String(l.get("direction", "")).strip_edges()
-		if p != "" and d != "":
-			dirs[p] = d
-	var free = [Vector2(-1, 0), Vector2(1, 0), Vector2(0, -1), Vector2(0, 1),
-		Vector2(-1, -1), Vector2(1, -1), Vector2(-1, 1), Vector2(1, 1),
-		Vector2(-2, 0), Vector2(2, 0), Vector2(0, -2), Vector2(0, 2)]
-	var used = {"0,0": true}
-	var fi = 0
+# Rects FÍSICOS (layout de Pantallas) por hid + "__local". Mismo criterio que la vista
+# Pantallas: posición y tamaño reales de cada pantalla. Un peer sin pantalla en el
+# layout queda sin rect (no entra al mosaico).
+func _mv_phys_rects(hids):
+	var data = {}
+	if settings_bridge != null:
+		data = settings_bridge.settings.get("screens", {})
+	var lay = SCREEN_LAYOUT.normalize_layout(data)
 	var out = {}
+	out["__local"] = SCREEN_LAYOUT.rect(lay.local) if lay.local != null else Rect2(0, 0, 16, 9)
 	for h in (hids if typeof(hids) == TYPE_ARRAY else []):
 		var hid = String(h)
-		var cell = _mv_cell_for_dir(dirs.get(_peer_name_for(hid).to_lower(), ""))
-		if cell == null or used.has(_cell_key(cell)):
-			while fi < free.size() and used.has(_cell_key(free[fi])):
-				fi += 1
-			cell = free[fi] if fi < free.size() else Vector2.ZERO
-			fi += 1
-		used[_cell_key(cell)] = true
-		out[hid] = cell
+		var nm = _peer_name_for(hid)
+		var sc = SCREEN_LAYOUT.screen_by_id(lay, nm)
+		if sc == null:
+			for s in lay.screens:
+				if String(s.get("peer", "")).to_lower() == nm.to_lower() \
+						or String(s.get("label", "")).to_lower() == nm.to_lower() \
+						or String(s.get("id", "")).to_lower() == nm.to_lower():
+					sc = s
+					break
+		if sc != null:
+			var r = SCREEN_LAYOUT.rect(sc)
+			if r.size.x > 0.0 and r.size.y > 0.0:
+				out[hid] = r
 	return out
 
 

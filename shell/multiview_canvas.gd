@@ -4,16 +4,14 @@ extends Node
 #
 # Cada peer publica sus frames en un archivo shm (contrato GVDSHM1, escrito por
 # `gvd recv --sink shmout`); este nodo los lee, los sube como ImageTexture y los
-# dispone en una GRILLA espacial alrededor de la pantalla LOCAL (según la dirección
-# física del layout) dentro de un Viewport FUERA DE PANTALLA. El feed del portal (F5)
-# empuja el texture de ESE viewport.
+# dispone en un Viewport FUERA DE PANTALLA usando el MISMO LAYOUT que la vista
+# Pantallas: cada pantalla en su rect físico (settings["screens"]), y todo el conjunto
+# se escala para entrar en el feed. Así la composición respeta la disposición real
+# (posiciones y tamaños) sin huecos artificiales: los únicos huecos son los del propio
+# layout. El feed del portal (F5) empuja el texture de ESE viewport.
 #
-# Reglas:
-#  - Sólo se incluyen tiles CON imagen (la local siempre; un peer entra recién cuando
-#    llega su primer frame). Un tile sin señal NO reserva celda -> no deja huecos.
-#  - Celdas contiguas (sin gutter); celdas de media vista.
-#  - PAN: sigue al foco (el tile del cursor) centrándolo, suave (lerp); si no hay foco,
-#    sigue al mouse de la pantalla local.
+# Sólo se incluyen tiles CON imagen (la local siempre; un peer entra recién cuando
+# llega su primer frame): un tile sin señal no reserva rect -> no deja hueco.
 #
 # Nunca bloquea: lectura de archivo por tick (tmpfs) y re-render a demanda.
 
@@ -21,30 +19,27 @@ const MAGIC = [0x47, 0x56, 0x44, 0x53, 0x48, 0x4d, 0x31, 0x00]  # "GVDSHM1\0"
 const HEADER = 64
 const INTERVAL_MS = 66          # cadencia de composición/lectura (~15 fps)
 const BG = Color(0.06, 0.06, 0.08, 1.0)
-const CELL_FRACTION = 1.0       # cada pantalla llena la vista; el pan navega entre ellas
-const PAN_LERP = 0.12           # suavizado del pan (por tick)
+# Margen relativo entre pantallas del layout físico (mm): 0 = pegadas.
+const LAYOUT_MARGIN = 0.0
 
 var _vp = null
 var _canvas = null
-var _slots = []                 # [{path, cell, tex, img, seq}]
+var _slots = []                 # [{path, rect: Rect2 (físico), tex, img, seq}]
 var _local_vp = null            # Viewport raíz del shell (pantalla local)
-var _local_cell = Vector2()
+var _local_phys = Rect2()
 var _has_local = false
 var _composite = Vector2()
-var _pan = Vector2()
-var _pan_max = Vector2()
-var _cell = Vector2()
-var _arr = Vector2()
-var _min_cell = Vector2()
-var _focus_cell = null          # celda del dueño del puntero (Vector2) o null
+var _bbox_pos = Vector2()
+var _scale = 1.0
+var _origin = Vector2()
 var _last_ms = 0
 
 
 # `composite` (Vector2): tamaño del viewport de composición.
-# `tiles`: Array de {"path": String, "cell": Vector2}.
-# `local_viewport` (Viewport raíz) + `local_cell` (Vector2): tile local; null para no
-# incluirlo.
-func start(composite, tiles, local_viewport = null, local_cell = null):
+# `tiles`: Array de {"path": String, "rect": Rect2} (rect físico del layout).
+# `local_viewport` (Viewport raíz) + `local_phys` (Rect2 físico): tile local; null para
+# no incluirlo.
+func start(composite, tiles, local_viewport = null, local_phys = null):
 	stop()
 	_composite = Vector2(composite)
 	if _composite.x < 2.0 or _composite.y < 2.0:
@@ -60,21 +55,17 @@ func start(composite, tiles, local_viewport = null, local_cell = null):
 	_vp.add_child(_canvas)
 	add_child(_vp)
 	_local_vp = local_viewport
-	_has_local = local_viewport != null and typeof(local_cell) == TYPE_VECTOR2
-	_local_cell = Vector2(local_cell) if _has_local else Vector2()
+	_has_local = local_viewport != null and typeof(local_phys) == TYPE_RECT2 and local_phys.size.x > 0.0
+	_local_phys = Rect2(local_phys) if _has_local else Rect2()
 	_slots = []
 	for t in (tiles if typeof(tiles) == TYPE_ARRAY else []):
 		if typeof(t) != TYPE_DICTIONARY:
 			continue
 		var path = String(t.get("path", "")).strip_edges()
-		if path == "":
+		var r = t.get("rect", null)
+		if path == "" or typeof(r) != TYPE_RECT2 or r.size.x <= 0.0 or r.size.y <= 0.0:
 			continue
-		var cell = t.get("cell", Vector2())
-		_slots.append({"path": path,
-			"cell": Vector2(cell) if typeof(cell) == TYPE_VECTOR2 else Vector2(),
-			"tex": null, "img": null, "seq": -1})
-	_cell = Vector2(max(16.0, _composite.x * CELL_FRACTION),
-		max(16.0, _composite.y * CELL_FRACTION))
+		_slots.append({"path": path, "rect": Rect2(r), "tex": null, "img": null, "seq": -1})
 	_layout()
 	_canvas.update()
 	_vp.render_target_update_mode = Viewport.UPDATE_ONCE
@@ -85,16 +76,10 @@ func stop():
 	_slots = []
 	_local_vp = null
 	_has_local = false
-	_focus_cell = null
 	if _vp != null:
 		_vp.queue_free()
 		_vp = null
 	_canvas = null
-
-
-# Celda del tile dueño del puntero (para centrar el pan). Vector2 o null.
-func set_focus_cell(cell):
-	_focus_cell = Vector2(cell) if typeof(cell) == TYPE_VECTOR2 else null
 
 
 func get_texture():
@@ -115,40 +100,37 @@ func _exit_tree():
 		_vp = null
 
 
-# Disposición sobre los tiles CON imagen (local + slots con tex): bounding box de
-# celdas, sin gutter. Recalcula pan_max.
+# Escala el bounding box de los tiles CON imagen (local + slots con tex) para entrar en
+# el composite, centrado. Los huecos del layout son los del propio layout físico.
 func _layout():
-	var minc = Vector2(1e9, 1e9)
-	var maxc = Vector2(-1e9, -1e9)
+	var minp = Vector2(1e20, 1e20)
+	var maxp = Vector2(-1e20, -1e20)
 	var have = false
 	if _has_local:
-		minc = _local_cell
-		maxc = _local_cell
+		var m = _local_phys.grow(LAYOUT_MARGIN)
+		minp = m.position
+		maxp = m.position + m.size
 		have = true
 	for s in _slots:
 		if s.tex == null:
 			continue
-		minc = Vector2(min(minc.x, s.cell.x), min(minc.y, s.cell.y))
-		maxc = Vector2(max(maxc.x, s.cell.x), max(maxc.y, s.cell.y))
+		var r = s.rect.grow(LAYOUT_MARGIN)
+		minp = Vector2(min(minp.x, r.position.x), min(minp.y, r.position.y))
+		maxp = Vector2(max(maxp.x, r.position.x + r.size.x), max(maxp.y, r.position.y + r.size.y))
 		have = true
 	if not have:
-		minc = Vector2.ZERO
-		maxc = Vector2.ZERO
-	_min_cell = minc
-	_arr = Vector2((maxc.x - minc.x + 1.0) * _cell.x, (maxc.y - minc.y + 1.0) * _cell.y)
-	_pan_max = Vector2(max(0.0, _arr.x - _composite.x), max(0.0, _arr.y - _composite.y))
+		minp = Vector2.ZERO
+		maxp = Vector2.ONE
+	_bbox_pos = minp
+	var sz = maxp - minp
+	_scale = min(_composite.x / sz.x, _composite.y / sz.y) if sz.x > 0.0 and sz.y > 0.0 else 1.0
+	_origin = (_composite - sz * _scale) * 0.5
 
 
-# Rect de una celda SIN pan (base + centrado si la disposición es más chica que la vista).
-func _base_rect(cell):
-	var base = Vector2((cell.x - _min_cell.x) * _cell.x, (cell.y - _min_cell.y) * _cell.y)
-	var center = Vector2(max(0.0, (_composite.x - _arr.x) * 0.5),
-		max(0.0, (_composite.y - _arr.y) * 0.5))
-	return Rect2(base + center, _cell)
-
-
-func _cell_rect(cell):
-	return Rect2(_base_rect(cell).position - _pan, _cell)
+# Rect en pantalla (composite) de un rect físico del layout.
+func _scaled_rect(phys):
+	var p = (phys.position - _bbox_pos) * _scale + _origin
+	return Rect2(p, phys.size * _scale)
 
 
 func _process(_delta):
@@ -166,26 +148,8 @@ func _process(_delta):
 			changed = true
 	if changed:
 		_layout()
-		_update_pan()
 		_canvas.update()
 		_vp.render_target_update_mode = Viewport.UPDATE_ONCE
-
-
-func _update_pan():
-	# Pan = sigue el MOUSE de la pantalla local (0..1 -> 0..pan_max), suave. Si no hay
-	# pantalla local, usa el foco (dueño del puntero) como respaldo.
-	var target = _pan
-	if _has_local and _local_vp != null and is_instance_valid(_local_vp):
-		var vsize = _local_vp.get_size()
-		if vsize.x > 1.0 and vsize.y > 1.0:
-			var mn = _local_vp.get_mouse_position() / vsize
-			target = Vector2(clamp(mn.x, 0.0, 1.0) * _pan_max.x,
-				clamp(mn.y, 0.0, 1.0) * _pan_max.y)
-	elif _focus_cell != null:
-		var fr = _base_rect(_focus_cell)
-		target = fr.position + fr.size * 0.5 - _composite * 0.5
-	target = Vector2(clamp(target.x, 0.0, _pan_max.x), clamp(target.y, 0.0, _pan_max.y))
-	_pan = _pan.linear_interpolate(target, PAN_LERP)
 
 
 func _read_slot(s):
@@ -265,11 +229,11 @@ func _draw():
 	for s in _slots:
 		if s.tex == null:
 			continue
-		_canvas.draw_texture_rect(s.tex, _fit_rect(s.tex.get_size(), _cell_rect(s.cell)), false)
+		_canvas.draw_texture_rect(s.tex, _fit_rect(s.tex.get_size(), _scaled_rect(s.rect)), false)
 	if _has_local and _local_vp != null and is_instance_valid(_local_vp):
 		var ltex = _local_vp.get_texture()
 		if ltex != null:
-			_draw_local(ltex, _fit_rect(ltex.get_size(), _cell_rect(_local_cell)))
+			_draw_local(ltex, _fit_rect(ltex.get_size(), _scaled_rect(_local_phys)))
 
 
 # El viewport raíz llega en la orientación opuesta a los frames shm: espejo vertical.
