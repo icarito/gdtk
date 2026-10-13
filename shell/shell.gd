@@ -334,8 +334,9 @@ var multiview_follow_mode = "off"  # "off" | "focus"
 var _mv_canvas = null
 # Planes offscreen vivos por hid (para asociar slot -> path del shm).
 var _mv_off_plans = {}
-# Celda de la grilla espacial por hid Y por nombre visible (para el pan por foco).
-var _mv_cells = {}
+# Mapa rect físico por hid/nombre (y "__local") para el snap del pan a la pantalla
+# bajo el puntero.
+var _mv_phys_map = {}
 # K17: vínculo Deskflow suspendido temporalmente mientras gvd extiende el monitor
 # virtual hacia ese vecino/dirección. Se guarda para restaurarlo al cortar la
 # sesión de pantalla (SPEC-ui-rework-2026-10, decisión 2026-10-01).
@@ -1826,6 +1827,16 @@ func _process(_delta):
 		_focus_follow(hover_hit)
 	_poll_force_close(now)
 	_sync_capture_cursor()
+	# Snap del pan del multiview: encuadra la pantalla bajo el puntero (dueno via
+	# pointer_owner; local por defecto).
+	if multiview_on and _mv_canvas != null and is_instance_valid(_mv_canvas) \
+			and _mv_canvas.has_method("set_focus_rect"):
+		var po = pointer_owner()
+		var ph = String(po.get("peer", "")) if typeof(po) == TYPE_DICTIONARY else ""
+		var fr = _mv_phys_map.get(ph, null)
+		if typeof(fr) != TYPE_RECT2:
+			fr = _mv_phys_map.get("__local", null)
+		_mv_canvas.set_focus_rect(fr)
 	# ScreenCast nativo (multiview): si el backend del portal tiene una fuente PipeWire
 	# activa, empujar el viewport a ~15 fps. Sin fuente activa no se captura nada.
 	# Misma orientación que remote.gd (_screenshot hace flip_y).
@@ -9676,94 +9687,19 @@ func _peer_screen_res(hid, vs):
 	return true
 
 
-# Handler del método peer `layout`: el equipo del Grupo cambió su acomodo y empuja la
-# geometría de sus pantallas vecinas para que el resto lo refleje. Upserta por id (o
-# por nombre resoluble), sin tocar la pantalla local y sin re-difundir (evita el eco).
+# Handler del método peer `layout`: DESACTIVADO. El layout es relativo al marco LOCAL de
+# cada equipo; empujar x/y absolutos hacía que el receptor los aplicara crudo y se
+# desacomodara solo (un vecino pisaba la disposición del otro). Se deja el método como
+# no-op para no romper el protocolo; la propagación correcta necesita un marco canónico
+# (relaciones de adyacencia), no coordenadas.
 func _peer_layout(hid, screens):
-	if settings_bridge == null or settings_bridge.model == null:
-		return false
-	if typeof(screens) != TYPE_ARRAY:
-		return false
-	var me = _local_hid()
-	var lay = SCREEN_LAYOUT.normalize_layout(settings_bridge.settings.get("screens", {}))
-	var local_id = String(lay.local.id)
-	var changed = false
-	for e in screens:
-		if typeof(e) != TYPE_DICTIONARY:
-			continue
-		var sid = String(e.get("id", "")).strip_edges()
-		var sname = String(e.get("peer", "")).strip_edges()
-		if sname == "":
-			sname = String(e.get("label", "")).strip_edges()
-		if sid == "" or sid == local_id or sid == me or sname == _local_hostname():
-			continue
-		# El target se busca DENTRO de `lay.screens` (mismo objeto que vamos a guardar):
-		# SCREEN_LAYOUT.screen_by_id normaliza y devuelve una copia, así que mutarla no
-		# afectaba el layout.
-		var target = null
-		for sc in lay.screens:
-			if String(sc.get("id", "")) == sid:
-				target = sc
-				break
-		if target == null and sname != "":
-			var sn = sname.to_lower()
-			for sc in lay.screens:
-				if String(sc.get("peer", "")).to_lower() == sn \
-						or String(sc.get("label", "")).to_lower() == sn:
-					target = sc
-					break
-		if target == null:
-			if sname == "" or sname == sid:
-				continue
-			target = SCREEN_LAYOUT.default_screen(sid, sname, false)
-			target.peer = sname
-			lay.screens.append(target)
-		target["x"] = float(e.get("x", target.get("x", 0.0)))
-		target["y"] = float(e.get("y", target.get("y", 0.0)))
-		target["w"] = float(e.get("w", target.get("w", SCREEN_LAYOUT.DEFAULT_W)))
-		target["h"] = float(e.get("h", target.get("h", SCREEN_LAYOUT.DEFAULT_H)))
-		var pw = int(e.get("px_w", 0))
-		var ph = int(e.get("px_h", 0))
-		if pw > 0 and ph > 0:
-			target["px_w"] = pw
-			target["px_h"] = ph
-		changed = true
-	if not changed:
-		return true
-	settings_bridge.settings["screens"] = lay
-	# Marca la firma para que el poll de settings no rebote el layout recién recibido.
-	_layout_sent_sig = SCREEN_LAYOUT.to_json(lay)
-	settings_bridge.write_atomic(settings_bridge.settings_path(),
-		settings_bridge.model.to_json(settings_bridge.settings))
-	_apply_deskflow_settings()
-	request_redraw()
 	return true
 
 
-# Difunde el layout actual del Grupo a los pares (una vez por cambio). Se llama tras
-# un cambio LOCAL (editor de Pantallas, colocación en el Grupo); no desde _peer_layout.
+# Difusión del layout: DESACTIVADA (ver _peer_layout). Se deja el hook para no tocar los
+# llamadores; el layout se sincroniza por resolución (`screen_res`) y por el editor local.
 func _maybe_broadcast_layout():
-	if settings_bridge == null:
-		return
-	var raw = settings_bridge.settings.get("screens", {})
-	var sig = SCREEN_LAYOUT.to_json(raw)
-	if sig == _layout_sent_sig:
-		return
-	_layout_sent_sig = sig
-	var targets = _group_targets()
-	if targets.empty():
-		return
-	var lay = SCREEN_LAYOUT.normalize_layout(raw)
-	var screens = []
-	for sc in lay.screens:
-		screens.append({
-			"id": String(sc.get("id", "")), "peer": String(sc.get("peer", "")),
-			"label": String(sc.get("label", "")), "x": float(sc.get("x", 0.0)),
-			"y": float(sc.get("y", 0.0)), "w": float(sc.get("w", 0.0)),
-			"h": float(sc.get("h", 0.0)), "px_w": int(sc.get("px_w", 0)),
-			"px_h": int(sc.get("px_h", 0)),
-		})
-	_peer_send_async(targets, "layout", {"screens": screens})
+	return
 
 
 # Controles de audio universales: difunde una acción de volumen/mute a todos los
@@ -10871,6 +10807,12 @@ func multiview_start(hids) -> Dictionary:
 	# (settings["screens"]). El canvas escala el conjunto para entrar en el feed.
 	var phys = _mv_phys_rects(peers)
 	var local_phys = phys.get("__local", Rect2(0, 0, 16, 9))
+	_mv_phys_map = {"__local": local_phys}
+	for h in peers:
+		var r2 = phys.get(String(h), null)
+		if typeof(r2) == TYPE_RECT2:
+			_mv_phys_map[String(h)] = r2
+			_mv_phys_map[_peer_name_for(String(h))] = r2
 	var slots = []
 	var out = []
 	for entry in plans:

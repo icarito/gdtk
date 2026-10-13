@@ -24,7 +24,8 @@ const LAYOUT_MARGIN = 0.0
 # Zoom sobre el "fit" (1.0 = entra todo el layout). >1 acerca: el contenido excede el
 # feed y el pan navega. Tunable.
 const ZOOM = 1.7
-const PAN_LERP = 0.12           # suavizado del pan (por tick)
+const PAN_LERP = 0.12           # suavizado del pan continuo (por tick)
+const SNAP_LERP = 0.18          # suavizado del snap a la pantalla enfocada
 
 var _vp = null
 var _canvas = null
@@ -38,6 +39,7 @@ var _scale = 1.0
 var _origin = Vector2()
 var _pan = Vector2()
 var _pan_max = Vector2()
+var _focus_phys = null          # Rect2 físico de la pantalla a encuadrar (snap) o null
 var _last_ms = 0
 
 
@@ -96,6 +98,11 @@ func is_active():
 	return _vp != null
 
 
+# Pantalla a encuadrar (snap): rect físico del layout, o null -> pan por mouse.
+func set_focus_rect(phys):
+	_focus_phys = Rect2(phys) if typeof(phys) == TYPE_RECT2 else null
+
+
 func composite_size():
 	return _composite
 
@@ -138,23 +145,33 @@ func _layout():
 	_pan = Vector2(clamp(_pan.x, 0.0, _pan_max.x), clamp(_pan.y, 0.0, _pan_max.y))
 
 
-# Pan: sigue al mouse de la pantalla local (0..1 -> 0..pan_max), suave. Sin zoom el
-# contenido entra entero (pan_max=0) y queda centrado.
+# Pan: si hay una pantalla enfocada (bajo el puntero) el pan SNAP la encuadra completa;
+# si no, sigue al mouse (0..1 -> 0..pan_max). Suave en ambos casos.
 func _update_pan():
 	var target = _pan_max * 0.5
-	if _has_local and _local_vp != null and is_instance_valid(_local_vp):
+	var lerp_k = PAN_LERP
+	if _focus_phys != null:
+		var sr = _scaled_rect_nopan(_focus_phys)
+		target = sr.position + sr.size * 0.5 - _composite * 0.5
+		lerp_k = SNAP_LERP
+	elif _has_local and _local_vp != null and is_instance_valid(_local_vp):
 		var vs = _local_vp.get_size()
 		if vs.x > 1.0 and vs.y > 1.0:
 			var mn = _local_vp.get_mouse_position() / vs
 			target = Vector2(clamp(mn.x, 0.0, 1.0) * _pan_max.x,
 				clamp(mn.y, 0.0, 1.0) * _pan_max.y)
-	_pan = _pan.linear_interpolate(target, PAN_LERP)
+	target = Vector2(clamp(target.x, 0.0, _pan_max.x), clamp(target.y, 0.0, _pan_max.y))
+	_pan = _pan.linear_interpolate(target, lerp_k)
+
+
+# Rect físico -> rect en el composite SIN pan.
+func _scaled_rect_nopan(phys):
+	return Rect2((phys.position - _bbox_pos) * _scale + _origin, phys.size * _scale)
 
 
 # Rect en pantalla (composite) de un rect físico del layout.
 func _scaled_rect(phys):
-	var p = (phys.position - _bbox_pos) * _scale + _origin - _pan
-	return Rect2(p, phys.size * _scale)
+	return Rect2(_scaled_rect_nopan(phys).position - _pan, phys.size * _scale)
 
 
 func _process(_delta):
