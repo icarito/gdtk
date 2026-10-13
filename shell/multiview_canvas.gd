@@ -19,6 +19,8 @@ const STALE_MS = 2500           # un tile sin frames frescos sale de la vista
 const BG = Color(0.06, 0.06, 0.08, 1.0)
 const CAM_LERP = 0.14           # suavizado de la cámara (por frame): anima el paso
 const CAM_EPS = 0.0006          # residuo relativo por debajo del cual la cámara descansa
+const PUSH_MIN_MS = 50          # techo del envío al feed: ~20 fps (cada frame de
+                                # animación son MB; saturarlo tumba el loop)
 
 var _vp = null
 var _canvas = null
@@ -37,6 +39,7 @@ var _cam_scale = 1.0
 var _cam_ready = false
 var _frame_seq = 0
 var _last_ms = 0
+var _last_push_ms = 0
 
 
 func start(composite, tiles, local_viewport = null, local_phys = null):
@@ -65,7 +68,8 @@ func start(composite, tiles, local_viewport = null, local_phys = null):
 		var r = t.get("rect", null)
 		if path == "" or typeof(r) != TYPE_RECT2 or r.size.x <= 0.0 or r.size.y <= 0.0:
 			continue
-		_slots.append({"path": path, "rect": Rect2(r), "tex": null, "img": null, "seq": -1, "last_ms": 0})
+		_slots.append({"path": path, "rect": Rect2(r), "tex": null, "img": null, "seq": -1,
+			"last_ms": 0, "f": null})
 	_cam_ready = false
 	_recompute_bbox()
 	_layout_cam(true)
@@ -75,6 +79,11 @@ func start(composite, tiles, local_viewport = null, local_phys = null):
 
 
 func stop():
+	for s in _slots:
+		var f = s.get("f", null)
+		if f != null:
+			f.close()
+		s.f = null
 	_slots = []
 	_local_vp = null
 	_has_local = false
@@ -123,6 +132,11 @@ func frame_seq():
 
 
 func _exit_tree():
+	for s in _slots:
+		var f = s.get("f", null)
+		if f != null:
+			f.close()
+		s.f = null
 	if _vp != null:
 		_vp.queue_free()
 		_vp = null
@@ -194,7 +208,9 @@ func _process(_delta):
 		return
 	var now = OS.get_ticks_msec()
 	# El lerp de cámara corre CADA frame (la animación entre pantallas se ve suave a la
-	# tasa de refresco); la lectura del shm sigue cada INTERVAL_MS (peers lentos).
+	# tasa de refresco); la lectura del shm sigue cada INTERVAL_MS (peers lentos). El
+	# ENVÍO al feed se techo con PUSH_MIN_MS: la animación a 60 fps copia MB por frame
+	# y el empuje constante puede saturar el loop principal (se vio en bastión).
 	var changed = false
 	if _layout_cam(false):
 		changed = true
@@ -205,7 +221,8 @@ func _process(_delta):
 		_recompute_bbox()
 		_layout_cam(false)
 		changed = true
-	if changed:
+	if changed and now - _last_push_ms >= PUSH_MIN_MS:
+		_last_push_ms = now
 		_canvas.update()
 		_vp.render_target_update_mode = Viewport.UPDATE_ONCE
 		# La vista "salió": el consumidor del feed debe recibir la composición nueva.
@@ -213,31 +230,35 @@ func _process(_delta):
 
 
 func _read_slot(s):
-	var f = File.new()
-	if f.open(String(s.path), File.READ) != OK:
-		return false
+	# Manejo PERSISTENTE (se abre una vez y se relee): el open/close de cada tic cada
+	# 100 ms vivía en el hilo principal. El seqlock no cambia: la cabecera se lee antes
+	# y después del cuerpo y sólo acepta el frame si ambas secuencias coinciden
+	# (marcador par y vigente; ver GVDSHM1 en tools/gvd).
+	var f = s.f
+	if f == null:
+		f = File.new()
+		if f.open(String(s.path), File.READ) != OK:
+			s["f"] = null
+			return false
+		s["f"] = f
+	f.seek(0)
 	var head = f.get_buffer(HEADER)
 	if head.size() != HEADER or not _is_magic(head):
-		f.close()
 		return false
 	var seq = _u64(head, 8)
 	var w = _u32(head, 16)
 	var h = _u32(head, 20)
 	var stride = _u32(head, 24)
 	if seq % 2 != 0 or seq < 2 or w <= 0 or h <= 0 or stride < w * 4:
-		f.close()
 		return false
 	if seq == int(s.seq):
-		f.close()
 		return false
 	if h > 4096 or w > 8192:
-		f.close()
 		return false
 	f.seek(HEADER)
 	var data = f.get_buffer(stride * h)
 	f.seek(8)
 	var seq2 = _u64(f.get_buffer(8), 0)
-	f.close()
 	if data.size() != stride * h or seq2 != seq:
 		return false
 	if stride != w * 4:

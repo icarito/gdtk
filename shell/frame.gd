@@ -3164,6 +3164,16 @@ func _input(event):
 			# el evento como manejado (con Super sigue mandando el zoom/alejar).
 			if shell.apps_view and super_press == null:
 				return
+			# Alt + rueda: el zoom de la Vista del grupo desde cualquier lado (alejar
+			# bajo x1 muestra todo el layout). Super ya es el zoom Sugar de niveles y
+			# no se pisa; ALT+WHEEL es libre en el Frame (el Alt+clic de apps pasa con
+			# su reenvío normal, acá no hay botón).
+			if event.alt and shell.multiview_on and shell.has_method("multiview_scroll_zoom"):
+				shell.multiview_scroll_zoom(
+					1 if event.button_index == BUTTON_WHEEL_UP else -1)
+				multiview.refresh(true)
+				get_tree().set_input_as_handled()
+				return
 			# Sobre Vecindario/Grupo/Hogar o el ícono central: un paso de la misma cadena
 			# vertical que el gesto de 3 dedos (rueda arriba = acercar / dedos abajo).
 			if super_press == null and (_over_place(mouse_pos) or shell._over_center_icon(mouse_pos)):
@@ -3176,17 +3186,10 @@ func _input(event):
 				get_tree().set_input_as_handled()
 				return
 			if super_press != null:
-				# Vista del grupo prendida: Super+rueda controla el zoom de la
-				# composición desde cualquier lado (alejar bajo 1 muestra todo).
-				if shell.multiview_on and shell.has_method("multiview_scroll_zoom"):
-					shell.multiview_scroll_zoom(
-						1 if event.button_index == BUTTON_WHEEL_UP else -1)
-					multiview.refresh(true)
-					get_tree().set_input_as_handled()
-					return
 				# En el Hogar o dentro del zoom (Grupo/Vecindario) la rueda VERTICAL
 				# aleja/acerca un nivel Sugar (el ícono central se achica/agranda).
-				# Fuera de ahí el paneo de la franja sigue igual.
+				# Fuera de ahí el paneo de la franja sigue igual. (Super ya es el zoom
+				# Sugar: el zoom de la Vista del grupo va con Alt+rueda, ver arriba.)
 				if shell.zoom_level > 0 or shell._at_home():
 					shell._zoom_step(1 if event.button_index == BUTTON_WHEEL_UP else -1)
 				else:
