@@ -337,8 +337,8 @@ var _mv_off_plans = {}
 # Mapa rect físico por hid/nombre (y "__local") para el snap del pan a la pantalla
 # bajo el puntero.
 var _mv_phys_map = {}
-# Última config multiview aplicada (settings["multiview"] normalizada).
-var _mv_cfg_last = {}
+# Reintento del arranque automático del multiview (por si el Vecindario no estaba listo).
+var _mv_retry_at = 0
 # K17: vínculo Deskflow suspendido temporalmente mientras gvd extiende el monitor
 # virtual hacia ese vecino/dirección. Se guarda para restaurarlo al cortar la
 # sesión de pantalla (SPEC-ui-rework-2026-10, decisión 2026-10-01).
@@ -11051,7 +11051,7 @@ func _mv_write_cfg(cfg):
 	settings_bridge.settings["multiview"] = cfg
 	settings_bridge.write_atomic(settings_bridge.settings_path(),
 		settings_bridge.model.to_json(settings_bridge.settings))
-	_mv_cfg_last = {}
+	_mv_retry_at = 0
 
 
 func multiview_set_pan(v):
@@ -11098,17 +11098,18 @@ func _mv_desired_peers():
 
 
 # Aplica settings["multiview"] en vivo: prende/apaga la vista y ajusta zoom/pan. Se
-# llama por frame (barato: sólo actúa si la config cambió).
+# llama por frame; el arranque reintenta (el Vecindario puede no estar listo todavía).
 func _mv_apply_settings():
+	var now = OS.get_ticks_msec()
 	var cfg = _mv_mvcfg()
-	var same = str(cfg) == str(_mv_cfg_last)
-	_mv_cfg_last = cfg
-	if not same:
-		var want = bool(cfg.get("enabled", false))
-		if want and not multiview_on and share_enabled:
-			multiview_start(_mv_desired_peers())
-		elif not want and multiview_on:
-			multiview_stop()
+	var want = bool(cfg.get("enabled", false))
+	if want and not multiview_on and share_enabled and now >= _mv_retry_at:
+		var peers = _mv_desired_peers()
+		if not peers.empty():
+			multiview_start(peers)
+		_mv_retry_at = now + 2000
+	elif not want and multiview_on:
+		multiview_stop()
 	if multiview_on and _mv_canvas != null and is_instance_valid(_mv_canvas):
 		_mv_canvas.set_zoom(float(cfg.get("zoom", 1.7)))
 		_mv_canvas.set_pan_enabled(bool(cfg.get("pan", true)))
@@ -11810,11 +11811,6 @@ func _tracked_launch_work(userdata):
 	userdata.state.error = err
 	userdata.state.done = true
 	_gvd_mutex.unlock()
-
-
-# Comilla un token para `sh -c` (entre simples, escapando comillas simples).
-func _sh_quote(s):
-	return "'" + String(s).replace("'", "'\\''") + "'"
 
 
 # Reapea los Threads de lanzamiento terminados (no bloquea).
