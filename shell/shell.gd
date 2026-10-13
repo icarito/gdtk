@@ -7877,6 +7877,20 @@ func _sync_directions_from_screen_layout():
 		else:
 			old.erase("input")
 		next[id] = DIRECTIONS_MODEL.sanitize_entry(old)
+		# Espeja a la otra clave (hid <-> nombre): el Grupo indexa por hid mientras el
+		# layout puede keyear por nombre (o al revés). Sin esto, editar Pantallas
+		# actualizaba una sola clave y el acomodo del Grupo quedaba stale.
+		var entry2 = next[id]
+		if not _looks_like_hid(id):
+			var hid_e = _host_hid_for_label(String(sc.get("label", "")), String(sc.get("peer", "")))
+			if hid_e != "" and hid_e != id:
+				next[hid_e] = entry2.duplicate()
+		else:
+			var nm_e = String(sc.get("label", ""))
+			if nm_e == "":
+				nm_e = String(sc.get("peer", ""))
+			if nm_e != "" and nm_e != id:
+				next[nm_e] = entry2.duplicate()
 	if str(next) != str(host_directions):
 		host_directions = next
 		_refresh_direction_views()
@@ -10691,6 +10705,19 @@ func _peer_name_for(hid):
 	return String(hid)
 
 
+# hid del vecino visto cuyo label o peer coincide (case-insensitive). "" si no está.
+func _host_hid_for_label(label, peer):
+	var names = [String(label).strip_edges().to_lower(), String(peer).strip_edges().to_lower()]
+	if neighborhood == null:
+		return ""
+	for h in neighborhood.hosts:
+		var lbl = String(h.get("label", "")).strip_edges().to_lower()
+		if lbl != "" and names.has(lbl):
+			var hh = String(h.get("hid", ""))
+			return hh if hh != "" else String(h.get("id", ""))
+	return ""
+
+
 # Handler del método peer `share_notify`: guarda/actualiza el lado que el otro
 # equipo comparte hacia este (el `side` ya viene invertido por el emisor) o lo
 # borra al recibir "stopped". Upsert por (hid, tipo).
@@ -10819,7 +10846,10 @@ func multiview_start(hids) -> Dictionary:
 	var plans = GVD_LAUNCH.multiview_offscreen_plans(path, peers,
 		MULTIVIEW_BASE_PORT, MULTIVIEW_MAX_SLOTS, labels, _mv_shm_dir(),
 		int(tile.x), int(tile.y), MULTIVIEW_SHM_FPS)
-	var rects = MULTIVIEW.tile_rects(plans.size(), comp, MULTIVIEW_GUTTER)
+	# Grilla: el primer tile es la pantalla LOCAL (bastion) y luego los peers, así la
+	# vista unificada incluye SIEMPRE el escritorio propio.
+	var rects = MULTIVIEW.tile_rects(plans.size() + 1, comp, MULTIVIEW_GUTTER)
+	var local_rect = rects[0] if not rects.empty() else Rect2()
 	var slots = []
 	var out = []
 	for entry in plans:
@@ -10838,7 +10868,7 @@ func multiview_start(hids) -> Dictionary:
 		multiview_slots[hid] = {"slot": slot, "port": port, "label": label}
 		_gvd_mutex.unlock()
 		_mv_off_plans[hid] = entry
-		var rect = rects[slot] if (slot >= 0 and slot < rects.size()) else Rect2()
+		var rect = rects[slot + 1] if (slot >= 0 and slot + 1 < rects.size()) else Rect2()
 		slots.append({"path": String(entry.get("path", "")), "rect": rect})
 		out.append({"hid": hid, "slot": slot, "port": port})
 		# Aviso al peer por el canal autorizado (async: nunca bloquea el render).
@@ -10854,7 +10884,7 @@ func multiview_start(hids) -> Dictionary:
 		return {"ok": false, "error": "multiview: sin receptores válidos", "slots": []}
 	_mv_canvas = MULTIVIEW_CANVAS.new()
 	add_child(_mv_canvas)
-	if not _mv_canvas.start(comp, slots):
+	if not _mv_canvas.start(comp, slots, get_viewport(), local_rect):
 		_mv_stop_canvas()
 		return {"ok": false,
 			"error": "multiview: no pude abrir la composición fuera de pantalla", "slots": []}
@@ -11861,7 +11891,7 @@ func _draw_layout_confirm_popup():
 	set_next_window_pos(layout_confirm_pos, true)
 	var shown = begin("Distribución propuesta##layout_confirm",
 		WINDOW_NO_DECORATION | WINDOW_NO_BACKGROUND | WINDOW_NO_MOVE
-		| WINDOW_NO_RESIZE | WINDOW_NO_SAVED_SETTINGS | WINDOW_NO_BRING_TO_FRONT_ON_FOCUS)
+		| WINDOW_NO_RESIZE | WINDOW_NO_SAVED_SETTINGS)
 	if shown:
 		MENU_STYLE.chrome(self, "Distribución propuesta")
 		text("Arrastrá: mover · bordes: tamaño (aspecto fijo)")
@@ -11993,9 +12023,12 @@ func _lc_event_motion(pos):
 func _layout_confirm_place():
 	var vp = get_viewport_rect().size
 	var ms = Vector2(get_mouse_pos())
+	# Debajo de la barra del Frame: si el puntero está arriba, el popup quedaba tapado
+	# por la barra (botones inalcanzables / texto ilegible).
+	var top = frame_bar_h(vp) + 8.0
 	return Vector2(
 		clamp(ms.x + 18.0, 8.0, max(8.0, vp.x - 330.0)),
-		clamp(ms.y + 18.0, 8.0, max(8.0, vp.y - 330.0)))
+		clamp(ms.y + 18.0, top, max(top, vp.y - 330.0)))
 func _wifi_psk_confirm():
 	var psk = String(wifi_psk_text)
 	if not HOTSPOT.valid_psk(psk):

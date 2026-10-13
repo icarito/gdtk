@@ -29,11 +29,18 @@ var _canvas = null
 var _slots = []        # [{path, rect, tex, img, seq}]
 var _last_ms = 0
 var _composite = Vector2()
+# Pantalla LOCAL del host (el escritorio real): su viewport raíz se dibuja como un tile
+# más, siempre fresco (a diferencia de los peers, que llegan por shm). Null = sin tile
+# local. `_local_rect` en coordenadas del composite.
+var _local_vp = null
+var _local_rect = null
 
 
 # `composite` (Vector2) es el tamaño del viewport de composición; `slots` es un
 # Array de {"path": String, "rect": Rect2} (rect en coordenadas del composite).
-func start(composite, slots):
+# `local_viewport` (Viewport raíz del shell) + `local_rect` (Rect2) agregan el tile de
+# la pantalla local; se pasan como null para no incluirlo.
+func start(composite, slots, local_viewport = null, local_rect = null):
 	stop()
 	_composite = Vector2(composite)
 	if _composite.x < 2.0 or _composite.y < 2.0:
@@ -49,6 +56,8 @@ func start(composite, slots):
 	_canvas.connect("draw", self, "_draw")
 	_vp.add_child(_canvas)
 	add_child(_vp)
+	_local_vp = local_viewport
+	_local_rect = local_rect if typeof(local_rect) == TYPE_RECT2 else null
 	_slots = []
 	for s in (slots if typeof(slots) == TYPE_ARRAY else []):
 		if typeof(s) != TYPE_DICTIONARY:
@@ -67,6 +76,8 @@ func start(composite, slots):
 
 func stop():
 	_slots = []
+	_local_vp = null
+	_local_rect = null
 	if _vp != null:
 		_vp.queue_free()
 		_vp = null
@@ -100,6 +111,8 @@ func _process(_delta):
 		return
 	_last_ms = now
 	var changed = false
+	if _local_vp != null and is_instance_valid(_local_vp):
+		changed = true   # el escritorio local cambia cada frame: se re-renderiza siempre
 	for s in _slots:
 		if _read_slot(s):
 			changed = true
@@ -190,6 +203,10 @@ func _pack_rows(data, w, h, stride):
 
 func _draw():
 	_canvas.draw_rect(Rect2(Vector2(), _composite), BG)
+	if _local_vp != null and is_instance_valid(_local_vp) and _local_rect != null:
+		var ltex = _local_vp.get_texture()
+		if ltex != null:
+			_canvas.draw_texture_rect(ltex, _fit_rect(ltex.get_size(), _local_rect), false)
 	for s in _slots:
 		var tex = s.tex
 		if tex == null:

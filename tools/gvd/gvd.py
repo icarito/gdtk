@@ -106,13 +106,13 @@ CAPTURE_FORMATS = {"XR24": "BGRx", "AR24": "BGRA", "XB24": "RGBx", "AB24": "RGBA
 # output rotado (p. ej. un panel portrait = 90) se ve de costado.
 TRANSFORM_VIDEOFLIP = {
     0: [],
-    1: ["counterclockwise"],
+    1: ["clockwise"],
     2: ["rotate-180"],
-    3: ["clockwise"],
+    3: ["counterclockwise"],
     4: ["horizontal-flip"],
-    5: ["horizontal-flip", "counterclockwise"],
+    5: ["horizontal-flip", "clockwise"],
     6: ["vertical-flip"],
-    7: ["horizontal-flip", "clockwise"],
+    7: ["horizontal-flip", "counterclockwise"],
 }
 
 # Colorimetría forzada del stream. Sin esto el encoder etiqueta bt601 (default) y
