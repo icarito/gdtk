@@ -416,6 +416,9 @@ var input_requests = []  # pedidos de otros procesos esperando el diálogo
 var eis_cursor = null  # sin cursor propio el host (cage/sway) no lo mueve: se dibuja uno
 # ScreenCast nativo (multiview, SPEC-multiview-portal §9 N1): último empuje de frame.
 var _screencast_last_ms = 0
+# Borde de bajada del ScreenCast: al cerrarse la sesión del portal, cortar el multiview
+# (mata receptores locales y emisores de los peers) en vez de dejarlos colgados.
+var _screencast_was_active = false
 
 # Volumen/mute/brillo: worker + OSD (ver system_osd.gd).
 var system_osd = null
@@ -1840,9 +1843,16 @@ func _process(_delta):
 	# ScreenCast nativo (multiview): si el backend del portal tiene una fuente PipeWire
 	# activa, empujar el viewport a ~15 fps. Sin fuente activa no se captura nada.
 	# Misma orientación que remote.gd (_screenshot hace flip_y).
+	var sc_active = remote_input != null and remote_input.has_method("screencast_active") \
+		and bool(remote_input.screencast_active())
+	# El portal se cerró: ya no hay consumidor del feed -> cortar el multiview (mata
+	# los gvd locales y los emisores de los peers). Evita procesos colgados/zombies.
+	if _screencast_was_active and not sc_active and multiview_on:
+		multiview_stop()
+	_screencast_was_active = sc_active
 	if remote_input != null and remote_input.has_method("screencast_active") \
 			and remote_input.has_method("screencast_push") \
-			and now - _screencast_last_ms >= 66 and remote_input.screencast_active():
+			and now - _screencast_last_ms >= 66 and sc_active:
 		# Fuente del feed: la composición FUERA DE PANTALLA del multiview si está
 		# activa (mosaico limpio, sin espejar el escritorio ni incluir la ventana del
 		# cliente); si no, el viewport del shell (compartir el escritorio de siempre).
@@ -10133,6 +10143,9 @@ func _share_gvd_hids():
 func _share_off_reap():
 	if share_enabled:
 		return
+	# El multiview depende del feed compartido: al apagar Compartiendo, cortarlo.
+	if multiview_on:
+		multiview_stop()
 	for hid in _share_gvd_hids():
 		_stop_gvd_screen(hid)
 	for k in gvd_session_pids.keys():
@@ -11604,10 +11617,21 @@ func _tracked_launch_work(userdata):
 	var args = userdata.get("args", [])
 	if typeof(args) != TYPE_ARRAY:
 		args = []
-	var pid = int(OS.execute(String(userdata.get("cmd", "")), args, false))
+	var cmd = String(userdata.get("cmd", ""))
+	var full = _sh_quote(cmd)
+	for a in args:
+		full += " " + _sh_quote(str(a))
+	# Doble fork (`&` + sh que sale): el proceso queda huérfano y lo reapea init, así
+	# al matarlo NO queda zombie. Antes con OS.execute no bloqueante el hijo era de
+	# Godot, que no lo reapea -> zombies acumulados al cortar los gvd.
+	var out = []
+	OS.execute("sh", ["-c", full + " & echo $!"], true, out)
+	var pid = 0
+	if out.size() > 0:
+		pid = int(String(out[0]).strip_edges())
 	var err = ""
 	if pid <= 0:
-		err = "no se pudo lanzar " + String(userdata.get("cmd", ""))
+		err = "no se pudo lanzar " + cmd
 	_gvd_mutex.lock()
 	if pid > 0:
 		gvd_session_pids[String(userdata.key)] = pid
@@ -11615,6 +11639,11 @@ func _tracked_launch_work(userdata):
 	userdata.state.error = err
 	userdata.state.done = true
 	_gvd_mutex.unlock()
+
+
+# Comilla un token para `sh -c` (entre simples, escapando comillas simples).
+func _sh_quote(s):
+	return "'" + String(s).replace("'", "'\\''") + "'"
 
 
 # Reapea los Threads de lanzamiento terminados (no bloquea).
