@@ -421,6 +421,9 @@ var _screencast_last_ms = 0
 # Borde de bajada del ScreenCast: al cerrarse la sesión del portal, cortar el multiview
 # (mata receptores locales y emisores de los peers) en vez de dejarlos colgados.
 var _screencast_was_active = false
+# Última secuencia de frame del canvas multiview ya empujada al portal (evita pushes
+# repetidos cuando la composición no cambió).
+var _screencast_mv_seq = -1
 
 # Volumen/mute/brillo: worker + OSD (ver system_osd.gd).
 var system_osd = null
@@ -1855,28 +1858,37 @@ func _process(_delta):
 		multiview_stop()
 	_screencast_was_active = sc_active
 	if remote_input != null and remote_input.has_method("screencast_active") \
-			and remote_input.has_method("screencast_push") \
-			and now - _screencast_last_ms >= 66 and sc_active:
+			and remote_input.has_method("screencast_push") and sc_active:
 		# Fuente del feed: la composición FUERA DE PANTALLA del multiview si está
 		# activa (mosaico limpio, sin espejar el escritorio ni incluir la ventana del
 		# cliente); si no, el viewport del shell (compartir el escritorio de siempre).
-		# Nunca las dos: con multiview on el feed es sólo el canvas compuesto.
-		var sc_tex = null
-		var sc_flip = false
-		if multiview_on and _mv_canvas != null and is_instance_valid(_mv_canvas):
-			sc_tex = _mv_canvas.get_texture()   # ya orientado por render_target_v_flip
-		else:
-			var sc_vp = get_viewport()
-			sc_tex = sc_vp.get_texture() if sc_vp != null else null
-			sc_flip = true
-		if sc_tex != null:
-			_screencast_last_ms = now
-			var sc_img = sc_tex.get_data()
-			if sc_img != null:
-				sc_img.convert(Image.FORMAT_RGBA8)
-				if sc_flip:
-					sc_img.flip_y()
-				remote_input.screencast_push(int(sc_img.get_width()), int(sc_img.get_height()), sc_img.get_data())
+		# El multiview va más lento (10 fps) y sólo cuando el canvas cambió: el render +
+		# readback de 1920x1080 es caro y los peers tienen CPU limitada.
+		var is_mv = multiview_on and _mv_canvas != null and is_instance_valid(_mv_canvas)
+		var push = now - _screencast_last_ms >= (100 if is_mv else 66)
+		if is_mv:
+			var seq = int(_mv_canvas.frame_seq())
+			if seq == _screencast_mv_seq:
+				push = false
+			elif push:
+				_screencast_mv_seq = seq
+		if push:
+			var sc_tex = null
+			var sc_flip = false
+			if is_mv:
+				sc_tex = _mv_canvas.get_texture()   # ya orientado por render_target_v_flip
+			else:
+				var sc_vp = get_viewport()
+				sc_tex = sc_vp.get_texture() if sc_vp != null else null
+				sc_flip = true
+			if sc_tex != null:
+				_screencast_last_ms = now
+				var sc_img = sc_tex.get_data()
+				if sc_img != null:
+					sc_img.convert(Image.FORMAT_RGBA8)
+					if sc_flip:
+						sc_img.flip_y()
+					remote_input.screencast_push(int(sc_img.get_width()), int(sc_img.get_height()), sc_img.get_data())
 	# Destello del cursor: avanza sólo mientras la onda está activa (sin I/O).
 	_tick_ripple(now)
 	# Cursor de resize pegado: si una barra del Frame quedó dibujada encima del puntero

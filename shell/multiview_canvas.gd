@@ -17,7 +17,7 @@ extends Node
 
 const MAGIC = [0x47, 0x56, 0x44, 0x53, 0x48, 0x4d, 0x31, 0x00]  # "GVDSHM1\0"
 const HEADER = 64
-const INTERVAL_MS = 66          # cadencia de composición/lectura (~15 fps)
+const INTERVAL_MS = 100         # cadencia de composición/lectura (~10 fps; barato para peers lentos)
 # Un slot sin frame nuevo por este tiempo se considera caído: su tile sale de la vista
 # (no queda una imagen congelada del peer desconectado); reaparece si vuelven los frames.
 const STALE_MS = 2500
@@ -47,6 +47,7 @@ var _focus_phys = null          # Rect2 físico de la pantalla a encuadrar (snap
 var _zoom = 1.7                 # zoom sobre el fit (ajustable por settings / dockapp)
 var _pan_enabled = true         # pan siguiendo el mouse (ajustable)
 var _last_ms = 0
+var _frame_seq = 0              # sube en cada re-render (para que F5 empuje sólo al cambiar)
 
 
 # `composite` (Vector2): tamaño del viewport de composición.
@@ -256,6 +257,12 @@ func _process(_delta):
 		_update_pan()
 		_canvas.update()
 		_vp.render_target_update_mode = Viewport.UPDATE_ONCE
+		_frame_seq += 1
+
+
+# Secuencia del último re-render (F5 empuja sólo si cambió).
+func frame_seq():
+	return _frame_seq
 
 
 func _read_slot(s):
