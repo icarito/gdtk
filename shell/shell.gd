@@ -6074,6 +6074,25 @@ var _publish_started = false
 
 # Hostname local como etiqueta; /etc/hostname es el respaldo si el entorno no lo
 # trae. Sólo se usa para `name`; el `hid` público es opaco (ver PUBLISH_PLAN).
+# Host que se anuncia a los peers para que conecten DE VUELTA (p. ej. el emisor gvd del
+# multiview). El nombre corto no siempre resuelve (tengu no conoce "bastion", sólo
+# "bastion.local"/IPv6, y el receptor escucha IPv4): se prefiere el IPv4 de LAN.
+func _mv_announce_host():
+	var ip = _local_lan_ip()
+	return ip if ip != "" else _local_hostname()
+
+
+# Primer IPv4 de LAN (no loopback ni link-local). "" si no hay. Puro salvo la lectura
+# de las direcciones del sistema.
+func _local_lan_ip():
+	for a in IP.get_local_addresses():
+		var s = String(a).strip_edges()
+		if s == "" or s.find(":") >= 0 or s == "127.0.0.1" or s.begins_with("169.254."):
+			continue
+		return s
+	return ""
+
+
 func _local_hostname():
 	# Android: nombre del equipo tomado del nombre Bluetooth (sin permisos); si no hay,
 	# el modelo ("Redmi Note 9 Pro" → "redmi").
@@ -10879,7 +10898,7 @@ func multiview_start(hids) -> Dictionary:
 				ctl = _peer_port()
 			_peer_send_async([{"id": hid, "host": String(ep.get("peer", "")),
 				"port": ctl, "token": _peer_token_get(hid)}],
-				"mv_slot", {"port": port, "host": _local_hostname(), "slot": slot})
+				"mv_slot", {"port": port, "host": _mv_announce_host(), "slot": slot})
 	if out.empty():
 		return {"ok": false, "error": "multiview: sin receptores válidos", "slots": []}
 	_mv_canvas = MULTIVIEW_CANVAS.new()
