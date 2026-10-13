@@ -11097,18 +11097,21 @@ func _mv_desired_peers():
 	return want
 
 
-# Aplica settings["multiview"] en vivo: prende/apaga la vista y ajusta zoom/pan. Se
-# llama por frame; el arranque reintenta (el Vecindario puede no estar listo todavía).
+# Aplica settings["multiview"] en vivo: prende/apaga la vista y ajusta zoom/pan. Sólo se
+# levanta gvd (receptores locales + emisores de los peers) mientras hay una sesión
+# ScreenCast del portal ACTIVA: sin consumidor NO se quema CPU en los peers.
 func _mv_apply_settings():
 	var now = OS.get_ticks_msec()
 	var cfg = _mv_mvcfg()
 	var want = bool(cfg.get("enabled", false))
-	if want and not multiview_on and share_enabled and now >= _mv_retry_at:
+	var sc_active = remote_input != null and remote_input.has_method("screencast_active") \
+		and bool(remote_input.screencast_active())
+	if want and sc_active and not multiview_on and share_enabled and now >= _mv_retry_at:
 		var peers = _mv_desired_peers()
 		if not peers.empty():
 			multiview_start(peers)
-		_mv_retry_at = now + 2000
-	elif not want and multiview_on:
+		_mv_retry_at = now + 3000
+	elif (not want or not sc_active) and multiview_on:
 		multiview_stop()
 	if multiview_on and _mv_canvas != null and is_instance_valid(_mv_canvas):
 		_mv_canvas.set_zoom(float(cfg.get("zoom", 1.7)))
