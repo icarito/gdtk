@@ -1927,6 +1927,9 @@ func _process(_delta):
 			# Presencia cambió: rearma la barrera de los vecinos Deskflow apagados
 			# (barato; sólo publica si el rango cambió).
 			_apply_capture_ranges()
+			# Vista del grupo dinámica: altas/bajas de peers con pantalla en el layout.
+			if multiview_on:
+				_mv_dynamic_tick()
 			if neighborhood_view:
 				request_redraw()
 	# Servicios: copia el snapshot del worker (sin consultar procesos acá).
@@ -6097,12 +6100,38 @@ var _publish_started = false
 
 # Hostname local como etiqueta; /etc/hostname es el respaldo si el entorno no lo
 # trae. Sólo se usa para `name`; el `hid` público es opaco (ver PUBLISH_PLAN).
-# Host que se anuncia a los peers para que conecten DE VUELTA (p. ej. el emisor gvd del
-# multiview). El nombre corto no siempre resuelve (tengu no conoce "bastion", sólo
-# "bastion.local"/IPv6, y el receptor escucha IPv4): se prefiere el IPv4 de LAN.
-func _mv_announce_host():
-	var ip = _local_lan_ip()
-	return ip if ip != "" else _local_hostname()
+# Host que se anuncia a un peer para que conecte DE VUELTA (p. ej. el emisor gvd del
+# multiview). Elige el IPv4 local de la MISMA subred que el peer (host multi-interfaz:
+# p. ej. hotspot 10.42.x vs LAN 192.168.x); si no se puede, el primer IPv4 de LAN, y
+# como último recurso el nombre corto.
+func _mv_announce_host(hid = ""):
+	var own = ""
+	if String(hid) != "":
+		var ep = _peer_endpoint_for(String(hid))
+		var pip = String(ep.get("peer", "")) if typeof(ep) == TYPE_DICTIONARY else ""
+		own = _local_ip_for(pip)
+	if own == "":
+		own = _local_lan_ip()
+	return own if own != "" else _local_hostname()
+
+
+# IPv4 local en la MISMA subred (/16) que `peer_ip`; "" si no hay. Puro salvo la
+# lectura de las direcciones del sistema.
+func _local_ip_for(peer_ip):
+	var p = String(peer_ip).strip_edges()
+	if p == "" or p.find(":") >= 0 or not p.is_valid_ip_address():
+		return ""
+	var po = p.split(".")
+	if po.size() != 4:
+		return ""
+	for a in IP.get_local_addresses():
+		var s = String(a).strip_edges()
+		if s.find(":") >= 0 or s == "127.0.0.1" or s.begins_with("169.254."):
+			continue
+		var lo = s.split(".")
+		if lo.size() == 4 and lo[0] == po[0] and lo[1] == po[1]:
+			return s
+	return ""
 
 
 # Primer IPv4 de LAN (no loopback ni link-local). "" si no hay. Puro salvo la lectura
@@ -10856,7 +10885,7 @@ func multiview_start(hids) -> Dictionary:
 				ctl = _peer_port()
 			_peer_send_async([{"id": hid, "host": String(ep.get("peer", "")),
 				"port": ctl, "token": _peer_token_get(hid)}],
-				"mv_slot", {"port": port, "host": _mv_announce_host(), "slot": slot})
+				"mv_slot", {"port": port, "host": _mv_announce_host(hid), "slot": slot})
 	if out.empty():
 		return {"ok": false, "error": "multiview: sin receptores válidos", "slots": []}
 	# Canvas FRESCO (Host.sc recompila desde disco): así un reload del shell toma
@@ -10903,6 +10932,46 @@ func multiview_stop() -> Dictionary:
 	multiview_follow_mode = "off"
 	request_redraw()
 	return {"ok": true, "error": ""}
+
+
+# Mantiene la vista dinámica respecto del Vecindario: agrega peers "visto" que tengan
+# pantalla en el layout y no estén ya, y quita los que se fueron. Rebuild honesto:
+# multiview_start corta los que sobran (mv_stop a los peers) y arranca los nuevos.
+func _mv_dynamic_tick():
+	if not multiview_on or neighborhood == null:
+		return
+	var data = settings_bridge.settings.get("screens", {}) if settings_bridge != null else {}
+	var lay = SCREEN_LAYOUT.normalize_layout(data)
+	var want = []
+	for h in neighborhood.hosts:
+		if typeof(h) != TYPE_DICTIONARY or String(h.get("state", "")) != "visto":
+			continue
+		var hid = String(h.get("id", "")).strip_edges()
+		if hid == "" or not _mv_screen_of(lay, h):
+			continue
+		if not want.has(hid):
+			want.append(hid)
+	var cur = multiview_slots.keys()
+	if want.size() == cur.size():
+		var same = true
+		for x in want:
+			if not cur.has(String(x)):
+				same = false
+				break
+		if same:
+			return
+	multiview_start(want)
+
+
+# ¿El host del Vecindario tiene una pantalla en el layout (por nombre/id/peer)?
+func _mv_screen_of(lay, h):
+	var cands = [String(h.get("label", "")).to_lower(), String(h.get("id", "")).to_lower()]
+	for s in lay.screens:
+		for k in [String(s.get("peer", "")).to_lower(), String(s.get("label", "")).to_lower(),
+				String(s.get("id", "")).to_lower()]:
+			if k != "" and cands.has(k):
+				return true
+	return false
 
 
 # --- Composición offscreen del multiview (F4/§9 N1) --------------------------------

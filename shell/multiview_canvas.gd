@@ -18,6 +18,9 @@ extends Node
 const MAGIC = [0x47, 0x56, 0x44, 0x53, 0x48, 0x4d, 0x31, 0x00]  # "GVDSHM1\0"
 const HEADER = 64
 const INTERVAL_MS = 66          # cadencia de composición/lectura (~15 fps)
+# Un slot sin frame nuevo por este tiempo se considera caído: su tile sale de la vista
+# (no queda una imagen congelada del peer desconectado); reaparece si vuelven los frames.
+const STALE_MS = 2500
 const BG = Color(0.06, 0.06, 0.08, 1.0)
 # Margen relativo entre pantallas del layout físico (mm): 0 = pegadas.
 const LAYOUT_MARGIN = 0.0
@@ -73,7 +76,7 @@ func start(composite, tiles, local_viewport = null, local_phys = null):
 		var r = t.get("rect", null)
 		if path == "" or typeof(r) != TYPE_RECT2 or r.size.x <= 0.0 or r.size.y <= 0.0:
 			continue
-		_slots.append({"path": path, "rect": Rect2(r), "tex": null, "img": null, "seq": -1})
+		_slots.append({"path": path, "rect": Rect2(r), "tex": null, "img": null, "seq": -1, "last_ms": 0})
 	_layout()
 	_canvas.update()
 	_vp.render_target_update_mode = Viewport.UPDATE_ONCE
@@ -116,6 +119,7 @@ func _exit_tree():
 # Escala el bounding box de los tiles CON imagen (local + slots con tex) para entrar en
 # el composite, centrado. Los huecos del layout son los del propio layout físico.
 func _layout():
+	var now = OS.get_ticks_msec()
 	var minp = Vector2(1e20, 1e20)
 	var maxp = Vector2(-1e20, -1e20)
 	var have = false
@@ -125,7 +129,7 @@ func _layout():
 		maxp = m.position + m.size
 		have = true
 	for s in _slots:
-		if s.tex == null:
+		if not _is_live(s, now):
 			continue
 		var r = s.rect.grow(LAYOUT_MARGIN)
 		minp = Vector2(min(minp.x, r.position.x), min(minp.y, r.position.y))
@@ -185,12 +189,11 @@ func _process(_delta):
 	if now - _last_ms < INTERVAL_MS:
 		return
 	_last_ms = now
-	var changed = false
-	if _has_local:
-		changed = true
+	# Refrescar siempre: el escritorio local cambia cada frame y un slot puede caerse
+	# (stale) y hay que sacarlo de la vista.
+	var changed = true
 	for s in _slots:
-		if _read_slot(s):
-			changed = true
+		_read_slot(s)
 	if changed:
 		_layout()
 		_update_pan()
@@ -239,7 +242,13 @@ func _read_slot(s):
 	else:
 		s.tex.set_data(s.img)
 	s.seq = seq
+	s.last_ms = OS.get_ticks_msec()
 	return true
+
+
+# ¿El slot tiene imagen y sigue fresco (llegó un frame dentro de STALE_MS)?
+func _is_live(s, now):
+	return s.tex != null and (now - int(s.last_ms)) < STALE_MS
 
 
 func _is_magic(head):
@@ -272,8 +281,9 @@ func _pack_rows(data, w, h, stride):
 
 func _draw():
 	_canvas.draw_rect(Rect2(Vector2(), _composite), BG)
+	var now = OS.get_ticks_msec()
 	for s in _slots:
-		if s.tex == null:
+		if not _is_live(s, now):
 			continue
 		_canvas.draw_texture_rect(s.tex, _fit_rect(s.tex.get_size(), _scaled_rect(s.rect)), false)
 	if _has_local and _local_vp != null and is_instance_valid(_local_vp):
