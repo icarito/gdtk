@@ -10846,7 +10846,14 @@ func multiview_start(hids) -> Dictionary:
 				"mv_slot", {"port": port, "host": _mv_announce_host(), "slot": slot})
 	if out.empty():
 		return {"ok": false, "error": "multiview: sin receptores válidos", "slots": []}
-	_mv_canvas = MULTIVIEW_CANVAS.new()
+	# Canvas FRESCO (Host.sc recompila desde disco): así un reload del shell toma
+	# cambios de multiview_canvas.gd sin reiniciar (el preload quedaría cacheado).
+	var canvas_script = MULTIVIEW_CANVAS
+	if Host != null and Host.has_method("sc"):
+		var fresh = Host.sc("res://multiview_canvas.gd")
+		if fresh != null:
+			canvas_script = fresh
+	_mv_canvas = canvas_script.new()
 	add_child(_mv_canvas)
 	if not _mv_canvas.start(comp, slots, get_viewport(), local_phys):
 		_mv_stop_canvas()
