@@ -334,6 +334,8 @@ var multiview_follow_mode = "off"  # "off" | "focus"
 var _mv_canvas = null
 # Planes offscreen vivos por hid (para asociar slot -> path del shm).
 var _mv_off_plans = {}
+# Celda de la grilla espacial por hid Y por nombre visible (para el pan por foco).
+var _mv_cells = {}
 # K17: vínculo Deskflow suspendido temporalmente mientras gvd extiende el monitor
 # virtual hacia ese vecino/dirección. Se guarda para restaurarlo al cortar la
 # sesión de pantalla (SPEC-ui-rework-2026-10, decisión 2026-10-01).
@@ -1824,6 +1826,11 @@ func _process(_delta):
 		_focus_follow(hover_hit)
 	_poll_force_close(now)
 	_sync_capture_cursor()
+	# Pan del multiview: centra el tile del dueño del puntero (o la pantalla local).
+	if multiview_on and _mv_canvas != null and is_instance_valid(_mv_canvas):
+		var po = pointer_owner()
+		var ph = String(po.get("peer", "")) if typeof(po) == TYPE_DICTIONARY else ""
+		_mv_canvas.set_focus_cell(_mv_cells.get(ph, Vector2(0, 0)))
 	# ScreenCast nativo (multiview): si el backend del portal tiene una fuente PipeWire
 	# activa, empujar el viewport a ~15 fps. Sin fuente activa no se captura nada.
 	# Misma orientación que remote.gd (_screenshot hace flip_y).
@@ -10869,6 +10876,12 @@ func multiview_start(hids) -> Dictionary:
 	# en su celda según su dirección física (cupid al oeste -> izquierda, etc.). Sin
 	# dirección o celda ocupada -> primera celda libre.
 	var cells = _mv_cells_for(peers)
+	_mv_cells = {}
+	for h in peers:
+		var hidk = String(h)
+		var ck = cells.get(hidk, Vector2())
+		_mv_cells[hidk] = ck
+		_mv_cells[_peer_name_for(hidk)] = ck
 	var slots = []
 	var out = []
 	for entry in plans:
@@ -11052,6 +11065,8 @@ func _peer_mv_slot(hid, p):
 		int(p.get("port", 0)), "")
 	if not bool(plan.get("ok", false)):
 		return false
+	# El multiview SÍ quiere ver el puntero del emisor dentro del tile.
+	plan["args"].append_array(["--cursor-mode", "embedded"])
 	_launch_tracked(key, String(plan.get("cmd", "")), plan.get("args", []))
 	return true
 
