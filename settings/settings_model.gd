@@ -105,6 +105,13 @@ const CONTROL_DEFAULT = {
 	# DESKFLOW_MOUSE_ADJUSTMENT en el proceso servidor. 1.0 = sin cambio.
 	"mouse_scale": 1.0,
 }
+# Vista del grupo / multiview (SPEC-multiview-portal): `enabled` publica la vista
+# compuesta por el portal ScreenCast; `pan` habilita el paneo siguiendo el mouse;
+# `zoom` es el zoom de la composición sobre el "fit" del layout (1.0 = entra todo).
+# Persistido; el shell lo relee en vivo.
+const MULTIVIEW_ZOOM_MIN = 1.0
+const MULTIVIEW_ZOOM_MAX = 6.0
+const MULTIVIEW_DEFAULT = {"enabled": false, "pan": true, "zoom": 1.7}
 # Multi-monitor (SPEC-physical-multi-monitor): escritorio extendido en una sola
 # ventana (span). `enabled` activa/desactiva; `primary` es el nombre de la salida
 # principal ("" = automática: externa > interna); `order` es el orden izquierda->
@@ -162,6 +169,7 @@ func defaults():
 		"wallpaper": WALLPAPER_DEFAULT.duplicate(true),
 		"natural_scroll": NATURAL_SCROLL_DEFAULT,
 		"deskflow": CONTROL_DEFAULT.duplicate(true),
+		"multiview": MULTIVIEW_DEFAULT.duplicate(true),
 		"appearance": APPEARANCE_DEFAULT.duplicate(true),
 		"ui_scale": UI_SCALE_DEFAULT,
 		"span": SPAN_DEFAULT.duplicate(true),
@@ -185,6 +193,7 @@ func normalize(data):
 	out["wallpaper"] = wallpaper(data.get("wallpaper", {}))
 	out["natural_scroll"] = nat_scroll(data.get("natural_scroll", null))
 	out["deskflow"] = deskflow(data.get("deskflow", {}))
+	out["multiview"] = multiview(data.get("multiview", {}))
 	out["appearance"] = appearance(data.get("appearance", {}))
 	out["ui_scale"] = ui_scale_value(data.get("ui_scale", null))
 	out["span"] = span(data.get("span", {}))
@@ -319,6 +328,18 @@ func deskflow(v):
 	if out.mode == "use_remote" and out.host == "":
 		out.mode = "off"
 	return out
+
+
+# Vista del grupo (multiview): valida enabled/pan (bool) y zoom (1..6).
+func multiview(v):
+	if typeof(v) != TYPE_DICTIONARY:
+		v = {}
+	return {
+		"enabled": bool_value(v.get("enabled", MULTIVIEW_DEFAULT.enabled), MULTIVIEW_DEFAULT.enabled),
+		"pan": bool_value(v.get("pan", MULTIVIEW_DEFAULT.pan), MULTIVIEW_DEFAULT.pan),
+		"zoom": clamp(num_value(v.get("zoom", MULTIVIEW_DEFAULT.zoom), MULTIVIEW_DEFAULT.zoom),
+			MULTIVIEW_ZOOM_MIN, MULTIVIEW_ZOOM_MAX),
+	}
 
 
 func host_name(v):

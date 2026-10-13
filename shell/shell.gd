@@ -337,6 +337,8 @@ var _mv_off_plans = {}
 # Mapa rect físico por hid/nombre (y "__local") para el snap del pan a la pantalla
 # bajo el puntero.
 var _mv_phys_map = {}
+# Última config multiview aplicada (settings["multiview"] normalizada).
+var _mv_cfg_last = {}
 # K17: vínculo Deskflow suspendido temporalmente mientras gvd extiende el monitor
 # virtual hacia ese vecino/dirección. Se guarda para restaurarlo al cortar la
 # sesión de pantalla (SPEC-ui-rework-2026-10, decisión 2026-10-01).
@@ -1830,6 +1832,8 @@ func _process(_delta):
 		_focus_follow(hover_hit)
 	_poll_force_close(now)
 	_sync_capture_cursor()
+	# Settings del multiview (enabled/pan/zoom) reaplicados en vivo.
+	_mv_apply_settings()
 	# Snap del pan del multiview: encuadra la pantalla bajo el puntero (dueno via
 	# pointer_owner; local por defecto).
 	if multiview_on and _mv_canvas != null and is_instance_valid(_mv_canvas) \
@@ -10901,6 +10905,9 @@ func multiview_start(hids) -> Dictionary:
 		_mv_stop_canvas()
 		return {"ok": false,
 			"error": "multiview: no pude abrir la composición fuera de pantalla", "slots": []}
+	var mvc = _mv_mvcfg()
+	_mv_canvas.set_zoom(float(mvc.get("zoom", 1.7)))
+	_mv_canvas.set_pan_enabled(bool(mvc.get("pan", true)))
 	multiview_on = true
 	request_redraw()
 	return {"ok": true, "error": "", "slots": out}
@@ -11010,6 +11017,101 @@ func _mv_phys_rects(hids):
 			if r.size.x > 0.0 and r.size.y > 0.0:
 				out[hid] = r
 	return out
+
+
+# Config multiview normalizada (settings["multiview"]).
+func _mv_mvcfg():
+	if settings_bridge == null or settings_bridge.model == null:
+		return {"enabled": false, "pan": true, "zoom": 1.7}
+	return settings_bridge.model.multiview(settings_bridge.settings.get("multiview", {}))
+
+
+# Estado para la dockapp: modo/config + mini-radar (rects normalizados + viewport).
+func multiview_status():
+	var cfg = _mv_mvcfg()
+	var mini = {"rects": [], "viewport": Rect2(0.0, 0.0, 1.0, 1.0)}
+	if multiview_on and _mv_canvas != null and is_instance_valid(_mv_canvas):
+		mini["rects"] = _mv_canvas.mini_rects()
+		mini["viewport"] = _mv_canvas.viewport_frac()
+	return {
+		"on": multiview_on,
+		"enabled": bool(cfg.get("enabled", false)),
+		"share": share_enabled,
+		"pan": bool(cfg.get("pan", true)),
+		"zoom": float(cfg.get("zoom", 1.7)),
+		"peers": multiview_slots.size(),
+		"mini": mini,
+	}
+
+
+# Persiste settings["multiview"] y fuerza a reaplicar en el próximo frame.
+func _mv_write_cfg(cfg):
+	if settings_bridge == null or settings_bridge.model == null:
+		return
+	settings_bridge.settings["multiview"] = cfg
+	settings_bridge.write_atomic(settings_bridge.settings_path(),
+		settings_bridge.model.to_json(settings_bridge.settings))
+	_mv_cfg_last = {}
+
+
+func multiview_set_pan(v):
+	var cfg = _mv_mvcfg()
+	cfg["pan"] = bool(v)
+	_mv_write_cfg(cfg)
+	if _mv_canvas != null and is_instance_valid(_mv_canvas):
+		_mv_canvas.set_pan_enabled(bool(v))
+	request_redraw()
+
+
+func multiview_set_zoom(z):
+	var cfg = _mv_mvcfg()
+	cfg["zoom"] = clamp(float(z), 1.0, 6.0)
+	_mv_write_cfg(cfg)
+	if _mv_canvas != null and is_instance_valid(_mv_canvas):
+		_mv_canvas.set_zoom(float(cfg["zoom"]))
+	request_redraw()
+
+
+func multiview_toggle():
+	var cfg = _mv_mvcfg()
+	cfg["enabled"] = not bool(cfg.get("enabled", false))
+	_mv_write_cfg(cfg)
+	request_redraw()
+
+
+# Peers deseados para la vista: hosts "visto" del Vecindario con pantalla en el layout.
+func _mv_desired_peers():
+	var want = []
+	if neighborhood == null:
+		return want
+	var data = settings_bridge.settings.get("screens", {}) if settings_bridge != null else {}
+	var lay = SCREEN_LAYOUT.normalize_layout(data)
+	for h in neighborhood.hosts:
+		if typeof(h) != TYPE_DICTIONARY or String(h.get("state", "")) != "visto":
+			continue
+		var hid = String(h.get("id", "")).strip_edges()
+		if hid == "" or not _mv_screen_of(lay, h):
+			continue
+		if not want.has(hid):
+			want.append(hid)
+	return want
+
+
+# Aplica settings["multiview"] en vivo: prende/apaga la vista y ajusta zoom/pan. Se
+# llama por frame (barato: sólo actúa si la config cambió).
+func _mv_apply_settings():
+	var cfg = _mv_mvcfg()
+	var same = str(cfg) == str(_mv_cfg_last)
+	_mv_cfg_last = cfg
+	if not same:
+		var want = bool(cfg.get("enabled", false))
+		if want and not multiview_on and share_enabled:
+			multiview_start(_mv_desired_peers())
+		elif not want and multiview_on:
+			multiview_stop()
+	if multiview_on and _mv_canvas != null and is_instance_valid(_mv_canvas):
+		_mv_canvas.set_zoom(float(cfg.get("zoom", 1.7)))
+		_mv_canvas.set_pan_enabled(bool(cfg.get("pan", true)))
 
 
 # Tamaño del canvas de composición: EXACTAMENTE el del escritorio (OS.get_window_size),

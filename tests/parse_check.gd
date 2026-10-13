@@ -20,6 +20,7 @@ func _init():
 		"res://notify.gd", "res://applet_notif.gd", "res://notifications_panel.gd",
 		"res://applet_volume.gd", "res://peer_link.gd", "res://kdeconnect_link.gd",
 		"res://kdeconnect_packet.gd", "res://pointer_owner.gd",
+		"res://applet_multiview.gd", "res://multiview_canvas.gd", "res://multiview_model.gd",
 	]
 	var failed = 0
 	for p in paths:

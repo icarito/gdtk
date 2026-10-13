@@ -98,6 +98,7 @@ const APPLETS = [
 	{"id": "volumen", "name": "Volumen", "short": "VOL"},
 	{"id": "portapapeles", "name": "Portapapeles", "short": "CLIP"},
 	{"id": "notificaciones", "name": "Notificaciones", "short": "NOTIF", "span": 2},
+	{"id": "multiview", "name": "Vista del grupo", "short": "MV"},
 ]
 const APPLET_DEFAULT = ["recursos", "termico", "reloj", "teclado"]
 # Look WindowMaker de los menús verticales (popups ImGui). Sólo estilo.
@@ -187,6 +188,7 @@ var keyboard = Host.sc("res://applet_keyboard.gd").new()
 var clipboard = Host.sc("res://applet_clipboard.gd").new()
 var volume = Host.sc("res://applet_volume.gd").new()
 var notif_applet = Host.sc("res://applet_notif.gd").new()
+var multiview = Host.sc("res://applet_multiview.gd").new()
 # Modelo PURO de las posiciones de bloque ancladas al costado (izquierda/derecha): al
 # cambiar `n` (rotar pantalla, otro monitor) los bloques vuelven a su borde. Se carga
 # con Host.sc (no `const preload`) para que la recarga en caliente tome el .gd nuevo.
@@ -195,7 +197,7 @@ var bar_slots = Host.sc("res://bar_slots.gd")
 # les pide state/value/detail, los refresca mientras están a la vista y los para al
 # salir. Sumar una dockapp = un archivo + su entrada en APPLETS + una línea acá.
 var applet_mods = {"teclado": keyboard, "portapapeles": clipboard, "volumen": volume,
-	"notificaciones": notif_applet}
+	"notificaciones": notif_applet, "multiview": multiview}
 var items_layout = []
 var drawn = false
 # Orden estable de las teselas de ventana en la franja (por `key`). Conserva el lugar
@@ -315,6 +317,9 @@ func _ready():
 	# El bus de notificaciones vive en el shell (creado antes que este Frame).
 	if shell != null and shell.notify != null:
 		notif_applet.notif = shell.notify
+	# La dockapp del multiview lee/controla el shell.
+	if shell != null:
+		multiview.shell = shell
 
 
 # Los applets consultan en workers; al salir del árbol no deben quedar hilos vivos.
@@ -1758,6 +1763,13 @@ func _applet_primary(id):
 		if shell.notify != null:
 			shell.notify.panel_open = not shell.notify.panel_open
 			shell.request_redraw()
+	elif id == "multiview":
+		# Clic izquierdo = prender/apagar el pan de la composición.
+		if shell != null and shell.has_method("multiview_status"):
+			var mst = shell.multiview_status()
+			shell.multiview_set_pan(not bool(mst.get("pan", true)))
+			multiview.refresh(true)
+			shell.request_redraw()
 
 
 # Menú contextual del applet (clic derecho). Mismo destino que el equivalente de
@@ -3165,6 +3177,14 @@ func _input(event):
 					shell.system_osd.rpc_action({"action": "up" if event.button_index == BUTTON_WHEEL_UP else "down"})
 				volume.refresh(true)  # el worker relee ya (si no, el bloque espera el período)
 				shell.request_redraw()
+				get_tree().set_input_as_handled()
+				return
+			# Rueda sobre la dockapp de la Vista del grupo: zoom in/out de la composición.
+			if _applet_at(mouse_pos) == "multiview":
+				var mst = shell.multiview_status()
+				var dz = 0.2 if event.button_index == BUTTON_WHEEL_UP else -0.2
+				shell.multiview_set_zoom(float(mst.get("zoom", 1.7)) + dz)
+				multiview.refresh(true)
 				get_tree().set_input_as_handled()
 				return
 			# Rueda sobre el tramo del DockApp de ventanas: scroll horizontal de sus

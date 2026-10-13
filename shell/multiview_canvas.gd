@@ -38,11 +38,14 @@ var _local_phys = Rect2()
 var _has_local = false
 var _composite = Vector2()
 var _bbox_pos = Vector2()
+var _sz = Vector2.ONE
 var _scale = 1.0
 var _origin = Vector2()
 var _pan = Vector2()
 var _pan_max = Vector2()
 var _focus_phys = null          # Rect2 físico de la pantalla a encuadrar (snap) o null
+var _zoom = 1.7                 # zoom sobre el fit (ajustable por settings / dockapp)
+var _pan_enabled = true         # pan siguiendo el mouse (ajustable)
 var _last_ms = 0
 
 
@@ -106,6 +109,56 @@ func set_focus_rect(phys):
 	_focus_phys = Rect2(phys) if typeof(phys) == TYPE_RECT2 else null
 
 
+# Zoom sobre el "fit" del layout (1.0 = entra todo). Ajustable en vivo.
+func set_zoom(z):
+	_zoom = clamp(float(z), 0.5, 8.0)
+
+
+func get_zoom():
+	return _zoom
+
+
+# Pan siguiendo el mouse (on/off).
+func set_pan_enabled(b):
+	_pan_enabled = bool(b)
+
+
+func is_pan_enabled():
+	return _pan_enabled
+
+
+# Rect físico -> fracción (0..1) dentro del bbox del layout.
+func _frac_of(phys):
+	if _sz.x <= 0.0 or _sz.y <= 0.0:
+		return Rect2()
+	return Rect2((phys.position - _bbox_pos) / _sz, phys.size / _sz)
+
+
+# Mini-radar: rects normalizados de los tiles con imagen (local + peers).
+func mini_rects():
+	var out = []
+	if _has_local:
+		out.append({"rect": _frac_of(_local_phys), "local": true})
+	var now = OS.get_ticks_msec()
+	for s in _slots:
+		if _is_live(s, now):
+			out.append({"rect": _frac_of(s.rect), "local": false})
+	return out
+
+
+# Ventana visible (viewport) normalizada dentro del bbox del layout (0..1).
+func viewport_frac():
+	if _sz.x <= 0.0 or _sz.y <= 0.0:
+		return Rect2(0.0, 0.0, 1.0, 1.0)
+	var content = _sz * _scale
+	if content.x <= 0.0 or content.y <= 0.0:
+		return Rect2(0.0, 0.0, 1.0, 1.0)
+	var tl = Vector2(-_origin.x + _pan.x, -_origin.y + _pan.y)
+	return Rect2(
+		Vector2(clamp(tl.x / content.x, 0.0, 1.0), clamp(tl.y / content.y, 0.0, 1.0)),
+		Vector2(clamp(_composite.x / content.x, 0.0, 1.0), clamp(_composite.y / content.y, 0.0, 1.0)))
+
+
 func composite_size():
 	return _composite
 
@@ -140,6 +193,7 @@ func _layout():
 		maxp = Vector2.ONE
 	_bbox_pos = minp
 	var sz = maxp - minp
+	_sz = sz
 	if _focus_phys != null and _focus_phys.size.x > 0.0 and _focus_phys.size.y > 0.0:
 		# Encaje al foco (cover): la pantalla enfocada LLENA la vista (aspecto
 		# respetado) y el eje que sobra PANEA. Para una pantalla portrait = encaja al
@@ -150,7 +204,7 @@ func _layout():
 		_pan_max = Vector2(max(0.0, cf.x - _composite.x), max(0.0, cf.y - _composite.y))
 	else:
 		var fit = min(_composite.x / sz.x, _composite.y / sz.y) if sz.x > 0.0 and sz.y > 0.0 else 1.0
-		_scale = fit * ZOOM
+		_scale = fit * _zoom
 		var content = sz * _scale
 		_origin = Vector2(max(0.0, (_composite.x - content.x) * 0.5),
 			max(0.0, (_composite.y - content.y) * 0.5))
@@ -163,7 +217,7 @@ func _layout():
 # el sobrante de todo el layout.
 func _update_pan():
 	var target = _pan_max * 0.5
-	if _has_local and _local_vp != null and is_instance_valid(_local_vp):
+	if _pan_enabled and _has_local and _local_vp != null and is_instance_valid(_local_vp):
 		var vs = _local_vp.get_size()
 		if vs.x > 1.0 and vs.y > 1.0:
 			var mn = _local_vp.get_mouse_position() / vs

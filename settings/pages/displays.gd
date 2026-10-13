@@ -34,6 +34,10 @@ var guides = []
 var hover_handle = ""
 var scale_slider = null
 var scale_label = null
+var mv_enabled = null
+var mv_pan = null
+var mv_zoom = null
+var mv_zoom_label = null
 
 var scale = 1.0
 var origin = Vector2.ZERO
@@ -78,8 +82,66 @@ func _build():
 	scale_label = STYLE.note("x%.1f" % scale_slider.value)
 	srow.add_child(scale_label)
 
+	_build_multiview()
 	layout = _ensure_layout()
 	_refresh_status()
+
+
+# Vista del grupo (multiview): publica por el portal ScreenCast una composición de las
+# pantallas del grupo (mismo layout de acá). enabled/pan/zoom se guardan con Aplicar.
+func _build_multiview():
+	h_gap(6)
+	h_note("Vista del grupo: publica por el portal una composición de las pantallas de arriba.")
+	var cfg = model.multiview(settings.get("multiview", {}))
+	var r0 = h_row()
+	mv_enabled = CheckButton.new()
+	mv_enabled.text = "Activar vista del grupo"
+	mv_enabled.pressed = bool(cfg.get("enabled", false))
+	mv_enabled.connect("toggled", self, "_on_mv_enabled")
+	r0.add_child(mv_enabled)
+	var r1 = h_row()
+	mv_pan = CheckButton.new()
+	mv_pan.text = "Pan sigue al mouse"
+	mv_pan.pressed = bool(cfg.get("pan", true))
+	mv_pan.connect("toggled", self, "_on_mv_pan")
+	r1.add_child(mv_pan)
+	var r2 = h_row()
+	h_label("Zoom", r2, 140)
+	mv_zoom = HSlider.new()
+	mv_zoom.min_value = 1.0
+	mv_zoom.max_value = 6.0
+	mv_zoom.step = 0.1
+	mv_zoom.rect_min_size = Vector2(220, 24)
+	mv_zoom.value = float(cfg.get("zoom", 1.7))
+	mv_zoom.connect("value_changed", self, "_on_mv_zoom")
+	r2.add_child(mv_zoom)
+	mv_zoom_label = STYLE.note("x%.1f" % mv_zoom.value)
+	r2.add_child(mv_zoom_label)
+
+
+func _mv_write(cfg):
+	settings["multiview"] = cfg
+	host.set_field("multiview", cfg)
+
+
+func _on_mv_enabled(v):
+	var cfg = model.multiview(settings.get("multiview", {}))
+	cfg["enabled"] = bool(v)
+	_mv_write(cfg)
+
+
+func _on_mv_pan(v):
+	var cfg = model.multiview(settings.get("multiview", {}))
+	cfg["pan"] = bool(v)
+	_mv_write(cfg)
+
+
+func _on_mv_zoom(v):
+	var cfg = model.multiview(settings.get("multiview", {}))
+	cfg["zoom"] = float(v)
+	_mv_write(cfg)
+	if mv_zoom_label != null:
+		mv_zoom_label.text = "x%.1f" % float(v)
 
 
 # El tamano de cada pantalla se ajusta arrastrando sus bordes/esquinas en el
