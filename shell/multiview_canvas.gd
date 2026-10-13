@@ -136,32 +136,36 @@ func _layout():
 		maxp = Vector2.ONE
 	_bbox_pos = minp
 	var sz = maxp - minp
-	var fit = min(_composite.x / sz.x, _composite.y / sz.y) if sz.x > 0.0 and sz.y > 0.0 else 1.0
-	_scale = fit * ZOOM
-	var content = sz * _scale
-	_origin = Vector2(max(0.0, (_composite.x - content.x) * 0.5),
-		max(0.0, (_composite.y - content.y) * 0.5))
-	_pan_max = Vector2(max(0.0, content.x - _composite.x), max(0.0, content.y - _composite.y))
+	if _focus_phys != null and _focus_phys.size.x > 0.0 and _focus_phys.size.y > 0.0:
+		# Encaje al foco (cover): la pantalla enfocada LLENA la vista (aspecto
+		# respetado) y el eje que sobra PANEA. Para una pantalla portrait = encaja al
+		# ancho y panea vertical; landscape = encaja al alto y panea horizontal.
+		_scale = max(_composite.x / _focus_phys.size.x, _composite.y / _focus_phys.size.y)
+		_origin = -(_focus_phys.position - _bbox_pos) * _scale
+		var cf = _focus_phys.size * _scale
+		_pan_max = Vector2(max(0.0, cf.x - _composite.x), max(0.0, cf.y - _composite.y))
+	else:
+		var fit = min(_composite.x / sz.x, _composite.y / sz.y) if sz.x > 0.0 and sz.y > 0.0 else 1.0
+		_scale = fit * ZOOM
+		var content = sz * _scale
+		_origin = Vector2(max(0.0, (_composite.x - content.x) * 0.5),
+			max(0.0, (_composite.y - content.y) * 0.5))
+		_pan_max = Vector2(max(0.0, content.x - _composite.x), max(0.0, content.y - _composite.y))
 	_pan = Vector2(clamp(_pan.x, 0.0, _pan_max.x), clamp(_pan.y, 0.0, _pan_max.y))
 
 
-# Pan: si hay una pantalla enfocada (bajo el puntero) el pan SNAP la encuadra completa;
-# si no, sigue al mouse (0..1 -> 0..pan_max). Suave en ambos casos.
+# Pan: la posición del mouse (0..1) recorre el rango de pan. Con foco, ese rango es el
+# sobrante de la pantalla enfocada (encaja al ancho/alto y panea el otro eje); sin foco,
+# el sobrante de todo el layout.
 func _update_pan():
 	var target = _pan_max * 0.5
-	var lerp_k = PAN_LERP
-	if _focus_phys != null:
-		var sr = _scaled_rect_nopan(_focus_phys)
-		target = sr.position + sr.size * 0.5 - _composite * 0.5
-		lerp_k = SNAP_LERP
-	elif _has_local and _local_vp != null and is_instance_valid(_local_vp):
+	if _has_local and _local_vp != null and is_instance_valid(_local_vp):
 		var vs = _local_vp.get_size()
 		if vs.x > 1.0 and vs.y > 1.0:
 			var mn = _local_vp.get_mouse_position() / vs
 			target = Vector2(clamp(mn.x, 0.0, 1.0) * _pan_max.x,
 				clamp(mn.y, 0.0, 1.0) * _pan_max.y)
-	target = Vector2(clamp(target.x, 0.0, _pan_max.x), clamp(target.y, 0.0, _pan_max.y))
-	_pan = _pan.linear_interpolate(target, lerp_k)
+	_pan = _pan.linear_interpolate(target, SNAP_LERP)
 
 
 # Rect físico -> rect en el composite SIN pan.
