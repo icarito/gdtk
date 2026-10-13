@@ -27,6 +27,20 @@ cosas; **B** frena trabajo; **C** higiene.
   Deskflow contra el socket embebido; verificar primero.
 - **El historial del portapapeles necesita el motor recompilado** (`ext-data-control-v1`
   en `wl_server.c`, 2026-10-04). Con un binario viejo el applet queda `no_disponible`.
+- **X11↔Wayland: causa raíz hallada y fija (2026-10-10).** El socket del compositor
+  embebido es `wayland-0` (`wayland-1` es sway; medir con el equivocado da un falso
+  «no fluye»). El puente sí funciona: con una ventana X11 enfocada, copiar/pegar cruza
+  en ambas direcciones. **La falla real: el Xwayland perezoso se apaga al quedarse sin
+  clientes X y, al relanzarse, crea una XWM nueva SIN asiento**; sin asiento wlroots
+  descarta TODOS los eventos de selección (`not handling selection events: no seat
+  assigned to xwayland`) y el puente muere en ambas direcciones hasta reiniciar el
+  shell. Fix: re-fijar `wlr_xwayland_set_seat` en cada evento `ready` de Xwayland
+  (`modules/wayland/wl_server.c`, `handle_xwayland_ready`). Matiz de wlroots: sólo
+  cruza mientras haya una superficie X11 enfocada (puerta de seguridad; se cumple al
+  copiar/pegar en la propia app X11). Diagnóstico reproducible con `GDTK_WLR_DEBUG=1`
+  (sube el log de wlroots a DEBUG vía env; sin la variable no cambia nada). Verificado
+  e2e en instancia anidada: tras forzar el restart lazy, X→W y W→X funcionan y no hay
+  líneas `no seat`.
 
 ## B — Rendimiento
 

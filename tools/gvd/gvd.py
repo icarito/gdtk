@@ -62,6 +62,29 @@ import gvd_util as U  # noqa: E402  (K18: logica pura, sin GI/Mutter)
 
 WINDOW_TITLE = U.WINDOW_TITLE
 APP_ID = U.APP_ID
+TITLE_MAX_LEN = 80
+
+
+def sanitize_window_title(text, default=WINDOW_TITLE):
+    """Titulo de ventana seguro para el receptor (SPEC-multiview-portal §7/§8).
+
+    Sólo afecta el nombre de la ventana (GLib.set_prgname/app_name), no el sink.
+    Quita controles, saltos, tabuladores y `=`; recorta, acota a TITLE_MAX_LEN y,
+    si queda vacio, vuelve al default (WINDOW_TITLE). Nunca devuelve None.
+    """
+    if text is None:
+        return default
+    out = []
+    for ch in str(text):
+        if ch in "=\r\n\t" or ord(ch) < 0x20 or ord(ch) == 0x7F:
+            continue
+        out.append(ch)
+    s = "".join(out).strip()
+    if s == "":
+        return default
+    if len(s) > TITLE_MAX_LEN:
+        s = s[:TITLE_MAX_LEN].strip()
+    return s or default
 CURSOR_HELPER = "gvd-cursor"
 CURSOR_HELPER_SRC = "gvd-cursor.c"
 CURSOR_MAX_HZ = 120.0
@@ -75,7 +98,22 @@ CAPTURE_HELPER_SRC = "gvd-capture.c"
 CAPTURE_PROTO_DIR = "protocols"
 CAPTURE_PROTO_C = "wlr-screencopy-unstable-v1-protocol.c"
 CAPTURE_PROTO_H = "wlr-screencopy-unstable-v1-client-protocol.h"
-CAPTURE_FORMATS = {"XR24": "BGRx", "AR24": "BGRA", "AB24": "RGBA"}
+CAPTURE_FORMATS = {"XR24": "BGRx", "AR24": "BGRA", "XB24": "RGBx", "AB24": "RGBA"}
+
+# wl_output_transform -> métodos de `videoflip` para enderezar el framebuffer del panel.
+# Los "_flipped" combinan un flip y una rotación (dos videoflip encadenados). El
+# framebuffer de wlr-screencopy viene en la orientación nativa del panel; sin esto un
+# output rotado (p. ej. un panel portrait = 90) se ve de costado.
+TRANSFORM_VIDEOFLIP = {
+    0: [],
+    1: ["counterclockwise"],
+    2: ["rotate-180"],
+    3: ["clockwise"],
+    4: ["horizontal-flip"],
+    5: ["horizontal-flip", "counterclockwise"],
+    6: ["vertical-flip"],
+    7: ["horizontal-flip", "clockwise"],
+}
 
 # Colorimetría forzada del stream. Sin esto el encoder etiqueta bt601 (default) y
 # los sinks que asumen bt709/HD muestran colores desviados. Override con
@@ -89,6 +127,10 @@ SINK_ELEMENTS = {
     "gl": "glimagesink",
     "xv": "xvimagesink",
     "wayland": "waylandsink",
+    # Receptor SIN ventana (multiview offscreen): no hay sink de video real; el
+    # pipeline termina en appsink y cada frame RGBA se publica en un archivo shm
+    # (contrato GVDSHM1) que el shell compone fuera de pantalla.
+    "shmout": "appsink",
 }
 SINK_ORDER = {
     "auto": ["gl", "xv", "wayland"],
@@ -334,6 +376,7 @@ class Sender:
         self.backend = detect_capture_backend(getattr(args, "capture", "auto"))
         self.capture = None       # proceso gvd-capture (solo wlr)
         self.capture_hdr = None   # (fourcc, width, height, stride)
+        self.capture_transform = 0  # wl_output_transform del output capturado (0 normal)
         self.virtual = None       # SwayVirtualOutput (solo wlr --virtual)
         # K18: si Mutter cambia la disposicion/tamano del monitor virtual o la
         # sesion ScreenCast se corta, se recrea sesion+pipeline sin relanzar.
@@ -716,10 +759,16 @@ class Sender:
         except (IndexError, ValueError):
             log("[!] cabecera de captura invalida: " + line)
             return False
+        # 6º campo opcional: transform del output (wl_output_transform). Ausente (p. ej.
+        # captura shm de una ventana ya derecha) = 0 normal.
+        try:
+            self.capture_transform = int(parts[5]) if len(parts) > 5 else 0
+        except ValueError:
+            self.capture_transform = 0
         fmt = CAPTURE_FORMATS.get(fourcc, "BGRx")
         self.capture_hdr = (fmt, width, height, stride)
         threading.Thread(target=self._drain_capture_stderr, daemon=True).start()
-        log(f"[+] captura {what} {fmt} {width}x{height}")
+        log(f"[+] captura {what} {fmt} {width}x{height} transform={self.capture_transform}")
         return True
 
     def _start_shm_capture(self):
@@ -739,6 +788,8 @@ class Sender:
         source = ["fdsrc", "fd=0", "!", "rawvideoparse", f"format={fmt}",
                   f"width={width}", f"height={height}",
                   f"framerate={self.a.fps}/1", "!"]
+        for m in TRANSFORM_VIDEOFLIP.get(self.capture_transform, []):
+            source += ["videoflip", f"method={m}", "!"]
         cmd = self.build_pipeline(source=source)
         log("[*] send: " + " ".join(cmd))
         child_cmd = [sys.executable, os.path.abspath(__file__), "__gst_child__", *cmd[2:]]
@@ -950,6 +1001,27 @@ def recv_pipeline(args, sink, stats):
              "rtph264depay", "wait-for-keyframe=true", "!",
              "video/x-h264,alignment=au", "!", "h264parse", "!",
              "avdec_h264", "!", "videoconvert", "!"]
+    if sink == "shmout":
+        # Receptor SIN ventana (multiview offscreen): decodifica, baja la cadencia
+        # (videorate) y escala a RGBA del tamaño pedido, y entrega cada frame por
+        # appsink. El shell lo publica/lee de un archivo shm (GVDSHM1) y compone
+        # fuera de pantalla. Sin sink de video no hay toplevel: no roba foco ni
+        # espeja el escritorio.
+        w = max(0, int(getattr(args, "video_w", 0) or 0))
+        h = max(0, int(getattr(args, "video_h", 0) or 0))
+        f = max(1, int(getattr(args, "shm_fps", 15) or 15))
+        # Con tamaño 0x0 no se fuerza escala: se conserva el tamaño (y el aspecto) del
+        # emisor, para no deformar peers portrait (el canvas hace letterbox). Con un
+        # tamaño > 0 se escala a ese tamaño (aprovechando para bajar ancho de banda).
+        if w > 1 and h > 1:
+            caps = f"video/x-raw,format=RGBA,width={w},height={h},framerate={f}/1"
+        else:
+            caps = f"video/x-raw,format=RGBA,framerate={f}/1"
+        e += ["videorate", "!", "videoscale", "!",
+              caps, "!",
+              "appsink", "name=gvdsink", "emit-signals=true",
+              "max-buffers=2", "drop=true", "sync=false"]
+        return e
     if stats:
         e += ["fpsdisplaysink", "text-overlay=false", "sync=false",
               f"video-sink={' '.join(inner)}"]
@@ -1323,6 +1395,7 @@ class GstReceiver:
         self.restart_want = False
         self.stopping = False
         self.failed = False
+        self._shm = None          # ShmWriter del sink "shmout" (sin ventana)
 
     # -- pipeline
     def _build(self):
@@ -1385,6 +1458,23 @@ class GstReceiver:
             self.request_stop()
             return False
         self._attach()
+        if self.sink == "shmout":
+            # Sin ventana: engancha el appsink y publica cada frame RGBA en el
+            # archivo shm. Sin archivo o sin appsink no hay feed: falla honesto.
+            self._shm = ShmWriter(self.a.shm_out)
+            if not self._shm.open():
+                self._stop_pipeline()
+                self.failed = True
+                self.request_stop()
+                return False
+            sink_el = self.pipeline.get_by_name("gvdsink")
+            if sink_el is None:
+                log("[!] shmout: sin appsink en el pipeline")
+                self._stop_pipeline()
+                self.failed = True
+                self.request_stop()
+                return False
+            sink_el.connect("new-sample", self._on_shm_sample)
         if self.pipeline.set_state(self.gst.State.PLAYING) == \
                 self.gst.StateChangeReturn.FAILURE:
             log("[!] GStreamer no pudo iniciar el pipeline del receptor")
@@ -1399,9 +1489,32 @@ class GstReceiver:
         return True
 
     def _stop_pipeline(self):
+        if self._shm is not None:
+            self._shm.close()
+            self._shm = None
         if self.pipeline is not None:
             self.pipeline.set_state(self.gst.State.NULL)
             self.pipeline = None
+
+    def _on_shm_sample(self, appsink):
+        """Publica el frame RGBA del appsink en el archivo shm (seqlock GVDSHM1)."""
+        sample = appsink.emit("pull-sample")
+        if sample is None:
+            return self.gst.FlowReturn.OK
+        buf = sample.get_buffer()
+        caps = sample.get_caps()
+        if buf is None or caps is None or self._shm is None:
+            return self.gst.FlowReturn.OK
+        st = caps.get_structure(0)
+        w = int(st.get_value("width")) if st.has_field("width") else 0
+        h = int(st.get_value("height")) if st.has_field("height") else 0
+        ok, mi = buf.map(self.gst.MapFlags.READ)
+        if ok:
+            self._shm.write(mi.data, w, h)
+            buf.unmap(mi)
+            with self.lock:
+                self.last_buffer = time.monotonic()
+        return self.gst.FlowReturn.OK
 
     # -- watchdog
     def _tick(self):
@@ -1467,9 +1580,11 @@ class GstReceiver:
         self.gst = Gst
         Gst.init(None)
         # waylandsink toma titulo y app_id de g_get_prgname(): se fija aqui para
-        # que el shell reconozca la ventana como "Pantalla compartida".
-        GLib.set_prgname(WINDOW_TITLE)
-        GLib.set_application_name(WINDOW_TITLE)
+        # que el shell reconozca la ventana como "Pantalla compartida". Con
+        # `--title` (multiview) el shell asocia cada tile a su equipo.
+        title = sanitize_window_title(getattr(self.a, "title", None))
+        GLib.set_prgname(title)
+        GLib.set_application_name(title)
         if not self._start_pipeline():
             return 2
         self.loop = GLib.MainLoop()
@@ -1540,6 +1655,13 @@ def run_recv(args):
     if args.sink == "ffplay" and args.transport != "tcp":
         log("[!] --sink ffplay requiere --transport tcp")
         return 2
+    if args.sink == "shmout":
+        # Receptor offscreen: no abre ventana; publica frames en --shm-out. Sin
+        # archivo no hay a dónde escribir: honesto y sin sink de video no hay plan B.
+        if not getattr(args, "shm_out", ""):
+            log("[!] --sink shmout requiere --shm-out <archivo>")
+            return 2
+        return _run_recv_gst(args, "shmout", None)
     sinks = choose_sinks(args.sink, args.transport)
     if not sinks:
         log(f"[!] sink {args.sink} no disponible; usando fakesink")
@@ -1773,7 +1895,7 @@ def build_parser():
     r.add_argument("--transport", default="udp", choices=["udp", "tcp"],
                    help="debe coincidir con el transporte del emisor")
     r.add_argument("--sink", default="auto",
-                   choices=["auto", "ffplay", "gl", "xv", "wayland"])
+                   choices=["auto", "ffplay", "gl", "xv", "wayland", "shmout"])
     r.add_argument("--stats", action="store_true")
     r.add_argument("--jitter-ms", type=int, default=DEFAULT_JITTER_MS,
                    help="margen de reordenamiento RTP en ms (default: 120; 0 para LAN estable)")
@@ -1783,6 +1905,12 @@ def build_parser():
                    help="mover el cursor nativo de sway (auto-off sin SWAYSOCK)")
     r.add_argument("--video-size", default=DEFAULT_SIZE,
                    help="tamano del video para escalar el cursor a la salida")
+    r.add_argument("--title", default=None,
+                   help="titulo/app_id de la ventana (default: WINDOW_TITLE)")
+    r.add_argument("--shm-out", default="",
+                   help="sink shmout: archivo donde publicar frames RGBA (contrato GVDSHM1)")
+    r.add_argument("--shm-fps", type=int, default=15,
+                   help="sink shmout: cadencia de publicacion (1..60)")
 
     c = sub.add_parser("caps")
     c.add_argument("--json", action="store_true",
@@ -1798,6 +1926,77 @@ SHM_RESIZED = 3   # rc de shm_capture: cambió el tamaño, rearmar sin contar co
 # así que el stream tolera la cadencia variable; la repetición mantiene vivo el RTP y
 # acota la espera de un receptor que se reengancha.
 SHM_KEEPALIVE_S = 0.5
+
+
+class ShmWriter:
+    """Escritor del archivo de frames del receptor offscreen (mismo contrato que
+    window_cast.gd) para el sink `shmout`.
+
+    Formato (little endian): magic[8] | seq u64 | width u32 | height u32 | stride u32
+    | fourcc[4] | relleno hasta 64 | frame RGBA. `seq` es impar mientras se escribe el
+    frame (seqlock): el lector descarta ese estado. Sólo se publica el frame más nuevo
+    (el appsink ya descarta con max-buffers=1, drop=true).
+
+    Escribe con os.pwrite: sin buffering de Python que retenga frames. Un cambio de
+    tamaño reescribe la cabecera dentro del mismo seqlock. Nunca lanza hacia el loop
+    de GStreamer: un error de I/O sólo desactiva la publicación.
+    """
+
+    def __init__(self, path):
+        self.path = str(path)
+        self.fd = -1
+        self.seq = 0
+        self.w = 0
+        self.h = 0
+        self.ok = False
+
+    def open(self):
+        try:
+            d = os.path.dirname(self.path)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            self.fd = os.open(self.path,
+                              os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)
+        except OSError as e:
+            log(f"[!] shmout: no pude abrir {self.path}: {e}")
+            return False
+        self.ok = True
+        return True
+
+    def write(self, data, w, h):
+        import struct
+        if not self.ok or self.fd < 0 or w <= 0 or h <= 0 or data is None:
+            return
+        n = len(data)
+        stride = n // h
+        if stride <= 0:
+            return
+        try:
+            if (w, h) != (self.w, self.h):
+                head = bytearray(SHM_HEADER)
+                head[0:8] = SHM_MAGIC
+                head[28:32] = b"AB24"
+                struct.pack_into("<QIII", head, 8, 0, w, h, stride)
+                os.pwrite(self.fd, bytes(head), 0)
+                self.w, self.h = w, h
+                self.seq = 0
+            self.seq += 1                       # impar: frame a medio escribir
+            os.pwrite(self.fd, struct.pack("<Q", self.seq), 8)
+            os.pwrite(self.fd, bytes(data[:stride * h]), SHM_HEADER)
+            self.seq += 1                       # par: frame completo
+            os.pwrite(self.fd, struct.pack("<Q", self.seq), 8)
+        except OSError as e:
+            log(f"[!] shmout: escritura: {e}")
+            self.ok = False
+
+    def close(self):
+        if self.fd >= 0:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+        self.fd = -1
+        self.ok = False
 
 
 def shm_capture(path, fps, max_frames=0):
@@ -1883,8 +2082,14 @@ def main():
         if args.jitter_ms < 0:
             raise SystemExit("[!] --jitter-ms debe ser >= 0")
         try:
-            args.video_w, args.video_h = U.parse_size(args.video_size) \
-                or U.DEFAULT_VIDEO_SIZE
+            vs = str(getattr(args, "video_size", "") or "").strip().lower()
+            if vs in ("", "0x0", "native", "none"):
+                # Sin forzar escala: se conserva el tamaño/aspecto del emisor (el
+                # consumidor hace letterbox). parse_size("0x0") da None -> no sirve.
+                args.video_w, args.video_h = 0, 0
+            else:
+                args.video_w, args.video_h = U.parse_size(args.video_size) \
+                    or U.DEFAULT_VIDEO_SIZE
         except (TypeError, ValueError):
             args.video_w, args.video_h = U.DEFAULT_VIDEO_SIZE
 

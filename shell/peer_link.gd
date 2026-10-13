@@ -16,7 +16,8 @@ const VERSION = 1
 # remoto completo, sólo lo necesario para pantalla y el aviso de lados compartidos).
 const METHODS = ["ping", "gvd_recv", "gvd_stop", "gvd_send", "gvd_status",
 	"share_notify", "share_stop", "clip_set", "audio_recv", "audio_stop", "gvd_size",
-	"window_input", "window_input_stream", "gvd_meta", "direction", "expose", "media"]
+	"window_input", "window_input_stream", "gvd_meta", "direction", "expose", "media",
+	"mv_slot", "mv_stop", "screen_res", "layout"]
 
 # Handshake de dirección del Vecindario (antes por ssh): viaja por el canal peer SIN
 # token (es la vinculación inicial del Grupo). Vocabulario del DTO de
@@ -174,6 +175,28 @@ static func direction_message(params):
 	return out
 
 
+# Reparto de slots del host multiview (SPEC-multiview-portal §10/§11): el host pide
+# a un peer, por el canal peer YA autenticado, que emita hacia un `port`/`slot`. Se
+# sanitiza a átomos seguros (mismo juego de caracteres que `valid_hid`: sin vacío,
+# controles, `=`, `/` ni cadenas largas) y se acotan puerto (1024..65535) y slot
+# (0..15). Devuelve {"port","host","slot"} o {} si algo no es válido. Puro.
+static func mv_slot_params(params) -> Dictionary:
+	var p = params if typeof(params) == TYPE_DICTIONARY else {}
+	var port = int(p.get("port", 0))
+	if port < 1024 or port > 65535:
+		return {}
+	var slot = int(p.get("slot", 0))
+	if slot < 0 or slot > 15:
+		return {}
+	var host = String(p.get("host", "")).strip_edges()
+	if host == "" or host.length() > 128 or host.begins_with("-"):
+		return {}
+	for i in range(host.length()):
+		if _HID_OK.find(host[i]) < 0:
+			return {}
+	return {"port": port, "host": host, "slot": slot}
+
+
 static func valid_hid(hid):
 	var s = String(hid).strip_edges()
 	if s == "" or s.length() > 128 or s.begins_with("-"):
@@ -198,6 +221,44 @@ static func media_action(params):
 	var p = params if typeof(params) == TYPE_DICTIONARY else {}
 	var a = String(p.get("action", "")).strip_edges()
 	return a if MEDIA_ACTIONS.has(a) else ""
+
+
+# Propagación del layout del Grupo: el equipo que cambió su acomodo empuja sus
+# pantallas vecinas (no la local) para que el resto refleje el mismo orden. Cada
+# entrada se sanitiza a átomos seguros y números acotados; se limita la cantidad.
+const LAYOUT_MAX_SCREENS = 24
+
+
+static func layout_screens(params):
+	var p = params if typeof(params) == TYPE_DICTIONARY else {}
+	var src = p.get("screens", [])
+	if typeof(src) != TYPE_ARRAY or src.size() > LAYOUT_MAX_SCREENS:
+		return []
+	var out = []
+	for e in src:
+		if typeof(e) != TYPE_DICTIONARY:
+			continue
+		var sid = String(e.get("id", "")).strip_edges()
+		if not valid_hid(sid):
+			continue
+		var peer = String(e.get("peer", "")).strip_edges()
+		if peer != "" and not valid_hid(peer):
+			peer = ""
+		var label = String(e.get("label", "")).strip_edges()
+		if label.length() > 64:
+			label = label.substr(0, 64)
+		out.append({
+			"id": sid,
+			"peer": peer,
+			"label": label,
+			"x": clamp(float(e.get("x", 0.0)), -100000.0, 100000.0),
+			"y": clamp(float(e.get("y", 0.0)), -100000.0, 100000.0),
+			"w": clamp(float(e.get("w", 0.0)), 1.0, 100000.0),
+			"h": clamp(float(e.get("h", 0.0)), 1.0, 100000.0),
+			"px_w": int(clamp(float(e.get("px_w", 0.0)), 0.0, 16384.0)),
+			"px_h": int(clamp(float(e.get("px_h", 0.0)), 0.0, 16384.0)),
+		})
+	return out
 
 
 static func new_token():
@@ -303,4 +364,17 @@ static func selftest():
 	ok = ok and media_action({"action": " up "}) == "up"
 	ok = ok and media_action({"action": "loud"}) == ""
 	ok = ok and media_action({}) == ""
+	ok = ok and valid_method("screen_res") and valid_method("layout")
+	var ls = layout_screens({"screens": [
+		{"id": "61950c8964e60e15", "peer": "cupid", "label": "cupid",
+			"x": 1.0, "y": 2.0, "w": 3.0, "h": 4.0, "px_w": 1440, "px_h": 2160},
+		{"id": ""}, {"id": "aa033bda2a7c6092", "px_w": 99999}]})
+	ok = ok and ls.size() == 2 and String(ls[0].id) == "61950c8964e60e15" \
+		and int(ls[0].px_w) == 1440 and int(ls[0].px_h) == 2160
+	ok = ok and int(ls[1].px_w) == 16384
+	ok = ok and layout_screens({"screens": "nope"}).empty()
+	var many = []
+	for i in range(30):
+		many.append({"id": "a"})
+	ok = ok and layout_screens({"screens": many}).empty()
 	return ok

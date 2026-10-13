@@ -61,5 +61,31 @@ func _init():
 
 	check("sin teselas: null", F.strip_drop_target([], [], 10) == null)
 
+	# Minimizar con el app-icon no debe mover la tesela: `merge_minimized_order`
+	# conserva el lugar de las minimizadas reinsertándolas tras su vecino previo vivo.
+	check("orden: sin previo = fresh", F.merge_minimized_order([], ["w:1", "w:2"]) == ["w:1", "w:2"])
+	check("orden: minimizada del medio conserva su lugar",
+		F.merge_minimized_order(["w:1", "w:2", "w:3"], ["w:1", "w:3"]) == ["w:1", "w:2", "w:3"])
+	check("orden: minimizada del final queda al final",
+		F.merge_minimized_order(["w:1", "w:2"], ["w:1"]) == ["w:1", "w:2"])
+	check("orden: minimizada primera queda primera (sin ancla previa)",
+		F.merge_minimized_order(["w:1", "w:2"], ["w:2"]) == ["w:1", "w:2"])
+	check("orden: tiled nueva entra al final",
+		F.merge_minimized_order(["w:1"], ["w:1", "w:2"]) == ["w:1", "w:2"])
+	check("orden: ancla cerrada, minimizada huérfana va al frente",
+		F.merge_minimized_order(["w:2", "w:3"], ["w:3"]) == ["w:2", "w:3"])
+
+	# El shell, al restaurar, reinserta la ventana al final de su unidad (`fresh` la
+	# trae al final): igual debe conservar su lugar. Un reordenamiento real (todas
+	# visibles y en otro orden) sí se refleja.
+	check("orden: restaurar conserva el lugar",
+		F.reconcile_strip_order(["w:1", "w:2", "w:3"], ["w:1", "w:3"], ["w:1", "w:3", "w:2"]) == ["w:1", "w:2", "w:3"])
+	check("orden: minimizar conserva el lugar",
+		F.reconcile_strip_order(["w:1", "w:2", "w:3"], ["w:1", "w:2", "w:3"], ["w:1", "w:3"]) == ["w:1", "w:2", "w:3"])
+	check("orden: reordenar visibles se refleja",
+		F.reconcile_strip_order(["w:1", "w:2", "w:3"], ["w:1", "w:2", "w:3"], ["w:1", "w:3", "w:2"]) == ["w:1", "w:3", "w:2"])
+	check("orden: alta entra al final",
+		F.reconcile_strip_order(["w:1"], ["w:1"], ["w:1", "w:2"]) == ["w:1", "w:2"])
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

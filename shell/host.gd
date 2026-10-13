@@ -22,10 +22,14 @@ var _health_sequence = 0
 
 
 func _ready():
-	compositor = WaylandCompositor.new()
-	compositor.name = "Compositor"
-	add_child(compositor)
-	var socket = compositor.start()
+	# Módulo Wayland/EIS: sólo Linux (wlroots/libei). En Android la clase no existe;
+	# se instancia por nombre y el shell queda sin compositor (ya guarda
+	# `compositor == null`). Así el mismo host.gd parsea en las dos plataformas.
+	compositor = ClassDB.instance("WaylandCompositor") if ClassDB.class_exists("WaylandCompositor") else null
+	if compositor != null:
+		compositor.name = "Compositor"
+		add_child(compositor)
+	var socket = compositor.start() if compositor != null else ""
 	if socket == "":
 		printerr("Host: no se pudo iniciar el compositor wayland")
 	else:
@@ -48,10 +52,12 @@ func _ready():
 				f.store_line(socket)
 				f.close()
 
-	remote_input = RemoteInput.new()
-	remote_input.name = "RemoteInput"
-	add_child(remote_input)
-	var rerr = remote_input.start()
+	remote_input = ClassDB.instance("RemoteInput") if ClassDB.class_exists("RemoteInput") else null
+	var rerr = ""
+	if remote_input != null:
+		remote_input.name = "RemoteInput"
+		add_child(remote_input)
+		rerr = remote_input.start()
 	if rerr != "":
 		print("RemoteInput: ", rerr)
 

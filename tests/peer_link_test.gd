@@ -58,6 +58,27 @@ func _init():
 	check("share_notify parseable", String(sn.method) == "share_notify"
 		and String(sn.params.side) == "south")
 
+	# --- Reparto de slots del multiview (F3) ---------------------------------
+	check("métodos mv en la lista blanca",
+		P.valid_method("mv_slot") and P.valid_method("mv_stop"))
+	var mvs = P.mv_slot_params({"port": 5700, "host": "tengu.local", "slot": 2})
+	check("mv_slot_params válido", int(mvs.get("port", 0)) == 5700
+		and String(mvs.get("host", "")) == "tengu.local" and int(mvs.get("slot", -1)) == 2)
+	check("mv_slot_params rechaza puerto",
+		P.mv_slot_params({"port": 80, "host": "tengu.local", "slot": 0}).empty()
+		and P.mv_slot_params({"port": 70000, "host": "tengu.local", "slot": 0}).empty())
+	check("mv_slot_params rechaza slot",
+		P.mv_slot_params({"port": 5700, "host": "tengu.local", "slot": 16}).empty()
+		and P.mv_slot_params({"port": 5700, "host": "tengu.local", "slot": -1}).empty())
+	check("mv_slot_params rechaza host inseguro",
+		P.mv_slot_params({"port": 5700, "host": "a/b", "slot": 0}).empty()
+		and P.mv_slot_params({"port": 5700, "host": "a=b", "slot": 0}).empty()
+		and P.mv_slot_params({"port": 5700, "host": "a b", "slot": 0}).empty()
+		and P.mv_slot_params({"port": 5700, "host": "a\u0007b", "slot": 0}).empty()
+		and P.mv_slot_params({"port": 5700, "host": "", "slot": 0}).empty())
+	check("mv_slot_params rechaza no-dict",
+		P.mv_slot_params("x").empty() and P.mv_slot_params(null).empty())
+
 	check("video_size: válido", P.video_size({"w": 944, "h": 500}) == Vector2(944, 500))
 	check("video_size: falta o fuera de rango", P.video_size({}) == Vector2()
 		and P.video_size({"w": 99999, "h": 10}) == Vector2() and P.video_size(null) == Vector2())

@@ -105,3 +105,15 @@ resuelto. Para retomar el fix nativo, revisar la entrega de escala/`wl_surface.e
 a surfaces tardías y los cambios de outputs, capturando sólo una instancia de
 prueba con `MOZ_LOG=WidgetScreen:5,WidgetWayland:5` y, si hace falta, `WAYLAND_DEBUG=1`.
 Los logs de protocolo deben quedar privados: pueden contener texto del usuario.
+
+## Cierre de la prueba nativa-Wayland (2026-10-10)
+
+Se probó el camino original con `GDTK_FIREFOX_NATIVE_WAYLAND=1` (Wayland nativo dentro
+del compositor embebido) usando el motor nuevo. El usuario reportó que **volvió a caer
+(hubo crash)**: la mitigación C11 no se puede retirar por ahora.
+
+Decisión vigente: **la mitigación X11 queda como camino por defecto** (`GDK_BACKEND=x11`,
+`MOZ_ENABLE_WAYLAND=0`, Xwayland embebido `:0`). El escape `GDTK_FIREFOX_NATIVE_WAYLAND=1`
+se conserva sólo para comparar bajo supervisión; no debe ser lo que use el ícono ni el
+lanzador. Retomar el fix nativo recién si el UAF deje de reproducirse en una instancia de
+prueba aislada.

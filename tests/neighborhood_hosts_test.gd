@@ -86,6 +86,27 @@ func _init():
 	var saved_hosts = nb.model_from_text("", {"sv1": {"label": "Guardado"}}, 5)
 	check("host guardado sin accent", saved_hosts.size() == 1 and saved_hosts[0].accent == "")
 
+	# Rol multiview (SPEC-multiview-portal §5): mv habilita y parsea enteros.
+	var mv_sample = PoolStringArray([
+		"service _gdtk-gvd._udp name=MvHost host=mv.local port=5600 hid=mv1 kind=desktop mv=1 mv_slots=4 mv_base=5700",
+		"service _gdtk-gvd._udp name=NoMv host=nomv.local port=5600 hid=mv2 kind=desktop",
+		"service _gdtk-gvd._udp name=BadMv host=badmv.local port=5600 hid=mv3 kind=desktop mv=1 mv_slots=99 mv_base=70000",
+		"service _gdtk-gvd._udp name=ZeroMv host=z.local port=5600 hid=mv4 mv=0 mv_slots=4 mv_base=5700",
+	]).join("\n")
+	var mv_hosts = nb.model_from_text(mv_sample, {}, 5)
+	var mv1 = nb._find_host(mv_hosts, "mv1")
+	var mv2 = nb._find_host(mv_hosts, "mv2")
+	var mv3 = nb._find_host(mv_hosts, "mv3")
+	var mv4 = nb._find_host(mv_hosts, "mv4")
+	check("mv habilita y parsea slots/base",
+		mv1 != null and mv1.multiview.enabled and mv1.multiview.slots == 4 and mv1.multiview.base == 5700)
+	check("sin mv queda deshabilitado",
+		mv2 != null and not mv2.multiview.enabled and mv2.multiview.slots == 0 and mv2.multiview.base == 0)
+	check("mv con enteros inválidos -> slots/base 0 pero habilitado",
+		mv3 != null and mv3.multiview.enabled and mv3.multiview.slots == 0 and mv3.multiview.base == 0)
+	check("mv=0 queda deshabilitado",
+		mv4 != null and not mv4.multiview.enabled and mv4.multiview.slots == 0 and mv4.multiview.base == 0)
+
 	# Resolución del remoteHost Deskflow: el nombre guardado se resuelve a la IP
 	# actual del Vecindario (sobrevive a que el servidor cambie de IP).
 	var df_sample = PoolStringArray([

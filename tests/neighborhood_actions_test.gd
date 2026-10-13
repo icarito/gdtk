@@ -108,7 +108,8 @@ func _init():
 		"serve_input_here")
 	check("direccion confirmada -> serve_input_here con layout barrier", confirmed.enabled
 		and confirmed.plan.ok and confirmed.plan.has("layout_text")
-		and confirmed.plan.layout_text.find("section: screens") >= 0
+		and confirmed.plan.layout_text.find("section: links") >= 0
+		and confirmed.plan.layout_text.find("section: screens") < 0
 		and confirmed.plan.layout_text.find("right = tengu") >= 0)
 	check("serve_input_here escribe server-settings.ini con externalConfigFile", confirmed.enabled
 		and confirmed.plan.config == "/home/u/gdtk/deskflow-server-settings.ini"

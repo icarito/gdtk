@@ -272,6 +272,7 @@ struct wl_server {
 	struct wl_list layers;
 	struct wlr_xwayland *xwayland;
 	struct wl_listener new_xsurface;
+	struct wl_listener xwayland_ready;
 	struct wl_list xors;
 	int x_focus_id; // última ventana X enfocada: dueña de los menús sin padre
 	bool throttle; // true tras el primer wl_server_set_visible: frame callbacks sólo a lo visible
@@ -2552,6 +2553,19 @@ static void handle_xor_destroy(struct wl_listener *listener, void *data) {
 	xor_free(o);
 }
 
+// Xwayland perezoso: cuando se queda sin clientes X, wlroots lo apaga y lo relanza
+// al siguiente. La XWM nueva nace SIN asiento, y sin asiento wlroots descarta todos
+// los eventos de selección ("not handling selection events: no seat assigned to
+// xwayland"), así que el puente X11↔Wayland muere en ambas direcciones hasta
+// reiniciar el shell. Volver a fijar el asiento en cada `ready` lo repara (y es
+// inocuo en el primer arranque). Ver tech-debt A.
+static void handle_xwayland_ready(struct wl_listener *listener, void *data) {
+	struct wl_server *s = wl_container_of(listener, s, xwayland_ready);
+	if (s->xwayland != NULL && s->seat != NULL) {
+		wlr_xwayland_set_seat(s->xwayland, s->seat);
+	}
+}
+
 static void handle_new_xsurface(struct wl_listener *listener, void *data) {
 	struct wl_server *s = wl_container_of(listener, s, new_xsurface);
 	struct wlr_xwayland_surface *xs = data;
@@ -2629,6 +2643,13 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 	struct wl_server *s = calloc(1, sizeof(*s));
 	if (s == NULL) {
 		return NULL;
+	}
+	// Diagnóstico del puente de selecciones X11↔Wayland: wlroots no lee env vars,
+	// así que GDTK_WLR_DEBUG=1 en la sesión sube el nivel de log del motor a DEBUG
+	// (los eventos XFIXES/SELECTION y los motivos de denegación salen al log del
+	// shell). Sin la variable no cambia nada.
+	if (getenv("GDTK_WLR_DEBUG") != NULL) {
+		wlr_log_init(WLR_DEBUG, NULL);
 	}
 	s->cb = cb;
 	s->default_w = default_w > 0 ? default_w : 1024;
@@ -2834,6 +2855,10 @@ wl_server *wl_server_create(wl_server_callbacks cb, int default_w, int default_h
 			wlr_xwayland_set_seat(s->xwayland, s->seat);
 			s->new_xsurface.notify = handle_new_xsurface;
 			wl_signal_add(&s->xwayland->events.new_surface, &s->new_xsurface);
+			// El arranque perezoso puede reiniciar Xwayland; la XWM nueva no hereda
+			// el asiento, así que se re-fija en cada `ready`.
+			s->xwayland_ready.notify = handle_xwayland_ready;
+			wl_signal_add(&s->xwayland->events.ready, &s->xwayland_ready);
 			wlr_log(WLR_INFO, "wl_server: Xwayland (perezoso) en %s", s->xwayland->display_name);
 		}
 	}
@@ -3886,6 +3911,7 @@ void wl_server_destroy(wl_server *s) {
 	}
 
 	if (s->xwayland != NULL) {
+		wl_list_remove(&s->xwayland_ready.link);
 		wlr_xwayland_destroy(s->xwayland);
 		s->xwayland = NULL;
 	}

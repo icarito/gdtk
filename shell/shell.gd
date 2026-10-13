@@ -1,5 +1,10 @@
 extends ImGuiCanvas
 
+# RemoteInput.DEVICE_ID del módulo EIS (valor 69, ver modules/wayland/remote_input.h).
+# Se fija acá para no depender de la clase nativa en builds sin el módulo Wayland
+# (Android): el parser resuelve una constante local y el filtro sigue igual.
+const REMOTE_INPUT_DEVICE_ID = 69
+
 var ACTIVITIES = [
 	{"name": "Terminal", "wayland": ["alacritty"]},
 	{"name": "Gears", "wayland": ["es2gears_wayland"]},
@@ -36,7 +41,10 @@ const DIRECTIONS_MODEL = preload("res://neighborhood_directions.gd")
 # Generadores puros del layout Deskflow (K5): links desde la brujula y el formato
 # real de servidor; el shell sólo los consume al aplicar.
 const LAYOUT_MODEL = preload("res://deskflow_layout.gd")
-const CONF_MODEL = preload("res://deskflow_conf.gd")
+# Cargado con Host.sc (sin caché) en _ready: un `preload` queda cacheado por Godot 3
+# y la recarga transaccional no tomaba los cambios de deskflow_conf.gd sin reiniciar
+# el proceso.
+var CONF_MODEL = null
 const DESKFLOW_SETTINGS = preload("res://deskflow_settings.gd")
 # Este también va por Host.sc: el popup de revisión (##layout_confirm) llama
 # mini_map, y una recarga transaccional reusa el preload cacheado (viejo) en
@@ -49,6 +57,11 @@ var RING_LAYOUT = Host.sc("res://ring_layout.gd")
 # Deskflow contra el descubrimiento (Host.sc para recargas transaccionales).
 var HOSTS_MODEL = Host.sc("res://neighborhood_hosts.gd")
 var DESKFLOW_WATCH = Host.sc("res://deskflow_watch.gd")
+# Presencia Deskflow (Host.sc para recargas transaccionales): bloquea el borde de
+# los vecinos gdtk apagados para que la barrera no atrape el puntero.
+var DESKFLOW_PRESENCE = Host.sc("res://deskflow_presence.gd")
+# Velocidad del puntero (Host.sc, no preload: una recarga toma el helper nuevo).
+var DESKFLOW_MOUSE = Host.sc("res://deskflow_mouse.gd")
 const SERVICE_STATE = preload("res://service_state.gd")
 # Sesión de pantalla gvd (Kilo F2): modelo puro de estados/planes/clasificación que
 # usa el despacho de acciones del Vecindario (no ejecuta nada por sí mismo).
@@ -121,6 +134,16 @@ const SCROLL_STOP_DEVICE = 901
 const DRAG_ICON = preload("res://drag_icon.gd")
 # G1: zoom Sugar de 3 niveles (Hogar/Grupo/Vecindario) y escala del ícono central.
 const ZOOM = preload("res://zoom_model.gd")
+# Resolutor puro del dueño del puntero (SPEC-multiview-portal §8): borde + fracción
+# -> vecino controlado, sin I/O.
+const POINTER_OWNER = preload("res://pointer_owner.gd")
+# Modelo puro de la vista compuesta del multiview (SPEC-multiview-portal §6/§7/§8):
+# reparto de tiles (tile_rects) y asociacion titulo de ventana -> hid. Sin I/O.
+const MULTIVIEW = preload("res://multiview_model.gd")
+# Composición FUERA DE PANTALLA de la vista del grupo (SPEC-multiview-portal §9 N1):
+# lee los frames shm de cada receptor y los compone en un Viewport offscreen que
+# alimenta el feed ScreenCast. Nunca toca el escritorio real.
+const MULTIVIEW_CANVAS = preload("res://multiview_canvas.gd")
 
 onready var compositor = Host.compositor
 var view = null          # Control que dibuja las ventanas (se crea en _ready)
@@ -192,6 +215,9 @@ var unmanaged_since = {}
 # Home: fila(s) de actividades o grilla de apps instaladas (Tab alterna).
 var apps = Host.sc("res://apps.gd").new()
 var apps_view = false
+# La grilla de apps se abrió al empezar a tipear dentro del exposé: Esc vuelve al
+# exposé (donde estaba) en vez de quedarse en la grilla.
+var apps_from_expose = false
 # Íconos XDG del anillo: rasterizar uno o dos por frame (el SVG bloquea el frame).
 var home_icon_loads = 0
 
@@ -254,6 +280,8 @@ var _layout_hover = {}           # asa bajo el puntero (resaltado, sin arrastrar
 var _df_watch_at = 0       # próximo chequeo del vigía de Deskflow (ms)
 var _df_watch_baseline = ""  # último evento consumido: no rescatar por una caída vieja
 var _df_mismatch = 0       # chequeos seguidos con captura activa y servidor "en local"
+var _df_cap_ranges = null  # último rango de captura publicado (evita flapping)
+var _nb_seen = false       # el Vecindario ya escaneó alguna vez (sin eso no se bloquea)
 var group_placements = {}   # hid -> grados alrededor del equipo local (de host_directions)
 const ZOOM_MS = 220.0
 var nb_version = -1
@@ -286,6 +314,26 @@ var _gvd_launch_states = []   # {"done": bool, "key": String, "pid": int, "error
 var _gvd_peer_threads = []    # Threads de llamadas peer gvd_* antes de lanzar procesos
 var _gvd_peer_states = []     # {"done": bool, "key": String, "ok": bool, ...}
 var _gvd_mutex = Mutex.new()  # protege gvd_session_pids y los flags "done"
+# Host multiview (SPEC-multiview-portal §10): `multiview_slots` es hid ->
+# {"slot": int, "port": int} con los receptores `mvrecv:<hid>` vivos; se lee/escribe
+# bajo `_gvd_mutex` como el resto de las sesiones rastreadas. `multiview_on` sólo
+# refleja si hay un multiview iniciado (lo lee la UI/snapshot).
+var multiview_on = false
+var multiview_slots = {}
+# Vista del grupo (F4/§7/§8): mapeo hid -> id de toplevel del receptor, y modo de
+# "seguir el puntero" (off|focus). `multiview_saved` recuerda el estado flotante
+# previo de cada ventana para deshacer la colocación al cerrar la vista (nada queda
+# pinneado). `multiview_follow` sólo afecta lo que se PRESENTA; nunca inyecta input.
+var multiview_windows = {}        # hid -> id del toplevel receptor
+var multiview_saved = {}          # id -> {"memory", "rect", "in_layout"}
+var multiview_follow = false
+var multiview_follow_mode = "off"  # "off" | "focus"
+# Canvas offscreen de composición (F4 offscreen): nodo que lee los frames shm de cada
+# receptor y los compone fuera de pantalla. No hay ventanas reales; el feed F5 empuja
+# SU texture. Null si no hay multiview activo o el modo offscreen no está disponible.
+var _mv_canvas = null
+# Planes offscreen vivos por hid (para asociar slot -> path del shm).
+var _mv_off_plans = {}
 # K17: vínculo Deskflow suspendido temporalmente mientras gvd extiende el monitor
 # virtual hacia ese vecino/dirección. Se guarda para restaurarlo al cortar la
 # sesión de pantalla (SPEC-ui-rework-2026-10, decisión 2026-10-01).
@@ -363,6 +411,8 @@ var ui_scale_factor = 1.0
 var remote_input = null
 var input_requests = []  # pedidos de otros procesos esperando el diálogo
 var eis_cursor = null  # sin cursor propio el host (cage/sway) no lo mueve: se dibuja uno
+# ScreenCast nativo (multiview, SPEC-multiview-portal §9 N1): último empuje de frame.
+var _screencast_last_ms = 0
 
 # Volumen/mute/brillo: worker + OSD (ver system_osd.gd).
 var system_osd = null
@@ -647,6 +697,9 @@ const RING_CIRCLE_MAX = 7
 # Se cargan como texto, se sustituyen por los colores pedidos y se rasterizan a una
 # ImageTexture cacheada (el motor no expone load_svg_from_string en este árbol).
 const SUGAR_DIR = "res://icons/sugar/"
+# Copia cruda del SVG con extensión NO importada, para que el export la incluya en
+# el PCK (Godot 3 sólo empaqueta la textura importada, no el .svg crudo).
+const SUGAR_RAW_EXT = ".svg.svgdata"
 const SUGAR_RASTER = 192  # px del SVG al rasterizar (se dibuja a ~120)
 const SLUG_RASTER = 256   # px del SVG al renderizar con Slug (GLES3)
 # Texto nítido: TTF cargado en runtime y horneado al tamaño exacto (ver _sync_ui_font).
@@ -681,7 +734,16 @@ const STARTING_PERIOD_S = 1.2
 # El mínimo de 80 garantiza que el ícono de 64 entre holgado en cualquier resolución.
 # Todo bloque/salto del Hogar y del Frame sale de acá; no se repiten números.
 func grid_unit(vp):
-	return max(80.0, floor(min(vp.x, vp.y) / 10.0)) * ui_scale_factor
+	return max(80.0, floor(min(vp.x, vp.y) / 10.0)) * ui_scale_factor * _dpi_boost()
+
+
+# En Android la pantalla lógica coincide con los píxeles FÍSICOS: un factor suave
+# por densidad (440 dpi ≈ 1.5x) agranda los bloques sin que dominen la pantalla.
+# En escritorio devuelve 1.0 y no cambia nada.
+func _dpi_boost():
+	if OS.get_name() != "Android":
+		return 1.0
+	return clamp(OS.get_screen_dpi() / 300.0, 1.0, 1.6)
 
 
 # Unidad base de la grilla: con U=80 la UI está a escala 1. La resolución ya escala
@@ -1229,6 +1291,10 @@ var _local_kind = null
 func local_device_kind():
 	if _local_kind != null:
 		return _local_kind
+	# Android: es un teléfono (sin DMI/batería legibles).
+	if OS.get_name() == "Android":
+		_local_kind = "mobile"
+		return _local_kind
 	var chassis = _read_sysfs_line("/sys/class/dmi/id/chassis_type")
 	var product = _read_sysfs_line("/sys/class/dmi/id/product_name")
 	_local_kind = DEVICE_KIND.detect(OS.get_environment("GDTK_DEVICE_KIND"), chassis, _has_battery(), product)
@@ -1236,13 +1302,30 @@ func local_device_kind():
 
 
 # Primera línea de un archivo sysfs, o "" si no existe/no se puede leer.
+# Lee la PRIMERA línea de un archivo. `get_as_text()` devuelve "" en archivos de
+# sysfs (st_size reportado = 0) aunque `open()` dé OK; `get_line()` sí lee hasta el
+# salto sin depender del tamaño. Sin esto, el DMI (product_name/chassis_type) se leía
+# vacío y `device_kind.detect` caía a la heurística de batería -> siempre "laptop".
 func _read_sysfs_line(path):
 	var f = File.new()
 	if not f.file_exists(path) or f.open(path, File.READ) != OK:
 		return ""
-	var text = f.get_as_text().strip_edges()
+	var text = f.get_line().strip_edges()
 	f.close()
 	return text
+
+
+# Forma de hid opaco del Vecindario: 16 dígitos hex minúsculas (ver
+# neighborhood_publish_plan.IDENTITY_HID_LEN). Sirve para reconocer pantallas
+# "fantasma" keyed por hid (label==id) sin depender de tener al equipo a la vista.
+func _looks_like_hid(s):
+	var v = String(s)
+	if v.length() != 16 or v != v.to_lower():
+		return false
+	for i in range(16):
+		if "0123456789abcdef".find(v[i]) < 0:
+			return false
+	return true
 
 
 # ¿Hay alguna batería? Sólo un indicio para inferir portátil cuando el DMI no
@@ -1265,38 +1348,43 @@ func _has_battery():
 
 
 func _ready():
+	CONF_MODEL = Host.sc("res://deskflow_conf.gd")
 	connect("imgui_frame", self, "_imgui_frame")
 	_wmem_load()
-	compositor.connect("toplevel_added", self, "_on_toplevel_added")
-	compositor.connect("toplevel_removed", self, "_on_toplevel_removed")
-	compositor.connect("toplevel_activate", self, "_on_toplevel_activate")
-	compositor.connect("toplevel_minimize", self, "_on_toplevel_minimize")
-	compositor.connect("toplevel_maximize", self, "_on_toplevel_maximize")
-	compositor.connect("toplevel_fullscreen", self, "_on_toplevel_fullscreen")
-	compositor.connect("toplevel_move", self, "_on_toplevel_move")
-	compositor.connect("toplevel_resize", self, "_on_toplevel_resize")
-	# Lock de puntero pedido por un cliente (SDL relativo). has_signal mantiene la
-	# compatibilidad con binarios viejos (sin el módulo recompilado).
-	if compositor.has_signal("pointer_lock"):
-		compositor.connect("pointer_lock", self, "_on_client_pointer_lock")
-	# Cursor pedido por el cliente (surface NULL = oculto). has_signal mantiene la
-	# compatibilidad con binarios viejos (sin el módulo recompilado).
-	if compositor.has_signal("client_cursor_hidden"):
-		compositor.connect("client_cursor_hidden", self, "_on_client_cursor_hidden")
-	# Cursor que pide la app: forma (wp_cursor_shape_v1) o imagen (wl_pointer.set_cursor).
-	if compositor.has_signal("client_cursor_shape"):
-		compositor.connect("client_cursor_shape", self, "_on_client_cursor_shape")
-	if compositor.has_signal("client_cursor_image"):
-		compositor.connect("client_cursor_image", self, "_on_client_cursor_image")
-	# Drag and drop nativo: el compositor avisa del icono y del estado del drag.
-	# has_signal mantiene la compatibilidad con binarios viejos (sin recompilar).
-	if compositor.has_signal("drag_icon_changed"):
-		compositor.connect("drag_icon_changed", self, "_on_drag_icon_changed")
-	if compositor.has_signal("drag_state_changed"):
-		compositor.connect("drag_state_changed", self, "_on_drag_state_changed")
-	# Cambios de ventanas: rearmar la UI (el Frame las lista, recovery espera la suya).
-	compositor.connect("toplevel_added", self, "_redraw_on_signal")
-	compositor.connect("toplevel_removed", self, "_redraw_on_signal")
+	# El compositor Wayland no existe en Android: sin él no hay señales que
+	# enlazar ni ventanas que listar. El resto de `_ready` (Frame, Home, apps)
+	# sigue igual; el shell queda como lanzador.
+	if compositor != null:
+		compositor.connect("toplevel_added", self, "_on_toplevel_added")
+		compositor.connect("toplevel_removed", self, "_on_toplevel_removed")
+		compositor.connect("toplevel_activate", self, "_on_toplevel_activate")
+		compositor.connect("toplevel_minimize", self, "_on_toplevel_minimize")
+		compositor.connect("toplevel_maximize", self, "_on_toplevel_maximize")
+		compositor.connect("toplevel_fullscreen", self, "_on_toplevel_fullscreen")
+		compositor.connect("toplevel_move", self, "_on_toplevel_move")
+		compositor.connect("toplevel_resize", self, "_on_toplevel_resize")
+		# Lock de puntero pedido por un cliente (SDL relativo). has_signal mantiene la
+		# compatibilidad con binarios viejos (sin el módulo recompilado).
+		if compositor.has_signal("pointer_lock"):
+			compositor.connect("pointer_lock", self, "_on_client_pointer_lock")
+		# Cursor pedido por el cliente (surface NULL = oculto). has_signal mantiene la
+		# compatibilidad con binarios viejos (sin el módulo recompilado).
+		if compositor.has_signal("client_cursor_hidden"):
+			compositor.connect("client_cursor_hidden", self, "_on_client_cursor_hidden")
+		# Cursor que pide la app: forma (wp_cursor_shape_v1) o imagen (wl_pointer.set_cursor).
+		if compositor.has_signal("client_cursor_shape"):
+			compositor.connect("client_cursor_shape", self, "_on_client_cursor_shape")
+		if compositor.has_signal("client_cursor_image"):
+			compositor.connect("client_cursor_image", self, "_on_client_cursor_image")
+		# Drag and drop nativo: el compositor avisa del icono y del estado del drag.
+		# has_signal mantiene la compatibilidad con binarios viejos (sin recompilar).
+		if compositor.has_signal("drag_icon_changed"):
+			compositor.connect("drag_icon_changed", self, "_on_drag_icon_changed")
+		if compositor.has_signal("drag_state_changed"):
+			compositor.connect("drag_state_changed", self, "_on_drag_state_changed")
+		# Cambios de ventanas: rearmar la UI (el Frame las lista, recovery espera la suya).
+		compositor.connect("toplevel_added", self, "_redraw_on_signal")
+		compositor.connect("toplevel_removed", self, "_redraw_on_signal")
 	view_layer = CanvasLayer.new()
 	view_layer.name = "ViewLayer"
 	view_layer.layer = -1
@@ -1413,9 +1501,10 @@ func _ready():
 			type_text = arg.substr("--type=".length())
 
 	remote_input = Host.remote_input
-	remote_input.connect("access_requested", self, "_on_input_access")
-	if remote_input.has_signal("remote_left"):
-		remote_input.connect("remote_left", self, "_on_remote_left")
+	if remote_input != null:
+		remote_input.connect("access_requested", self, "_on_input_access")
+		if remote_input.has_signal("remote_left"):
+			remote_input.connect("remote_left", self, "_on_remote_left")
 	# Nodo hermano de la entrada de ImGui: permanece activo cuando `_set_capture_cursor`
 	# apaga el _input de este canvas para que los clics no entren al Frame/Hogar.
 	capture_input = CAPTURE_INPUT.new()
@@ -1448,10 +1537,11 @@ func _ready():
 		input_hz = 60.0
 		_arm_clock()
 	# El colector del HUD corría en cada vuelta del loop (60/s) aunque nada cambie.
-	DebugHud.metrics.sample_hz = 4.0
-	# Ni widget mini ni F1: el HUD completo se abre con Super+F6 (frame.gd).
-	DebugHud.show_mini = false
-	DebugHud.hotkeys = false
+	if DebugHud != null:
+		DebugHud.metrics.sample_hz = 4.0
+		# Ni widget mini ni F1: el HUD completo se abre con Super+F6 (frame.gd).
+		DebugHud.show_mini = false
+		DebugHud.hotkeys = false
 
 	# Las sesiones apagan audio/hidapi de SDL para el shell (hilos que despiertan sin
 	# uso); vacías, las apps que lanza el compositor vuelven a los valores por defecto.
@@ -1504,6 +1594,8 @@ func _prune_units():
 # estado (actividades y tiles) desde los toplevels existentes.
 func _adopt_windows():
 	var roots = []
+	if compositor == null:
+		return
 	for id in compositor.get_ids():
 		if compositor.get_parent_id(id) > 0:
 			if not dialogs.has(id):
@@ -1732,6 +1824,32 @@ func _process(_delta):
 		_focus_follow(hover_hit)
 	_poll_force_close(now)
 	_sync_capture_cursor()
+	# ScreenCast nativo (multiview): si el backend del portal tiene una fuente PipeWire
+	# activa, empujar el viewport a ~15 fps. Sin fuente activa no se captura nada.
+	# Misma orientación que remote.gd (_screenshot hace flip_y).
+	if remote_input != null and remote_input.has_method("screencast_active") \
+			and remote_input.has_method("screencast_push") \
+			and now - _screencast_last_ms >= 66 and remote_input.screencast_active():
+		# Fuente del feed: la composición FUERA DE PANTALLA del multiview si está
+		# activa (mosaico limpio, sin espejar el escritorio ni incluir la ventana del
+		# cliente); si no, el viewport del shell (compartir el escritorio de siempre).
+		# Nunca las dos: con multiview on el feed es sólo el canvas compuesto.
+		var sc_tex = null
+		var sc_flip = false
+		if multiview_on and _mv_canvas != null and is_instance_valid(_mv_canvas):
+			sc_tex = _mv_canvas.get_texture()   # ya orientado por render_target_v_flip
+		else:
+			var sc_vp = get_viewport()
+			sc_tex = sc_vp.get_texture() if sc_vp != null else null
+			sc_flip = true
+		if sc_tex != null:
+			_screencast_last_ms = now
+			var sc_img = sc_tex.get_data()
+			if sc_img != null:
+				sc_img.convert(Image.FORMAT_RGBA8)
+				if sc_flip:
+					sc_img.flip_y()
+				remote_input.screencast_push(int(sc_img.get_width()), int(sc_img.get_height()), sc_img.get_data())
 	# Destello del cursor: avanza sólo mientras la onda está activa (sin I/O).
 	_tick_ripple(now)
 	# Cursor de resize pegado: si una barra del Frame quedó dibujada encima del puntero
@@ -1763,7 +1881,7 @@ func _process(_delta):
 		zoom_f = float(zoom_level)
 		neighborhood_view = zoom_level > 0
 		request_redraw()
-	if compositor.commit_count != last_commits:
+	if compositor != null and compositor.commit_count != last_commits:
 		last_commits = compositor.commit_count
 		last_commit_ms = now
 		_present_commit()
@@ -1782,6 +1900,10 @@ func _process(_delta):
 		neighborhood.poll()
 		if neighborhood.version != nb_version:
 			nb_version = neighborhood.version
+			_nb_seen = true
+			# Presencia cambió: rearma la barrera de los vecinos Deskflow apagados
+			# (barato; sólo publica si el rango cambió).
+			_apply_capture_ranges()
 			if neighborhood_view:
 				request_redraw()
 	# Servicios: copia el snapshot del worker (sin consultar procesos acá).
@@ -1789,6 +1911,9 @@ func _process(_delta):
 	# Deskflow por defecto: reintenta el arranque si debía correr y no está.
 	_deskflow_tick(now)
 	_deskflow_watch(now)
+	# Resolución de pantallas: refleja sola rotación/cambio de resolución (local y
+	# peers) en el layout, cada RES_POLL_MS.
+	_screens_resolution_tick(now)
 	# Escrituras de dirección: reapea los Threads ya terminados (no bloquea).
 	_dir_poll()
 	# Buzón del handshake de dirección: aplica el snapshot del worker y reapea los
@@ -1994,6 +2119,11 @@ func _imgui_frame():
 	if tiles_ui != null:
 		tiles_ui.rect_size = _desktop_rect().size
 		tiles_ui.refresh()
+	# Vista del grupo (F4/§8): con "seguir el puntero" se resalta el tile del equipo
+	# dueño del puntero. Capa ImGui propia (ignora el mouse) sobre los tiles y debajo
+	# del Frame. Sin follow no dibuja nada.
+	if multiview_on:
+		_multiview_draw()
 	var _m3 = OS.get_ticks_usec()
 	# Decoración por ventana (OpenStep): se redibuja con el tamaño de la vista.
 	for did in deco_nodes.keys():
@@ -2018,7 +2148,8 @@ func _imgui_frame():
 
 	_draw_input_requests()
 	# HUD de debug global (autoload DebugHud): Super+F6 lo abre en cualquier actividad (frame.gd).
-	DebugHud.draw(self)
+	if DebugHud != null:
+		DebugHud.draw(self)
 	# OSD de volumen/brillo, por encima de todo y efímero.
 	if system_osd != null:
 		system_osd.draw(self)
@@ -2927,6 +3058,12 @@ func _update_tiles():
 	# El default del compositor embebido sigue a la SALIDA PRINCIPAL: es el tamano
 	# de los clientes que no eligen salida (con span el viewport es el escritorio).
 	compositor.default_size = _tile_rect(_screen_size()).size
+	# Vista del grupo (F4/§7): antes de calcular el layout se fijan (puro) los rects
+	# flotantes de los receptores mapeados en la grilla; el render en vivo de siempre
+	# (`_compute_float_layout` -> `_update_tile`) los dibuja. Fuera de multiview_on no
+	# toca nada.
+	if multiview_on and not expose:
+		_multiview_arrange()
 	if expose:
 		_compute_expose_layout()
 	else:
@@ -3358,6 +3495,19 @@ func _compositor_focus(id, raise_window):
 		compositor.focus(id)
 
 
+# Garantiza que el TECLADO apunte a `id` tras elegir una ventana por su app-icon,
+# restaurarla o Alt+Tab: fija el foco de teclado del compositor (manda el keyboard
+# enter a esa superficie) y el target de reenvío de sueltas, sin depender del foco
+# que tuviera el puntero. Enfocar sólo la vista no basta: sin esto la ventana queda
+# seleccionada pero las teclas siguen yendo a la anterior.
+func _focus_keyboard_on(id):
+	if id < 0 or not _id_alive(id):
+		return
+	focused_tile = id
+	last_key_target = id
+	_compositor_focus(id, false)
+
+
 func _focus_tile(id, raise_window = true):
 	if id < 0 or not _id_alive(id):
 		return
@@ -3645,6 +3795,7 @@ func _apply_vlevel(level):
 		3:
 			_go_home()
 			apps_view = true
+			apps_from_expose = false
 	request_redraw()
 
 
@@ -4030,6 +4181,15 @@ func _rebuild_tiles(units):
 
 
 func _toggle_expose(on, local := true):
+	# Android: no hay compositor; el "expose" nativo (Recents) hace de análogo y se
+	# abre/cierra con el mismo evento (local o sincronizado del Grupo).
+	if compositor == null and apps != null:
+		var plug = apps.android_plugin()
+		if plug != null:
+			plug.call("openRecents" if on else "closeRecents")
+		expose = on
+		request_redraw()
+		return
 	expose = on
 	expose_hover = -1
 	expose_drag = null
@@ -4587,6 +4747,7 @@ func _draw_home(offset = 0.0):
 	# las apps lo usan para cambiar de pestaña, así que la tecla debe llegarles.
 	if is_key_pressed(KEY_TAB) and not Input.is_key_pressed(KEY_CONTROL):
 		apps_view = not apps_view
+		apps_from_expose = false
 	if apps_view:
 		_draw_apps(offset)
 		return
@@ -4748,6 +4909,7 @@ func _draw_home(offset = 0.0):
 		text_colored(HOME_BLOCK_TEXT, "Apps")
 		if apps_clicked:
 			apps_view = true
+			apps_from_expose = false
 
 		if activity_error != "":
 			# Sobre la barra inferior, no dentro (en 800x600 la barra mide 80 px).
@@ -5101,7 +5263,8 @@ func _ease_out(k):
 # de arranque de las wayland cerradas.
 func _ring_activate(e, pos, size):
 	if e.kind == "favorite":
-		if String(e.app.get("cmd", "")) == "":
+		# Android: la app no tiene `cmd` (se lanza por Intent) → _launch_app.
+		if String(e.app.get("cmd", "")) == "" and String(e.app.get("pkg", "")) == "":
 			# Favorito sin app resuelta (no instalada o id desactualizado): no hay
 			# comando para lanzar; se intenta por nombre y si no, queda el aviso.
 			_open_by_name(e.name)
@@ -5154,12 +5317,17 @@ func _load_np_icon(name):
 		return sugar_icons[key]
 	var path = NP_DIR + String(name) + ".png"
 	var img = Image.new()
-	if img.load(path) != OK or img.get_width() == 0:
-		return null
-	var tex = ImageTexture.new()
-	tex.create_from_image(img, Texture.FLAG_FILTER)
-	sugar_icons[key] = tex
-	return tex
+	if img.load(path) == OK and img.get_width() > 0:
+		var tex = ImageTexture.new()
+		tex.create_from_image(img, Texture.FLAG_FILTER)
+		sugar_icons[key] = tex
+		return tex
+	# En el APK solo está la textura importada (.stex), no el PNG crudo: se usa esa.
+	var res = load(path)
+	if res is Texture:
+		sugar_icons[key] = res
+		return res
+	return null
 
 
 # Carga (y cachea) un PNG de un archivo arbitrario como ImageTexture: miniaturas del
@@ -5208,7 +5376,7 @@ func _load_sugar_slug(name, stroke, fill):
 	if slug_icons.has(key):
 		return slug_icons[key]
 	var vector = ClassDB.instance("SlugVector")
-	vector.set_svg_path(SUGAR_DIR + name + ".svg")
+	vector.set_svg_path(SUGAR_DIR + name + SUGAR_RAW_EXT)
 	# Los SVG Sugar marcan los paints con las entidades &fill_color;/&stroke_color;,
 	# que Slug reconoce: se recolorean sin reescribir el archivo.
 	vector.set_fill_color(fill)
@@ -5256,6 +5424,11 @@ func _load_sugar_svg(name, stroke, fill):
 		# sustituido en user:// y lo rasteriza el loader SVG del motor.
 		ok = _load_sugar_file(img, key, text)
 	if not ok or img.get_width() == 0:
+		# Sin el SVG crudo en el APK, se usa la textura importada (sin recolorear).
+		var res = load(SUGAR_DIR + name + ".svg")
+		if res is Texture:
+			sugar_icons[key] = res
+			return res
 		return null
 	var tex = ImageTexture.new()
 	tex.create_from_image(img, Texture.FLAG_FILTER)
@@ -5278,7 +5451,7 @@ func _load_sugar_file(img, key, text):
 # Texto del SVG sin DOCTYPE, con width/height agrandados y las entidades ya resueltas.
 func _sugar_svg_text(name, stroke, fill):
 	var f = File.new()
-	if f.open(SUGAR_DIR + name + ".svg", File.READ) != OK:
+	if f.open(SUGAR_DIR + name + SUGAR_RAW_EXT, File.READ) != OK:
 		return ""
 	var s = f.get_as_text()
 	f.close()
@@ -5477,17 +5650,35 @@ func _activity_icon_of(app):
 	return app.tex
 
 
+# Margen de la grilla de apps: una celda en escritorio; cero en teléfono o
+# pantallas chicas (la grilla ocupa todo el ancho/alto disponible).
+func _apps_margin(vp):
+	if OS.get_name() == "Android" or min(vp.x, vp.y) < 700.0:
+		return 0.0
+	return grid_unit(vp)
+
+
 func _draw_apps(offset = 0.0):
 	var vp = _screen_size()
-	# Una celda libre a cada lado y sobre/bajo la zona desplazable.
-	var u = grid_unit(vp)
+	# En escritorio se deja una celda libre a cada lado; en teléfono o pantallas
+	# chicas ese margen desperdicia ancho: la grilla usa todo el espacio.
+	var u = _apps_margin(vp)
 	set_next_window_pos(Vector2(offset + u, u), true)
 	set_next_window_size(Vector2(vp.x - 2.0 * u, vp.y - 2.0 * u), true)
 	if begin("##apps", WINDOW_NO_DECORATION | WINDOW_NO_BACKGROUND | WINDOW_NO_MOVE | WINDOW_NO_SAVED_SETTINGS | WINDOW_NO_BRING_TO_FRONT_ON_FOCUS):
 		if button("Anillo"):
 			apps_view = false
+			apps_from_expose = false
 		same_line()
 		var app = apps.draw(self)
+		# Esc desde la búsqueda abierta al tipear en exposé: volver al exposé (donde
+		# estaba), en vez de quedarse en la grilla.
+		if app == null and apps_from_expose and is_key_pressed(KEY_ESCAPE):
+			apps_view = false
+			apps_from_expose = false
+			apps.query = ""
+			_toggle_expose(true)
+			get_tree().set_input_as_handled()
 		if activity_error != "":
 			text(activity_error)
 		if app != null:
@@ -5499,6 +5690,14 @@ func _draw_apps(offset = 0.0):
 # anillo mientras viva su ventana (ver _on_toplevel_removed).
 func _launch_app(app, origin = null):
 	apps.query = ""
+	# Android: la app se lanza por Intent con el plugin nativo (no hay compositor ni sh).
+	if app.get("pkg", "") != "":
+		var plug = apps.android_plugin()
+		if plug != null:
+			plug.call("launchApp", String(app.pkg), String(app.activity))
+			apps_view = false
+			apps_from_expose = false
+			return
 	var i = _activity_named(app.name)
 	if i < 0:
 		ACTIVITIES.append({"name": app.name, "wayland": ["sh", "-c", app.cmd], "dynamic": true})
@@ -5520,6 +5719,7 @@ func _launch_app(app, origin = null):
 	# La grilla vuelve al anillo de Hogar: ahí se ve el pulso de arranque del ícono
 	# hasta que llegue la ventana (la vista no salta a la actividad al lanzarla).
 	apps_view = false
+	apps_from_expose = false
 	apps.watch(self, app.name, last_launch_pid)
 	# Si no se pudo lanzar, no queda colgada en el anillo.
 	if not _pending_has(app.name) and not wayland_ids.has(app.name) and ACTIVITIES[i].get("dynamic", false):
@@ -5875,6 +6075,29 @@ var _publish_started = false
 # Hostname local como etiqueta; /etc/hostname es el respaldo si el entorno no lo
 # trae. Sólo se usa para `name`; el `hid` público es opaco (ver PUBLISH_PLAN).
 func _local_hostname():
+	# Android: nombre del equipo tomado del nombre Bluetooth (sin permisos); si no hay,
+	# el modelo ("Redmi Note 9 Pro" → "redmi").
+	if OS.get_name() == "Android":
+		# 1) Override explícito en user://hostname (una línea): permite alinear con el
+		#    nombre de pantalla del app Deskflow sin reconstruir.
+		var hf = File.new()
+		if hf.file_exists("user://hostname") and hf.open("user://hostname", File.READ) == OK:
+			var stored = _hostname_atom(hf.get_as_text().strip_edges())
+			hf.close()
+			if stored != "":
+				return stored
+		var env = OS.get_environment("GDTK_HOSTNAME").strip_edges()
+		if env != "":
+			return env
+		var bt = ""
+		var plug = apps.android_plugin() if apps != null else null
+		if plug != null:
+			bt = String(plug.call("bluetoothName")).strip_edges()
+		print("local_hostname: plug=", plug != null, " bt=[", bt, "] model=", OS.get_model_name())
+		if bt == "":
+			bt = OS.get_model_name().strip_edges()
+		var clean = _hostname_atom(bt)
+		return clean if clean != "" else "android"
 	var host = OS.get_environment("HOSTNAME").strip_edges()
 	if host == "":
 		var f = File.new()
@@ -5882,6 +6105,15 @@ func _local_hostname():
 			host = f.get_as_text().strip_edges()
 			f.close()
 	return host
+
+
+# Normaliza un nombre a átomo válido (lowercase [a-z0-9_-]); "" si queda vacío.
+func _hostname_atom(s):
+	var out = ""
+	for c in String(s).to_lower():
+		if (c >= "a" and c <= "z") or (c >= "0" and c <= "9") or c == "-" or c == "_":
+			out += c
+	return out
 
 
 # Arranca los anuncios una sola vez. No bloquea: detect_avahi sólo mira el PATH
@@ -5894,11 +6126,19 @@ func _start_publishers():
 		return
 	_publish_started = true
 	_publisher = PUBLISH_MODEL.new()
+	# Android: no hay avahi; se publica con NsdManager vía el plugin nativo.
+	var plug = apps.android_plugin() if apps != null else null
+	print("publish: os=", OS.get_name(), " has_singleton=", Engine.has_singleton("GdtkApps"), " plug=", plug != null)
+	if plug != null:
+		_android_publish(plug)
+		return
 	var avahi = _publisher.detect_avahi()
 	if not avahi.available:
 		return   # degradado, sin error
 	_reap_stray_publishers()
 	var identity = PUBLISH_PLAN.local_identity(_local_hostname(), local_device_kind())
+	identity["res"] = _local_size_text()
+	_res_published = identity["res"]
 	# Endpoint del canal peer (LAN, sin ssh) para que un vecino nos pida abrir el
 	# receptor de pantalla. Vacío si el canal no está escuchando.
 	if Host.peer_control != null and Host.peer_control.listening():
@@ -5915,6 +6155,27 @@ func _start_publishers():
 	var plan = PUBLISH_PLAN.new().build(identity, caps, avahi.path)
 	for entry in plan.services:
 		_publish_launch(entry)
+
+
+# Anuncio DNS-SD por NsdManager (Android). Mismo TXT que avahi para que gdtk lo
+# descubra igual (avahi-browse).
+func _android_publish(plug):
+	print("android_publish: start")
+	var identity = PUBLISH_PLAN.local_identity(_local_hostname(), local_device_kind())
+	identity["res"] = _local_size_text()
+	_res_published = identity["res"]
+	if Host.peer_control != null and Host.peer_control.listening():
+		identity["ctl"] = str(Host.peer_control.port)
+	_published_accent = "#" + accent.to_html(false)
+	identity["accent"] = _published_accent
+	if _mesh_role_written == "host":
+		identity["mesh"] = MESH_SSID
+	var name = String(identity.get("name", "gdtk"))
+	var gvd_txt = PUBLISH_MODEL.new().build_gvd_txt(identity, {"role": "recv", "state": "capable"})
+	plug.call("publishService", "gdtk gvd " + name, "_gdtk-gvd._udp", 5600, JSON.print(gvd_txt))
+	print("android_publish: gvd ok")
+	var df_txt = PUBLISH_MODEL.new().build_deskflow_txt(identity, {"role": String(_deskflow_role), "clip": "1"})
+	plug.call("publishService", "gdtk deskflow " + name, "_gdtk-deskflow._tcp", 24800, JSON.print(df_txt))
 
 
 func _reap_stray_publishers():
@@ -6181,6 +6442,7 @@ func _apply_settings():
 		_apply_input_settings()
 		_sync_directions_from_screen_layout()
 		_apply_deskflow_settings()
+		_maybe_broadcast_layout()
 		_apply_span_settings()
 		_apply_notifications_settings()
 		_apply_audio_settings()
@@ -6440,6 +6702,13 @@ func _start_span_watch():
 # Sondeo periodico desde _process: lanza el Thread si no hay uno en vuelo y reapa.
 func _span_tick(now):
 	if not span_enabled():
+		# Sin span, `_screen_size()` debe seguir al viewport EN VIVO. Si `screen_size`
+		# quedó seteado (p. ej. hubo un multi-salida transitorio: monitor virtual de
+		# gvd, span activado y luego desactivado), no se limpiaba y la resolución
+		# quedaba congelada: al rotar no se actualizaba ni se republicaba (`res=`).
+		if screen_size != Vector2.ZERO:
+			screen_size = Vector2.ZERO
+			request_redraw()
 		return
 	if span_thread != null:
 		_span_reap()
@@ -6836,6 +7105,11 @@ func _apply_deskflow_settings():
 	var cfg = settings_bridge.model.deskflow(settings_bridge.settings.get("deskflow", {}))
 	var mode = String(cfg.get("mode", "off"))
 	var effective_mode = mode
+	# Velocidad del puntero (global, Deskflow 1.27 no la tiene por cliente): el
+	# servidor la lee de DESKFLOW_MOUSE_ADJUSTMENT. El valor entra en la clave para
+	# que un cambio relance el servicio con el multiplicador nuevo.
+	var mouse_scale_text = DESKFLOW_MOUSE.adjust_text(cfg.get("mouse_scale", 1.0))
+	OS.set_environment("DESKFLOW_MOUSE_ADJUSTMENT", mouse_scale_text)
 	# El gate se pregunta en cada aplicación de settings, pero el resultado se cachea
 	# en deskflow_server_available(): el portal lo sube RemoteInput al arrancar y ahí
 	# queda, así que el cacheo no puede quedar viejo respecto a lo que hay en el bus.
@@ -6861,6 +7135,7 @@ func _apply_deskflow_settings():
 		_refresh_service_targets()
 	var key = effective_mode + "|" + String(cfg.get("host", "")) + "|" + str(int(cfg.get("port", 24800))) \
 		+ "|" + local + "|" + service + "|auto=" + str(bool(cfg.get("auto", false))) \
+		+ "|ms=" + mouse_scale_text \
 		+ "|" + _settings_layout_key()
 	var deskflow_was_configured = _deskflow_settings_key != ""
 	var config_changed = deskflow_was_configured and key != _deskflow_settings_key
@@ -6890,8 +7165,7 @@ func _apply_deskflow_settings():
 	# eis_server.c::barrier_crossed). Sólo al cambiar el acomodo: publicarlos en
 	# cada release del popup flapeaba la captura. El binario sin este método se
 	# ignora por has_method; el rango por defecto (0..100) queda inerte.
-	if Host.remote_input != null and Host.remote_input.has_method("set_capture_ranges"):
-		Host.remote_input.set_capture_ranges(_deskflow_capture_ranges())
+	_apply_capture_ranges()
 	if auto:
 		if auto_key != _deskflow_auto_key:
 			_deskflow_auto_key = auto_key
@@ -7201,13 +7475,11 @@ func _settings_deskflow_links():
 	return out
 
 
-# Rangos porcentuales por borde donde el portal InputCapture puede activarse, para
-# que Deskflow (que arma barreras de borde COMPLETO aunque el layout use tramos
-# parciales como down(0,67)) no capture fuera del tramo con vecino: sin esto el
-# puntero queda clavado/oculto y el cursor de Deskflow hace hover/clicks en la
-# pantalla equivocada. Orden:
-# [left_lo,left_hi, right_lo,right_hi, top_lo,top_hi, bottom_lo,bottom_hi].
-func _deskflow_capture_ranges():
+# Direcciones que NO capturan input, con la misma semántica que
+# `capture_ranges(..., disabled)`: gvd extendido hacia ese borde y vecinos gdtk
+# apagados. Única fuente para `_deskflow_capture_ranges` y para el dueño del
+# puntero (`_resolve_pointer_owner`), así no divergen.
+func _deskflow_disabled_directions():
 	# Las direcciones con gvd extendido quedan deshabilitadas: el input no cruza
 	# (SPEC-screen-share-compass §4/§7), así Deskflow no rapta el teclado en ese borde.
 	var disabled = []
@@ -7215,7 +7487,43 @@ func _deskflow_capture_ranges():
 		var d = String(_gvd_link_suspended[hid]).strip_edges()
 		if d != "" and d != "none":
 			disabled.append(d)
-	return GVD_LAUNCH.capture_ranges(_settings_deskflow_links(), disabled)
+	# Vecinos gdtk apagados: su borde tampoco captura, si no el puntero queda
+	# atrapado/oculto hasta el timeout de Deskflow.
+	for d in _deskflow_absent_directions():
+		if not disabled.has(d):
+			disabled.append(d)
+	return disabled
+
+
+# Rangos porcentuales por borde donde el portal InputCapture puede activarse, para
+# que Deskflow (que arma barreras de borde COMPLETO aunque el layout use tramos
+# parciales como down(0,67)) no capture fuera del tramo con vecino: sin esto el
+# puntero queda clavado/oculto y el cursor de Deskflow hace hover/clicks en la
+# pantalla equivocada. Orden:
+# [left_lo,left_hi, right_lo,right_hi, top_lo,top_hi, bottom_lo,bottom_hi].
+func _deskflow_capture_ranges():
+	return GVD_LAUNCH.capture_ranges(_settings_deskflow_links(), _deskflow_disabled_directions())
+
+
+# Direcciones cuyo vecino gdtk no está visto en el Vecindario. Vacío hasta el
+# primer escaneo (no se bloquea todo al arrancar). Los extremos externos
+# (`deskflow_extra`) no viven en `screens`: nunca entran acá.
+func _deskflow_absent_directions():
+	if settings_bridge == null or not _nb_seen or DESKFLOW_PRESENCE == null:
+		return []
+	var present = []
+	for h in (neighborhood.hosts if neighborhood != null else []):
+		if typeof(h) != TYPE_DICTIONARY or String(h.get("state", "")) != "visto":
+			continue
+		# El layout (`settings["screens"]`) keyea las pantallas por NOMBRE visible
+		# (`peer`), no por el hid hash del Vecindario. Hay que aceptar ambos: si sólo
+		# se compara contra id/hid (hashes), toda pantalla queda "ausente" y el borde
+		# no captura (el cursor no atraviesa).
+		for k in ["id", "hid", "label", "name"]:
+			var v = String(h.get(k, "")).strip_edges()
+			if v != "" and not present.has(v):
+				present.append(v)
+	return DESKFLOW_PRESENCE.absent_directions(settings_bridge.settings.get("screens", {}), present)
 
 
 # Nombres de TODAS las pantallas del layout, local primero (mismo criterio que
@@ -7231,7 +7539,22 @@ func _settings_deskflow_screen_names(local_name):
 		var nm = String(local_name) if s.local else (String(s.peer) if String(s.peer) != "" else String(s.id))
 		if nm != "" and not names.has(nm):
 			names.append(nm)
+	for ex in _deskflow_extra_screens():
+		var exn = String(ex.get("name", "")).strip_edges()
+		if exn != "" and not names.has(exn):
+			names.append(exn)
 	return names
+
+
+# Pantallas Deskflow EXTERNAS (no son peers gdtk: p. ej. el teléfono con la app
+# Deskflow). Viven en settings.json -> "deskflow_extra": [{"name", "edge"}], con el
+# borde desde ESTE equipo (up/down/left/right). Así sobreviven a la regeneración de
+# la config del servidor.
+func _deskflow_extra_screens():
+	if settings_bridge == null:
+		return []
+	var raw = settings_bridge.settings.get("deskflow_extra", [])
+	return raw if typeof(raw) == TYPE_ARRAY else []
 
 
 # Conf del server con la topología COMPLETA del layout de Pantallas: todas las
@@ -7243,6 +7566,14 @@ func _settings_deskflow_topology_text(local_name):
 	var layout = settings_bridge.settings.get("screens", {})
 	var lay = SCREEN_LAYOUT.normalize_layout(layout)
 	var topo = SCREEN_LAYOUT.topology(lay, String(local_name))
+	# Suma las pantallas externas (teléfono) con su borde desde este equipo.
+	for ex in _deskflow_extra_screens():
+		var nm = String(ex.get("name", "")).strip_edges()
+		var ed = String(ex.get("edge", "up")).strip_edges()
+		if nm != "" and ed != "":
+			topo.append({"screen": String(local_name), "edge": ed, "peer": nm})
+	if CONF_MODEL == null:
+		return ""
 	return CONF_MODEL.build_topology_conf(_settings_deskflow_screen_names(local_name), topo)
 
 
@@ -7425,6 +7756,9 @@ func _exit_tree():
 # (~/.config/gdtk/neighborhood-directions.json por defecto). "" si no hay HOME ni
 # XDG_CONFIG_HOME: sin base no se adivina una ruta.
 func _directions_path():
+	# En Android no hay XDG_CONFIG_HOME ni HOME: user:// persiste.
+	if OS.get_name() == "Android":
+		return "user://neighborhood-directions.json"
 	var base = OS.get_environment("XDG_CONFIG_HOME")
 	if base == "":
 		var home = OS.get_environment("HOME")
@@ -7488,6 +7822,12 @@ func _screen_layout_host(layout, host_id, create = true):
 			return {"layout": lay, "screen": sc}
 	if not create:
 		return {"layout": lay, "screen": null}
+	if name == "" or name == id:
+		# El host no está en el Vecindario: `_peer_name_for` devolvió el hid. Crear una
+		# pantalla keyeada por el hid dejaba un "ID desconocido" duplicado (label==hid)
+		# que después no se podía quitar y ensuciaba el conf de Deskflow. Se difiere
+		# hasta que el equipo tenga nombre real.
+		return {"layout": lay, "screen": null}
 	var sc2 = SCREEN_LAYOUT.default_screen(id, name, false)
 	sc2.peer = name
 	lay.screens.append(sc2)
@@ -7501,6 +7841,7 @@ func _write_screen_layout(layout):
 	settings_bridge.settings["screens"] = lay
 	settings_bridge.write_atomic(settings_bridge.settings_path(),
 		settings_bridge.model.to_json(settings_bridge.settings))
+	_maybe_broadcast_layout()
 
 
 # settings["screens"] es la fuente canonica. host_directions queda como proyeccion
@@ -7732,6 +8073,7 @@ func _layout_drag_release():
 		"local": lay.local, "screens": lay.screens})
 	_sync_directions_from_screen_layout()
 	_apply_deskflow_settings()
+	_maybe_broadcast_layout()
 	layout_confirm_host = id
 	_layout_confirm.propose(_layout_confirm.baseline, OS.get_ticks_msec())
 	request_redraw()
@@ -8261,6 +8603,9 @@ func apply_deskflow_layout(links):
 	var local = _local_hostname()
 	if not LAYOUT_MODEL.valid_peer(local):
 		local = "gdtk-local"
+	if CONF_MODEL == null:
+		activity_error = "deskflow_conf no compiló"
+		return
 	var text = CONF_MODEL.build_server_conf(local, clean)
 	if text == "":
 		activity_error = "layout: no se pudo generar deskflow-server.conf"
@@ -8541,6 +8886,8 @@ func _close_pantalla_window():
 
 func _pantalla_window_ids():
 	var out = []
+	if compositor == null:
+		return out
 	for name in wayland_ids.keys():
 		var id = int(wayland_ids[name])
 		if not _id_alive(id):
@@ -8649,13 +8996,28 @@ func _peer_tokens_load():
 	return d if typeof(d) == TYPE_DICTIONARY else {}
 
 
+# Los tokens peer los posee peer_control (Host.peer_control): es el ÚNICO escritor e
+# único lector del archivo. El shell pide/persiste por método, así no hay dos
+# read-modify-write del archivo que se pisen (ver shell/peer_control.gd). El fallback
+# a archivo sólo aplica si el canal no está disponible.
 func _peer_token_get(peer_id):
+	var pc = Host.peer_control
+	if pc != null and pc is Object and pc.has_method("token_for"):
+		return String(pc.token_for(peer_id))
 	return String(_peer_tokens_load().get("cli:" + String(peer_id), ""))
 
 
 func _peer_token_set(peer_id, tok):
+	var pc = Host.peer_control
+	if pc != null and pc is Object and pc.has_method("set_client_token"):
+		pc.set_client_token(peer_id, tok)
+		return
 	var d = _peer_tokens_load()
 	d["cli:" + String(peer_id)] = String(tok)
+	_peer_tokens_store(d)
+
+
+func _peer_tokens_store(d):
 	var f = File.new()
 	if f.open(_peer_tokens_path(), File.WRITE) == OK:
 		f.store_string(JSON.print(d))
@@ -8973,6 +9335,10 @@ func _group_input_set(host_id, on):
 			any = true
 			break
 	_deskflow_write("share_here" if any else "off", "")
+	# Encender un interruptor de equipo arma el servicio aunque el modo ya fuera
+	# share_here (el tick reintenta si el portal tardó y no duplica procesos).
+	if on:
+		_deskflow_arm()
 	_share_notify(id, "input", "starting" if on else "stopped")
 	request_redraw()
 
@@ -9006,15 +9372,152 @@ func _deskflow_write(mode, host):
 	if settings_bridge == null or settings_bridge.model == null:
 		return
 	var cfg = settings_bridge.model.deskflow(settings_bridge.settings.get("deskflow", {}))
+	# `auto` es derivado del modo (encender el intercambio implica autoarranque). Se
+	# reconcilia también cuando el modo no cambia: el early return original dejaba un
+	# `auto=false` rancio y el servicio no volvía a arrancar (p. ej. tras un reboot).
+	var want_auto = String(mode) != "off"
 	if String(cfg.get("mode", "")) == String(mode) and String(cfg.get("host", "")) == String(host):
+		if bool(cfg.get("auto", false)) == want_auto:
+			return
+		cfg["auto"] = want_auto
+		settings_bridge.settings["deskflow"] = settings_bridge.model.deskflow(cfg)
+		settings_bridge.write_atomic(settings_bridge.settings_path(),
+			settings_bridge.model.to_json(settings_bridge.settings))
+		_apply_deskflow_settings()
 		return
 	cfg["mode"] = String(mode)
 	cfg["host"] = String(host)
-	cfg["auto"] = String(mode) != "off"
+	cfg["auto"] = want_auto
 	settings_bridge.settings["deskflow"] = settings_bridge.model.deskflow(cfg)
 	settings_bridge.write_atomic(settings_bridge.settings_path(),
 		settings_bridge.model.to_json(settings_bridge.settings))
 	_apply_deskflow_settings()
+
+
+# --- Resolución de pantallas (vecindario) -------------------------------------
+# Refleja sola un cambio de resolución/orientación (portrait <-> landscape) en el
+# layout: el local por OS.get_screen_size() y cada peer por el `res=WxH` que anuncia
+# en su TXT de deskflow. Ancla el borde de contacto y conserva la densidad mm/px
+# (screen_layout.apply_resolution), así los rangos Deskflow siguen siendo correctos.
+var _res_next_ms = 0
+const RES_POLL_MS = 2000
+var _republish_pending = false
+var _res_published = ""
+var _layout_sent_sig = ""   # última firma de layout difundida al Grupo (evita eco/spam)
+
+
+# "WxH" de la pantalla local; "" si no se puede medir. `OS.get_screen_size()`
+# devuelve 0 en el compositor embebido, así que se usa `_screen_size()` (salida del
+# span o el viewport), que es la resolución real del escritorio.
+func _local_size_text():
+	var s = _screen_size()
+	if s.x < 1.0 or s.y < 1.0:
+		return ""
+	return str(int(s.x)) + "x" + str(int(s.y))
+
+
+static func _parse_size_text(t):
+	var v = String(t).strip_edges().to_lower()
+	var parts = v.split("x", true, 1)
+	if parts.size() != 2 or not parts[0].is_valid_integer() or not parts[1].is_valid_integer():
+		return []
+	var w = int(parts[0])
+	var h = int(parts[1])
+	if w < 100 or w > 16384 or h < 100 or h > 16384:
+		return []
+	return [w, h]
+
+
+# Tamaño `res` anunciado por el host que corresponde a `key` (nombre de pantalla,
+# etiqueta, id o hid), leído de su capacidad deskflow. [] si no hay dato.
+func _host_size_for(hosts, key):
+	var want = String(key).strip_edges().to_lower()
+	if want == "" or typeof(hosts) != TYPE_ARRAY:
+		return []
+	for h in hosts:
+		if typeof(h) != TYPE_DICTIONARY:
+			continue
+		var names = [String(h.get("label", "")).to_lower(), String(h.get("id", "")).to_lower(),
+			String(h.get("hid", "")).to_lower()]
+		if not names.has(want):
+			continue
+		var caps = h.get("capabilities", {})
+		if typeof(caps) != TYPE_DICTIONARY:
+			return []
+		for cap_name in ["deskflow", "gvd"]:
+			var cap = caps.get(cap_name, null)
+			if typeof(cap) == TYPE_DICTIONARY:
+				var sz = _parse_size_text(String(cap.get("txt", {}).get("res", "")))
+				if sz.size() == 2:
+					return sz
+	return []
+
+
+func _screens_resolution_tick(now):
+	if settings_bridge == null or settings_bridge.model == null:
+		return
+	if now < _res_next_ms:
+		return
+	_res_next_ms = now + RES_POLL_MS
+	var layout = SCREEN_LAYOUT.normalize_layout(settings_bridge.settings.get("screens", {}))
+	var changed = false
+	# Local: reescala si su resolución cambió. Republica si el anuncio quedó sin
+	# `res` (el viewport todavía no tenía tamaño cuando arrancaron los publishers).
+	var ls_text = _local_size_text()
+	var ls = _parse_size_text(ls_text)
+	if ls_text != "" and ls_text != _res_published:
+		_republish_pending = true
+		# Avisa al Grupo AL TOQUE por el canal peer: el Vecindario recién refleja el
+		# `res=` nuevo en su próximo rescan (hasta 60 s). Se manda una vez por cambio
+		# (el bloque de _republish_pending de abajo actualiza _res_published).
+		if ls.size() == 2:
+			var gtargets = _group_targets()
+			if not gtargets.empty():
+				_peer_send_async(gtargets, "screen_res", {"w": ls[0], "h": ls[1]})
+	if ls.size() == 2:
+		var r = SCREEN_LAYOUT.apply_resolution(layout, layout.local.id, ls[0], ls[1])
+		if bool(r.changed):
+			layout = r.layout
+			changed = true
+	# Peers: cada pantalla con su nombre anunciado toma el `res` del vecino.
+	var hosts = neighborhood.hosts if neighborhood != null else []
+	for sc in layout.screens:
+		var peer = String(sc.get("peer", "")).strip_edges()
+		var sz = _host_size_for(hosts, peer if peer != "" else String(sc.id))
+		if sz.size() != 2:
+			continue
+		var r2 = SCREEN_LAYOUT.apply_resolution(layout, sc.id, sz[0], sz[1])
+		if bool(r2.changed):
+			layout = r2.layout
+			changed = true
+	# Dedup de pantallas "fantasma": una keyeada por el hid (label==id con id de forma
+	# de hid, típica de una migración vieja). Ningún usuario nombra una pantalla con su
+	# hid, así que se cae aunque el equipo esté apagado (sin depender de verlo): si no,
+	# quedaba un "ID desconocido" imborrable y ensuciaba el `[computer_*]` de Deskflow.
+	var kept_screens = []
+	var dropped = false
+	for sc in layout.screens:
+		var sid = String(sc.get("id", "")).strip_edges()
+		var sname = String(sc.get("label", "")).strip_edges()
+		if _looks_like_hid(sid) and sname == sid:
+			dropped = true
+			continue
+		kept_screens.append(sc)
+	if dropped:
+		layout.screens = kept_screens
+		changed = true
+	if changed:
+		settings_bridge.settings["screens"] = layout
+		settings_bridge.write_atomic(settings_bridge.settings_path(),
+			settings_bridge.model.to_json(settings_bridge.settings))
+		_apply_deskflow_settings()
+		request_redraw()
+	if _republish_pending:
+		_republish_pending = false
+		if _publish_started:
+			_stop_publishers()
+			_publish_started = false
+			_start_publishers()
 
 
 # --- Portapapeles del Grupo ---------------------------------------------------
@@ -9106,6 +9609,126 @@ func _peer_expose(on):
 	if expose != on:
 		_toggle_expose(on, false)
 	return true
+
+
+# Handler del método peer `screen_res`: el equipo del Grupo avisa su resolución nueva
+# (rotación portrait<->landscape). Refleja `px_w/px_h` en el layout y re-aplica Deskflow
+# al toque, en vez de esperar el rescan del Vecindario (RESCAN_MS = 60 s). Devuelve true
+# aunque no cambie (idempotente: el emisor puede repetir).
+func _peer_screen_res(hid, vs):
+	if settings_bridge == null or settings_bridge.model == null:
+		return false
+	var id = String(hid)
+	var name = _peer_name_for(id)
+	var layout = SCREEN_LAYOUT.normalize_layout(settings_bridge.settings.get("screens", {}))
+	var target = SCREEN_LAYOUT.screen_by_id(layout, id)
+	if target == null:
+		for sc in layout.screens:
+			if String(sc.get("label", "")).to_lower() == name.to_lower() \
+					or String(sc.get("peer", "")).to_lower() == name.to_lower():
+				target = sc
+				break
+	if target == null:
+		return false
+	var r = SCREEN_LAYOUT.apply_resolution(layout, String(target.get("id", "")), int(vs.x), int(vs.y))
+	if not bool(r.changed):
+		return true
+	settings_bridge.settings["screens"] = r.layout
+	settings_bridge.write_atomic(settings_bridge.settings_path(),
+		settings_bridge.model.to_json(settings_bridge.settings))
+	_apply_deskflow_settings()
+	request_redraw()
+	return true
+
+
+# Handler del método peer `layout`: el equipo del Grupo cambió su acomodo y empuja la
+# geometría de sus pantallas vecinas para que el resto lo refleje. Upserta por id (o
+# por nombre resoluble), sin tocar la pantalla local y sin re-difundir (evita el eco).
+func _peer_layout(hid, screens):
+	if settings_bridge == null or settings_bridge.model == null:
+		return false
+	if typeof(screens) != TYPE_ARRAY:
+		return false
+	var me = _local_hid()
+	var lay = SCREEN_LAYOUT.normalize_layout(settings_bridge.settings.get("screens", {}))
+	var local_id = String(lay.local.id)
+	var changed = false
+	for e in screens:
+		if typeof(e) != TYPE_DICTIONARY:
+			continue
+		var sid = String(e.get("id", "")).strip_edges()
+		var sname = String(e.get("peer", "")).strip_edges()
+		if sname == "":
+			sname = String(e.get("label", "")).strip_edges()
+		if sid == "" or sid == local_id or sid == me or sname == _local_hostname():
+			continue
+		# El target se busca DENTRO de `lay.screens` (mismo objeto que vamos a guardar):
+		# SCREEN_LAYOUT.screen_by_id normaliza y devuelve una copia, así que mutarla no
+		# afectaba el layout.
+		var target = null
+		for sc in lay.screens:
+			if String(sc.get("id", "")) == sid:
+				target = sc
+				break
+		if target == null and sname != "":
+			var sn = sname.to_lower()
+			for sc in lay.screens:
+				if String(sc.get("peer", "")).to_lower() == sn \
+						or String(sc.get("label", "")).to_lower() == sn:
+					target = sc
+					break
+		if target == null:
+			if sname == "" or sname == sid:
+				continue
+			target = SCREEN_LAYOUT.default_screen(sid, sname, false)
+			target.peer = sname
+			lay.screens.append(target)
+		target["x"] = float(e.get("x", target.get("x", 0.0)))
+		target["y"] = float(e.get("y", target.get("y", 0.0)))
+		target["w"] = float(e.get("w", target.get("w", SCREEN_LAYOUT.DEFAULT_W)))
+		target["h"] = float(e.get("h", target.get("h", SCREEN_LAYOUT.DEFAULT_H)))
+		var pw = int(e.get("px_w", 0))
+		var ph = int(e.get("px_h", 0))
+		if pw > 0 and ph > 0:
+			target["px_w"] = pw
+			target["px_h"] = ph
+		changed = true
+	if not changed:
+		return true
+	settings_bridge.settings["screens"] = lay
+	# Marca la firma para que el poll de settings no rebote el layout recién recibido.
+	_layout_sent_sig = SCREEN_LAYOUT.to_json(lay)
+	settings_bridge.write_atomic(settings_bridge.settings_path(),
+		settings_bridge.model.to_json(settings_bridge.settings))
+	_apply_deskflow_settings()
+	request_redraw()
+	return true
+
+
+# Difunde el layout actual del Grupo a los pares (una vez por cambio). Se llama tras
+# un cambio LOCAL (editor de Pantallas, colocación en el Grupo); no desde _peer_layout.
+func _maybe_broadcast_layout():
+	if settings_bridge == null:
+		return
+	var raw = settings_bridge.settings.get("screens", {})
+	var sig = SCREEN_LAYOUT.to_json(raw)
+	if sig == _layout_sent_sig:
+		return
+	_layout_sent_sig = sig
+	var targets = _group_targets()
+	if targets.empty():
+		return
+	var lay = SCREEN_LAYOUT.normalize_layout(raw)
+	var screens = []
+	for sc in lay.screens:
+		screens.append({
+			"id": String(sc.get("id", "")), "peer": String(sc.get("peer", "")),
+			"label": String(sc.get("label", "")), "x": float(sc.get("x", 0.0)),
+			"y": float(sc.get("y", 0.0)), "w": float(sc.get("w", 0.0)),
+			"h": float(sc.get("h", 0.0)), "px_w": int(sc.get("px_w", 0)),
+			"px_h": int(sc.get("px_h", 0)),
+		})
+	_peer_send_async(targets, "layout", {"screens": screens})
 
 
 # Controles de audio universales: difunde una acción de volumen/mute a todos los
@@ -10140,6 +10763,467 @@ func _peer_share_stop(hid, params):
 	return false
 
 
+# --- Multiview del Vecindario (SPEC-multiview-portal §10/§11/§13 F3) -----------
+# El host hospeda N receptores `gvd recv` (uno por miembro/slot) por el MISMO ciclo
+# de vida rastreado (`_launch_tracked`/`gvd_session_pids`) y reparte el puerto de
+# cada slot por el canal peer YA autenticado (`mv_slot`). Nada bloquea el frame: los
+# procesos y los avisos van por los helpers en Thread existentes. El emisor es
+# honesto: un peer sólo emite si puede mandar un escritorio completo; si no, el
+# pedido se rechaza y el tile queda degradado (nunca se manda una ventana en su
+# lugar).
+
+const MULTIVIEW_BASE_PORT = 5700
+const MULTIVIEW_MAX_SLOTS = 4
+# Composición offscreen (F4/§9): el canvas debe medir EXACTAMENTE lo mismo que la
+# geometría del screencast (= OS.get_window_size(), que eis_server difunde por process),
+# porque `screencast_push_rgba` descarta el frame si el tamaño no coincide. Cada
+# receptor sí decodifica chico (tope por tile) para abaratar la red/decode.
+const MULTIVIEW_TILE_CAP = Vector2(960, 540)
+const MULTIVIEW_SHM_FPS = 15
+
+
+# Inicia el multiview hospedando un receptor por `hid` de `hids`. Devuelve
+# {ok, error, slots:[{hid,slot,port}]} (serializable para el control remoto). Los
+# hids sin canal peer quedan igual con su receptor rastreado, pero sin aviso.
+func multiview_start(hids) -> Dictionary:
+	if not share_enabled:
+		return {"ok": false, "error": SHARE_DISABLED_ERROR, "slots": []}
+	var path = _gvd_path_local()
+	if path == "":
+		return {"ok": false,
+			"error": "multiview: no se encontró el programa de pantalla", "slots": []}
+	# El reload del shell sólo recompila shell.gd (no los módulos preloaded): si el
+	# proceso viene de una recarga con gvd_launch viejo, el plan offscreen no existe.
+	# Se falla honesto en vez de tirar un error de GDScript; entra en el próximo arranque.
+	var gvd_mod = GVD_LAUNCH
+	if not gvd_mod.has_method("multiview_offscreen_plans"):
+		return {"ok": false,
+			"error": "multiview: requiere reiniciar el shell para activar la composición offscreen",
+			"slots": []}
+	var peers = hids if typeof(hids) == TYPE_ARRAY else []
+	# Nombres visibles por hid para el título de cada tile (F4/§7): si no se conoce
+	# un nombre real, se deja vacío y el plan usa "equipo N" (nunca el hid opaco).
+	var labels = {}
+	for h in peers:
+		var hid0 = String(h)
+		var nm = _peer_name_for(hid0)
+		labels[hid0] = nm if (nm != "" and nm != hid0) else ""
+	# Vista nueva: se descarta el mapeo/estado guardado de una corrida anterior.
+	multiview_windows = {}
+	multiview_saved = {}
+	_mv_stop_canvas()
+	# Composición OFFLINE (F4 offscreen): cada receptor publica frames RGBA en un
+	# archivo shm (sin ventana) y el canvas compone la grilla fuera de pantalla.
+	var comp = _multiview_composite_size(get_viewport().size)
+	var tile = _multiview_tile_size(comp, peers.size())
+	var plans = GVD_LAUNCH.multiview_offscreen_plans(path, peers,
+		MULTIVIEW_BASE_PORT, MULTIVIEW_MAX_SLOTS, labels, _mv_shm_dir(),
+		int(tile.x), int(tile.y), MULTIVIEW_SHM_FPS)
+	var rects = MULTIVIEW.tile_rects(plans.size(), comp, MULTIVIEW_GUTTER)
+	var slots = []
+	var out = []
+	for entry in plans:
+		if not bool(entry.get("ok", false)):
+			continue
+		var hid = String(entry.get("hid", ""))
+		var slot = int(entry.get("slot", 0))
+		var port = int(entry.get("port", 0))
+		var label = String(entry.get("label", ""))
+		var plan = entry.get("plan", {})
+		# Reintentar no debe apilar receptores: se corta el slot previo de ese hid.
+		_stop_tracked(GVD_SESSION.multiview_recv_key(hid))
+		_launch_tracked(GVD_SESSION.multiview_recv_key(hid),
+			String(plan.get("cmd", "")), plan.get("args", []))
+		_gvd_mutex.lock()
+		multiview_slots[hid] = {"slot": slot, "port": port, "label": label}
+		_gvd_mutex.unlock()
+		_mv_off_plans[hid] = entry
+		var rect = rects[slot] if (slot >= 0 and slot < rects.size()) else Rect2()
+		slots.append({"path": String(entry.get("path", "")), "rect": rect})
+		out.append({"hid": hid, "slot": slot, "port": port})
+		# Aviso al peer por el canal autorizado (async: nunca bloquea el render).
+		var ep = _peer_endpoint_for(hid)
+		if bool(ep.get("ok", false)):
+			var ctl = int(ep.get("port", 0))
+			if ctl <= 0:
+				ctl = _peer_port()
+			_peer_send_async([{"id": hid, "host": String(ep.get("peer", "")),
+				"port": ctl, "token": _peer_token_get(hid)}],
+				"mv_slot", {"port": port, "host": _local_hostname(), "slot": slot})
+	if out.empty():
+		return {"ok": false, "error": "multiview: sin receptores válidos", "slots": []}
+	_mv_canvas = MULTIVIEW_CANVAS.new()
+	add_child(_mv_canvas)
+	if not _mv_canvas.start(comp, slots):
+		_mv_stop_canvas()
+		return {"ok": false,
+			"error": "multiview: no pude abrir la composición fuera de pantalla", "slots": []}
+	multiview_on = true
+	request_redraw()
+	return {"ok": true, "error": "", "slots": out}
+
+
+# Detiene el multiview: corta cada receptor rastreado, avisa `mv_stop` a los peers
+# (mejor esfuerzo, async) y limpia el estado. Restaura las ventanas afectadas a su
+# modo/posición previos para que nada quede pinneado por la vista. Devuelve {ok, error}.
+func multiview_stop() -> Dictionary:
+	_gvd_mutex.lock()
+	var hids = multiview_slots.keys()
+	multiview_slots = {}
+	_gvd_mutex.unlock()
+	for hid in hids:
+		var id = String(hid)
+		_stop_tracked(GVD_SESSION.multiview_recv_key(id))
+		var ep = _peer_endpoint_for(id)
+		if bool(ep.get("ok", false)):
+			var ctl = int(ep.get("port", 0))
+			if ctl <= 0:
+				ctl = _peer_port()
+			_peer_send_async([{"id": id, "host": String(ep.get("peer", "")),
+				"port": ctl, "token": _peer_token_get(id)}], "mv_stop", {})
+	multiview_on = false
+	_mv_stop_canvas()
+	_multiview_restore()
+	multiview_windows = {}
+	multiview_follow = false
+	multiview_follow_mode = "off"
+	request_redraw()
+	return {"ok": true, "error": ""}
+
+
+# --- Composición offscreen del multiview (F4/§9 N1) --------------------------------
+# Directorio (tmpfs) de los archivos shm por slot. Bajo el runtime del usuario: los
+# frames nunca tocan disco.
+func _mv_shm_dir():
+	var rt = OS.get_environment("XDG_RUNTIME_DIR")
+	if rt == "":
+		rt = "/tmp"
+	return rt.plus_file("gdtk").plus_file("mv")
+
+
+# Tamaño del canvas de composición: EXACTAMENTE el del escritorio (OS.get_window_size),
+# para que coincida con la geometría del screencast. Puro.
+func _multiview_composite_size(vs):
+	var v = Vector2(vs)
+	if v.x < 2.0 or v.y < 2.0:
+		v = Vector2(1280, 720)
+	return Vector2(int(v.x), int(v.y))
+
+
+# Tamaño al que cada receptor escala su tile: el de la celda de la grilla, capado a
+# MULTIVIEW_TILE_CAP y con lados pares. Puro.
+func _multiview_tile_size(comp, n):
+	var rects = MULTIVIEW.tile_rects(max(1, int(n)), comp, MULTIVIEW_GUTTER)
+	var t = rects[0].size if not rects.empty() else comp
+	var k = min(1.0, min(MULTIVIEW_TILE_CAP.x / t.x, MULTIVIEW_TILE_CAP.y / t.y))
+	return Vector2(max(2, int(t.x * k / 2) * 2), max(2, int(t.y * k / 2) * 2))
+
+
+# Corta el canvas de composición (si hay) y descarta los planes offscreen vivos.
+func _mv_stop_canvas():
+	if _mv_canvas != null:
+		if is_instance_valid(_mv_canvas):
+			_mv_canvas.stop()
+			_mv_canvas.queue_free()
+		_mv_canvas = null
+	_mv_off_plans = {}
+
+
+# Handler del método peer `mv_slot` (§10/§11): el host multiview pide a ESTE equipo
+# que emita su pantalla hacia su `port`/`slot`. Sólo se acepta si este equipo puede
+# emitir un escritorio completo (honestidad: un gdtk sin emisor de escritorio NO
+# manda una ventana en su lugar); el rechazo deja el tile degradado del host.
+func _peer_mv_slot(hid, p):
+	if not share_enabled:
+		return false
+	if typeof(p) != TYPE_DICTIONARY or p.empty():
+		return false
+	# Emisión de PANTALLA COMPLETA, no de ventana: un host gdtk corre a pantalla
+	# completa sobre sway y el `gvd send` por defecto captura la SALIDA con
+	# wlr-screencopy, es decir todo el escritorio gdtk (que ya es full-screen). Por eso
+	# no se exige `local_can_emit` (que sólo reconoce el backend embedded, todavía no
+	# listo): alcanza con una sesión Wayland. Sigue rechazando sesiones no-Wayland o
+	# desconocidas y la falta de gvd; si el plan de envío no es válido, se rechaza y el
+	# tile del host queda vacío/degradado (fallback honesto).
+	var session = OS.get_environment("XDG_SESSION_TYPE").to_lower()
+	var can_emit = GVD_LAUNCH.local_can_emit(
+		OS.get_environment("XDG_CURRENT_DESKTOP"), session)
+	if not can_emit and session != "wayland":
+		return false
+	var path = _gvd_path_local()
+	if path == "":
+		return false
+	var id = String(hid)
+	var key = GVD_SESSION.multiview_send_key(id)
+	# Reintentar no apila emisores: se corta el anterior de ese hid antes de reabrir.
+	if _has_tracked(key):
+		_stop_tracked(key)
+	var plan = GVD_LAUNCH.local_send_argv(path, String(p.get("host", "")),
+		int(p.get("port", 0)), "")
+	if not bool(plan.get("ok", false)):
+		return false
+	_launch_tracked(key, String(plan.get("cmd", "")), plan.get("args", []))
+	return true
+
+
+# Handler del método peer `mv_stop`: corta el emisor rastreado hacia ese host.
+func _peer_mv_stop(hid):
+	_stop_tracked(GVD_SESSION.multiview_send_key(String(hid)))
+	return true
+
+
+# Despacho del control remoto (JSON-RPC "multiview"): {on, peers, follow}. Arranca/
+# para el multiview local y fija el modo de "seguir el puntero" (off|focus). La lógica
+# de arranque/negación vive en multiview_start/stop. `peers` o `follow` pueden llegar
+# también dentro de un dict (tolerancia: el dispatcher sólo reenvía lo que conoce).
+func multiview_rpc(on, peers = [], follow = false):
+	var hids = peers
+	if typeof(peers) == TYPE_DICTIONARY:
+		hids = peers.get("hids", peers.get("peers", []))
+		if peers.has("follow"):
+			follow = bool(peers.get("follow", false))
+	var res = multiview_start(hids) if bool(on) else multiview_stop()
+	multiview_set_follow(follow)
+	return res
+
+
+# Fija el modo de "seguir el puntero" (SPEC-multiview-portal §8): off = cuadrícula
+# estática; focus = resalta/eleva el tile del equipo dueño del puntero. Revocable y
+# sin efecto en el contenido emitido; nunca inyecta input.
+func multiview_set_follow(follow):
+	multiview_follow = bool(follow)
+	multiview_follow_mode = "focus" if bool(follow) else "off"
+	request_redraw()
+
+
+# --- Vista del grupo: composición en tiles y "seguir el puntero" (F4/§7/§8) -------
+# Mecanismo elegido: cada receptor se mantiene FLOTANTE (su modo natural) y la vista
+# FIJA su rect en `float_layout`/`float_memory` con las celdas de `MULTIVIEW.tile_rects`.
+# Así el camino de dibujo de siempre (`_compute_float_layout` -> `_update_tile`) pinta
+# el contenido en vivo en la grilla, y al cerrar se restauran los rects previos: nada
+# queda pinneado ni se altera el modo de otras ventanas. No hay procesos/red/disco.
+
+const MULTIVIEW_GUTTER = 8.0
+# Prefijo del título de las ventanas receptoras de la vista (mismo literal que
+# `MULTIVIEW.TITLE_PREFIX`; el modelo lo valida en su test).
+const MULTIVIEW_TITLE_PREFIX = "Vista del grupo — "
+
+
+# Registra una ventana receptora por su título -> hid (SPEC §7). Idempotente; sólo
+# si `multiview_on`. El título puede no estar listo en `toplevel_added`: el barrido
+# por frame de `_multiview_arrange` reintenta.
+func _multiview_register_window(id):
+	if not multiview_on or compositor == null:
+		return
+	var title = String(compositor.get_title(id))
+	if not title.begins_with(MULTIVIEW_TITLE_PREFIX):
+		return
+	var claimed = []
+	for hid in multiview_windows.keys():
+		var mid = int(multiview_windows[hid])
+		if mid != int(id) and _id_alive(mid):
+			claimed.append(String(hid))
+	var labels = {}
+	for hid in multiview_slots.keys():
+		labels[String(hid)] = _peer_name_for(String(hid))
+	var hid2 = MULTIVIEW.match_hid(title, multiview_slots, labels, claimed)
+	if hid2 != "" and int(multiview_windows.get(hid2, -1)) != int(id):
+		multiview_windows[hid2] = id
+		request_redraw()
+
+
+# Ids de los receptores mapeados y vivos, en orden de slot.
+func _multiview_ids_in_slot_order():
+	var pairs = []
+	for hid in multiview_windows.keys():
+		var id = int(multiview_windows[hid])
+		if not tiles.has(id) or not _id_alive(id):
+			continue
+		var slot = 1 << 30
+		var e = multiview_slots.get(String(hid), null)
+		if typeof(e) == TYPE_DICTIONARY:
+			slot = int(e.get("slot", 1 << 30))
+		pairs.append({"id": id, "slot": slot})
+	pairs.sort_custom(self, "_multiview_slot_less")
+	var out = []
+	for p in pairs:
+		out.append(int(p.id))
+	return out
+
+
+func _multiview_slot_less(a, b):
+	return int(a.slot) < int(b.slot)
+
+
+# hid dueño del puntero (§8) resuelto contra el mapeo de la vista. "" sin dueño.
+func _multiview_active_hid():
+	var own = pointer_owner()
+	var peer = String(own.get("peer", "")).strip_edges()
+	if peer == "":
+		return ""
+	if multiview_windows.has(peer):
+		return peer
+	# El peer puede ser un id de pantalla distinto del hid: se cruza por nombre visible.
+	var lbl = _peer_name_for(peer)
+	if lbl != "" and lbl != peer:
+		for hid in multiview_windows.keys():
+			if _peer_name_for(String(hid)) == lbl:
+				return String(hid)
+	return ""
+
+
+# Líder (id) de la pantalla actualmente visible en la fila: la unidad enfocada, o el
+# Escritorio (0) si no hay unidad tiled visible. Es el ancla a la que se llevan los
+# receptores para que su rect local caiga en la caja de contenido `cr` (off = 0).
+func _multiview_visible_anchor():
+	var units = _units()
+	var i = _focused_unit_index(units)
+	if i <= 0 or i >= units.size():
+		return WM_HYBRID.ESCRITORIO
+	var members = units[i]
+	return int(members[0]) if not members.empty() else WM_HYBRID.ESCRITORIO
+
+
+# Coloca (barato) los receptores en la grilla. Compone TODOS los mapeados y vivos:
+# los que ya son flotantes sólo se fijan; los que están en mosaico se convierten a
+# flotante anclado a la pantalla visible (se disuelve su unidad propia) y se fijan.
+# El estado previo (modo/ancla/rect flotante) se guarda en `multiview_saved` ANTES de
+# tocar nada, para restaurarlo exacto al cerrar. Sin procesos; sólo los ids mapeados.
+func _multiview_arrange():
+	if not multiview_on or compositor == null:
+		return
+	# Modo offscreen activo: la composición vive en el canvas, no hay ventanas de
+	# receptor que acomodar en el escritorio (nada que robar foco ni pinnear).
+	if _mv_canvas != null:
+		return
+	# Descarta mapeos de ventanas muertas (un receptor que se cae se puede reasociar).
+	for hid in multiview_windows.keys():
+		if not _id_alive(int(multiview_windows[hid])):
+			multiview_windows.erase(hid)
+	# Barrido de títulos por si llegaron después de `toplevel_added`.
+	for tid in compositor.get_ids():
+		if not multiview_windows.values().has(int(tid)):
+			_multiview_register_window(int(tid))
+	var ids = _multiview_ids_in_slot_order()
+	var count = ids.size()
+	if count == 0:
+		return
+	var cr = _tile_rect(_screen_size())
+	var rects = MULTIVIEW.tile_rects(count, cr.size, MULTIVIEW_GUTTER)
+	# Ancla única para todos, decidida ANTES de convertir. Si el líder visible es un
+	# receptor que va a dejar de estar en mosaico, se usa el Escritorio: su unidad se
+	# disuelve y el foco flotante lleva la fila a 0 de todos modos (off = 0).
+	var vis_anchor = _multiview_visible_anchor()
+	if multiview_windows.values().has(vis_anchor):
+		vis_anchor = WM_HYBRID.ESCRITORIO
+	for i in range(min(ids.size(), rects.size())):
+		var id = ids[i]
+		if not tiles.has(id):
+			continue
+		var local = Rect2(cr.position + rects[i].position, rects[i].size)
+		if not multiview_saved.has(id):
+			# Snapshot ANTES de cualquier cambio (modo, ancla, rect flotante).
+			multiview_saved[id] = {
+				"floating": hybrid.is_floating(id),
+				"anchor": int(hybrid.anchor(id, WM_HYBRID.ESCRITORIO)),
+				"memory": float_memory.get(id, null),
+				"rect": float_layout.rect(id),
+				"in_layout": float_layout.has(id)}
+			# Transición de modo por el camino de siempre (set_window_mode hace el
+			# WM_UNITS.remove, limpia maximizado y recuerda la geometría flotante).
+			if not hybrid.is_floating(id):
+				set_window_mode(id, WM_HYBRID.FLOATING, vis_anchor)
+			elif int(hybrid.anchor(id, WM_HYBRID.ESCRITORIO)) != vis_anchor:
+				hybrid.reanchor(id, vis_anchor)
+		# Pin del rect local por el camino flotante normal: `_compute_float_layout`
+		# (que corre después) lo respeta y `_update_tile` dibuja el contenido en vivo.
+		float_layout.set_rect(id, local)
+		float_memory[id] = local
+	# Seguir el puntero: eleva el tile activo (z-order flotante), sin cambiar el modo.
+	if multiview_follow:
+		var active = _multiview_active_hid()
+		if active != "" and multiview_windows.has(active):
+			var aid = int(multiview_windows[active])
+			if float_layout.has(aid):
+				float_layout.raise(aid)
+
+
+# Devuelve las ventanas de la vista a su estado previo exacto: modo (flotante/mosaico),
+# ancla y rect flotante, según el snapshot tomado al abrir. Idempotente; vacía el
+# snapshot para que nada quede pinneado ni convertido.
+func _multiview_restore():
+	var saved = multiview_saved
+	multiview_saved = {}
+	if saved.empty():
+		return
+	# 1) Primero los que estaban en mosaico: se vuelven a tiled por el camino de
+	#    siempre. `set_window_mode` llama `_remember_float_geometry`, que pisa
+	#    `float_memory` de los flotantes; por eso van primero y los flotantes se
+	#    reescriben después con el snapshot (autoritativo).
+	for id in saved.keys():
+		var wt = int(id)
+		if bool(saved[id].get("floating", true)) or not tiles.has(wt):
+			continue
+		float_layout.remove(wt)
+		float_memory.erase(wt)
+		set_window_mode(wt, WM_HYBRID.TILED)
+		hybrid.reanchor(wt, int(saved[id].get("anchor", WM_HYBRID.ESCRITORIO)))
+	# 2) Luego los que ya eran flotantes: rect, memoria y ancla originales del snapshot.
+	for id in saved.keys():
+		var w = int(id)
+		var s = saved[id]
+		if not bool(s.get("floating", true)) or not tiles.has(w):
+			continue
+		var mem = s.get("memory", null)
+		if mem != null:
+			float_memory[w] = mem
+		else:
+			float_memory.erase(w)
+		var r = s.get("rect", null)
+		if bool(s.get("in_layout", false)) and r != null:
+			float_layout.set_rect(w, r)
+		else:
+			float_layout.remove(w)
+		hybrid.reanchor(w, int(s.get("anchor", WM_HYBRID.ESCRITORIO)))
+	request_redraw()
+
+
+# Resalta el tile del equipo dueño del puntero (modo focus). Capa ImGui transparente
+# que ignora el mouse, sobre los tiles y debajo del Frame. Sin follow no dibuja.
+func _multiview_draw():
+	if not multiview_on or not multiview_follow:
+		return
+	var active = _multiview_active_hid()
+	if active == "" or not multiview_windows.has(active):
+		return
+	var id = int(multiview_windows[active])
+	var r = window_rects.get(id, null)
+	if r == null:
+		r = tile_rects.get(id, null)
+	if r == null or r.size.x < 4.0 or r.size.y < 4.0:
+		return
+	var vp = _screen_size()
+	set_next_window_pos(Vector2.ZERO, true)
+	set_next_window_size(vp, true)
+	var flags = WINDOW_NO_DECORATION | WINDOW_NO_BACKGROUND | WINDOW_NO_MOVE \
+		| WINDOW_NO_SAVED_SETTINGS | WINDOW_NO_BRING_TO_FRONT_ON_FOCUS \
+		| IMGUI_WINDOW_NO_MOUSE_INPUTS
+	push_style_var_vec2(STYLE_VAR_WINDOW_PADDING, Vector2.ZERO)
+	if begin("##multiview_follow", flags):
+		var acc = accent if accent != null else Color(0.55, 0.80, 1.0)
+		var c = Color(acc.r, acc.g, acc.b, 0.95)
+		var b = 3.0
+		var rr = Rect2(r)
+		imgui_draw_rect_filled(Rect2(rr.position, Vector2(rr.size.x, b)), c, 0.0)
+		imgui_draw_rect_filled(Rect2(Vector2(rr.position.x, rr.end.y - b),
+			Vector2(rr.size.x, b)), c, 0.0)
+		imgui_draw_rect_filled(Rect2(rr.position, Vector2(b, rr.size.y)), c, 0.0)
+		imgui_draw_rect_filled(Rect2(Vector2(rr.end.x - b, rr.position.y),
+			Vector2(b, rr.size.y)), c, 0.0)
+	end()
+	pop_style_var()
+
+
 # Ventanas de pantalla extendida para el diagrama: [{id, title, peer_name, maximized}].
 # Sólo lee caches/consultas baratas del compositor, sin procesos.
 func _share_windows():
@@ -10160,16 +11244,22 @@ func _share_windows():
 	return out
 
 
-# hids con token peer (cli: o srv:) en peer-tokens.json, sin copiar los valores.
+# hids con token peer (cli: o srv:), sin copiar los valores. Delegado a peer_control
+# (único dueño del archivo); fallback a disco si el canal no está.
 func _peer_token_hids():
+	var pc = Host.peer_control
+	if pc != null and pc is Object and pc.has_method("token_hids"):
+		return pc.token_hids()
 	var out = []
+	var seen = {}
 	var d = _peer_tokens_load()
 	for k in d.keys():
 		var key = String(k)
 		if not (key.begins_with("cli:") or key.begins_with("srv:")):
 			continue
 		var hid = key.substr(4).strip_edges()
-		if hid != "" and not out.has(hid):
+		if hid != "" and not seen.has(hid):
+			seen[hid] = true
 			out.append(hid)
 	out.sort()
 	return out
@@ -10212,21 +11302,14 @@ func _group_remove(host_id):
 # Olvida los tokens peer del hid en memoria (peer_control) y en disco. Si el canal
 # peer no está vivo, escribe el archivo directamente con lo que ya había.
 func _peer_token_forget(hid):
-	var id = String(hid)
 	var pc = Host.peer_control
-	if pc != null and pc is Object:
-		pc.tokens.erase("cli:" + id)
-		pc.tokens.erase("srv:" + id)
-		if pc.has_method("_save_tokens"):
-			pc._save_tokens()
+	if pc != null and pc is Object and pc.has_method("token_forget"):
+		pc.token_forget(hid)
 		return
 	var d = _peer_tokens_load()
-	d.erase("cli:" + id)
-	d.erase("srv:" + id)
-	var f = File.new()
-	if f.open(_peer_tokens_path(), File.WRITE) == OK:
-		f.store_string(JSON.print(d))
-		f.close()
+	d.erase("cli:" + String(hid))
+	d.erase("srv:" + String(hid))
+	_peer_tokens_store(d)
 
 
 # Quita la pantalla configurada del equipo (por id o nombre) de settings["screens"],
@@ -10380,10 +11463,17 @@ func _restore_deskflow_link(host_id):
 
 
 # Publica los rangos del portal InputCapture al RemoteInput del compositor (barato,
-# sin I/O): refleja altas/bajas de la suspensión por extensión de pantalla.
+# sin I/O): refleja altas/bajas de la suspensión por extensión de pantalla y de los
+# vecinos Deskflow apagados. Sólo publica si el rango cambió: hacerlo en cada
+# escaneo del Vecindario flapeaba la captura.
 func _apply_capture_ranges():
-	if Host.remote_input != null and Host.remote_input.has_method("set_capture_ranges"):
-		Host.remote_input.set_capture_ranges(_deskflow_capture_ranges())
+	if Host.remote_input == null or not Host.remote_input.has_method("set_capture_ranges"):
+		return
+	var ranges = _deskflow_capture_ranges()
+	if _df_cap_ranges != null and str(_df_cap_ranges) == str(ranges):
+		return
+	_df_cap_ranges = ranges
+	Host.remote_input.set_capture_ranges(ranges)
 
 
 func _queue_gvd_peer_launch(host_id, peer_host, ctl_port, method, params, cmd, args, direction,
@@ -11100,11 +12190,16 @@ func _current_wayland_id():
 
 
 func _id_alive(id):
-	return compositor.get_ids().has(id)
+	return compositor != null and compositor.get_ids().has(id)
 
 
 func _on_toplevel_added(id):
 	print("toplevel_added ", id)
+	# Vista del grupo (F4/§7): una ventana con el título del multiview se asocia a su
+	# hid por etiqueta/slot (el título puede llegar vacío acá; _multiview_arrange lo
+	# reintenta por frame). Sólo cuando `multiview_on`.
+	if multiview_on:
+		_multiview_register_window(id)
 	# Un toplevel con padre es un dialogo: no se asigna a ninguna actividad.
 	if compositor.get_parent_id(id) > 0:
 		_add_dialog(id)
@@ -11422,6 +12517,9 @@ var _wmem_next = 0
 
 
 func _wmem_path():
+	# En Android no hay XDG_CONFIG_HOME ni HOME: user:// persiste.
+	if OS.get_name() == "Android":
+		return "user://windows.json"
 	var base = OS.get_environment("XDG_CONFIG_HOME")
 	if base == "":
 		var home = OS.get_environment("HOME")
@@ -11864,7 +12962,12 @@ func _on_view_input(event):
 			pointer_grab_id = hit.id
 			pointer_grab_buttons[event.button_index] = true
 		if event.pressed:
-			if hit.dialog > 0:
+			if _over_frame_bar(event.position):
+				# Clic sobre la barra del Frame: manda la barra (app-icon/applet). La
+				# ventana que hay DEBAJO no toma el foco por el clic, o le robaría el
+				# foco de teclado a la ventana que el app-icon acaba de elegir/restaurar.
+				pass
+			elif hit.dialog > 0:
 				compositor.focus(hit.id)
 				focused_dialog = hit.dialog
 			else:
@@ -12715,6 +13818,34 @@ func _ptr_log_motion(rel):
 
 
 var _capture_drag_held = false   # sólo para loguear una vez por arrastre
+# SPEC-multiview-portal §8 ("seguir el puntero"): última posición LOCAL del puntero
+# antes de que Deskflow capture (queda pegada al borde por el que cruzó), y el
+# dueño resuelto al activarse la captura ({peer, direction} o {}). Sólo se leen
+# valores cacheados en el frame; no hay procesos/red/disco acá.
+var _last_local_pointer = Vector2.ZERO
+var _pointer_owner = {}
+var _was_capturing = false
+
+
+# Dueño del puntero según el borde de captura y el layout de Pantallas. Puro
+# (POINTER_OWNER): sólo usa la última posición local cacheada y los links/disabled
+# derivados de settings y del estado de gvd/Vecindario. No bloquea el render.
+func _resolve_pointer_owner():
+	var disabled = _deskflow_disabled_directions()
+	return POINTER_OWNER.owner_at(_last_local_pointer,
+		get_viewport().get_visible_rect().size, _settings_deskflow_links(), disabled)
+
+
+# Fuente de verdad del dueño del puntero para el Frame y el multiview: captura
+# viva (leída del RemoteInput) + peer/dirección resueltos. `peer` vacío sin captura
+# o sin link reconocible.
+func pointer_owner():
+	return {
+		"capturing": bool(remote_input != null and remote_input.has_method("is_capturing")
+			and remote_input.is_capturing()),
+		"peer": String(_pointer_owner.get("peer", "")),
+		"direction": String(_pointer_owner.get("direction", "")),
+	}
 
 
 func _capture_remote_input_event(event):
@@ -12726,7 +13857,7 @@ func _capture_remote_input_event(event):
 		return false
 	# InputCapture toma exclusivamente el hardware local. Los eventos EIS que entran
 	# desde otro equipo tienen DEVICE_ID y nunca deben volver a Deskflow.
-	if remote_input == null or event.device == RemoteInput.DEVICE_ID:
+	if remote_input == null or event.device == REMOTE_INPUT_DEVICE_ID:
 		return false
 	var captured = false
 	var now = OS.get_ticks_msec()
@@ -12742,15 +13873,26 @@ func _capture_remote_input_event(event):
 					print("deskflow: arrastre en curso, el puntero no cruza")
 			return false
 		_capture_drag_held = false
+		# Posición LOCAL del motion que dispara la captura = posición precisa en el
+		# borde (el lock de SDL la vuelve relativa después). Ver _resolve_pointer_owner.
+		if not remote_input.is_capturing():
+			_last_local_pointer = event.position
 		captured = remote_input.capture_motion(event.position, event.relative, now)
 	elif event is InputEventMouseButton:
-		if event.button_index == BUTTON_WHEEL_UP and event.pressed:
+		var bi = int(event.button_index)
+		var wheel = bi == BUTTON_WHEEL_UP or bi == BUTTON_WHEEL_DOWN \
+			or bi == BUTTON_WHEEL_LEFT or bi == BUTTON_WHEEL_RIGHT
+		if wheel and not event.pressed:
+			# Godot emite press Y release de la rueda: el release no es un botón. Antes
+			# caía en capture_button y mandaba un release espurio de "botón" 4/5/6/7.
+			captured = false
+		elif bi == BUTTON_WHEEL_UP:
 			captured = remote_input.capture_scroll(0.0, -1.0, now)
-		elif event.button_index == BUTTON_WHEEL_DOWN and event.pressed:
+		elif bi == BUTTON_WHEEL_DOWN:
 			captured = remote_input.capture_scroll(0.0, 1.0, now)
-		elif event.button_index == BUTTON_WHEEL_LEFT and event.pressed:
+		elif bi == BUTTON_WHEEL_LEFT:
 			captured = remote_input.capture_scroll(-1.0, 0.0, now)
-		elif event.button_index == BUTTON_WHEEL_RIGHT and event.pressed:
+		elif bi == BUTTON_WHEEL_RIGHT:
 			captured = remote_input.capture_scroll(1.0, 0.0, now)
 		else:
 			captured = remote_input.capture_button(event.button_index, event.pressed, now)
@@ -12769,6 +13911,14 @@ func _capture_remote_input_event(event):
 	if remote_input.has_method("is_capturing"):
 		active = remote_input.is_capturing()
 	_set_capture_cursor(active)
+	# Transición de captura (SPEC-multiview-portal §8): al ENTRAR se resuelve el dueño
+	# desde la última posición local; al SALIR se limpia. Sólo en el flanco, sin
+	# procesos ni polling.
+	if active and not _was_capturing:
+		_pointer_owner = _resolve_pointer_owner()
+	elif not active:
+		_pointer_owner = {}
+	_was_capturing = active
 	if active:
 		captured = true
 	if captured:
@@ -12779,6 +13929,11 @@ func _capture_remote_input_event(event):
 
 func _input(event):
 	last_activity = OS.get_ticks_msec()
+	# Rastrea la posición LOCAL del puntero mientras no hay captura: si Deskflow
+	# captura más adelante, la última posición local es la del borde de cruce.
+	if event is InputEventMouseMotion and not (remote_input != null
+			and remote_input.has_method("is_capturing") and remote_input.is_capturing()):
+		_last_local_pointer = event.position
 	# Selector de pantallazo: mientras está abierto se queda con TODO el input (mouse y
 	# teclas), antes de cualquier reenvío a la app o al control remoto.
 	if screenshot_ui != null and screenshot_ui.is_active():
@@ -12888,10 +14043,12 @@ func _input(event):
 			# fuera del Hogar ese flag puede quedar pegado en true.
 			_go_home()
 			apps_view = true
+			apps_from_expose = true
 			apps.type(char(event.unicode))
 			get_tree().set_input_as_handled()
 		elif current_activity == null and not apps.search_active and event.unicode >= 32:
 			apps_view = true
+			apps_from_expose = false
 			apps.type(char(event.unicode))
 
 
@@ -13357,7 +14514,7 @@ func _move_eis_cursor(event):
 	if mouse_locked:
 		eis_cursor.visible = false
 		return
-	if event.device != RemoteInput.DEVICE_ID:
+	if event.device != REMOTE_INPUT_DEVICE_ID:
 		if event is InputEventMouseMotion:
 			eis_cursor.visible = false
 		return

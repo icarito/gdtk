@@ -40,6 +40,11 @@ const MIN_CELLS = 9
 const TILE_PAD = 4.0     # aire entre texto/ícono y el borde del bloque (escala con la UI)
 const HOT_EDGE = 4.0     # con autohide sólo revela si el puntero empuja contra este canto
 const DRAG_PX = 8.0
+# Durante un arrastre (bloque interno o DnD nativo de una app), posarse sobre el
+# ícono de OTRA ventana la eleva/enfoca tras esta pausa: trae su escritorio a la
+# vista para poder soltar ahí. Un blanco nuevo reinicia la cuenta (una vez por
+# blanco).
+const DRAG_RAISE_MS = 450
 # ImGuiWindowFlags_NoScrollWithMouse (1 << 4): sin esto, un dockapp que desborda la
 # franja hace que la rueda scrollee la ventana ImGui completa. El motor no expone esta
 # constante (sólo WINDOW_NO_SCROLLBAR), así que se fija su valor como WINDOW_NO_MOUSE_INPUTS.
@@ -169,6 +174,10 @@ var drag_from = Vector2.ZERO
 var drag_grab = Vector2.ZERO
 var mouse_down = false
 var mouse_pos = Vector2.ZERO
+# DnD sobre el ícono de una ventana: blanco bajo el puntero y cuándo empezó a
+# posarse, para elevar/enfocar esa ventana tras DRAG_RAISE_MS (ver _drag_raise_step).
+var drag_raise_id = -1
+var drag_raise_since = 0
 var slide_instant = false  # aparecer sin animación (Alt+Tab)
 var show_until = 0         # ms hasta el que el Frame no se auto-oculta (Alt+Tab)
 var vol_pan = 0.0          # pan de touchpad acumulado sobre la dockapp de Volumen
@@ -189,6 +198,13 @@ var applet_mods = {"teclado": keyboard, "portapapeles": clipboard, "volumen": vo
 	"notificaciones": notif_applet}
 var items_layout = []
 var drawn = false
+# Orden estable de las teselas de ventana en la franja (por `key`). Conserva el lugar
+# de las minimizadas y restauradas: al minimizar/restaurar con el app-icon la tesela no
+# salta (restaurarla queda bajo el mouse). `_strip_vis` es el subconjunto visible del
+# orden anterior, para distinguir un reordenamiento real (drag/otro escritorio) de un
+# alta/minimizar/restaurar. Ver running/reconcile_strip_order.
+var _strip_keys = []
+var _strip_vis = []
 # Estado de dibujo por barra del frame anterior: al dejar de submitir una barra, ImGui
 # todavía calcula WantCaptureMouse con ella viva (un frame de atraso) y se come el
 # primer clic; se fuerza un frame extra al ocultarse para que lo recalcule.
@@ -309,7 +325,11 @@ func _exit_tree():
 
 # Ruta del archivo de applets: $XDG_CONFIG_HOME/gdtk/frame-applets.json
 # (~/.config/gdtk/frame-applets.json por defecto), junto a keyboard.
+# En Android no hay XDG_CONFIG_HOME ni HOME: se usa user:// (dir privado de la app),
+# que sí persiste entre arranques.
 func _applets_path():
+	if OS.get_name() == "Android":
+		return "user://frame-applets.json"
 	var base = OS.get_environment("XDG_CONFIG_HOME")
 	if base == "":
 		base = OS.get_environment("HOME") + "/.config"
@@ -1884,6 +1904,10 @@ func _shared_snapshot():
 	var focus = {"capturing": false}
 	if shell.get("remote_input") != null and shell.remote_input.has_method("is_capturing"):
 		focus.capturing = bool(shell.remote_input.is_capturing())
+	# SPEC-multiview-portal §8: el dueño del puntero (a qué vecino se controla) lo
+	# resuelve el shell; el radar resalta ese par. Aditivo y con guarda.
+	if shell.has_method("pointer_owner"):
+		focus.peer = String(shell.pointer_owner().get("peer", ""))
 	# Interruptor general del intercambio: cortado aunque no haya sesiones deja el
 	# bloque a la vista (stub apagado) para que se pueda volver a encender.
 	var master_on = true
@@ -2549,24 +2573,103 @@ func set_visible(v):
 # pantalla partida quedan juntas y comparten `screen`); al final las minimizadas y
 # las que aún no entraron a la franja, atenuadas y sin número de pantalla. `title`
 # y `key` no cambian: el número de pantalla es un campo aparte.
-func running():
+# Orden estable de la franja. `prev` es el último orden mostrado (incluye minimizadas);
+# `fresh` es el orden recién calculado de lo visible (scripts y ventanas tiled por
+# escritorio). Las claves de `fresh` mandan; cada minimizada de `prev` ausente de `fresh`
+# se reinserta tras su vecino previo que siga vivo (su app-icon conserva el lugar), y si
+# no queda ninguno va al frente. Función pura: se testea sin shell.
+static func merge_minimized_order(prev, fresh):
 	var out = []
-	for name in shell.script_instances.keys():
-		out.append({"key": "s:" + name, "name": name, "title": name, "id": -1,
-			"minimized": false, "screen": 0})
-	var order = []
-	var by_id = {}
-	for id in shell.compositor.get_ids():
-		if shell.compositor.get_parent_id(id) > 0:
+	for k in fresh:
+		if not out.has(k):
+			out.append(k)
+	for i in range(prev.size()):
+		var k = prev[i]
+		if out.has(k):
 			continue
-		var name = shell._activity_for_window(id)
-		var title = shell.window_title(id) if shell.has_method("window_title") \
-			else shell.compositor.get_title(id)
-		if title == "":
-			title = name if name != "" else "Ventana " + str(id)
-		by_id[id] = {"key": "w:" + str(id), "name": name, "title": title, "id": id,
-			"minimized": shell.minimized.has(id), "screen": 0}
-		order.append(id)
+		var at = -1
+		for j in range(i - 1, -1, -1):
+			var a = out.find(prev[j])
+			if a >= 0:
+				at = a + 1
+				break
+		if at < 0:
+			out.push_front(k)
+		else:
+			out.insert(at, k)
+	return out
+
+
+# Orden final de la franja. `prev_full` es el orden mostrado (incluye minimizadas),
+# `prev_vis` su subsecuencia visible, y `fresh` el orden por escritorio de las ventanas
+# visibles ahora. Si el orden relativo de las visibles que siguen visibles cambió, hubo
+# un reordenamiento real (drag, otro escritorio) y se adopta `fresh`; si no (sólo se
+# minimizó/restauró alguna o entró una nueva), se conserva el lugar previo —así
+# minimizar y restaurar no mueven la tesela. Las minimizadas se reinsertan tras su
+# vecino previo vivo (merge_minimized_order). Función pura: se testea sin shell.
+static func reconcile_strip_order(prev_full, prev_vis, fresh):
+	var fresh_set = {}
+	for k in fresh:
+		fresh_set[k] = true
+	var prev_vis_live = []
+	for k in prev_vis:
+		if fresh_set.has(k):
+			prev_vis_live.append(k)
+	var fresh_vis_prev = []
+	for k in fresh:
+		if prev_vis_live.has(k):
+			fresh_vis_prev.append(k)
+	var reorder = prev_vis_live != fresh_vis_prev
+	var base = []
+	if reorder:
+		base = fresh.duplicate()
+	else:
+		# Conservar el orden previo de las que siguen visibles.
+		for k in prev_full:
+			if fresh_set.has(k) and not base.has(k):
+				base.append(k)
+		# Altas (visibles nuevas): insertar por ancla en `fresh`.
+		for i in range(fresh.size()):
+			var k = fresh[i]
+			if base.has(k):
+				continue
+			var at = -1
+			for j in range(i - 1, -1, -1):
+				var a = base.find(fresh[j])
+				if a >= 0:
+					at = a + 1
+					break
+			if at < 0:
+				at = 0
+			base.insert(at, k)
+	return merge_minimized_order(prev_full, base)
+
+
+func running():
+	# Ítems vivos indexados por `key`: scripts primero, ventanas después.
+	var by_key = {}
+	var fresh = []
+	for name in shell.script_instances.keys():
+		var sk = "s:" + name
+		by_key[sk] = {"key": sk, "name": name, "title": name, "id": -1,
+			"minimized": false, "screen": 0}
+		fresh.append(sk)
+	var by_id = {}
+	var order = []
+	if shell.compositor != null:
+		for id in shell.compositor.get_ids():
+			if shell.compositor.get_parent_id(id) > 0:
+				continue
+			var name = shell._activity_for_window(id)
+			var title = shell.window_title(id) if shell.has_method("window_title") \
+				else shell.compositor.get_title(id)
+			if title == "":
+				title = name if name != "" else "Ventana " + str(id)
+			var k = "w:" + str(id)
+			by_key[k] = {"key": k, "name": name, "title": title, "id": id,
+				"minimized": shell.minimized.has(id), "screen": 0}
+			by_id[id] = k
+			order.append(id)
 	var screen = 0
 	for unit in shell._units():
 		# La ranura Escritorio (sin miembros tiled) no cuenta como pantalla numerada.
@@ -2575,12 +2678,49 @@ func running():
 		screen += 1
 		for id in unit:
 			if by_id.has(id):
-				by_id[id]["screen"] = screen
-				out.append(by_id[id])
+				var k = by_id[id]
+				by_key[k]["screen"] = screen
+				if not by_key[k]["minimized"]:
+					fresh.append(k)
 				by_id.erase(id)
+	# Las que aún no entraron a la franja (recién mapeadas), no minimizadas.
 	for id in order:
 		if by_id.has(id):
-			out.append(by_id[id])
+			var k = by_id[id]
+			if not by_key[k]["minimized"]:
+				fresh.append(k)
+			by_id.erase(id)
+	# Orden estable: minimizar/restaurar no mueven la tesela; un reordenamiento real
+	# (drag/otro escritorio) sí. `prev` sólo lleva claves vivas (las cerradas no sirven
+	# de ancla). Ver reconcile_strip_order.
+	var fresh_set = {}
+	for k in fresh:
+		fresh_set[k] = true
+	var prev = []
+	for k in _strip_keys:
+		if by_key.has(k):
+			prev.append(k)
+	var prev_vis = []
+	for k in _strip_vis:
+		if by_key.has(k):
+			prev_vis.append(k)
+	var final = reconcile_strip_order(prev, prev_vis, fresh)
+	var out = []
+	var kept = []
+	for k in final:
+		if by_key.has(k) and not kept.has(k):
+			out.append(by_key[k])
+			kept.append(k)
+	# Salvavidas: ninguna ventana viva debe desaparecer de la franja.
+	for k in by_key.keys():
+		if not kept.has(k):
+			out.append(by_key[k])
+			kept.append(k)
+	_strip_keys = kept
+	# `_strip_vis` refleja el orden de UNIDAD de las visibles (fresh), no el orden ya
+	# sostenido: así, al comparar con el frame siguiente, sólo se detecta un cambio de
+	# unidad real (drag/otro escritorio), no el hecho de haber sostenido una restaurada.
+	_strip_vis = fresh.duplicate()
 	return out
 
 
@@ -2735,6 +2875,8 @@ func drop_mouse_interaction():
 	mouse_down = false
 	dragging = null
 	drag_candidate = null
+	drag_raise_id = -1
+	drag_raise_since = 0
 	app_press = null
 	app_drag = null
 	applet_press = null
@@ -2772,7 +2914,155 @@ func _notification(what):
 		alt_press = null
 
 
+# --- Entrada táctil (Android): el Frame sólo entiende mouse; se traduce el toque ---
+# Un dedo: toque corto = clic; desliz rápido = scroll; MANTENER y arrastrar = mover
+# bloques (drag&drop). Dos dedos = scroll directo. No reemplaza a ImGui: el canvas ya
+# maneja el touch de los widgets; acá se traduce sólo lo que el Frame interpreta.
+const TOUCH_LONG_MS = 350
+const TOUCH_MOVE_PX = 12.0
+const TOUCH_SCROLL_PX = 14.0
+
+var _touches = {}
+var _scroll_y = 0.0
+var _touch_start_ms = 0
+var _touch_start_pos = Vector2.ZERO
+var _touch_mode = 0  # 0 sin decidir, 1 scroll, 2 arrastre (mouse)
+var _touch_mouse_down = false
+var _touch_moved = false
+
+
+func _touch_avg_y():
+	var s = 0.0
+	for k in _touches:
+		s += _touches[k].y
+	return s / max(1, _touches.size())
+
+
+# Pulso háptico (Android). Distingue "mover un bloque" (mantener + arrastrar) del
+# scroll: sin esto el gesto largo y el desliz rápido se sienten iguales. En
+# escritorio no hay vibrador: no-op.
+func _haptic(ms):
+	if OS.get_name() == "Android":
+		Input.vibrate_handheld(int(ms))
+
+
+func _touch_mouse_button(pos, pressed):
+	var mb = InputEventMouseButton.new()
+	mb.position = pos
+	mb.global_position = pos
+	mb.button_index = BUTTON_LEFT
+	mb.pressed = pressed
+	mb.button_mask = BUTTON_MASK_LEFT if pressed else 0
+	_input(mb)
+
+
+func _touch_right_click(pos):
+	# Click derecho sintético (menú contextual de las dockapps).
+	for pressed in [true, false]:
+		var rb = InputEventMouseButton.new()
+		rb.position = pos
+		rb.global_position = pos
+		rb.button_index = BUTTON_RIGHT
+		rb.pressed = pressed
+		_input(rb)
+
+
+func _touch_scroll_by(dy, pos):
+	if abs(dy) < 1.0:
+		return
+	# Dedo hacia arriba (dy>0 por _scroll_y-y) => avanzar (rueda abajo). `factor`
+	# fraccional: ImGui lo acumula y el scroll sale continuo, no a saltos.
+	_emit_wheel(BUTTON_WHEEL_DOWN if dy > 0.0 else BUTTON_WHEEL_UP, abs(dy), pos)
+
+
+# El canvas ImGui del motor sólo scrollea con rueda (BUTTON_WHEEL_*); NO entiende
+# InputEventPanGesture. Traduce el pan del touchpad a rueda para que la grilla de
+# apps (un child ImGui) scrollee en desktop; el toque ya sintetiza rueda en Android.
+func _pan_to_wheel(event):
+	var d = event.delta
+	if abs(d.y) >= 1.0:
+		_emit_wheel(BUTTON_WHEEL_DOWN if d.y > 0.0 else BUTTON_WHEEL_UP, abs(d.y), event.position)
+	if abs(d.x) >= 1.0:
+		_emit_wheel(BUTTON_WHEEL_RIGHT if d.x > 0.0 else BUTTON_WHEEL_LEFT, abs(d.x), event.position)
+
+
+func _emit_wheel(button, amount, pos):
+	var wb = InputEventMouseButton.new()
+	wb.position = pos
+	wb.global_position = pos
+	wb.button_index = button
+	wb.factor = max(0.05, float(amount) / 40.0)
+	wb.pressed = true
+	Input.parse_input_event(wb)
+	var wr = InputEventMouseButton.new()
+	wr.position = pos
+	wr.global_position = pos
+	wr.button_index = button
+	wr.factor = wb.factor
+	wr.pressed = false
+	Input.parse_input_event(wr)
+
+
+func _touch_to_mouse(event):
+	if event is InputEventScreenTouch:
+		if event.pressed:
+			_touches[event.index] = event.position
+			if _touches.size() == 1:
+				_touch_start_ms = OS.get_ticks_msec()
+				_touch_start_pos = event.position
+				_touch_mode = 0
+				_touch_moved = false
+			elif _touches.size() >= 2:
+				_touch_mode = 1
+		else:
+			_touches.erase(event.index)
+			if _touch_mode == 0 and _touches.size() == 0:
+				# Toque corto: clic (press+release en el mismo punto).
+				_touch_mouse_button(event.position, true)
+				_touch_mouse_button(event.position, false)
+			elif _touch_mode == 2 and _touch_mouse_down:
+				_touch_mouse_button(event.position, false)
+				_touch_mouse_down = false
+				# Long-press sin moverse => menú contextual (click derecho).
+				if not _touch_moved:
+					_touch_right_click(event.position)
+			if _touches.size() == 0:
+				_touch_mode = 0
+		_scroll_y = _touch_avg_y()
+		return
+	# InputEventScreenDrag
+	_touches[event.index] = event.position
+	if _touches.size() >= 2:
+		_touch_mode = 1
+	if _touch_mode == 0:
+		var moved = event.position.distance_to(_touch_start_pos)
+		if moved >= TOUCH_MOVE_PX:
+			if _touches.size() == 1 and OS.get_ticks_msec() - _touch_start_ms >= TOUCH_LONG_MS:
+				_touch_mode = 2
+				_haptic(40)   # ya es "mover bloque", no scroll
+				_touch_mouse_button(_touch_start_pos, true)
+				_touch_mouse_down = true
+			else:
+				_touch_mode = 1
+	if _touch_mode == 1:
+		var y = _touch_avg_y()
+		_touch_scroll_by(_scroll_y - y, event.position)
+		_scroll_y = y
+		return
+	if _touch_mode == 2:
+		_touch_moved = true
+		var mm = InputEventMouseMotion.new()
+		mm.position = event.position
+		mm.global_position = event.position
+		mm.relative = event.relative
+		mm.button_mask = BUTTON_MASK_LEFT
+		_input(mm)
+
+
 func _input(event):
+	if event is InputEventScreenTouch or event is InputEventScreenDrag:
+		_touch_to_mouse(event)
+		return
 	# Con el Frame oculto no hay widgets que atiendan mouse: descartar el estado del
 	# último dibujo (si no, el interruptor del radar se come clics y dispara el corte
 	# del intercambio). Los gestos globales (Super+rueda, pinch, vchain, Super+arrastrar)
@@ -2822,6 +3112,9 @@ func _input(event):
 			shell.request_redraw()
 		if win_drag != null:
 			shell.request_redraw()
+		# DnD: posarse sobre el ícono de otra ventana la eleva/cambia a su workspace.
+		if _drag_active():
+			_drag_raise_step(mouse_pos)
 		return
 	if event is InputEventMouseButton:
 		mouse_pos = event.position
@@ -2835,6 +3128,12 @@ func _input(event):
 		# llamaría a _super_used y limpiaría super_press, cortando el paneo).
 		if event.button_index == BUTTON_WHEEL_UP or event.button_index == BUTTON_WHEEL_DOWN:
 			if not event.pressed:
+				return
+			# Grilla de apps (Hogar) abierta: la rueda es del child ImGui ##grilla.
+			# El _input del Frame corre ANTES que el de ImGuiCanvas, así que si la
+			# consumiéramos acá la grilla nunca scrollea. La dejamos pasar SIN marcar
+			# el evento como manejado (con Super sigue mandando el zoom/alejar).
+			if shell.apps_view and super_press == null:
 				return
 			# Sobre Vecindario/Grupo/Hogar o el ícono central: un paso de la misma cadena
 			# vertical que el gesto de 3 dedos (rueda arriba = acercar / dedos abajo).
@@ -2914,6 +3213,8 @@ func _input(event):
 					return
 		if event.button_index == BUTTON_LEFT:
 			mouse_down = event.pressed
+			drag_raise_id = -1
+			drag_raise_since = 0
 			if event.pressed:
 				var hit_tile = _pinned_hit(mouse_pos)
 				if hit_tile == null and shell.apps_view:
@@ -3072,6 +3373,12 @@ func _input(event):
 	# 5%). Se acumula el delta y se aplica un paso por umbral. La rueda de mouse llega
 	# como WHEEL_UP/DOWN (manejado abajo); este caso cubre el scroll suave de touchpad.
 	if event is InputEventPanGesture:
+		# Grilla de apps abierta: el pan del touchpad se traduce a rueda para que el
+		# child scrollee (el canvas ImGui no entiende el gesto).
+		if shell.apps_view and event.delta != Vector2.ZERO:
+			_pan_to_wheel(event)
+			get_tree().set_input_as_handled()
+			return
 		if _applet_at(event.position) == "volumen":
 			vol_pan += event.delta.y
 			var vol_step = 14.0
@@ -3186,7 +3493,8 @@ func _input(event):
 		# Super+tecla: atajos del shell (no llegan a la app).
 		if code == KEY_F6:
 			super_press = null
-			DebugHud.toggle()
+			if DebugHud != null:
+				DebugHud.toggle()
 			shell.request_redraw()
 			_gulp(code)
 			return
@@ -3445,6 +3753,76 @@ func _item_at(pos):
 		if pos.x >= it.x and pos.x < it.x + it.w and pos.y >= it.y and pos.y < it.y + it.h:
 			return it
 	return null
+
+
+# ¿Hay un arrastre en curso que pueda "levantar" una ventana al pasar sobre su
+# ícono? Cubre los arrastres propios del Frame (bloque de ventana, app, applet,
+# DockApp) y el DnD nativo de una app (lo marca el shell).
+func _drag_active():
+	return dragging != null or win_drag != null or app_drag != null \
+		or applet_drag != null or win_dock_drag or shared_drag \
+		or (shell != null and shell.client_drag_active)
+
+
+# Un paso del "hover para elevar" durante un arrastre: si el puntero se posa sobre
+# el ícono de una ventana distinta (de la arrastrada y de la enfocada) por
+# DRAG_RAISE_MS, se la enfoca/eleva con _focus_tile — que además sale del Grupo/
+# Vecindario/Hogar y restaura la ventana si estaba minimizada, así "se eleva o
+# cambia a su workspace". Un blanco nuevo reinicia la cuenta; no dispara por frame.
+
+# Id de la ventana viva cuya actividad/app coincide con `name` (-1 si no hay).
+func _running_window_for_app(app):
+	if app == null:
+		return -1
+	var want = String(app.name).to_lower()
+	if want == "":
+		return -1
+	for it in running():
+		if int(it.id) >= 0 and String(it.name).to_lower() == want:
+			return int(it.id)
+	return -1
+
+
+# Blanco del "hover para elevar": id de la ventana cuyo ícono está bajo `pos`
+# durante un arrastre, o -1. Mira las teselas de ventana del Frame, los íconos de
+# app fijados y la grilla de apps del Hogar: el ícono de una ventana, en la vista
+# que sea (el Grupo/Vecindario deja las teselas del Frame a la vista).
+func _drag_raise_target(pos):
+	if drawn or bars_shown():
+		var t = _item_at(pos)
+		if t != null and int(t.id) >= 0:
+			return int(t.id)
+		var pin = _pinned_hit(pos)
+		if pin != null:
+			var wid = _running_window_for_app(pin.app)
+			if wid >= 0:
+				return wid
+	if shell != null and shell.apps_view:
+		var tile = shell.apps.at_tile(pos)
+		if tile != null:
+			var wid2 = _running_window_for_app(tile.app)
+			if wid2 >= 0:
+				return wid2
+	return -1
+
+
+func _drag_raise_step(pos):
+	var id = _drag_raise_target(pos)
+	# Sólo una ventana real, distinta de la que se arrastra y de la ya enfocada.
+	if id < 0 or (dragging != null and id == int(dragging.id)) \
+			or (shell != null and id == int(shell.focused_tile)):
+		drag_raise_id = -1
+		drag_raise_since = 0
+		return
+	if id != drag_raise_id:
+		drag_raise_id = id
+		drag_raise_since = OS.get_ticks_msec()
+		return
+	if drag_raise_since > 0 and OS.get_ticks_msec() - drag_raise_since >= DRAG_RAISE_MS:
+		drag_raise_since = 0
+		if shell != null and shell.has_method("_focus_tile"):
+			shell._focus_tile(id)
+			shell.request_redraw()
 
 
 # Id del applet bajo el punto (rects cuadrados del último dibujo del borde inferior).
@@ -5080,6 +5458,9 @@ func draw(ui):
 		# puntero al escritorio (la misma gracia que usa Alt+Tab en cycle()).
 		shell.last_activity = OS.get_ticks_msec()
 		shell._keyboard_focus_grace()
+		# Asegurar el foco de teclado del compositor en la ventana elegida/restaurada.
+		if chosen.id >= 0:
+			shell._focus_keyboard_on(chosen.id)
 	suppress_pinned_click = ""
 	# Perfilado A1: desglose de frame.draw.
 	_f_us += _f4 - _f0

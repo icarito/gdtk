@@ -17,13 +17,18 @@ func _ready():
 	layer = 100
 	shell = get_parent()
 	compositor = shell.compositor
-	compositor.connect("layers_changed", shell, "request_redraw")
+	# En Android no hay compositor Wayland: la capa queda inerte (el shell es lanzador).
+	if compositor != null:
+		compositor.connect("layers_changed", shell, "request_redraw")
 	shell.connect("imgui_frame", self, "_update")
 	# Fin de cada frame: el compositor deja sin frame callbacks a lo que no se dibujó.
-	shell.connect("redrawn", compositor, "end_frame")
+	if compositor != null:
+		shell.connect("redrawn", compositor, "end_frame")
 
 
 func _update():
+	if compositor == null:
+		return
 	# El output principal mide lo que la pantalla principal del shell: las anclas se
 	# resuelven contra ella aunque todavía no se haya abierto ninguna ventana (con
 	# span, contra la principal, no contra el escritorio completo).

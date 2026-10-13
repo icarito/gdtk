@@ -71,7 +71,7 @@ const DESKFLOW_LAYOUT = preload("res://deskflow_layout.gd")
 const DESKFLOW_CONF = preload("res://deskflow_conf.gd")
 const DESKFLOW_SETTINGS = preload("res://deskflow_settings.gd")
 const POSITIONS = ["right", "left", "above", "below"]
-const SINKS = ["auto", "ffplay", "gl", "xv", "wayland"]
+const SINKS = ["auto", "ffplay", "gl", "xv", "wayland", "shmout"]
 const DESKFLOW_MODES = ["client", "server"]
 # Caracteres seguros para nombres de host y para átomos de ruta/binary sin shell.
 const _SAFE_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
@@ -207,12 +207,27 @@ static func gvd_recv_plan(gvd_path, opts = {}):
 	var jitter = int(opts.get("jitter_ms", -1))
 	if jitter >= 0:
 		if jitter > 5000:
-			return _bad("jitter_ms inválido: " + str(opts.get("jitter_ms")))
+			return _bad("jitter_ms inválido: " + str(jitter))
 		args.append_array(["--jitter-ms", str(jitter)])
 	var tr = String(opts.get("transport", GVD_TRANSPORT)).strip_edges()
 	if tr != "udp" and tr != "tcp":
 		return _bad("transporte inválido: " + tr)
 	args.append_array(["--transport", tr])
+	# Sink offscreen (multiview, SPEC-multiview-portal): sin ventana; publica frames
+	# RGBA en `shm_out` (archivo) y opcionalmente escala/cadencia con video_size/shm_fps.
+	if sink == "shmout":
+		var so = String(opts.get("shm_out", "")).strip_edges()
+		if so == "" or so.find("\n") >= 0 or so.find("\r") >= 0:
+			return _bad("shmout requiere shm_out")
+		args.append_array(["--shm-out", so])
+		var vs = String(opts.get("video_size", "")).strip_edges()
+		if vs != "":
+			args.append_array(["--video-size", vs])
+		var sf = int(opts.get("shm_fps", 0))
+		if sf > 0:
+			if sf > 60:
+				return _bad("shm_fps inválido: " + str(sf))
+			args.append_array(["--shm-fps", str(sf)])
 	return {"ok": true, "kind": "process", "cmd": cmd, "args": args, "error": ""}
 
 
@@ -670,6 +685,16 @@ static func selftest():
 	assert(gvd_recv_plan("/home/u/gvd/gvd.py", {"port": 5600}).args.find("--port") < 0,
 		"puerto default no va en argv")
 	assert(not gvd_recv_plan("/home/u/gvd/gvd.py", {"port": 99999}).ok, "puerto inválido")
+	# Sink offscreen (multiview): exige shm_out y emite --shm-out/--video-size/--shm-fps.
+	var ro = gvd_recv_plan("/home/u/gvd/gvd.py", {"sink": "shmout", "port": 5702,
+		"shm_out": "/run/mv/slot1.gvds", "video_size": "640x360", "shm_fps": 15})
+	assert(ro.ok and ro.args.find("shmout") >= 0 and ro.args.find("--shm-out") >= 0
+		and ro.args.find("/run/mv/slot1.gvds") >= 0 and ro.args.find("640x360") >= 0
+		and ro.args.find("--shm-fps") >= 0, "argv de shmout")
+	assert(not gvd_recv_plan("/home/u/gvd/gvd.py", {"sink": "shmout"}).ok,
+		"shmout sin shm_out se rechaza")
+	assert(not gvd_recv_plan("/home/u/gvd/gvd.py",
+		{"sink": "shmout", "shm_out": "/x", "shm_fps": 90}).ok, "shm_fps fuera de rango")
 
 	# format_command: cita sólo lo necesario.
 	assert(format_command(p) == "python3 /home/u/Proyectos/gvd/gvd.py send --host tengu.local"

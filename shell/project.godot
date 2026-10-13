@@ -20,6 +20,11 @@ run/low_processor_mode_sleep_usec=16000
 driver="Dummy"
 output_latency=500
 
+[display]
+
+; En Android (y handhelds) rota con el sensor; en escritorio el SO lo ignora.
+window/handheld/orientation="sensor"
+
 [autoload]
 
 DebugHud="*res://addons/debug_hud/debug_hud.gd"

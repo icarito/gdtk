@@ -66,6 +66,11 @@ func build(identity, caps, avahi_path):
 			# canal autorizado (SPEC-sugar-neighborhood-host-actions §11).
 			"state": String(caps.get("gvd_state", "capable")),
 			"layout": caps.get("layout", 0),
+			# Hospedaje multiview opcional (SPEC-multiview-portal §5): sólo
+			# informativo; ausente/0 equivale a no hospedar.
+			"mv": caps.get("mv", 0),
+			"mv_slots": caps.get("mv_slots", 0),
+			"mv_base": caps.get("mv_base", 0),
 		})
 		_append(pub, services, errors, gvd, path, "gvd")
 

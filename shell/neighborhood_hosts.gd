@@ -173,6 +173,7 @@ static func _new_host(id, hid, svc):
 		"ctl": _ctl_port(txt.get("ctl", "")),
 		"accent": valid_accent(str(txt.get("accent", ""))),
 		"mesh": _mesh_atom(str(txt.get("mesh", ""))),
+		"multiview": _multiview_from_txt(txt),
 		"state": "visto",
 		"connected": false,
 		"degraded": hid == "",
@@ -195,6 +196,7 @@ static func _new_saved_host(hid):
 		"ctl": 0,
 		"accent": "",
 		"mesh": "",
+		"multiview": {"enabled": false, "slots": 0, "base": 0},
 		"state": "guardado",
 		"connected": false,
 		"degraded": false,
@@ -218,6 +220,33 @@ static func _mesh_atom(v):
 	return s
 
 
+# Entero dentro de [lo, hi] desde un TXT; 0 si no es entero o no calza.
+static func _bounded_int(v, lo, hi):
+	var s = str(v).strip_edges()
+	if not s.is_valid_integer():
+		return 0
+	var n = int(s)
+	return n if n >= lo and n <= hi else 0
+
+
+# Rol multiview del host (SPEC-multiview-portal §5): `mv` truthy lo habilita;
+# `mv_slots` se acota a 1..16 y `mv_base` a 1024..65000 (si no, 0). Puro.
+static func _multiview_from_txt(txt):
+	var enabled = false
+	var raw = txt.get("mv", 0)
+	if typeof(raw) == TYPE_BOOL:
+		enabled = raw
+	else:
+		enabled = int(raw) != 0
+	if not enabled:
+		return {"enabled": false, "slots": 0, "base": 0}
+	return {
+		"enabled": true,
+		"slots": _bounded_int(txt.get("mv_slots", ""), 1, 16),
+		"base": _bounded_int(txt.get("mv_base", ""), 1024, 65000),
+	}
+
+
 static func _add_service(host, svc, now_sec, ttl_sec):
 	var seen = int(svc.get("seen_at", now_sec))
 	var live = now_sec <= 0 or ttl_sec <= 0 or seen + ttl_sec >= now_sec
@@ -236,6 +265,12 @@ static func _add_service(host, svc, now_sec, ttl_sec):
 		var mesh = _mesh_atom(str(svc.txt.get("mesh", "")))
 		if mesh != "":
 			host.mesh = mesh
+	# Rol multiview: el primer servicio que lo anuncie lo fija; si ya está
+	# habilitado no se pisa (SPEC-multiview-portal §5).
+	if not host.multiview.enabled:
+		var mv = _multiview_from_txt(svc.txt)
+		if mv.enabled:
+			host.multiview = mv
 	if live:
 		host.live_count += 1
 		host.capabilities[item.capability] = item

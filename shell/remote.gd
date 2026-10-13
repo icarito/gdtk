@@ -8,7 +8,7 @@ const LINE_FEED = 10
 # Métodos de SOLO LECTURA: no deben despertar el loop. Antes cualquier RPC ponía
 # last_activity + request_redraw, así que un poll de estado dejaba la shell a 60 fps
 # ~3 s (IDLE_MS) sin necesidad (SPEC-rendimiento-compositor). Los interactivos sí.
-const READONLY_METHODS = ["state", "peers", "hud_snapshot"]
+const READONLY_METHODS = ["state", "peers", "hud_snapshot", "pointer"]
 
 var shell = null  # lo setea Host/Main (sobrevive a la recarga del shell)
 
@@ -273,6 +273,12 @@ func _handle_line(conn, line):
 			var want = bool(params.get("on", not shell._share_enabled()))
 			shell._share_all_enable(want)
 			_reply(conn, id, shell._share_enabled())
+		"multiview":
+			# Host multiview del Vecindario (§13 F3): {on: bool, peers: [hids]}.
+			# Arranca/corta los receptores locales y reparte los puertos por el
+			# canal peer autorizado. Devuelve {ok, error, slots}.
+			_reply(conn, id, shell.multiview_rpc(bool(params.get("on", false)),
+				params.get("peers", []), bool(params.get("follow", false))))
 		"open":
 			shell._open_by_name(str(params.get("name", "")))
 			_reply(conn, id, true)
@@ -375,6 +381,13 @@ func _handle_line(conn, line):
 			for h in (hs if typeof(hs) == TYPE_ARRAY else []):
 				peers.append({"id": str(h.get("id", "")), "label": str(h.get("label", ""))})
 			_reply(conn, id, peers)
+		"pointer":
+			# Dueño del puntero (SPEC-multiview-portal §8): {capturing, peer,
+			# direction}. Sólo lectura, no despierta el loop.
+			if shell.has_method("pointer_owner"):
+				_reply(conn, id, shell.pointer_owner())
+			else:
+				_fail(conn, id, -32003, "sin pointer_owner")
 		"share_window":
 			# Mismo camino que soltar el bloque de la ventana sobre un equipo del Grupo.
 			shell._group_share_window(str(params.get("host", "")), int(params.get("id", -1)))

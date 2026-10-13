@@ -286,6 +286,125 @@ static func direction_of(a, b):
 	return String(c.get("direction", "")) if not c.empty() else ""
 
 
+# Reajusta la pantalla `id` a una resolución nueva (px_w/px_h) preservando la
+# densidad mm/px: w/h escalan con los pixeles. Ancla el borde que toca a un vecino
+# (o el top-left si esta suelta) y centra en el eje perpendicular; si el rect
+# resultante solapara otro equipo, se desliza a lo largo del borde de contacto a la
+# posicion libre mas cercana. Puro. Devuelve {changed, layout, id}; changed=false si
+# la resolucion (px_w/px_h) no cambio. Es lo que usa el shell para reflejar sola la
+# rotacion/cambio de resolucion de un equipo (portrait <-> landscape).
+static func apply_resolution(layout, id, px_w, px_h):
+	var lay = normalize_layout(layout)
+	var key = String(id)
+	var sc = screen_by_id(lay, key)
+	var result = {"changed": false, "layout": lay, "id": key}
+	if sc == null:
+		return result
+	var pw = int(clamp(float(px_w), 100.0, 16384.0))
+	var ph = int(clamp(float(px_h), 100.0, 16384.0))
+	if pw == int(sc.px_w) and ph == int(sc.px_h):
+		return result
+	var scale = float(sc.w) / float(max(int(sc.px_w), 1))
+	if scale <= 0.0:
+		scale = float(sc.h) / float(max(int(sc.px_h), 1))
+	if scale <= 0.0:
+		scale = 1.0
+	var nw = max(float(pw) * scale, SIZE_MIN_MM)
+	var nh = max(float(ph) * scale, SIZE_MIN_MM)
+	var x0 = float(sc.x)
+	var y0 = float(sc.y)
+	var w0 = float(sc.w)
+	var h0 = float(sc.h)
+	var others = []
+	for o in all_screens(lay):
+		if String(o.id) != key:
+			others.append(o)
+	# Direccion del primer contacto (hacia el vecino): ese borde queda fijo. La
+	# pantalla local es la referencia del plano (0,0): nunca se mueve, solo escala.
+	var dir = ""
+	if not bool(sc.local):
+		for o in others:
+			var c = contact(sc, o)
+			if not c.empty():
+				dir = String(c.direction)
+				break
+	var cx = x0 + w0 * 0.5
+	var cy = y0 + h0 * 0.5
+	var box = {"x": x0, "y": y0, "w": nw, "h": nh}
+	match dir:
+		"east":
+			box.x = (x0 + w0) - nw
+			box.y = cy - nh * 0.5
+		"west":
+			box.x = x0
+			box.y = cy - nh * 0.5
+		"south":
+			box.y = (y0 + h0) - nh
+			box.x = cx - nw * 0.5
+		"north":
+			box.y = y0
+			box.x = cx - nw * 0.5
+	if _box_overlaps(box, others):
+		box = _slide_along_contact(box, dir, others)
+	sc.x = float(box.x)
+	sc.y = float(box.y)
+	sc.w = float(box.w)
+	sc.h = float(box.h)
+	sc.px_w = pw
+	sc.px_h = ph
+	_store_screen(lay, sc)
+	result.changed = true
+	result.layout = lay
+	return result
+
+
+static func _box_overlaps(box, others):
+	for o in others:
+		var ro = rect(o)
+		var ox = min(float(box.x) + float(box.w), ro.position.x + ro.size.x) - max(float(box.x), ro.position.x)
+		var oy = min(float(box.y) + float(box.h), ro.position.y + ro.size.y) - max(float(box.y), ro.position.y)
+		if ox > 0.0 and oy > 0.0:
+			return true
+	return false
+
+
+# Desplaza `box` a lo largo del borde de contacto (`dir` E/O mueve en y; N/S en x)
+# a la posicion libre mas cercana a la deseada. Los candidatos son los bordes de
+# los otros equipos alineados; se elige el mas cercano sin solape.
+static func _slide_along_contact(box, dir, others):
+	var vertical = dir == "east" or dir == "west"
+	var desired = float(box.y) if vertical else float(box.x)
+	var span = float(box.h) if vertical else float(box.w)
+	var cand = [desired]
+	for o in others:
+		var ro = rect(o)
+		if vertical:
+			cand.append(float(ro.position.y) - span)
+			cand.append(float(ro.position.y + ro.size.y))
+		else:
+			cand.append(float(ro.position.x) - span)
+			cand.append(float(ro.position.x + ro.size.x))
+	cand.sort()
+	var best = desired
+	var found = false
+	for c in cand:
+		var probe = box.duplicate()
+		if vertical:
+			probe.y = c
+		else:
+			probe.x = c
+		if not _box_overlaps(probe, others):
+			if not found or abs(c - desired) < abs(best - desired):
+				best = c
+				found = true
+	if found:
+		if vertical:
+			box.y = best
+		else:
+			box.x = best
+	return box
+
+
 # --- Imantado al soltar --------------------------------------------------------
 
 # Devuelve {x, y, snapped, target, side}. Si no hay candidato valido (sin

@@ -49,6 +49,17 @@ static func session_key(local_id, peer_id, direction):
 	return l + "-> " + p + ":" + d
 
 
+# Claves de las rutas del host multiview (SPEC-multiview-portal §10). Reutilizan
+# `_atom` (misma sanitización a caracteres seguros) y prefijos propios para no
+# chocar con `gvdrecv:`/`gvdsend:` del ciclo de vida histórico de gvd. Puro.
+static func multiview_recv_key(host_id):
+	return "mvrecv:" + _atom(host_id)
+
+
+static func multiview_send_key(host_id):
+	return "mvsend:" + _atom(host_id)
+
+
 # Transicion determinista de la maquina de estados. Devuelve el estado destino, o
 # el mismo `state` si el par (state, event) no esta previsto (no-op).
 #   idle+start -> preparing; preparing+ready -> active; preparing+fail -> failed;
@@ -165,6 +176,14 @@ static func selftest():
 	ok = ok and session_key("a", "b", "none").find("none") >= 0
 	ok = ok and session_key("bad id!", "b", "east").find("badid") >= 0
 	ok = ok and session_key("", "", "") == "none-> none:none"
+
+	# Claves multiview: prefijadas, sanitizadas y deterministas.
+	ok = ok and multiview_recv_key("tengu.local") == "mvrecv:tengu.local"
+	ok = ok and multiview_send_key("tengu.local") == "mvsend:tengu.local"
+	ok = ok and multiview_recv_key("bad id!") == "mvrecv:badid"
+	ok = ok and multiview_recv_key("") == "mvrecv:none"
+	ok = ok and multiview_send_key(" a b ") == "mvsend:ab"
+	ok = ok and multiview_recv_key("h1") != multiview_send_key("h1")
 
 	# Transiciones validas.
 	ok = ok and transition("idle", "start") == "preparing"

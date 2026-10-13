@@ -25,10 +25,13 @@ func start(p_shell, p_port):
 	port = int(p_port)
 	if port <= 0:
 		return
-	var base = OS.get_environment("XDG_CONFIG_HOME")
-	if base == "":
-		base = OS.get_environment("HOME").plus_file(".config")
-	tokens_path = base.plus_file("gdtk").plus_file("peer-tokens.json")
+	if OS.get_name() == "Android":
+		tokens_path = "user://peer-tokens.json"
+	else:
+		var base = OS.get_environment("XDG_CONFIG_HOME")
+		if base == "":
+			base = OS.get_environment("HOME").plus_file(".config")
+		tokens_path = base.plus_file("gdtk").plus_file("peer-tokens.json")
 	_load_tokens()
 	_listen()
 
@@ -73,10 +76,10 @@ func listening():
 	return server != null and port > 0
 
 
-# El archivo lo comparten dos escritores: este canal (claves "srv:<hid>", tokens que
-# emite) y el shell (claves "cli:<hid>", tokens que presenta). Cada uno lee y reescribe
-# SÓLO sus claves: pisar el archivo entero borraba los cli: y el equipo quedaba
-# rechazado ("unauthorized") por sus pares.
+# Este canal es el único que lee/escribe el archivo de tokens (ver _save_tokens): el
+# shell ya no lo toca, pide los `cli:` por método. Antes los dos escribían el archivo
+# entero y un read-modify-write cruzado borraba claves o pisaba un `srv:` con un
+# snapshot viejo → el equipo quedaba rechazado ("unauthorized") por sus pares.
 func _read_token_file():
 	var f = File.new()
 	if tokens_path == "" or f.open(tokens_path, File.READ) != OK:
@@ -86,29 +89,68 @@ func _read_token_file():
 	return data if typeof(data) == TYPE_DICTIONARY else {}
 
 
+# Este canal es el ÚNICO escritor de peer-tokens.json. Mantiene en memoria las dos
+# familias de claves: `srv:` (tokens que ESTE equipo emite a cada par) y `cli:`
+# (tokens que el shell presenta a cada par, ver shell._peer_token_get/set). Antes el
+# shell reescribía el archivo entero por su lado (read-modify-write) y las dos
+# escrituras se pisaban: una actualización perdida dejaba un `cli:` sin escribir o un
+# `srv:` pisado por un snapshot viejo, y el par quedaba en `unauthorized` para siempre.
 func _load_tokens():
 	tokens = {}
 	var data = _read_token_file()
 	for k in data.keys():
 		var key = String(k)
-		if key.begins_with("srv:") and LINK.valid_hid(key.substr(4)) and String(data[k]) != "":
+		if (key.begins_with("srv:") or key.begins_with("cli:")) \
+				and LINK.valid_hid(key.substr(4)) and String(data[k]) != "":
 			tokens[key] = String(data[k])
 
 
 func _save_tokens():
 	if tokens_path == "":
 		return
-	var data = _read_token_file()
-	for k in data.keys():
-		if String(k).begins_with("srv:"):
-			data.erase(k)
-	for k in tokens.keys():
-		data[k] = tokens[k]
 	var f = File.new()
 	if f.open(tokens_path, File.WRITE) != OK:
 		return
-	f.store_string(JSON.print(data))
+	f.store_string(JSON.print(tokens))
 	f.close()
+
+
+# Token que este equipo debe presentar al par `hid` (clave `cli:`).
+func token_for(hid):
+	return String(tokens.get("cli:" + String(hid), ""))
+
+
+# Guarda el token que el par `hid` nos emitió (TOFU). Único escritor.
+func set_client_token(hid, tok):
+	var id = String(hid)
+	if id == "":
+		return
+	tokens["cli:" + id] = String(tok)
+	_save_tokens()
+
+
+# Olvida los tokens del par (emitido y presentado) en memoria y disco.
+func token_forget(hid):
+	var id = String(hid)
+	tokens.erase("cli:" + id)
+	tokens.erase("srv:" + id)
+	_save_tokens()
+
+
+# hids con algún token (cli: o srv:), sin copiar los valores. Ordenado.
+func token_hids():
+	var out = []
+	var seen = {}
+	for k in tokens.keys():
+		var key = String(k)
+		if not (key.begins_with("cli:") or key.begins_with("srv:")):
+			continue
+		var hid = key.substr(4).strip_edges()
+		if hid != "" and not seen.has(hid):
+			seen[hid] = true
+			out.append(hid)
+	out.sort()
+	return out
 
 
 func _send(conn, line):
@@ -245,8 +287,18 @@ func _handle(conn, line):
 		_save_tokens()
 		extra["token"] = known
 	elif String(r.token) != known:
-		_send(conn, LINK.encode_response(false, "unauthorized"))
-		return
+		# Auto-sanación: un par CONFIRMADO que presenta un token viejo/ausente re-empara
+		# en vez de quedar en `unauthorized` para siempre. Antes, si el emisor perdía su
+		# `cli:` (o nuestro memoria quedaba desincronizada), no había forma de re-TOFU y
+		# todo pedido se rechazaba. No amplía la confianza: un par confirmado ya podía
+		# provisionar por TOFU (no se ejecuta nada de un hid NO confirmado).
+		if not _peer_is_confirmed(hid):
+			_send(conn, LINK.encode_response(false, "unauthorized"))
+			return
+		known = LINK.new_token()
+		tokens["srv:" + hid] = known
+		_save_tokens()
+		extra["token"] = known
 	if shell == null or not is_instance_valid(shell):
 		_send(conn, LINK.encode_response(false, "shell busy", extra))
 		return
@@ -287,6 +339,27 @@ func _handle(conn, line):
 					err = "no se pudo detener"
 			else:
 				err = "no disponible"
+		"mv_slot":
+			# Host multiview (F3): pide a ESTE equipo que emita hacia su `port`/`slot`.
+			# Params validados (puerto/slot/host seguros); la capacidad de emitir un
+			# escritorio completo se resuelve en el shell (rechazo honesto, el tile
+			# del host queda degradado).
+			var mvs = LINK.mv_slot_params(params)
+			if mvs.empty():
+				err = "parámetros inválidos"
+			elif shell.has_method("_peer_mv_slot"):
+				ok = bool(shell._peer_mv_slot(hid, mvs))
+				if not ok:
+					err = "no se pudo emitir"
+			else:
+				err = "no disponible"
+		"mv_stop":
+			if shell.has_method("_peer_mv_stop"):
+				ok = bool(shell._peer_mv_stop(hid))
+				if not ok:
+					err = "no se pudo detener"
+			else:
+				err = "no disponible"
 		"clip_set":
 			# Portapapeles del Grupo: sólo texto; el token ya autenticó al par.
 			var text = params.get("text", "")
@@ -299,6 +372,30 @@ func _handle(conn, line):
 		"expose":
 			if shell.has_method("_peer_expose"):
 				ok = bool(shell._peer_expose(bool(params.get("on", false))))
+			else:
+				err = "no disponible"
+		"screen_res":
+			# El par rotó o cambió de resolución: refleja el `res=` en el layout sin
+			# esperar el rescan del Vecindario (hasta 60 s). Volumen chico, sin stream.
+			var rs = LINK.video_size(params)
+			if rs == Vector2():
+				err = "parámetros inválidos"
+			elif shell.has_method("_peer_screen_res"):
+				ok = bool(shell._peer_screen_res(hid, rs))
+				if not ok:
+					err = "no aplicado"
+			else:
+				err = "no disponible"
+		"layout":
+			# El par cambió su acomodo de pantallas y empuja el del Grupo: se upserta
+			# la geometría de los vecinos. Sin eco (no se re-difunde).
+			var ls = LINK.layout_screens(params)
+			if ls.empty():
+				err = "parámetros inválidos"
+			elif shell.has_method("_peer_layout"):
+				ok = bool(shell._peer_layout(hid, ls))
+				if not ok:
+					err = "no aplicado"
 			else:
 				err = "no disponible"
 		"media":

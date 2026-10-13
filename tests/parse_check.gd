@@ -12,13 +12,14 @@ func _init():
 		"res://wm_units.gd", "res://wm_hybrid.gd", "res://wm_drag.gd",
 		"res://float_layout.gd", "res://window_chrome.gd", "res://window_deco.gd",
 		"res://tiles_ui.gd", "res://frame.gd", "res://bar_slots.gd", "res://remote.gd", "res://shell.gd",
+		"res://apps.gd", "res://deskflow_presence.gd", "res://deskflow_mouse.gd",
 		"res://system_osd.gd", "res://expose_bg.gd", "res://applet_clipboard.gd",
 		"res://audio_send.gd", "res://window_cast.gd", "res://peer_control.gd", "res://neighborhood_ui.gd",
 		"res://output_layout.gd", "res://span_layout.gd", "res://menu_style.gd",
 		"res://screenshot_model.gd", "res://screenshot_ui.gd",
 		"res://notify.gd", "res://applet_notif.gd", "res://notifications_panel.gd",
 		"res://applet_volume.gd", "res://peer_link.gd", "res://kdeconnect_link.gd",
-		"res://kdeconnect_packet.gd",
+		"res://kdeconnect_packet.gd", "res://pointer_owner.gd",
 	]
 	var failed = 0
 	for p in paths:

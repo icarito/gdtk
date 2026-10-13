@@ -4,6 +4,8 @@
 #define _GNU_SOURCE
 #include "eis_server.h"
 
+#include "screencast.h"
+
 #include <libeis.h>
 #include <systemd/sd-bus.h>
 
@@ -22,6 +24,7 @@
 #define DEVICE_TYPES 3 // KEYBOARD | POINTER
 #define SESSION_RD 1
 #define SESSION_IC 2
+#define SESSION_SC 3
 
 static const enum eis_device_capability CAPS[] = {
 	EIS_DEVICE_CAP_POINTER,
@@ -57,6 +60,8 @@ struct session {
 	sd_bus_message *pending; // Start esperando la respuesta del usuario
 	int req_id;
 	struct eis *eis;
+	// Sesión ScreenCast: fuente PipeWire de esta sesión (compartida con s->sc).
+	struct screencast *sc;
 	int kind, enabled, active;
 	uint32_t capabilities, activation_id;
 	struct capture_barrier *barriers;
@@ -100,6 +105,8 @@ struct eis_server {
 	struct eis *test;
 	struct session *sessions;
 	struct client *clients;
+	// Fuente PipeWire activa del multiview (ScreenCast nativo). Una por servidor.
+	struct screencast *sc;
 	// El input inyectado comparte estado en RemoteInput: sólo el sender que lo
 	// posee puede soltarlo al detenerse/desconectarse, no un cliente IC ajeno.
 	struct client *input_owner;
@@ -1039,21 +1046,142 @@ static const sd_bus_vtable ic_vtable[] = {
 	SD_BUS_VTABLE_END,
 };
 
-// ScreenCast vacío (sin fuentes; todo pedido se rechaza): libportal (Deskflow) lee la versión
-// de org.freedesktop.portal.ScreenCast antes de crear una sesión RemoteDesktop, y el frontend
-// sólo exporta esa interfaz si hay un backend que la implemente.
-static int m_unsupported(sd_bus_message *m, void *ud, sd_bus_error *err) {
+// ScreenCast nativo (SPEC-multiview-portal §9 N1): la fuente es el multiview compuesto
+// que el shell dibuja. El nodo PipeWire lo crea screencast.c; acá se hace el protocolo
+// del portal. Sin dialogo en este MVP (responsable de la UI es el shell).
+static int m_sc_create_session(sd_bus_message *m, void *ud, sd_bus_error *err) {
+	struct eis_server *s = ud;
+	const char *handle, *path, *app_id;
+	int r = sd_bus_message_read(m, "oos", &handle, &path, &app_id);
+	if (r < 0) {
+		return r;
+	}
 	if (!from_frontend(m, err)) {
 		return -EACCES;
 	}
-	return sd_bus_reply_method_return(m, "ua{sv}", 2, 0);
+	struct session *se = NULL;
+	r = session_add(s, path, SESSION_SC, &se);
+	if (r < 0) {
+		return r;
+	}
+	return sd_bus_reply_method_return(m, "ua{sv}", 0, 0);
+}
+
+static int m_sc_select_sources(sd_bus_message *m, void *ud, sd_bus_error *err) {
+	struct eis_server *s = ud;
+	const char *handle, *path, *app_id;
+	int r = sd_bus_message_read(m, "oos", &handle, &path, &app_id);
+	if (r < 0) {
+		return r;
+	}
+	if (!from_frontend(m, err)) {
+		return -EACCES;
+	}
+	if (!session_find_kind(s, path, SESSION_SC)) {
+		return sd_bus_error_set(err, SD_BUS_ERROR_INVALID_ARGS, "sesión inválida");
+	}
+	// Se ofrece siempre la fuente multiview; no hay elección de monitor/ventana en el MVP.
+	return sd_bus_reply_method_return(m, "ua{sv}", 0, 0);
+}
+
+// Añade una entrada {sv} con clave y valor ya tipado por el caller.
+static int sc_reply_start(sd_bus_message *m, struct eis_server *s, struct session *se) {
+	sd_bus_message *reply = NULL;
+	int r = sd_bus_message_new_method_return(m, &reply);
+	if (r < 0) {
+		return r;
+	}
+	uint32_t node = screencast_node_id(se->sc);
+	uint64_t serial = screencast_serial(se->sc);
+	r = sd_bus_message_append(reply, "u", 0);
+	if (r >= 0) r = sd_bus_message_open_container(reply, 'a', "{sv}");
+	if (r >= 0) r = sd_bus_message_open_container(reply, 'e', "sv");
+	if (r >= 0) r = sd_bus_message_append(reply, "s", "streams");
+	if (r >= 0) r = sd_bus_message_open_container(reply, 'v', "a(ua{sv})");
+	if (r >= 0) r = sd_bus_message_open_container(reply, 'a', "(ua{sv})");
+	if (r >= 0) r = sd_bus_message_open_container(reply, 'r', "ua{sv}");
+	if (r >= 0) r = sd_bus_message_append(reply, "u", node);
+	if (r >= 0) r = sd_bus_message_open_container(reply, 'a', "{sv}");
+	// position (ii)
+	if (r >= 0) r = sd_bus_message_open_container(reply, 'e', "sv");
+	if (r >= 0) r = sd_bus_message_append(reply, "s", "position");
+	if (r >= 0) r = sd_bus_message_open_container(reply, 'v', "(ii)");
+	if (r >= 0) r = sd_bus_message_append(reply, "(ii)", 0, 0);
+	if (r >= 0) r = sd_bus_message_close_container(reply);
+	if (r >= 0) r = sd_bus_message_close_container(reply);
+	// size (ii): la salida del compositor embebido
+	if (r >= 0) r = sd_bus_message_open_container(reply, 'e', "sv");
+	if (r >= 0) r = sd_bus_message_append(reply, "s", "size");
+	if (r >= 0) r = sd_bus_message_open_container(reply, 'v', "(ii)");
+	if (r >= 0) r = sd_bus_message_append(reply, "(ii)", s->w, s->h);
+	if (r >= 0) r = sd_bus_message_close_container(reply);
+	if (r >= 0) r = sd_bus_message_close_container(reply);
+	// source_type: 1 = MONITOR (SPEC §9 N1)
+	if (r >= 0) r = sd_bus_message_open_container(reply, 'e', "sv");
+	if (r >= 0) r = sd_bus_message_append(reply, "s", "source_type");
+	if (r >= 0) r = sd_bus_message_open_container(reply, 'v', "u");
+	if (r >= 0) r = sd_bus_message_append(reply, "u", 1);
+	if (r >= 0) r = sd_bus_message_close_container(reply);
+	if (r >= 0) r = sd_bus_message_close_container(reply);
+	// pipewire-serial
+	if (r >= 0) r = sd_bus_message_open_container(reply, 'e', "sv");
+	if (r >= 0) r = sd_bus_message_append(reply, "s", "pipewire-serial");
+	if (r >= 0) r = sd_bus_message_open_container(reply, 'v', "t");
+	if (r >= 0) r = sd_bus_message_append(reply, "t", serial);
+	if (r >= 0) r = sd_bus_message_close_container(reply);
+	if (r >= 0) r = sd_bus_message_close_container(reply);
+	if (r >= 0) r = sd_bus_message_close_container(reply); // a{sv}
+	if (r >= 0) r = sd_bus_message_close_container(reply); // r
+	if (r >= 0) r = sd_bus_message_close_container(reply); // a(ua{sv})
+	if (r >= 0) r = sd_bus_message_close_container(reply); // v
+	if (r >= 0) r = sd_bus_message_close_container(reply); // e
+	if (r >= 0) r = sd_bus_message_close_container(reply); // a{sv}
+	if (r >= 0) r = sd_bus_send(sd_bus_message_get_bus(m), reply, NULL);
+	sd_bus_message_unref(reply);
+	return r;
+}
+
+static int m_sc_start(sd_bus_message *m, void *ud, sd_bus_error *err) {
+	struct eis_server *s = ud;
+	const char *handle, *path, *app_id, *parent;
+	int r = sd_bus_message_read(m, "ooss", &handle, &path, &app_id, &parent);
+	if (r < 0) {
+		return r;
+	}
+	if (!from_frontend(m, err)) {
+		return -EACCES;
+	}
+	struct session *se = session_find_kind(s, path, SESSION_SC);
+	if (!se || se->started) {
+		return sd_bus_error_set(err, SD_BUS_ERROR_INVALID_ARGS, "sesión inválida");
+	}
+	// Una fuente por servidor: si quedara una viva de una sesión anterior, se cierra y
+	// se desvincula de su sesión para no liberarla dos veces.
+	if (s->sc != NULL) {
+		for (struct session *o = s->sessions; o; o = o->next) {
+			if (o->sc == s->sc) {
+				o->sc = NULL;
+			}
+		}
+		screencast_free(s->sc);
+		s->sc = NULL;
+	}
+	struct screencast *sc = screencast_new(s->w, s->h, 30);
+	if (sc == NULL) {
+		// Sin PipeWire (o fallo de conexión): no prometer feed (SPEC §12).
+		return sd_bus_reply_method_return(m, "ua{sv}", 2, 0);
+	}
+	s->sc = sc;
+	se->sc = sc;
+	se->started = 1;
+	return sc_reply_start(m, s, se);
 }
 
 static const sd_bus_vtable sc_vtable[] = {
 	SD_BUS_VTABLE_START(0),
-	SD_BUS_METHOD("CreateSession", "oosa{sv}", "ua{sv}", m_unsupported, SD_BUS_VTABLE_UNPRIVILEGED),
-	SD_BUS_METHOD("SelectSources", "oosa{sv}", "ua{sv}", m_unsupported, SD_BUS_VTABLE_UNPRIVILEGED),
-	SD_BUS_METHOD("Start", "oossa{sv}", "ua{sv}", m_unsupported, SD_BUS_VTABLE_UNPRIVILEGED),
+	SD_BUS_METHOD("CreateSession", "oosa{sv}", "ua{sv}", m_sc_create_session, SD_BUS_VTABLE_UNPRIVILEGED),
+	SD_BUS_METHOD("SelectSources", "oosa{sv}", "ua{sv}", m_sc_select_sources, SD_BUS_VTABLE_UNPRIVILEGED),
+	SD_BUS_METHOD("Start", "oossa{sv}", "ua{sv}", m_sc_start, SD_BUS_VTABLE_UNPRIVILEGED),
 	SD_BUS_PROPERTY("AvailableSourceTypes", "u", NULL, offsetof(struct eis_server, sc_sources), SD_BUS_VTABLE_PROPERTY_CONST),
 	SD_BUS_PROPERTY("AvailableCursorModes", "u", NULL, offsetof(struct eis_server, sc_cursors), SD_BUS_VTABLE_PROPERTY_CONST),
 	SD_BUS_PROPERTY("version", "u", NULL, offsetof(struct eis_server, sc_version), SD_BUS_VTABLE_PROPERTY_CONST),
@@ -1061,6 +1189,13 @@ static const sd_bus_vtable sc_vtable[] = {
 };
 
 static void session_free(struct eis_server *s, struct session *se) {
+	if (se->sc) {
+		if (s->sc == se->sc) {
+			s->sc = NULL;
+		}
+		screencast_free(se->sc);
+		se->sc = NULL;
+	}
 	if (se->pending) {
 		reply_start(se, 0);
 	}
@@ -1264,6 +1399,9 @@ eis_server *eis_server_create(eis_server_callbacks cb, const char *keymap, int w
 	s->device_types = DEVICE_TYPES;
 	s->version = 2;
 	s->sc_version = 5;
+	// ScreenCast nativo: MONITOR | VIRTUAL (1|4); cursor Hidden (1). SPEC §9 N1.
+	s->sc_sources = 1 | 4;
+	s->sc_cursors = 1;
 	s->ic_caps = DEVICE_TYPES;
 	s->ic_version = 2;
 	s->zone_set = 1;
@@ -1319,6 +1457,21 @@ const char *eis_server_error(eis_server *s) {
 // esto en vez de adivinar por el .portal: la interfaz es lo que atiende a Deskflow).
 int eis_server_has_input_capture(eis_server *s) {
 	return s && s->ic_slot != NULL;
+}
+
+// Fuente PipeWire del multiview: el shell la consulta/empuja por RemoteInput.
+struct screencast *eis_server_screencast(eis_server *s) {
+	return s != NULL ? s->sc : NULL;
+}
+
+int eis_server_screencast_active(eis_server *s) {
+	return s != NULL && screencast_active(s->sc);
+}
+
+void eis_server_screencast_push(eis_server *s, const void *rgba, int w, int h, int stride) {
+	if (s != NULL) {
+		screencast_push_rgba(s->sc, rgba, w, h, stride);
+	}
 }
 
 int eis_server_is_capturing(eis_server *s) {

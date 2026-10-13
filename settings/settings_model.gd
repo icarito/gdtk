@@ -100,6 +100,10 @@ const CONTROL_DEFAULT = {
 	"port": 24800,
 	"auto": false,
 	"name": "",
+	# Multiplicador global de velocidad del puntero al controlar otro equipo
+	# (Deskflow 1.27 no lo tiene por cliente): se inyecta como
+	# DESKFLOW_MOUSE_ADJUSTMENT en el proceso servidor. 1.0 = sin cambio.
+	"mouse_scale": 1.0,
 }
 # Multi-monitor (SPEC-physical-multi-monitor): escritorio extendido en una sola
 # ventana (span). `enabled` activa/desactiva; `primary` es el nombre de la salida
@@ -311,6 +315,7 @@ func deskflow(v):
 	out.port = tcp_port(v.get("port", out.port))
 	out.auto = bool_value(v.get("auto", out.auto), false)
 	out.name = screen_name(v.get("name", ""))
+	out.mouse_scale = clamp(num_value(v.get("mouse_scale", out.mouse_scale), out.mouse_scale), 0.1, 10.0)
 	if out.mode == "use_remote" and out.host == "":
 		out.mode = "off"
 	return out
@@ -331,6 +336,15 @@ func host_name(v):
 func tcp_port(v):
 	var p = int(v)
 	return p if p >= 1 and p <= 65535 else int(CONTROL_DEFAULT.port)
+
+
+# Float tolerante (acepta número o texto numérico); ante otra cosa, el fallback.
+func num_value(v, fallback):
+	if v is float or v is int:
+		return float(v)
+	if v is String and v.strip_edges().is_valid_float():
+		return float(v.strip_edges())
+	return float(fallback)
 
 
 func screen_name(v):

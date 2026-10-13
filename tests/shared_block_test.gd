@@ -159,8 +159,13 @@ func _init():
 		SB.from_cache({"h1": "idle"}, {}, {}, {}, false, {"h1": "Tengu"}).empty())
 
 	# --- diagram(): bloque-resumen de la dockapp "Compartiendo" (G5) ---------
-	var none = SB.diagram([], [], [])
-	check("diagram sin nada vacío", none.empty())
+	var idle = SB.diagram([], [], [])
+	# La dockapp queda SIEMPRE presente (en reposo): sin sesiones se dibuja sólo este
+	# equipo al centro. Así conserva el lugar que le dio el usuario.
+	check("diagram sin nada queda en reposo (no vacío)", not idle.empty())
+	check("reposo con master encendido y sin blips",
+		String(idle.master) == "on" and idle.radial.empty()
+		and idle.sides.north.empty() and idle.sides.east.empty())
 
 	var d = SB.diagram(
 		[{"host": "tengu", "peer_name": "tengu", "type": "screen",
@@ -218,9 +223,11 @@ func _init():
 	check("sides vacíos sin sesiones", dw.sides.north.empty() and dw.sides.south.empty()
 		and dw.sides.east.empty() and dw.sides.west.empty())
 
-	# Una entrada sin lado ubicable no se cuela en el diagrama.
+	# Una entrada sin lado ubicable no se cuela en el diagrama (queda en reposo).
+	var noSide = SB.diagram([{"peer_name": "x", "type": "screen", "state": "active"}], [], [])
 	check("sesión sin lado no se dibuja",
-		SB.diagram([{"peer_name": "x", "type": "screen", "state": "active"}], [], []).empty())
+		noSide.radial.empty() and noSide.sides.north.empty() and noSide.sides.south.empty()
+		and noSide.sides.east.empty() and noSide.sides.west.empty())
 
 	# Vocabulario: ningún texto visible del diagrama filtra nombres internos.
 	var d_visible = [String(d.tooltip), String(dw.tooltip)]
@@ -268,8 +275,9 @@ func _init():
 		and SB.focus_text(dr.radial, true).find("este equipo") >= 0)
 
 	# --- Interruptor retro del radar (2026-10-08): master on/off --------------
-	# Encendido y sin sesiones sigue vacío: para eso no hay dockapp.
-	check("master encendido sin nada vacío", SB.diagram([], [], [], {}, {}, true).empty())
+	# Encendido y sin sesiones: en reposo (no desaparece de la barra).
+	check("master encendido sin nada queda en reposo",
+		not SB.diagram([], [], [], {}, {}, true).empty())
 	# Cortado sin sesiones: stub no vacío (la dockapp queda con el interruptor).
 	var doff = SB.diagram([], [], [], {}, {}, false)
 	check("master apagado no vacío", not doff.empty())

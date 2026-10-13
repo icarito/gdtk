@@ -29,6 +29,8 @@ class StubShell:
 	var shares = []
 	var stops = []
 	var input_events = []
+	var screen_res = []
+	var layouts = []
 	func _peer_is_confirmed(hid):
 		return String(hid) == "aaaa" or String(hid) == "bbbb"
 	func _peer_gvd_open(port, from, _hid = "", _video = Vector2()):
@@ -46,8 +48,22 @@ class StubShell:
 	func _peer_share_stop(hid, params):
 		stops.append([String(hid), params.duplicate(true)])
 		return true
+	var mv_slots = []
+	var mv_stops = []
+	func _peer_mv_slot(hid, params):
+		mv_slots.append([String(hid), params.duplicate(true)])
+		return true
+	func _peer_mv_stop(hid):
+		mv_stops.append(String(hid))
+		return true
 	func _peer_window_input(hid, events):
 		input_events.append([String(hid), events.duplicate(true)])
+		return true
+	func _peer_screen_res(hid, vs):
+		screen_res.append([String(hid), vs])
+		return true
+	func _peer_layout(hid, screens):
+		layouts.append([String(hid), screens.duplicate(true)])
 		return true
 
 
@@ -90,14 +106,17 @@ func _init():
 	check("token guardado en disco", File.new().file_exists(tokens_path))
 	var tok = String(r.get("token", ""))
 
-	# token incorrecto: unauthorized
+	# token viejo/incorrecto de un par CONFIRMADO: auto-sanación (re-empara y devuelve
+	# un token nuevo); no queda en `unauthorized` para siempre.
 	r = _resp(pc, peer, LINK.encode_request("aaaa", "malo", "gvd_recv", {"port": 5602}))
-	check("token incorrecto rechazado", not bool(r.get("ok", false)) and String(r.get("error", "")) == "unauthorized")
+	check("token viejo re-empara", bool(r.get("ok", false)) and String(r.get("token", "")).length() == 48)
+	tok = String(r.get("token", ""))
+	check("abrió receptor tras re-emparar", pc.shell.opened.size() == 2 and pc.shell.opened[1][0] == 5602)
 
-	# token correcto: ok (sin devolver token de nuevo)
+	# token correcto (ya el nuevo): ok (sin devolver token de nuevo)
 	r = _resp(pc, peer, LINK.encode_request("aaaa", tok, "gvd_recv", {"port": 5603}))
 	check("token correcto ok", bool(r.get("ok", false)) and not r.has("token"))
-	check("abrió segundo receptor", pc.shell.opened.size() == 2)
+	check("abrió tercer receptor", pc.shell.opened.size() == 3)
 
 	r = _resp(pc, peer, LINK.encode_request("aaaa", tok, "window_input", {"events": [
 		{"kind": "motion", "x": 0.5, "y": 0.25},
@@ -189,6 +208,57 @@ func _init():
 	check("share_stop sin tipo rechazado",
 		not bool(r.get("ok", false)) and pc.shell.stops.size() == 1)
 
+	# --- Resolución de pantalla del par (rotación) ---------------------------
+	r = _resp(pc, peer, LINK.encode_request("aaaa", tok, "screen_res", {"w": 2160, "h": 1440}))
+	check("screen_res ok", bool(r.get("ok", false)) and pc.shell.screen_res.size() == 1
+		and pc.shell.screen_res[0][1] == Vector2(2160, 1440))
+	r = _resp(pc, peer, LINK.encode_request("aaaa", tok, "screen_res", {"w": 0, "h": 0}))
+	check("screen_res inválido rechazado",
+		not bool(r.get("ok", false)) and pc.shell.screen_res.size() == 1)
+	# Un par NO confirmado sigue rechazado (no ejecuta ni con token).
+	r = _resp(pc, peer, LINK.encode_request("cccc", tok, "screen_res", {"w": 800, "h": 600}))
+	check("screen_res sin token rechazado", not bool(r.get("ok", false)))
+
+	# --- Layout del Grupo (propagación) --------------------------------------
+	r = _resp(pc, peer, LINK.encode_request("aaaa", tok, "layout", {"screens": [
+		{"id": "61950c8964e60e15", "peer": "cupid", "label": "cupid",
+			"x": 1.0, "y": 2.0, "w": 3.0, "h": 4.0, "px_w": 1440, "px_h": 2160}, {"id": ""}]}))
+	check("layout ok", bool(r.get("ok", false)) and pc.shell.layouts.size() == 1
+		and pc.shell.layouts[0][1].size() == 1 and String(pc.shell.layouts[0][1][0].id) == "61950c8964e60e15")
+	r = _resp(pc, peer, LINK.encode_request("aaaa", tok, "layout", {"screens": []}))
+	check("layout vacío rechazado",
+		not bool(r.get("ok", false)) and pc.shell.layouts.size() == 1)
+
+	# --- Reparto de slots del multiview (F3) ---------------------------------
+	# mv_slot válido: se valida y se delega al shell con el hid y los params.
+	r = _resp(pc, peer, LINK.encode_request("aaaa", tok, "mv_slot",
+		{"port": 5700, "host": "bastion.local", "slot": 1}))
+	check("mv_slot válido ok", bool(r.get("ok", false)))
+	check("mv_slot delegado al shell", pc.shell.mv_slots.size() == 1
+		and String(pc.shell.mv_slots[0][0]) == "aaaa"
+		and int(pc.shell.mv_slots[0][1].port) == 5700
+		and String(pc.shell.mv_slots[0][1].host) == "bastion.local"
+		and int(pc.shell.mv_slots[0][1].slot) == 1)
+
+	# puerto/slot/host inválidos: error y NO delega.
+	r = _resp(pc, peer, LINK.encode_request("aaaa", tok, "mv_slot",
+		{"port": 80, "host": "bastion.local", "slot": 1}))
+	check("mv_slot puerto inválido rechazado",
+		not bool(r.get("ok", false)) and pc.shell.mv_slots.size() == 1)
+	r = _resp(pc, peer, LINK.encode_request("aaaa", tok, "mv_slot",
+		{"port": 5700, "host": "bastion.local", "slot": 16}))
+	check("mv_slot slot inválido rechazado",
+		not bool(r.get("ok", false)) and pc.shell.mv_slots.size() == 1)
+	r = _resp(pc, peer, LINK.encode_request("aaaa", tok, "mv_slot",
+		{"port": 5700, "host": "a/b", "slot": 1}))
+	check("mv_slot host inválido rechazado",
+		not bool(r.get("ok", false)) and pc.shell.mv_slots.size() == 1)
+
+	# mv_stop: sin params, se delega al shell.
+	r = _resp(pc, peer, LINK.encode_request("aaaa", tok, "mv_stop"))
+	check("mv_stop ok", bool(r.get("ok", false)) and pc.shell.mv_stops.size() == 1
+		and String(pc.shell.mv_stops[0]) == "aaaa")
+
 	# Shell sin los handlers: parámetros válidos pero error de disponibilidad.
 	pc.shell = StubBare.new()
 	r = _resp(pc, peer, LINK.encode_request("dddd", "", "share_notify",
@@ -203,7 +273,8 @@ func _init():
 
 	if d.file_exists(tokens_path):
 		d.remove(tokens_path)
-	# Tokens: el canal conserva sus srv: entre reinicios y no borra los cli: del shell.
+	# Tokens: el canal es el ÚNICO dueño del archivo (lee y escribe srv: y cli:) y expone
+	# get/set/forget/hids para que el shell no haga read-modify-write por su lado.
 	var tp = OS.get_user_data_dir().plus_file("peer-tokens-test.json")
 	var tf = File.new()
 	tf.open(tp, File.WRITE)
@@ -212,14 +283,22 @@ func _init():
 	var tpc = load("res://peer_control.gd").new()
 	tpc.tokens_path = tp
 	tpc._load_tokens()
-	check("tokens: carga srv: válidos", tpc.tokens.get("srv:h1", "") == "S1" and not tpc.tokens.has("srv:bad hid"))
+	check("tokens: carga srv: y cli: válidos", tpc.tokens.get("srv:h1", "") == "S1"
+		and tpc.tokens.get("cli:h2", "") == "C2" and not tpc.tokens.has("srv:bad hid"))
+	check("token_for devuelve cli:", tpc.token_for("h2") == "C2" and tpc.token_for("nope") == "")
+	tpc.set_client_token("h4", "C4")
+	check("set_client_token persiste", tpc.token_for("h4") == "C4")
+	check("token_hids ordenados y únicos", tpc.token_hids() == ["h1", "h2", "h4"])
+	tpc.token_forget("h2")
+	check("token_forget borra cli:", tpc.token_for("h2") == "" and not tpc.tokens.has("cli:h2"))
 	tpc.tokens["srv:h3"] = "S3"
 	tpc._save_tokens()
 	tf.open(tp, File.READ)
 	var saved = JSON.parse(tf.get_as_text()).result
 	tf.close()
-	check("tokens: guardar conserva cli: del shell", saved.get("cli:h2", "") == "C2"
-		and saved.get("srv:h1", "") == "S1" and saved.get("srv:h3", "") == "S3")
+	check("tokens: guardar escribe srv: y cli:", saved.get("srv:h1", "") == "S1"
+		and saved.get("cli:h4", "") == "C4" and saved.get("srv:h3", "") == "S3"
+		and not saved.has("cli:h2"))
 	Directory.new().remove(tp)
 	tpc.free()
 

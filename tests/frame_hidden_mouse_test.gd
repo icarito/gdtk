@@ -43,6 +43,7 @@ func _init():
 	var harness = "extends Reference\nvar shell\nvar visible = false\n"
 	harness += "var pin_top_bar = false\nvar pin_bottom_bar = false\n"
 	harness += "var mouse_down = false\nvar dragging = null\nvar drag_candidate = null\n"
+	harness += "var drag_raise_id = -1\nvar drag_raise_since = 0\n"
 	harness += "var app_press = null\nvar app_drag = null\nvar applet_press = null\nvar applet_drag = null\n"
 	harness += "var shared_press = \"\"\nvar shared_drag = false\nvar shared_power_press = false\nvar shared_power_rect = Rect2()\n"
 	harness += "var win_dock_press = false\nvar win_dock_drag = false\nvar win_scroll_press = false\nvar win_drag = null\n"
@@ -96,6 +97,10 @@ func _init():
 	check("sin máquina de levantado por teclado en el Frame", source.find("lifted") < 0)
 	check("Space del switcher activa la ventana",
 		source.find("elif code == KEY_ENTER or code == KEY_KP_ENTER or code == KEY_SPACE:") >= 0)
+	# DnD → elevar: posarse sobre el ícono de una ventana la enfoca tras una pausa
+	# (arrastre interno o DnD nativo), y el reset lo descarta.
+	check("hover de DnD eleva la ventana del ícono",
+		source.find("_drag_raise_step") >= 0 and source.find("DRAG_RAISE_MS") >= 0)
 
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

@@ -19,6 +19,13 @@ func has_layout(txt):
 	return false
 
 
+func _has_prefix(txt, prefix):
+	for entry in txt:
+		if String(entry).begins_with(prefix):
+			return true
+	return false
+
+
 func _tmp_bin_dir():
 	var base = OS.get_environment("TMPDIR").strip_edges()
 	if base == "":
@@ -75,6 +82,19 @@ func _init():
 	check("deskflow argv seguro", desk_plan.ok and desk_plan.args[1] == pub.SERVICE_DESKFLOW
 		and desk_plan.args.has("tls=required") and desk_plan.txt_bytes < 200)
 
+	# res: resolución real del emisor para que los vecinos reflejen rotación/cambio.
+	var with_res = identity.duplicate()
+	with_res["res"] = "1920x1080"
+	check("deskflow res se anuncia", pub.build_deskflow_txt(with_res, {}).has("res=1920x1080"))
+	var res_upper = identity.duplicate()
+	res_upper["res"] = "1920X1080"
+	check("deskflow res normaliza a minúsculas", pub.build_deskflow_txt(res_upper, {}).has("res=1920x1080"))
+	var res_bad = identity.duplicate()
+	res_bad["res"] = "big"
+	check("deskflow res inválida se omite", not _has_prefix(pub.build_deskflow_txt(res_bad, {}), "res="))
+	check("deskflow sin res no agrega clave", not _has_prefix(pub.build_deskflow_txt(identity, {}), "res="))
+	check("deskflow res dentro del presupuesto", pub.validate_txt(pub.build_deskflow_txt(with_res, {})).ok)
+
 	check("rechaza servicio ajeno", not pub.build_publish_args("_http._tcp", 80, common, "web").ok)
 	check("rechaza token", not pub.validate_txt(["v=1", "token=abc"]).ok)
 	check("rechaza ruta privada", not pub.validate_txt(["v=1", "model=/home/icarito/host.glb"]).ok)
@@ -92,6 +112,42 @@ func _init():
 	var gvd_layout_bool = pub.build_gvd_txt(identity, {"layout": true})
 	check("gvd layout true se anuncia", gvd_layout_bool.has("layout=1") and pub.validate_txt(gvd_layout_bool).ok)
 	check("gvd presupuesto con layout <= 200", gvd_layout_check.bytes <= 200)
+
+	# Hospedaje multiview opcional (SPEC-multiview-portal §5): sólo en el TXT de
+	# gvd, ausente por defecto y sin entradas mal formadas.
+	var mv_plain = pub.build_gvd_txt(identity, {})
+	check("gvd sin mv por defecto", not _has_prefix(mv_plain, "mv=")
+		and not _has_prefix(mv_plain, "mv_slots=") and not _has_prefix(mv_plain, "mv_base="))
+	var mv_full = pub.build_gvd_txt(identity, {"mv": 1, "mv_slots": 4, "mv_base": 5700})
+	var mv_full_check = pub.validate_txt(mv_full)
+	check("gvd mv=1 + slots + base presentes y válido", mv_full.has("mv=1")
+		and mv_full.has("mv_slots=4") and mv_full.has("mv_base=5700") and mv_full_check.ok)
+	check("gvd mv presupuesto <= 200", mv_full_check.bytes <= 200)
+	var mv_bool = pub.build_gvd_txt(identity, {"mv": true, "mv_slots": "2", "mv_base": "6000"})
+	check("gvd mv acepta bool y strings válidos", mv_bool.has("mv=1")
+		and mv_bool.has("mv_slots=2") and mv_bool.has("mv_base=6000"))
+	var mv_bad = pub.build_gvd_txt(identity, {"mv": 1, "mv_slots": 0, "mv_base": 70000})
+	check("gvd mv con enteros inválidos se omiten", mv_bad.has("mv=1")
+		and not _has_prefix(mv_bad, "mv_slots=") and not _has_prefix(mv_bad, "mv_base="))
+	var mv_range = pub.build_gvd_txt(identity, {"mv": 1, "mv_slots": 17, "mv_base": 1023})
+	check("gvd mv fuera de rango se omiten", mv_range.has("mv=1")
+		and not _has_prefix(mv_range, "mv_slots=") and not _has_prefix(mv_range, "mv_base="))
+	var mv_no = pub.build_gvd_txt(identity, {"mv": 0, "mv_slots": 4, "mv_base": 5700})
+	check("gvd slots/base sin mv no se anuncian", not _has_prefix(mv_no, "mv=")
+		and not _has_prefix(mv_no, "mv_slots=") and not _has_prefix(mv_no, "mv_base="))
+	check("gvd mv inválido sigue validando", pub.validate_txt(mv_bad).ok and pub.validate_txt(mv_range).ok)
+	check("deskflow no anuncia mv", not _has_prefix(
+		pub.build_deskflow_txt(identity, {"mv": 1, "mv_slots": 4, "mv_base": 5700}), "mv="))
+
+	var plan_mod = load("res://neighborhood_publish_plan.gd").new()
+	var plan = plan_mod.build(identity, {"gvd": true, "deskflow": false,
+		"mv": 1, "mv_slots": 4, "mv_base": 5700}, "/bin/avahi-publish-service")
+	var gvd_entry = null
+	for s in plan.services:
+		if s.capability == "gvd":
+			gvd_entry = s
+	check("plan gvd pasa mv desde caps", gvd_entry != null and gvd_entry.args.has("mv=1")
+		and gvd_entry.args.has("mv_slots=4") and gvd_entry.args.has("mv_base=5700"))
 
 	var desk_plain = pub.build_deskflow_txt(identity, {})
 	check("deskflow sin layout por defecto", not has_layout(desk_plain))

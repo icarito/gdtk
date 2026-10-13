@@ -84,6 +84,20 @@ func _valid_accent(s):
 	return v
 
 
+# "WxH" en pixeles: dos enteros en rango razonable separados por 'x'. Normaliza a
+# minusculas; "" si no calza (se omite del TXT).
+func _valid_size(s):
+	var v = String(s).strip_edges().to_lower()
+	var parts = v.split("x", true, 1)
+	if parts.size() != 2 or not parts[0].is_valid_integer() or not parts[1].is_valid_integer():
+		return ""
+	var w = int(parts[0])
+	var h = int(parts[1])
+	if w < 100 or w > 16384 or h < 100 or h > 16384:
+		return ""
+	return str(w) + "x" + str(h)
+
+
 func build_gvd_txt(identity, opts = {}):
 	var txt = build_common_txt(identity)
 	txt.append("role=" + _one_of(String(opts.get("role", "recv")), ["recv"], "recv"))
@@ -94,6 +108,7 @@ func build_gvd_txt(identity, opts = {}):
 	txt.append("cursor_port=" + _txt_atom(String(opts.get("cursor_port", "+1")), "+1"))
 	txt.append("size=" + _txt_atom(String(opts.get("size", "1280x800")), "1280x800"))
 	txt.append_array(_layout_entries(opts))
+	txt.append_array(_multiview_entries(opts))
 	return txt
 
 
@@ -106,6 +121,12 @@ func build_deskflow_txt(identity, opts = {}):
 	txt.append("clip=" + _one_of(String(opts.get("clip", "1")), ["0", "1"], "1"))
 	txt.append("tls=" + _one_of(String(opts.get("tls", "required")), ["required"], "required"))
 	txt.append("screen=" + _txt_atom(String(opts.get("screen", "edge")), "edge"))
+	# Resolución real del emisor (WxH): clave propia para no confundirla con el
+	# `size` del stream gvd (que puede ser estático). Deja que los vecinos reflejen
+	# solos una rotación/cambio de resolución (portrait <-> landscape) en el layout.
+	var res = _valid_size(String(opts.get("res", identity.get("res", ""))))
+	if res != "":
+		txt.append("res=" + res)
 	txt.append_array(_layout_entries(opts))
 	return txt
 
@@ -114,6 +135,35 @@ func _layout_entries(opts):
 	var v = opts.get("layout", 0)
 	var want = v if typeof(v) == TYPE_BOOL else int(v) == 1
 	return ["layout=1"] if want else []
+
+
+# Entero dentro de [lo, hi] como átomo del TXT; "" si no calza (se omite).
+func _int_atom(value, lo, hi):
+	var s = String(value).strip_edges()
+	if not s.is_valid_integer():
+		return ""
+	var n = int(s)
+	if n < lo or n > hi:
+		return ""
+	return str(n)
+
+
+# Rol multiview opcional del host gvd (SPEC-multiview-portal §5). Sólo se anuncia
+# si el caller lo pide (`opts.mv` truthy) y cada valor pasa validación; un valor
+# inválido se omite, nunca se emite una entrada mal formada.
+func _multiview_entries(opts):
+	var raw = opts.get("mv", 0)
+	var want = raw if typeof(raw) == TYPE_BOOL else int(raw) != 0
+	if not want:
+		return []
+	var out = ["mv=1"]
+	var slots = _int_atom(opts.get("mv_slots", ""), 1, 16)
+	if slots != "":
+		out.append("mv_slots=" + slots)
+	var base = _int_atom(opts.get("mv_base", ""), 1024, 65000)
+	if base != "":
+		out.append("mv_base=" + base)
+	return out
 
 
 func build_gvd_launch(identity, port = 5600, opts = {}):

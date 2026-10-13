@@ -32,6 +32,8 @@ var drag_grab = Vector2.ZERO
 var drag_pre = null      # rect previo al resize (para revertir si queda solape)
 var guides = []
 var hover_handle = ""
+var scale_slider = null
+var scale_label = null
 
 var scale = 1.0
 var origin = Vector2.ZERO
@@ -57,6 +59,24 @@ func _build():
 
 	status_label = STYLE.note("")
 	box.add_child(status_label)
+
+	# Velocidad del puntero al controlar otro equipo. Es GLOBAL (Deskflow 1.27 no
+	# tiene velocidad por cliente): el shell la inyecta en el servidor como
+	# DESKFLOW_MOUSE_ADJUSTMENT. Se guarda con Aplicar.
+	h_gap(6)
+	h_note("Velocidad del puntero al controlar otro equipo (afecta a todos los equipos).")
+	var srow = h_row()
+	h_label("Multiplicador", srow, 140)
+	scale_slider = HSlider.new()
+	scale_slider.min_value = 0.5
+	scale_slider.max_value = 3.0
+	scale_slider.step = 0.1
+	scale_slider.rect_min_size = Vector2(220, 24)
+	scale_slider.value = float(model.deskflow(settings.get("deskflow", {})).get("mouse_scale", 1.0))
+	scale_slider.connect("value_changed", self, "_on_mouse_scale")
+	srow.add_child(scale_slider)
+	scale_label = STYLE.note("x%.1f" % scale_slider.value)
+	srow.add_child(scale_label)
 
 	layout = _ensure_layout()
 	_refresh_status()
@@ -190,6 +210,17 @@ func _commit():
 	settings["screens"] = layout
 	host.set_field("screens", layout)
 	_refresh_status()
+
+
+# Multiplicador global de velocidad del puntero: se escribe en settings["deskflow"]
+# (lo persiste Aplicar; el shell lo aplica en vivo).
+func _on_mouse_scale(value):
+	if scale_label != null:
+		scale_label.text = "x%.1f" % float(value)
+	var cfg = model.deskflow(settings.get("deskflow", {}))
+	cfg["mouse_scale"] = float(value)
+	settings["deskflow"] = model.deskflow(cfg)
+	host.set_field("deskflow", settings["deskflow"])
 
 
 # --- Input --------------------------------------------------------------------

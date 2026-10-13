@@ -1,10 +1,9 @@
 extends Reference
 
 # Generador PURO de los archivos de AJUSTES (QSettings ini) que consume
-# `deskflow-core <modo> --new-instance -s <cfg>` (deskflow-core 1.26 verificado en
-# hardware real). NO es el layout: el layout barrier (section: screens/links/options)
-# va aparte en su propio archivo, referenciado por `externalConfigFile` en modo
-# servidor.
+# `deskflow-core <modo> --new-instance -s <cfg>` (verificado con 1.26 y 1.27). NO es
+# el layout: el layout (section: links/options) va aparte en su propio archivo,
+# referenciado por `externalConfigFile` en modo servidor.
 #
 # Puro: no ejecuta Deskflow, no toca el filesystem (ni ~/.config) y no abre red.
 # Sólo produce texto determinista a partir de entradas ya validadas.

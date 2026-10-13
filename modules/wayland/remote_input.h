@@ -67,6 +67,10 @@ public:
 	bool has_input_capture() const;
 	bool is_capturing() const;
 	bool release_capture();
+	// ScreenCast nativo (multiview, SPEC-multiview-portal §9 N1): si hay fuente activa y
+	// el empuje de un frame RGBA8 (w*h*4, apretado) al nodo PipeWire. Nunca bloquea.
+	bool screencast_active() const;
+	void screencast_push(int p_w, int p_h, const PoolByteArray &p_data);
 	// Tramos porcentuales por borde donde InputCapture puede activarse, en el orden
 	// [left_lo,left_hi, right_lo,right_hi, top_lo,top_hi, bottom_lo,bottom_hi].
 	// Debe venir del layout de Deskflow (down(0,67) etc.); si no, NULL/[] = 0..100.

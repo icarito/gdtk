@@ -35,6 +35,24 @@ func _init():
 		mod.session_key("a", "b", "up").find("none") >= 0
 		and mod.session_key("a", "b", "diagonal").find("none") >= 0)
 
+	# Claves multiview (F0): deterministas, sanitizadas, con prefijo mvrecv:/mvsend:
+	# y distintas de las claves históricas gvdrecv:/gvdsend: del ciclo de vida gvd.
+	var mr1 = mod.multiview_recv_key("tengu.local")
+	var mr2 = mod.multiview_recv_key("tengu.local")
+	var ms1 = mod.multiview_send_key("tengu.local")
+	check("multiview_recv_key determinista y prefijada",
+		mr1 == mr2 and mr1 == "mvrecv:tengu.local")
+	check("multiview_send_key determinista y prefijada",
+		ms1 == "mvsend:tengu.local" and ms1 == mod.multiview_send_key("tengu.local"))
+	check("multiview keys sanitizan y caen a none",
+		mod.multiview_recv_key("bad id!") == "mvrecv:badid"
+		and mod.multiview_recv_key("") == "mvrecv:none"
+		and mod.multiview_send_key(" a b ") == "mvsend:ab")
+	var L = load("res://gvd_launch.gd")
+	check("multiview keys no chocan con las claves gvd",
+		mod.multiview_recv_key("h1") != L.remote_recv_key("h1")
+		and mod.multiview_send_key("h1") != L.remote_send_key("h1"))
+
 	# transition: todas las validas.
 	check("transition idle+start", mod.transition("idle", "start") == "preparing")
 	check("transition preparing+ready", mod.transition("preparing", "ready") == "active")

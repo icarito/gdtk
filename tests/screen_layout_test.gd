@@ -336,5 +336,29 @@ func _init():
 		bool(mv2.snap_x) and abs(float(mv2.x) - 140.0) <= 0.001
 		and bool(mv2.snap_y) and abs(float(mv2.y) - 212.0) <= 0.001)
 
+	# apply_resolution: refleja un cambio de resolución (p. ej. rotación) preservando
+	# la densidad mm/px, anclando el borde de contacto y sin solapar.
+	var rot = SL.normalize_layout({"version": 2,
+		"local": {"id": "local", "label": "L", "local": true, "x": 0, "y": 0, "w": 340, "h": 212.5,
+			"px_w": 1280, "px_h": 800},
+		"screens": [{"id": "ph", "label": "ph", "peer": "ph", "x": -200, "y": 0, "w": 200, "h": 400,
+			"px_w": 1000, "px_h": 2000}]})
+	var rr = SL.apply_resolution(rot, "ph", 2000, 1000)
+	var ph = SL.screen_by_id(rr.layout, "ph")
+	check("apply_resolution cambia y actualiza px",
+		bool(rr.changed) and ph.px_w == 2000 and ph.px_h == 1000)
+	check("apply_resolution conserva la densidad mm/px",
+		abs(float(ph.w) / float(ph.px_w) - 0.2) <= 0.001 and abs(float(ph.h) / float(ph.px_h) - 0.2) <= 0.001)
+	check("apply_resolution ancla el borde de contacto (east)",
+		abs((float(ph.x) + float(ph.w)) - 0.0) <= 0.001
+		and SL.direction_of(ph, SL.screen_by_id(rr.layout, "local")) == "east")
+	check("apply_resolution no solapa",
+		not SL._box_overlaps({"x": ph.x, "y": ph.y, "w": ph.w, "h": ph.h},
+			[SL.screen_by_id(rr.layout, "local")]))
+	check("apply_resolution sin cambio devuelve changed=false",
+		not bool(SL.apply_resolution(rr.layout, "ph", 2000, 1000).changed))
+	check("apply_resolution id desconocido no cambia",
+		not bool(SL.apply_resolution(rot, "nope", 100, 100).changed))
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

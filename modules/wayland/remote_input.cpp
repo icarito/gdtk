@@ -243,6 +243,8 @@ void RemoteInput::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("has_input_capture"), &RemoteInput::has_input_capture);
 	ClassDB::bind_method(D_METHOD("is_capturing"), &RemoteInput::is_capturing);
 	ClassDB::bind_method(D_METHOD("release_capture"), &RemoteInput::release_capture);
+	ClassDB::bind_method(D_METHOD("screencast_active"), &RemoteInput::screencast_active);
+	ClassDB::bind_method(D_METHOD("screencast_push", "w", "h", "data"), &RemoteInput::screencast_push);
 	ClassDB::bind_method(D_METHOD("set_capture_ranges", "ranges"), &RemoteInput::set_capture_ranges);
 	ClassDB::bind_method(D_METHOD("set_pointer_to_godot", "enabled"), &RemoteInput::set_pointer_to_godot);
 	ClassDB::bind_method(D_METHOD("capture_motion", "position", "relative", "time"), &RemoteInput::capture_motion);
@@ -349,6 +351,23 @@ bool RemoteInput::is_capturing() const {
 
 bool RemoteInput::release_capture() {
 	return eis_server_release_capture(server) != 0;
+}
+
+bool RemoteInput::screencast_active() const {
+	return server != NULL && eis_server_screencast_active(server) != 0;
+}
+
+void RemoteInput::screencast_push(int p_w, int p_h, const PoolByteArray &p_data) {
+	if (server == NULL || p_w <= 0 || p_h <= 0) {
+		return;
+	}
+	// El shell manda RGBA8 apretado (Image.convert(FORMAT_RGBA8) + get_data()).
+	// No confiar en el tamaño: leer menos que w*h*4 sería desbordar el buffer.
+	if ((int64_t)p_data.size() < (int64_t)p_w * (int64_t)p_h * 4) {
+		return;
+	}
+	PoolByteArray::Read r = p_data.read();
+	eis_server_screencast_push(server, r.ptr(), p_w, p_h, p_w * 4);
 }
 
 bool RemoteInput::set_capture_ranges(const PoolRealArray &p_ranges) {

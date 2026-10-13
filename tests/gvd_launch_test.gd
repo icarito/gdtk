@@ -197,5 +197,66 @@ func _init():
 	var lr2 = wc.layer_rect(Rect2(10, 10, 100, 50), Rect2(10, 10, 100, 50), Vector2(200, 200))
 	check("cast: capa raíz escalada y centrada", lr2 == Rect2(0, 50, 200, 100))
 
+	# Multiview (F0): un plan de receptor local por peer, en orden de slot, con el
+	# puerto base+2*slot (cursor en +1) y el tamaño de video pasado al receptor.
+	var gvdpy = "/home/u/Proyectos/gvd/gvd.py"
+	var mv = mod.multiview_recv_plans(gvdpy, ["peer-a", "peer.b", "peer_c"],
+		5700, 4, false, Vector2(1280, 720))
+	check("multiview: un plan por peer en orden de slot", mv.size() == 3
+		and mv[0].hid == "peer-a" and mv[1].hid == "peer.b" and mv[2].hid == "peer_c"
+		and mv[0].slot == 0 and mv[1].slot == 1 and mv[2].slot == 2)
+	check("multiview: puertos base+2*slot y cursor+1",
+		mv[0].port == 5700 and mv[1].port == 5702 and mv[2].port == 5704
+		and mv[0].cursor_port == 5701 and mv[1].cursor_port == 5703
+		and mv[2].cursor_port == 5705)
+	check("multiview: tamaño de video en el receptor", mv[1].ok
+		and mv[1].plan.args.find("--video-size") >= 0
+		and mv[1].plan.args.find("1280x720") >= 0)
+	check("multiview: duplicados omitidos y cap por max_slots",
+		mod.multiview_recv_plans(gvdpy, ["a", "a", "b"]).size() == 2
+		and mod.multiview_recv_plans(gvdpy, ["a", "b", "c"], 5700, 2).size() == 2)
+	var mvbad = mod.multiview_recv_plans("~/gvd/gvd.py", ["peer-a", "peer.b"])
+	check("multiview: ruta inválida deja planes ok=false", mvbad.size() == 2
+		and not bool(mvbad[0].ok) and not bool(mvbad[1].ok))
+	check("multiview: peers no-array no rompe",
+		mod.multiview_recv_plans(gvdpy, "nope").empty())
+
+	# Título de ventana del receptor (F4/§7): `--title` con texto seguro; inseguro se
+	# limpia y vacío no lo agrega; `multiview_recv_plans` rotula por nombre visible o
+	# "equipo N" (nunca el hid opaco).
+	var rt = mod.local_recv_argv(gvdpy, false, 0, Vector2(), "Vista del grupo — Sala")
+	check("multiview: --title seguro en el receptor", rt.ok
+		and rt.args.find("--title") >= 0 and rt.args.find("Vista del grupo — Sala") >= 0)
+	check("multiview: receptor sin title no agrega --title",
+		mod.local_recv_argv(gvdpy, false).args.find("--title") < 0)
+	check("multiview: title vacío no agrega --title",
+		mod.local_recv_argv(gvdpy, false, 0, Vector2(), "   ").args.find("--title") < 0)
+	var rbad = mod.local_recv_argv(gvdpy, false, 0, Vector2(), "a\nb\tc=d")
+	check("multiview: title inseguro se limpia", rbad.args.find("--title") >= 0
+		and rbad.args.find("abcd") >= 0)
+	check("multiview: title acotado a 80", mod.sanitize_window_title("x".repeat(200)).length() == 80)
+	var mvl = mod.multiview_recv_plans(gvdpy, ["peer-a", "peer.b"], 5700, 4, false,
+		Vector2(), {"peer-a": "Sala", "peer.b": "peer.b"})
+	check("multiview: título por slot con nombre visible y token",
+		mvl.size() == 2 and mvl[0].label == "Sala" and mvl[1].label == "equipo 2")
+	check("multiview: título prefijado y en el argv",
+		String(mvl[0].title) == "Vista del grupo — Sala"
+		and mvl[0].plan.args.find("--title") >= 0
+		and mvl[0].plan.args.find(mvl[0].title) >= 0
+		and mvl[1].plan.args.find(mvl[1].title) >= 0)
+
+	# Honestidad del emisor (F0/§1): pantalla completa, sólo ventana o nada.
+	check("emitter_send_kind GNOME -> full", mod.emitter_send_kind("GNOME") == "full")
+	check("emitter_send_kind gdtk con gvd -> window",
+		mod.emitter_send_kind("gdtk", "wayland", false, true) == "window")
+	check("emitter_send_kind gdtk con captura embedded -> full",
+		mod.emitter_send_kind("gdtk", "wayland", true, true) == "full")
+	check("emitter_send_kind sin gvd -> none",
+		mod.emitter_send_kind("gdtk", "wayland", false, false) == "none")
+	check("emitter_send_reason honesto y neutro",
+		mod.emitter_send_reason("full") == "puede compartir toda la pantalla"
+		and mod.emitter_send_reason("window") == "sólo puede compartir una ventana"
+		and mod.emitter_send_reason("none") == "no puede compartir pantalla")
+
 	OS.exit_code = 1 if failed > 0 else 0
 	quit()

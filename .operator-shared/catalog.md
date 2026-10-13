@@ -78,6 +78,9 @@
 - `SPEC-embedded-multi-output.md`
   - Description: Salidas múltiples dentro del compositor embebido: Frame sólo en la principal, workspaces/ventanas por output, captura offscreen para gvd y base común para multi-monitor físico.
   - Read If: Implementando gdtk como emisor, salidas virtuales, captura gvd, cruce de ventanas entre pantallas o soporte multi-monitor.
+- `SPEC-multiview-portal.md`
+  - Description: Servidor multiview del Grupo: un host se anuncia (TXT `mv*`), recibe N pantallas (un `gvd recv` por slot/puerto), las compone en tiles, sigue el puntero con el estado de Deskflow/InputCapture y publica la vista como feed por el portal ScreenCast (N0 con xdpw, sin motor; N1 backend nativo, fase de motor). Sin trabajo específico de OBS.
+  - Read If: Vista/actividad multiview, hospedar pantallas del Grupo, feed por portal ScreenCast, o seguir el puntero entre tiles.
 - `SPEC-physical-multi-monitor.md`
   - Description: Monitores físicos adicionales: una ventana Godot flotante que cubre todos los monitores («span»), principal en (0,0), `_screen_size()`, hotplug por sway.
   - Read If: Segundo monitor físico, `session/gdtk-outputs`, `shell/output_layout.gd`, cualquier uso de `get_viewport_rect()`.

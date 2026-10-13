@@ -128,7 +128,9 @@ TOOLS = [
     tool("gdtk_notify", "Notification bus (SPEC-notificaciones). action=push|list|dismiss|clear|silence|attention|panel|urgency; extra fields: summary, body, icon, urgency, id, on, window, text, source, severity, ttl_ms.", {"action": {"type": "string"}, "summary": {"type": "string"}, "body": {"type": "string"}, "icon": {"type": "string"}, "urgency": {"type": "string"}, "id": {"type": "integer"}, "on": {"type": "boolean"}, "window": {"type": "integer"}, "text": {"type": "string"}, "source": {"type": "string"}, "severity": {"type": "string"}, "ttl_ms": {"type": "integer"}}, ["action"]),
     tool("gdtk_metrics", "Get the debug HUD metrics snapshot: latest values plus min/max/avg of each series. With since_frame only the new samples are returned.", {"since_frame": {"type": "integer"}}),
     tool("gdtk_console", "Run a HUD console command and return its output (help, fps, vsync, timescale; eval only in debug builds).", {"line": {"type": "string"}}, ["line"]),
+    tool("gdtk_multiview", "Open or close the group multiview: the group's shared screens shown as tiles in one view. on=true opens (peers = list of team host ids to receive), on=false closes and returns windows to normal. follow=true highlights the tile of the team that owns the pointer (needs a peer host id list).", {"on": {"type": "boolean"}, "peers": {"type": "array", "items": {"type": "string"}}, "follow": {"type": "boolean"}}, ["on"]),
 ]
+
 
 TOOL_METHOD = {
     "gdtk_reload_shell": "reload_shell",
@@ -147,6 +149,7 @@ TOOL_METHOD = {
     "gdtk_notify": "notify",
     "gdtk_metrics": "hud_snapshot",
     "gdtk_console": "hud_command",
+    "gdtk_multiview": "multiview",
 }
 
 

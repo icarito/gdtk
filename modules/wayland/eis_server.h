@@ -12,6 +12,7 @@ extern "C" {
 // y demás clientes libei piden una sesión al portal, el shell la aprueba y reciben un
 // fd de este EIS; sus eventos llegan por los callbacks (coords en píxeles de la ventana).
 typedef struct eis_server eis_server;
+struct screencast;
 
 typedef struct {
 	void *ud;
@@ -36,6 +37,11 @@ const char *eis_server_error(eis_server *s);
 // 1 si la interfaz org.freedesktop.impl.portal.InputCapture quedó registrada en el
 // bus de la sesión (RemoteDesktop puede andar y InputCapture no, y viceversa).
 int eis_server_has_input_capture(eis_server *s);
+// Fuente PipeWire del multiview (backend ScreenCast nativo, SPEC-multiview-portal §9 N1):
+// screencast activo (NULL si no hay), estado y empuje del frame RGBA8 del shell.
+struct screencast *eis_server_screencast(eis_server *s);
+int eis_server_screencast_active(eis_server *s);
+void eis_server_screencast_push(eis_server *s, const void *rgba, int w, int h, int stride);
 // Estado actual, también tras Release/Disable/Close o desconexión por D-Bus/EIS.
 int eis_server_is_capturing(eis_server *s);
 int eis_server_release_capture(eis_server *s);

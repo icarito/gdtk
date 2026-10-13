@@ -65,10 +65,23 @@ func data_dirs():
 	return out
 
 
+# En Android no hay .desktop: las apps las da el plugin nativo GdtkApps (PackageManager).
+# Devuelve el singleton si el motor lo trae; si no, null.
+func android_plugin():
+	if OS.get_name() != "Android" or not Engine.has_singleton("GdtkApps"):
+		return null
+	return Engine.get_singleton("GdtkApps")
+
+
 func scan():
 	scanned = true
 	apps = []
 	_mwa_memo.clear()
+	var plug = android_plugin()
+	if plug != null:
+		_scan_android(plug)
+		apps.sort_custom(self, "_by_key")
+		return
 	path_dirs = OS.get_environment("PATH").split(":", false)
 	var desktops = Array(OS.get_environment("XDG_CURRENT_DESKTOP").to_lower().split(":", false))
 	desktops.append("gdtk")
@@ -79,6 +92,29 @@ func scan():
 		_scan_dir(d + "/applications", "", seen, desktops)
 	apps.sort_custom(self, "_by_key")
 	_find_theme_dirs()
+
+
+# Apps Android: JSON del plugin [{package, activity, label, system}] → mismo shape que
+# las de .desktop (name/exec/cmd/icon/key/tex) más pkg/activity para lanzarlas.
+func _scan_android(plug):
+	var raw = String(plug.call("listApps"))
+	var parsed = JSON.parse(raw)
+	if parsed.error != OK or typeof(parsed.result) != TYPE_ARRAY:
+		return
+	for e in parsed.result:
+		if typeof(e) != TYPE_DICTIONARY:
+			continue
+		var pkg = String(e.get("package", ""))
+		var act = String(e.get("activity", ""))
+		var name = String(e.get("label", "")).strip_edges()
+		if name == "":
+			name = pkg
+		apps.append({
+			"id": pkg + "/" + act, "name": name, "exec": "", "cmd": "",
+			"icon": "", "categories": "", "key": fold(name), "wm_class": pkg,
+			"pkg": pkg, "activity": act, "system": bool(e.get("system", false)),
+			"tex": null, "icon_tried": false,
+		})
 
 
 # Arranca el vigilante inotify (idempotente). Si el motor no trae GdtkFileWatch,
@@ -450,6 +486,10 @@ func resolve_icon(icon):
 
 func _load_icon(app):
 	app.icon_tried = true
+	# Android: el ícono lo rasteriza el plugin (PackageManager → PNG).
+	if app.get("pkg", "") != "":
+		_android_load_icon(app)
+		return
 	var path = resolve_icon(app.icon)
 	if path == "":
 		return
@@ -465,6 +505,28 @@ func _load_icon(app):
 			img.resize(ICON, ICON * img.get_height() / img.get_width(), Image.INTERPOLATE_BILINEAR)
 		Directory.new().make_dir_recursive("user://iconos")
 		img.save_png(cached)
+	var tex = ImageTexture.new()
+	tex.create_from_image(img, Texture.FLAG_FILTER)
+	app.tex = tex
+
+
+func _android_load_icon(app):
+	var plug = android_plugin()
+	if plug == null:
+		return
+	var path = String(plug.call("iconPngPath", String(app.pkg), String(app.activity), ICON))
+	if path == "":
+		return
+	var f = File.new()
+	if f.open(path, File.READ) != OK:
+		return
+	var bytes = f.get_buffer(f.get_len())
+	f.close()
+	if bytes.size() == 0:
+		return
+	var img = Image.new()
+	if img.load_png_from_buffer(bytes) != OK or img.get_width() == 0:
+		return
 	var tex = ImageTexture.new()
 	tex.create_from_image(img, Texture.FLAG_FILTER)
 	app.tex = tex
@@ -517,6 +579,13 @@ func draw(ui):
 			ui.set_scroll_here_y(0.0)
 		var side = ui.grid_unit(ui._screen_size()) * 1.5
 		var cols = max(1, int(ui.get_content_region_avail().x / side))
+		# Bloque proporcional a la celda (no un ICON fijo): mismo criterio en
+		# cualquier pantalla/DPI, con un canal de aire `gap` entre bloques.
+		var gap = side * 0.10
+		var block = side - gap
+		var pad = gap * 0.5
+		var inset = block * 0.16
+		var icon = block - inset * 2.0
 		var top = ui.get_window_pos().y
 		var bottom = top + ui.get_window_size().y
 		# ProggyClean (fuente por defecto) es monoespaciada: 7 px por carácter.
@@ -526,7 +595,7 @@ func draw(ui):
 		for i in range(list.size()):
 			var app = list[i]
 			var cell = Vector2((i % cols) * side, (i / cols) * side)
-			ui.set_cursor_pos(cell + Vector2((side - ICON) * 0.5, 4.0))
+			ui.set_cursor_pos(cell + Vector2(pad, pad))
 			var y = ui.get_cursor_screen_pos().y
 			if y > bottom or y + side < top:
 				continue
@@ -540,27 +609,27 @@ func draw(ui):
 			ui.push_style_color(ui.COL_BUTTON, Color(0, 0, 0, 0))
 			ui.push_style_color(ui.COL_BUTTON_HOVERED, Color(0, 0, 0, 0))
 			ui.push_style_color(ui.COL_BUTTON_ACTIVE, Color(0, 0, 0, 0))
-			clicked = ui.button("##" + app.id, Vector2(ICON, ICON))
+			clicked = ui.button("##" + app.id, Vector2(block, block))
 			var held = ui.is_item_active()
 			ui.pop_style_color(3)
 			var moving = ui.frame.app_drag != null and ui.frame.app_drag.id == app.id
-			ui._draw_home_bevel(Rect2(icon_scr, Vector2(ICON, ICON)), Color(0.12, 0.13, 0.17, 1.0) if moving else ui.HOME_BLOCK_FACE, held)
+			ui._draw_home_bevel(Rect2(icon_scr, Vector2(block, block)), Color(0.12, 0.13, 0.17, 1.0) if moving else ui.HOME_BLOCK_FACE, held)
 			if not moving:
 				if app.tex != null:
-					ui.set_cursor_pos(cell + Vector2((side - ICON) * 0.5 + 6.0, 10.0))
-					ui.image(app.tex, Vector2(ICON - 12, ICON - 12))
+					ui.set_cursor_pos(cell + Vector2(pad + inset, pad + inset))
+					ui.image(app.tex, Vector2(icon, icon))
 				else:
-					ui.set_cursor_pos(cell + Vector2((side - ICON) * 0.5 + 6.0, 26.0))
+					ui.set_cursor_pos(cell + Vector2(pad + max(0.0, (block - 7.0 * char_w) * 0.5), pad + (block - 14.0 * ui.get_imgui_scale()) * 0.5))
 					ui.text(app.name.substr(0, 7))
-			tiles.append({"app": app, "rect": Rect2(icon_scr, Vector2(ICON, ICON))})
+			tiles.append({"app": app, "rect": Rect2(icon_scr, Vector2(block, block))})
 			if ui.is_item_hovered():
 				ui.set_tooltip(app.name)
 			if clicked and app.id != suppress_click:
 				chosen = app
-				chosen_rect = Rect2(icon_scr, Vector2(ICON, ICON))
+				chosen_rect = Rect2(icon_scr, Vector2(block, block))
 			var label = app.name if app.name.length() <= 16 else app.name.substr(0, 15) + "."
 			if not moving:
-				ui.set_cursor_pos(cell + Vector2(max(0.0, (side - label.length() * char_w) * 0.5), ICON + 14.0))
+				ui.set_cursor_pos(cell + Vector2(max(0.0, (side - label.length() * char_w) * 0.5), pad + block + 2.0))
 				ui.text(label)
 		if more:
 			ui.request_redraw()

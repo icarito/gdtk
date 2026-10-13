@@ -17,6 +17,7 @@ const ACTIONS = preload("res://neighborhood_actions.gd")
 const SESSION = preload("res://gvd_session.gd")
 const DIRECTIONS = preload("res://neighborhood_directions.gd")
 const INBOX = preload("res://neighborhood_inbox.gd")
+const MULTIVIEW = preload("res://multiview_model.gd")
 
 const POSITIONS = ["right", "left", "above", "below"]
 const SSH_PROG = "ssh"
@@ -100,6 +101,32 @@ static func local_outer_virtual_allowed(desktop, session_type, sway_socket = fal
 	return local_emit_backend(desktop, session_type) == "wlr"
 
 
+# Qué puede compartir este peer hoy (F0 / SPEC-multiview-portal §1): "full" si
+# puede emitir toda la pantalla (GNOME/wlroots con su captura), "window" si sólo
+# puede mandar UNA ventana (hay gvd, pero no captura de escritorio: el caso de un
+# peer gdtk hoy), o "none" si no hay gvd. Puro; `embedded_ready` es la capacidad
+# ya resuelta por el caller.
+static func emitter_send_kind(desktop, session_type = "wayland", embedded_ready = false, has_gvd = true) -> String:
+	if local_can_emit(desktop, session_type, embedded_ready):
+		return "full"
+	if bool(has_gvd):
+		return "window"
+	return "none"
+
+
+# Motivo honesto y neutro (sin jerga de producto) para el kind de emisión.
+# "" si el kind es desconocido.
+static func emitter_send_reason(kind) -> String:
+	match String(kind):
+		"full":
+			return "puede compartir toda la pantalla"
+		"window":
+			return "sólo puede compartir una ventana"
+		"none":
+			return "no puede compartir pantalla"
+	return ""
+
+
 # Ruta de gvd dentro de un plan puro de neighborhood_actions: `python3 <ruta.py>`
 # o el binario del PATH directamente. "" si el plan no la trae.
 static func gvd_path_of(plan):
@@ -181,7 +208,10 @@ static func local_send_argv(gvd_path, peer, port = 0, position = "", wlr_virtual
 # emisor remoto usa otro puerto. El emisor wlroots ya no transmite el puntero en
 # el video (--overlay-cursor 0); se usa el puntero propio de este equipo, así que
 # se desactiva el cursor separado (no hay que mover el cursor de sway por red).
-static func local_recv_argv(gvd_path, has_sway = false, port = 0, video = Vector2()):
+# `title` (opcional, default ""): nombre de la ventana del receptor; sólo se agrega
+# `--title <seguro>` si queda un título no vacío tras sanitizar (compat: las
+# llamadas de siempre no cambian de argv).
+static func local_recv_argv(gvd_path, has_sway = false, port = 0, video = Vector2(), title = ""):
 	# Sink `gl` explícito: la «Pantalla compartida» es una ventana administrada por
 	# el shell (marco con el acento del origen + input). Con TCP `auto` elegiría
 	# ffplay (ventana propia, sin input ni marco), así que se pide glimagesink.
@@ -191,7 +221,88 @@ static func local_recv_argv(gvd_path, has_sway = false, port = 0, video = Vector
 		plan["args"].append_array(["--cursor", "none"])
 		if video.x >= 2.0 and video.y >= 2.0:
 			plan["args"].append_array(["--video-size", "%dx%d" % [int(video.x), int(video.y)]])
+		var t = sanitize_window_title(title)
+		if t != "":
+			plan["args"].append_array(["--title", t])
 	return plan
+
+
+# Planes de los N receptores locales del host multiview (SPEC-multiview-portal §10):
+# `MULTIVIEW.assign_slots` reparte un slot/puerto por hid y acá se arma, en orden de
+# slot, el receptor local de cada uno con el `local_recv_argv` de siempre. Devuelve
+# un Array (ordenado por slot) de
+#   {"hid": <hid>, "slot": i, "port": p, "cursor_port": p+1, "label": <str>,
+#    "title": <str>, "ok": bool, "plan": <plan>}.
+# Cada receptor lleva un título de ventana `"Vista del grupo — <label>"` (SPEC §7):
+# el shell lo usa para asociar ventana -> hid. `labels` (opcional, default {}) mapea
+# hid -> nombre visible; si falta o es igual al hid, se usa un token estable
+# `"equipo <n>"` (n = slot+1) para no filtrar el id opaco interno a la UI.
+# Ruta de gvd inválida -> los planes llevan ok=false, pero igual hay una entrada por
+# slot asignado. Nunca lanza: peers/hids inválidos simplemente se omiten.
+static func multiview_recv_plans(gvd_path, peers, base = 5700, max_slots = 4, has_sway = false,
+		video = Vector2(), labels = {}):
+	var out = []
+	var slots = MULTIVIEW.assign_slots(peers, base, max_slots)
+	var by_slot = {}
+	for hid in slots.keys():
+		var e = slots[hid]
+		by_slot[int(e.slot)] = {"hid": String(hid), "slot": int(e.slot),
+			"port": int(e.port), "cursor_port": int(e.cursor_port)}
+	var n = by_slot.size()
+	var lbls = labels if typeof(labels) == TYPE_DICTIONARY else {}
+	for i in range(n):
+		if not by_slot.has(i):
+			continue
+		var s = by_slot[i]
+		var label = String(lbls.get(s.hid, "")).strip_edges()
+		if label == "" or label == s.hid:
+			label = MULTIVIEW.unknown_label(s.slot)
+		var title = MULTIVIEW.TITLE_PREFIX + label
+		var plan = local_recv_argv(gvd_path, has_sway, s.port, video, title)
+		out.append({"hid": s.hid, "slot": s.slot, "port": s.port,
+			"cursor_port": s.cursor_port, "label": label, "title": title,
+			"ok": bool(plan.get("ok", false)), "plan": plan})
+	return out
+
+
+# Planes de los N receptores OFFLINE del host multiview (SPEC-multiview-portal §10):
+# como `multiview_recv_plans` pero SIN ventana. Cada receptor publica frames RGBA en
+# `<shm_dir>/slot<i>.gvds` (contrato GVDSHM1) y el shell los compone en un Viewport
+# fuera de pantalla (nunca en el escritorio: sin robo de foco ni espejo). `tile_w`/
+# `tile_h` son el tamaño al que el receptor escala (pares); `fps` acota la cadencia.
+# Devuelve, ordenado por slot, entradas
+#   {"hid","slot","port","path","label","ok","plan"}.
+# `shm_dir` vacío o ruta gvd inválida -> ok=false (honesto), sin inventar plan.
+static func multiview_offscreen_plans(gvd_path, peers, base = 5700, max_slots = 4,
+		labels = {}, shm_dir = "", tile_w = 640, tile_h = 360, fps = 15):
+	var out = []
+	var slots = MULTIVIEW.assign_slots(peers, base, max_slots)
+	var by_slot = {}
+	for hid in slots.keys():
+		var e = slots[hid]
+		by_slot[int(e.slot)] = {"hid": String(hid), "slot": int(e.slot), "port": int(e.port)}
+	var n = by_slot.size()
+	var lbls = labels if typeof(labels) == TYPE_DICTIONARY else {}
+	var d = String(shm_dir).strip_edges()
+	var tw = int(max(2, int(tile_w))) & ~1
+	var th = int(max(2, int(tile_h))) & ~1
+	var fr = int(clamp(int(fps), 1, 60))
+	for i in range(n):
+		if not by_slot.has(i):
+			continue
+		var s = by_slot[i]
+		var label = String(lbls.get(s.hid, "")).strip_edges()
+		if label == "" or label == s.hid:
+			label = MULTIVIEW.unknown_label(s.slot)
+		var path = d.plus_file("slot%d.gvds" % int(s.slot)) if d != "" else ""
+		# video-size 0x0 = no forzar escala: el receptor conserva el tamaño/aspecto del
+		# emisor (peers portrait no se deforman; el canvas hace letterbox por tile).
+		var plan = ACTIONS.gvd_recv_plan(gvd_path, {"sink": "shmout", "port": int(s.port),
+			"jitter_ms": ACTIONS.GVD_JITTER_MS, "shm_out": path,
+			"video_size": "0x0", "shm_fps": fr})
+		out.append({"hid": s.hid, "slot": s.slot, "port": s.port, "path": path,
+			"label": label, "ok": bool(plan.get("ok", false)), "plan": plan})
+	return out
 
 
 # argv de ssh para abrir el receptor remoto (buzón ssh). El comando remoto
@@ -364,6 +475,27 @@ static func _bad(error):
 	return {"ok": false, "cmd": "", "args": [], "error": error}
 
 
+# Titulo de ventana del receptor, seguro como elemento de argv (SPEC-multiview-portal
+# §7/§8). Espeja `gvd.py::sanitize_window_title`: quita controles/saltos/`=`, recorta,
+# acota a 80 y devuelve "" si queda vacio (el caller omite `--title`). Puro. Acepta
+# espacios y el guion largo del prefijo de producto.
+static func sanitize_window_title(text):
+	var s = String(text)
+	var out = ""
+	for i in range(s.length()):
+		var ch = s.substr(i, 1)
+		var code = s.ord_at(i)
+		if ch == "=" or ch == "\r" or ch == "\n" or ch == "\t":
+			continue
+		if code < 0x20 or code == 0x7F:
+			continue
+		out += ch
+	out = out.strip_edges()
+	if out.length() > 80:
+		out = out.substr(0, 80).strip_edges()
+	return out
+
+
 static func selftest():
 	var ok = true
 
@@ -492,6 +624,73 @@ static func selftest():
 	var noop = deskflow_suspend(links, "none")
 	ok = ok and not noop.suspended and noop.links.size() == 2
 	ok = ok and deskflow_suspend(null, "east").links.empty()
+
+	# Multiview (F0): un plan de receptor local por peer, ordenado por slot, con
+	# puerto base+2*slot y el tamaño de video pasado al receptor.
+	var mvp = multiview_recv_plans("/home/u/Proyectos/gvd/gvd.py",
+		["peer-a", "peer.b", "peer_c"], 5700, 4, false, Vector2(1280, 720))
+	ok = ok and mvp.size() == 3
+	ok = ok and mvp[0].hid == "peer-a" and mvp[1].hid == "peer.b" and mvp[2].hid == "peer_c"
+	ok = ok and mvp[0].slot == 0 and mvp[1].slot == 1 and mvp[2].slot == 2
+	ok = ok and mvp[0].port == 5700 and mvp[1].port == 5702 and mvp[2].port == 5704
+	ok = ok and mvp[0].cursor_port == 5701 and mvp[1].cursor_port == 5703
+	ok = ok and mvp[1].ok and mvp[1].plan.args.find("--video-size") >= 0 \
+		and mvp[1].plan.args.find("1280x720") >= 0
+	ok = ok and multiview_recv_plans("/home/u/Proyectos/gvd/gvd.py", ["a", "a", "b"]).size() == 2
+	ok = ok and multiview_recv_plans("/home/u/Proyectos/gvd/gvd.py", ["a", "b", "c"], 5700, 2).size() == 2
+	# Ruta inválida: una entrada por slot, todas ok=false; nunca lanza.
+	var mvbad = multiview_recv_plans("~/gvd/gvd.py", ["peer-a", "peer.b"])
+	ok = ok and mvbad.size() == 2 and not bool(mvbad[0].ok) and not bool(mvbad[1].ok)
+	ok = ok and multiview_recv_plans("/home/u/Proyectos/gvd/gvd.py", "nope").empty()
+
+	# Título de ventana del receptor (F4/§7): `--title` sólo con texto seguro;
+	# inseguro se limpia y vacío no agrega. `multiview_recv_plans` rotula por nombre
+	# visible o "equipo N" (nunca el hid opaco).
+	var rt = local_recv_argv("/home/u/Proyectos/gvd/gvd.py", false, 0, Vector2(),
+		"Vista del grupo — Sala")
+	ok = ok and rt.ok and rt.args.find("--title") >= 0 \
+		and rt.args.find("Vista del grupo — Sala") >= 0
+	var rbad = local_recv_argv("/home/u/Proyectos/gvd/gvd.py", false, 0, Vector2(), "a\nb\tc=d")
+	ok = ok and rbad.args.find("--title") >= 0 and rbad.args.find("abcd") >= 0
+	ok = ok and local_recv_argv("/home/u/Proyectos/gvd/gvd.py", false).args.find("--title") < 0
+	ok = ok and local_recv_argv("/home/u/Proyectos/gvd/gvd.py", false, 0, Vector2(),
+		"   ").args.find("--title") < 0
+	ok = ok and sanitize_window_title("x".repeat(200)).length() == 80
+	var mvl = multiview_recv_plans("/home/u/Proyectos/gvd/gvd.py", ["peer-a", "peer.b"],
+		5700, 4, false, Vector2(), {"peer-a": "Sala", "peer.b": "peer.b"})
+	ok = ok and mvl.size() == 2
+	ok = ok and mvl[0].label == "Sala" and mvl[1].label == "equipo 2"
+	ok = ok and String(mvl[0].title) == MULTIVIEW.TITLE_PREFIX + "Sala"
+	ok = ok and mvl[0].plan.args.find("--title") >= 0 \
+		and mvl[0].plan.args.find(mvl[0].title) >= 0
+	ok = ok and mvl[1].plan.args.find(mvl[1].title) >= 0
+
+	# Receptores OFFLINE (multiview offscreen): sin ventana, plan shmout con archivo
+	# por slot y escala par. `shm_dir` vacío -> honesto ok=false.
+	var mvo = multiview_offscreen_plans("/home/u/Proyectos/gvd/gvd.py",
+		["peer-a", "peer.b"], 5700, 4, {"peer-a": "Sala"}, "/run/mv", 640, 361, 15)
+	ok = ok and mvo.size() == 2
+	ok = ok and mvo[0].label == "Sala" and mvo[1].label == "equipo 2"
+	ok = ok and mvo[0].path == "/run/mv/slot0.gvds" and mvo[1].path == "/run/mv/slot1.gvds"
+	ok = ok and bool(mvo[0].ok) and bool(mvo[1].ok)
+	ok = ok and mvo[0].plan.args.find("shmout") >= 0
+	ok = ok and mvo[0].plan.args.find("--shm-out") >= 0
+	ok = ok and mvo[0].plan.args.find("/run/mv/slot0.gvds") >= 0
+	ok = ok and mvo[0].plan.args.find("0x0") >= 0      # sin forzar escala (aspecto nativo)
+	ok = ok and mvo[0].plan.args.find("--shm-fps") >= 0
+	ok = ok and mvo[0].plan.args.find("--title") < 0    # sin ventana: no hay titulo
+	var mvo_bad = multiview_offscreen_plans("/home/u/Proyectos/gvd/gvd.py",
+		["peer-a"], 5700, 4, {}, "")
+	ok = ok and mvo_bad.size() == 1 and not bool(mvo_bad[0].ok)
+
+	# Honestidad del emisor (§1): pantalla completa, sólo ventana o nada.
+	ok = ok and emitter_send_kind("GNOME") == "full"
+	ok = ok and emitter_send_kind("gdtk", "wayland", false, true) == "window"
+	ok = ok and emitter_send_kind("gdtk", "wayland", true, true) == "full"
+	ok = ok and emitter_send_kind("gdtk", "wayland", false, false) == "none"
+	ok = ok and emitter_send_reason("full") == "puede compartir toda la pantalla"
+	ok = ok and emitter_send_reason("window") == "sólo puede compartir una ventana"
+	ok = ok and emitter_send_reason("none") == "no puede compartir pantalla"
 
 	assert(ok, "selftest de gvd_launch")
 	return ok

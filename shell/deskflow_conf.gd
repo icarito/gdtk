@@ -14,19 +14,20 @@ extends Reference
 #   west  -> left    (peer a la izquierda)
 #
 # build_server_conf(local, links, template = ""):
-#   - section: screens  = local + peers (local primero), cada pantalla con sus
-#     claves halfDuplex*/xtestIsXineramaUnaware/switchCorners/switchCornerSize;
-#   - section: aliases  = vacia;
 #   - section: links    = aristas del local segun su direccion Y los inversos de
 #     cada peer (peer.arista_opuesta = local), indentadas con tabs;
 #   - section: options  = conservada del template si se pasa (si no, defaults del
 #     ejemplo real: protocol = barrier, etc.).
+#   Deskflow >= 1.27 sólo acepta `links` y `options` en el config externo: las
+#   pantallas y alias viven en el config general (`[computer_<nombre>]`, ver
+#   deskflow_settings.gd). Emitirlas acá dispara warnings y se ignoran.
 #   Devuelve "" si local/alguna direccion/algun peer es invalido.
 #
 # parse_server_conf(text) -> {local_links:[{direction,peer}], screens:[...]}.
-# Convencion de local: la config real no marca cual pantalla es el servidor, asi
-# que se toma la PRIMERA de `section: screens` (build emite local primero). Esto
-# garantiza el round-trip. Texto sin pantallas -> {local_links:[], screens:[]}.
+# Convencion de local: el config no marca cual pantalla es el servidor; se toma la
+# PRIMERA pantalla. En el formato 1.27 (sin `section: screens`) el orden de
+# `section: links` la define (build emite local primero). Texto sin pantallas ->
+# {local_links:[], screens:[]}.
 #
 # Seguridad: nombres de pantalla validados como los peers de deskflow_layout.gd;
 # sin espacios, ';', '=', saltos de linea ni rutas. Nunca viajan secretos aqui.
@@ -42,15 +43,6 @@ const EDGE_ORDER = ["up", "down", "left", "right"]
 # Orden canonico de links por direccion (igual que deskflow_layout.sanitize_links).
 const LINK_RANK = ["north", "east", "south", "west"]
 
-# Claves por pantalla del ejemplo real (cupid/tengu/bastion en bastion).
-const SCREEN_KEYS = [
-	["halfDuplexCapsLock", "false"],
-	["halfDuplexNumLock", "false"],
-	["halfDuplexScrollLock", "false"],
-	["xtestIsXineramaUnaware", "false"],
-	["switchCorners", "none"],
-	["switchCornerSize", "0"],
-]
 # Defaults de section: options tomados del ejemplo real.
 const OPTIONS_DEFAULT = [
 	["protocol", "barrier"],
@@ -143,17 +135,6 @@ static func _sort_edges(edges):
 	return out
 
 
-static func _screens_block(names):
-	var lines = PoolStringArray()
-	lines.append("section: screens")
-	for n in names:
-		lines.append("\t" + String(n) + ":")
-		for kv in SCREEN_KEYS:
-			lines.append("\t\t" + String(kv[0]) + " = " + String(kv[1]))
-	lines.append("end")
-	return lines.join("\n")
-
-
 # Rango Deskflow "(a,b)" en porcentajes 0..100; "" si no hay rango (borde completo).
 static func _range_text(rng):
 	if typeof(rng) != TYPE_ARRAY or rng.size() != 2:
@@ -173,6 +154,7 @@ static func _links_block(local, clean, peers):
 		local_edges.append({"edge": edge_of(l.direction), "peer": l.peer,
 			"lr": l.get("local_range"), "pr": l.get("peer_range")})
 	local_edges = _sort_edges(local_edges)
+	_fill_edge_gaps(local_edges)
 	lines.append("\t" + String(local) + ":")
 	for e in local_edges:
 		lines.append("\t\t" + _link_text(e.edge, e.peer, e.lr, e.pr))
@@ -183,6 +165,7 @@ static func _links_block(local, clean, peers):
 				inv.append({"edge": _opposite_edge(edge_of(l.direction)), "peer": local,
 					"lr": l.get("peer_range"), "pr": l.get("local_range")})
 		inv = _sort_edges(inv)
+		_fill_edge_gaps(inv)
 		lines.append("\t" + String(p) + ":")
 		for e in inv:
 			lines.append("\t\t" + _link_text(e.edge, e.peer, e.lr, e.pr))
@@ -296,10 +279,6 @@ static func build_server_conf(local_name, links, template_text = ""):
 			peers.append(l.peer)
 	peers.sort()
 
-	var names = [local]
-	for p in peers:
-		names.append(p)
-
 	var opts = _options_from_template(template_text)
 	if opts == "":
 		opts = _default_options_block()
@@ -307,11 +286,6 @@ static func build_server_conf(local_name, links, template_text = ""):
 	opts = _force_clipboard_sharing(opts)
 
 	var blocks = PoolStringArray()
-	blocks.append(_screens_block(names))
-	blocks.append("")
-	blocks.append("section: aliases")
-	blocks.append("end")
-	blocks.append("")
 	blocks.append(_links_block(local, clean, peers))
 	blocks.append("")
 	blocks.append(opts)
@@ -322,6 +296,35 @@ static func build_server_conf(local_name, links, template_text = ""):
 # cualquier par, no sólo desde la local). `names` = nombres de todas las pantallas
 # (la primera es el server/local). `links` = [{screen, edge, peer, range, peer_range}]
 # con edge en {up,down,left,right} y los rangos opcionales en % (0..100).
+# Tapar huecos por borde: si los tramos de un borde no cubren 0..100, el mouse que
+# sale por un tramo sin mapear queda ATRAPADO (p. ej. un teléfono más alto que su
+# vecino). Extiende el primer y último tramo para cubrir todo el borde.
+static func _fill_edge_gaps(edges):
+	var by_edge = {}
+	for e in edges:
+		if not e.has("lr") or e.lr == null:
+			continue
+		var ed = String(e.edge)
+		if not by_edge.has(ed):
+			by_edge[ed] = []
+		by_edge[ed].append(e)
+	for ed in by_edge:
+		var lst = by_edge[ed]
+		var min_e = lst[0]
+		var max_e = lst[0]
+		for e in lst:
+			if float(e.lr[0]) < float(min_e.lr[0]):
+				min_e = e
+			if float(e.lr[1]) > float(max_e.lr[1]):
+				max_e = e
+		if float(min_e.lr[0]) > 0.0:
+			min_e.lr[0] = 0.0
+		if float(max_e.lr[1]) < 100.0:
+			max_e.lr[1] = 100.0
+		print("fill_edge_gaps: edge=", ed, " n=", lst.size(), " -> ", min_e.lr, max_e.lr)
+	return edges
+
+
 static func build_topology_conf(names, links, template_text = ""):
 	if typeof(names) != TYPE_ARRAY or names.empty():
 		return ""
@@ -351,12 +354,11 @@ static func build_topology_conf(names, links, template_text = ""):
 		# borde opuesto, con los rangos intercambiados.
 		per[pe].append({"edge": _opposite_edge(ed), "peer": sc, "lr": l.get("peer_range"), "pr": l.get("range")})
 
+	# Tapar huecos por (pantalla, borde).
+	for n in clean_names:
+		_fill_edge_gaps(per[n])
+
 	var blocks = PoolStringArray()
-	blocks.append(_screens_block(clean_names))
-	blocks.append("")
-	blocks.append("section: aliases")
-	blocks.append("end")
-	blocks.append("")
 	var lines = PoolStringArray()
 	lines.append("section: links")
 	for n in clean_names:
@@ -374,8 +376,9 @@ static func build_topology_conf(names, links, template_text = ""):
 	return blocks.join("\n") + "\n"
 
 
-# Lee la config real. local = primera pantalla de section: screens (convencion
-# de build). Devuelve {local_links, screens}; texto invalido -> listas vacias.
+# Lee la config real. local = primera pantalla (de `section: screens` si es formato
+# viejo, o del orden de `section: links` en el formato 1.27). Devuelve
+# {local_links, screens}; texto invalido -> listas vacias.
 static func parse_server_conf(text):
 	var result = {"local_links": [], "screens": []}
 	var t = String(text)
@@ -422,6 +425,12 @@ static func parse_server_conf(text):
 						peer = peer.substr(0, pparen).strip_edges()
 					links[current_screen].append({"edge": edge, "peer": peer})
 	if screens.size() == 0:
+		# Config Deskflow >= 1.27: sin `section: screens` (las pantallas viven en el
+		# config general). El build emite `section: links` con la local primero, así
+		# que ese orden las recupera.
+		for k in links.keys():
+			screens.append(String(k))
+	if screens.size() == 0:
 		return result
 	var local = String(screens[0])
 	var local_links = []
@@ -454,8 +463,10 @@ static func selftest():
 	]
 	var text = build_server_conf("bastion", links)
 	assert(text != "", "build no vacio")
-	assert(text.find("section: screens") >= 0, "screens")
-	assert(text.find("section: aliases") >= 0, "aliases")
+	# 1.27: el config externo sólo lleva `links` y `options`; screens/alias viven en
+	# el config general ([computer_*]).
+	assert(text.find("section: screens") < 0, "sin section screens (1.27)")
+	assert(text.find("section: aliases") < 0, "sin section aliases (1.27)")
 	assert(text.find("section: links") >= 0, "links")
 	assert(text.find("section: options") >= 0, "options")
 	assert(text.find("protocol = barrier") >= 0, "default protocol")

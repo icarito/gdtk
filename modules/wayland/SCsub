@@ -41,13 +41,15 @@ if not os.path.exists(_dmabuf_src) or os.path.getmtime(_dmabuf_src) < os.path.ge
     subprocess.check_call(["wayland-scanner", "private-code", _dmabuf_xml, _dmabuf_src])
 
 env_wayland.Append(CPPDEFINES=["WLR_USE_UNSTABLE"])
-env_wayland.ParseConfig("pkg-config wlroots-0.20 libeis-1.0 libsystemd --cflags")
+# libpipewire-0.3: fuente Video/Source del multiview (screencast.c, backend ScreenCast
+# nativo; SPEC-multiview-portal §9 N1). Sin ella el módulo no compila.
+env_wayland.ParseConfig("pkg-config wlroots-0.20 libeis-1.0 libsystemd libpipewire-0.3 --cflags")
 
 # Las libs van al env del link final (el módulo es una librería estática).
 # GL/GLES se resuelven con eglGetProcAddress: solo se linkea egl.
 # libeis + sd-bus (libsystemd): input remoto y backend del portal RemoteDesktop (remote_input.cpp).
 # wayland-client: puntero del host (remote_pointer.c) y cursor nativo del compositor anfitrión.
-env.ParseConfig("pkg-config wlroots-0.20 wayland-server wayland-client xkbcommon pixman-1 libeis-1.0 libsystemd --libs")
+env.ParseConfig("pkg-config wlroots-0.20 wayland-server wayland-client xkbcommon pixman-1 libeis-1.0 libsystemd libpipewire-0.3 --libs")
 env.ParseConfig("pkg-config egl --libs")
 
 env_wayland.add_source_files(env.modules_sources, "*.c")

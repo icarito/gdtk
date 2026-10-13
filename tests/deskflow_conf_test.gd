@@ -25,20 +25,12 @@ func _init():
 	]
 	var text = C.build_server_conf("bastion", links)
 	check("build no vacio", text != "")
-	check("seccion screens", text.find("section: screens") >= 0)
-	check("seccion aliases", text.find("section: aliases") >= 0)
+	# Deskflow >= 1.27: el config externo sólo lleva `links` y `options`; las
+	# pantallas viven en el config general ([computer_*], ver deskflow_settings).
+	check("sin section screens (1.27)", text.find("section: screens") < 0)
+	check("sin section aliases (1.27)", text.find("section: aliases") < 0)
 	check("seccion links", text.find("section: links") >= 0)
 	check("seccion options", text.find("section: options") >= 0)
-
-	# Pantallas: local primero, luego peers ordenados.
-	check("screens local bastion", text.find("\tbastion:") >= 0)
-	check("screens peer cupid", text.find("\tcupid:") >= 0)
-	check("screens peer tengu", text.find("\ttengu:") >= 0)
-	check("claves halfDuplex por pantalla", text.find("halfDuplexCapsLock = false") >= 0
-		and text.find("halfDuplexNumLock = false") >= 0
-		and text.find("halfDuplexScrollLock = false") >= 0)
-	check("claves switchCorners por pantalla", text.find("switchCorners = none") >= 0
-		and text.find("switchCornerSize = 0") >= 0)
 
 	# Links del local segun arista (west->left, south->down) con tabs.
 	check("local west -> left = cupid", text.find("\t\tleft = cupid") >= 0)

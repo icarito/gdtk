@@ -36,6 +36,10 @@ struct output {
 	uint32_t name_tag;
 	char name[128];
 	int done;
+	/* Rotación del output (wl_output_transform). El framebuffer que entrega
+	 * wlr-screencopy está en la orientación nativa del panel; hay que aplicar
+	 * esta rotación para verlo derecho (p. ej. un panel portrait = 90). */
+	int transform;
 };
 
 struct state {
@@ -71,8 +75,10 @@ static void output_geometry(void *d, struct wl_output *o, int32_t x, int32_t y,
 			    int32_t pw, int32_t ph, int32_t subpixel,
 			    const char *make, const char *model, int32_t transform)
 {
-	(void)d; (void)o; (void)x; (void)y; (void)pw; (void)ph; (void)subpixel;
-	(void)make; (void)model; (void)transform;
+	(void)o; (void)x; (void)y;
+	(void)pw; (void)ph; (void)subpixel;
+	(void)make; (void)model;
+	((struct output *)d)->transform = transform;
 }
 
 static void output_mode(void *d, struct wl_output *o, uint32_t flags,
@@ -335,8 +341,9 @@ int main(int argc, char **argv)
 		fprintf(stderr, "[!] sin outputs\n");
 		return 1;
 	}
-	fprintf(stderr, "[*] capturando output '%s' (overlay_cursor=%d)\n",
-		out->name[0] ? out->name : "?", s.overlay_cursor);
+	fprintf(stderr, "[*] capturando output '%s' (overlay_cursor=%d, transform=%d)\n",
+		out->name[0] ? out->name : "?", s.overlay_cursor, out->transform);
+	int out_transform = out->transform;
 
 	int announced = 0;
 	uint64_t period = (uint64_t)(1000000000.0 / fps);
@@ -367,11 +374,18 @@ int main(int argc, char **argv)
 		}
 
 		if (!announced) {
+			/* fourcc wl_shm -> equivalente GStreamer por orden de bytes en
+			 * memoria (little-endian):
+			 *   XRGB8888 -> B,G,R,X (BGRx)   ARGB8888 -> B,G,R,A (BGRA)
+			 *   XBGR8888 -> R,G,B,X (RGBx)   ABGR8888 -> R,G,B,A (RGBA) */
 			const char *fourcc =
 				s.fmt == WL_SHM_FORMAT_XRGB8888 ? "XR24" :
-				s.fmt == WL_SHM_FORMAT_ARGB8888 ? "AR24" : "????";
-			fprintf(stderr, "GVDCAP1 %s %u %u %u\n", fourcc,
-				s.width, s.height, s.stride);
+				s.fmt == WL_SHM_FORMAT_ARGB8888 ? "AR24" :
+				s.fmt == WL_SHM_FORMAT_XBGR8888 ? "XB24" :
+				s.fmt == WL_SHM_FORMAT_ABGR8888 ? "AB24" : "????";
+			/* 6º campo `transform`: orientación a aplicar (wl_output_transform). */
+			fprintf(stderr, "GVDCAP1 %s %u %u %u %d\n", fourcc,
+				s.width, s.height, s.stride, out_transform);
 			fflush(stderr);
 			announced = 1;
 		}

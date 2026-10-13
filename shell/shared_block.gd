@@ -262,16 +262,16 @@ static func diagram(sessions, remote_shares, windows, placements = {}, focus = {
 			entries.append(e2)
 	var wlist = _diagram_windows(windows)
 	if entries.empty() and wlist.empty():
-		if master_on:
-			return {}
-		# Cortado a propósito: bloque en modo apagado (radar sin blips) para que el
-		# interruptor siga alcanzable. Los avisos remotos, si los hubiera, se firten
-		# arriba como los demás (ver _diagram_entry).
+		# El bloque (radar) queda SIEMPRE presente: sin sesiones se muestra en reposo
+		# (sólo este equipo al centro, sin blips). Antes, con el master encendido y sin
+		# sesiones, devolvía {} y la dockapp desaparecía de la barra —al reaparecer
+		# perdía el lugar asignado—; con el master cortado ya se mostraba el stub.
 		return {
-			"master": "off",
+			"master": "on" if master_on else "off",
 			"sides": {"north": [], "south": [], "east": [], "west": []},
-			"menu": _diagram_menu([], [], false),
-			"tooltip": "El intercambio está apagado en este equipo",
+			"menu": _diagram_menu([], [], master_on),
+			"tooltip": "Sin intercambio activo" if master_on \
+				else "El intercambio está apagado en este equipo",
 			"radial": [],
 			"local_focus": not bool(_as_dict(focus).get("capturing", false)),
 		}
