@@ -159,17 +159,25 @@ static func members(directions, tokens, screens, live_hosts, bt_devices):
 		deduped.append(m)
 
 	# Migración v1: si quedaron una ficha nominal y un único HID opaco en el mismo
-	# lado, son las dos identidades históricas de la misma pantalla. Sólo se fusiona
-	# cuando la asociación es inequívoca; nunca se adivina entre dos equipos.
+	# lado, son las dos identidades históricas de la misma pantalla. Se prefiere el
+	# par por (dirección, along): dos equipos del MISMO lado (p. ej. cupid y redmi al
+	# oeste) se distinguen por su posición; recién si no hay along se cae a la
+	# dirección, y sólo con un candidato único. Nunca se adivina entre dos.
 	for i in range(deduped.size() - 1, -1, -1):
 		var alias = deduped[i]
 		if _opaque_hid(String(alias.get("id", ""))) or String(alias.get("direction", "")) == "":
 			continue
+		var al = _along(alias.get("along", -1.0))
 		var matches = []
 		for j in range(deduped.size()):
-			if i != j and _opaque_hid(String(deduped[j].get("id", ""))) \
-					and String(deduped[j].get("direction", "")) == String(alias.direction):
-				matches.append(j)
+			if i == j or not _opaque_hid(String(deduped[j].get("id", ""))) \
+					or String(deduped[j].get("direction", "")) != String(alias.direction):
+				continue
+			if al >= 0.0:
+				var aj = _along(deduped[j].get("along", -1.0))
+				if aj >= 0.0 and abs(aj - al) > 0.02:
+					continue
+			matches.append(j)
 		if matches.size() == 1:
 			_merge_into(deduped[matches[0]], alias)
 			deduped.remove(i)
@@ -222,6 +230,71 @@ static func remove_member(directions, hid):
 	var out = directions.duplicate(true) if typeof(directions) == TYPE_DICTIONARY else {}
 	out.erase(String(hid).strip_edges())
 	return out
+
+
+# Normaliza la PERSISTENCIA del Grupo: una clave por NOMBRE (legacy: versiones viejas
+# guardaban la dirección del equipo por su nombre además de por su hid) se colapsa
+# sobre la identidad física cuando hay evidencia:
+#   - el nombre coincide con un host vivo (label), o
+#   - hay UN único hid opaco del mismo lado/posición (`along`).
+# Sin evidencia no se toca: mejor una ficha de más que fusionar dos equipos.
+# Devuelve {"directions": <copia nueva>, "changed": bool}; el shell persiste sólo si
+# cambió. Puro: sin I/O.
+static func normalize(directions, live_hosts) -> Dictionary:
+	if typeof(directions) != TYPE_DICTIONARY:
+		return {"directions": {}, "changed": false}
+	var out = directions.duplicate(true)
+	var changed = false
+	var idx = _index_hosts(live_hosts)
+	var names = directions.keys()
+	for k in names:
+		var nom = String(k).strip_edges()
+		if nom == "" or _opaque_hid(nom):
+			continue
+		var e = directions[k]
+		var dir = ""
+		var along = -1.0
+		if typeof(e) == TYPE_DICTIONARY:
+			dir = String(e.get("direction", "")).strip_edges()
+			along = _along(e.get("along", -1.0))
+		# 1) Host vivo por nombre.
+		var hid = ""
+		var h = idx.by_name.get(_norm(nom), null)
+		if h != null:
+			hid = _host_hid(h)
+		# 2) Único hid opaco con el mismo lado/posición.
+		if hid == "" and dir != "":
+			var cands = []
+			for k2 in names:
+				var s2 = String(k2).strip_edges()
+				if not _opaque_hid(s2):
+					continue
+				var e2 = directions[k2]
+				if typeof(e2) != TYPE_DICTIONARY \
+						or String(e2.get("direction", "")).strip_edges() != dir:
+					continue
+				var a2 = _along(e2.get("along", -1.0))
+				if along >= 0.0 and a2 >= 0.0 and abs(a2 - along) > 0.02:
+					continue
+				cands.append(s2)
+			if cands.size() == 1:
+				hid = cands[0]
+		if hid == "":
+			continue
+		var tgt = out.get(hid, null)
+		if typeof(tgt) != TYPE_DICTIONARY:
+			tgt = {}
+			out[hid] = tgt
+		if dir != "" and String(tgt.get("direction", "")) == "":
+			tgt["direction"] = dir
+		if along >= 0.0 and _along(tgt.get("along", -1.0)) < 0.0:
+			tgt["along"] = along
+		for f in ["confirm", "mode", "link", "input", "updated"]:
+			if not tgt.has(f) and typeof(e) == TYPE_DICTIONARY and e.has(f):
+				tgt[f] = e[f]
+		out.erase(nom)
+		changed = true
+	return {"directions": out, "changed": changed}
 
 
 # Plan de lo que el shell debe borrar al "Quitar del grupo".
@@ -618,6 +691,9 @@ static func _merge_into(target, src):
 		target.name = src.name
 	if target.direction == "" and src.direction != "":
 		target.direction = src.direction
+		target.along = src.along
+	elif _along(target.get("along", -1.0)) < 0.0 and _along(src.get("along", -1.0)) >= 0.0:
+		# Mismo lado ya presente: no se pierde la posición del alias.
 		target.along = src.along
 
 

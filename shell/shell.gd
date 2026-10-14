@@ -80,8 +80,10 @@ const AUDIO_SEND = preload("res://audio_send.gd")
 const MENU_STYLE = preload("res://menu_style.gd")
 const HOST_DISPATCH = preload("res://host_dispatch.gd")
 # Modelo puro del Grupo (G4a): el shell sólo lo usa para sumar/quitar miembros
-# (la vista y el resto del ciclo los maneja neighborhood_ui).
-const GROUP_MODEL = preload("res://group_model.gd")
+# (la vista y el resto del ciclo los maneja neighborhood_ui). Host.sc (no preload):
+# una recarga transaccional debe tomar el modelo nuevo (lenado canónico del Grupo),
+# que con el preload cacheado quedaría viejo hasta reiniciar el proceso.
+var GROUP_MODEL = Host.sc("res://group_model.gd")
 # Publisher mDNS del Vecindario: modelo puro + plan puro de anuncios; el shell
 # resuelve avahi una vez y lanza cada anuncio sin bloquear el frame (§2/§14).
 const PUBLISH_MODEL = preload("res://neighborhood_publish.gd")
@@ -291,6 +293,7 @@ var host_directions = {}
 var _dir_write_threads = []   # Threads de escritura de un solo uso, reapeados en _process
 var _dir_write_states = []    # estado {"done": bool} compartido con cada Thread
 var _dir_mutex = Mutex.new()  # protege los flags "done" de las escrituras
+var _dir_healed = false       # el archivo legacy ya se sanó una vez en esta sesión
 
 # Buzón del handshake de dirección (K3): worker con TTL que escanea
 # ~/.config/gdtk/direction-inbox y publica decisiones ya decodificadas; el hilo
@@ -1965,6 +1968,9 @@ func _process(_delta):
 		if neighborhood.version != nb_version:
 			nb_version = neighborhood.version
 			_nb_seen = true
+			# Persistencia legacy con claves por nombre: en cuanto hay hosts vivos se
+			# sanea una vez el archivo (una clave por equipo). Ver GROUP_MODEL.normalize.
+			_heal_directions_file()
 			# Presencia cambió: rearma la barrera de los vecinos Deskflow apagados
 			# (barato; sólo publica si el rango cambió).
 			_apply_capture_ranges()
@@ -8245,12 +8251,39 @@ func _persist_directions():
 	var path = _directions_path()
 	if path == "":
 		return
-	var text = DIRECTIONS_MODEL.to_json(host_directions)
+	# Al DISCO va la copia canónica (una clave por equipo, hid): el espejo hid<->nombre
+	# vive en memoria para las búsquedas, pero persistir la clave por nombre es lo que
+	# después aparece como host fantasma en el Grupo con el equipo apagado.
+	var text = DIRECTIONS_MODEL.to_json(_normalized_directions_for_disk())
 	var state = {"done": false}
 	var th = Thread.new()
 	_dir_write_threads.append(th)
 	_dir_write_states.append(state)
 	th.start(self, "_write_directions_work", {"path": path, "text": text, "state": state})
+
+
+# Copia de las direcciones con una sola clave por equipo (hid) cuando hay evidencia:
+# host vivo con ese nombre, o un único hid opaco del mismo lado/posición. No toca el
+# estado en memoria (el espejo hid<->nombre sigue disponible). Puro salvo por leer
+# neighborhood.hosts.
+func _normalized_directions_for_disk():
+	var hosts = neighborhood.hosts if neighborhood != null else []
+	var r = GROUP_MODEL.normalize(host_directions, hosts)
+	return r.get("directions", host_directions)
+
+
+# Sanea una vez por sesión el archivo legacy (claves por nombre) en cuanto el
+# Vecindario trae evidencia. Una sola escritura; después manda el camino normal.
+func _heal_directions_file():
+	if _dir_healed or neighborhood == null:
+		return
+	var hosts = neighborhood.hosts
+	if typeof(hosts) != TYPE_ARRAY or hosts.empty():
+		return   # sin evidencia todavía: se reintenta en el próximo cambio de presencia
+	_dir_healed = true
+	var canon = _normalized_directions_for_disk()
+	if str(canon) != str(host_directions):
+		_persist_directions()
 
 
 # Sólo escribe el archivo (tmp + rename atómico); nunca toca nodos ni red.

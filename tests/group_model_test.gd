@@ -307,6 +307,43 @@ func _placement_tests(GM):
 	check("along conservado y validado", abs(float(m1[0].along) - 0.3) < 0.001
 		and float(m2[0].along) < 0.0)
 
+	# Migración hid<->nombre (neighborhood-directions.json legacy trae AMBAS claves).
+	# Con dos equipos en el MISMO lado (cupid y redmi al oeste) sólo el `along` los
+	# distingue: nunca se adivina por dirección (eso dejaba hosts fantasma: la ficha
+	# nominal suelta y la opaca con el hash crudo como nombre).
+	var legacy = {
+		"61950c8964e60e15": {"direction": "west", "along": 0.7264},
+		"9c02e9e6b139ffab": {"direction": "west", "along": 0.6825},
+		"cupid": {"direction": "west", "along": 0.7264},
+		"redmi": {"direction": "west", "along": 0.6825},
+	}
+	var lm = GM.members(legacy, {}, [], [], [])
+	check("dos del mismo lado se fusionan por along", lm.size() == 2)
+	var mc = _find(lm, "61950c8964e60e15")
+	var mr = _find(lm, "9c02e9e6b139ffab")
+	check("cada uno conserva nombre y posición",
+		mc != null and mr != null and String(mc.name) == "cupid" and String(mr.name) == "redmi"
+		and abs(float(mc.along) - 0.7264) < 0.001 and abs(float(mr.along) - 0.6825) < 0.001
+		and not _find(lm, "cupid") and not _find(lm, "redmi"))
+
+	# normalize(): el archivo legacy se sanea a UNA clave por equipo (hid).
+	var n1 = GM.normalize({"redmi": {"direction": "west", "along": 0.6825},
+		"9c02e9e6b139ffab": {"direction": "west", "along": 0.6825}}, [])
+	check("normalize une por lado+posición",
+		bool(n1.changed) and n1.directions.has("9c02e9e6b139ffab")
+		and not n1.directions.has("redmi")
+		and String(n1.directions["9c02e9e6b139ffab"].direction) == "west")
+	var n2 = GM.normalize({"cupid": {"direction": "west", "along": 0.7}},
+		[{"id": "61950c8964e60e15", "label": "cupid", "state": "visto"}])
+	check("normalize une por host vivo",
+		bool(n2.changed) and n2.directions.has("61950c8964e60e15")
+		and not n2.directions.has("cupid"))
+	var n3 = GM.normalize({"x": {"direction": "west", "along": 0.1},
+		"a": {"direction": "west", "along": 0.1}, "b": {"direction": "west", "along": 0.1}}, [])
+	check("normalize no adivina entre dos opacos", not bool(n3.changed))
+	check("normalize sin claves nominales no cambia",
+		not bool(GM.normalize({"61950c8964e60e15": {"direction": "west"}}, []).changed))
+
 	# N9: conectores entre el centro y los pares con relación activa.
 	var peers = [
 		{"key": "he", "peer_name": "he", "kind": "both", "direction": "out", "state": "active",
