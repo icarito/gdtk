@@ -8240,9 +8240,39 @@ func _refresh_direction_views():
 		return
 	# Godot 3 no admite `"directions" in obj`; get() devuelve null si falta la var.
 	if neighborhood_ui.get("directions") != null:
-		neighborhood_ui.directions = host_directions
+		# A la vista van las direcciones persistidas MÁS las derivadas del layout de
+		# Pantallas (geometría -> lado + posición). La geometría es la evidencia durable
+		# de dónde está cada pantalla: con ella el modelo del Grupo une la ficha de
+		# pantalla (por nombre) con la identidad física (hid) de la persistencia, sin
+		# mantener claves por nombre en el archivo (origen de los hosts fantasma).
+		var ui_dirs = host_directions.duplicate(true)
+		var derived = _layout_directions()
+		for k in derived.keys():
+			if not ui_dirs.has(k):
+				ui_dirs[k] = derived[k]
+		neighborhood_ui.directions = ui_dirs
 	if neighborhood_ui.get("direction_conflicts") != null:
 		neighborhood_ui.direction_conflicts = conflicts
+
+
+# Direcciones derivadas del layout de Pantallas: {id/nombre de pantalla: {direction,
+# along, ...}}. Excluye la pantalla local (no es miembro). Pura salvo leer el puente.
+func _layout_directions():
+	if settings_bridge == null:
+		return {}
+	var lay = SCREEN_LAYOUT.normalize_layout(settings_bridge.settings.get("screens", {}))
+	var derived = SCREEN_LAYOUT.to_host_directions(lay)
+	var loc = []
+	if lay.local != null:
+		loc.append(String(lay.local.id).strip_edges().to_lower())
+		loc.append(String(lay.local.label).strip_edges().to_lower())
+	var out = {}
+	for k in derived.keys():
+		var ks = String(k).strip_edges()
+		if ks == "" or loc.has(ks.to_lower()):
+			continue
+		out[ks] = derived[k]
+	return out
 
 
 # Serializa en el hilo principal (puro y barato) y escribe en un Thread de un solo

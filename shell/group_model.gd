@@ -183,7 +183,31 @@ static func members(directions, tokens, screens, live_hosts, bt_devices):
 			deduped.remove(i)
 
 	_sort_members(deduped)
-	return deduped
+	# Ruido: una ficha de host sin presencia, sin nombre humano y sin ubicación no
+	# aporta nada al Grupo. Es el residuo de una identidad legacy (hash crudo del hid)
+	# que quedaba como host fantasma al lado de su ficha nominal cuando el equipo está
+	# apagado. Con nombre visible (o viva, o ubicada) se muestra siempre.
+	var shown = []
+	for m in deduped:
+		if not _is_noise(m):
+			shown.append(m)
+	return shown
+
+
+# ¿Ficha anónima y vacía? Sólo para hosts: apagada, id opaco (hash) sin nombre humano
+# y sin lado. Puro; la vista Grupo no la dibuja.
+static func _is_noise(m):
+	if typeof(m) != TYPE_DICTIONARY or String(m.get("kind", "")) != KIND_HOST \
+			or bool(m.get("online", false)):
+		return false
+	var id = String(m.get("id", "")).strip_edges()
+	var nm = String(m.get("name", "")).strip_edges()
+	if nm != "" and nm != id:
+		return false
+	if not _opaque_hid(id):
+		return false
+	var d = String(m.get("direction", "")).strip_edges()
+	return d == "" or d == "none"
 
 
 # Un Bluetooth está "al alcance" si está conectado o el adaptador lo ve ahora (RSSI

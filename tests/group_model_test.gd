@@ -344,6 +344,26 @@ func _placement_tests(GM):
 	check("normalize sin claves nominales no cambia",
 		not bool(GM.normalize({"61950c8964e60e15": {"direction": "west"}}, []).changed))
 
+	# Ruido: un hid opaco apagado, sin nombre humano y sin ubicación no es una ficha
+	# (el hash crudo no se muestra); con lado, vivo o con nombre sí.
+	check("hash apagado sin nombre ni ubicación no se muestra",
+		GM.members({"9c02e9e6b139ffab": {"direction": "none", "along": 0.0}}, {}, [], [], []).empty())
+	check("hash ubicado sí se muestra",
+		GM.members({"9c02e9e6b139ffab": {"direction": "west", "along": 0.5}}, {}, [], [], []).size() == 1)
+	check("hash vivo sí se muestra",
+		GM.members({"9c02e9e6b139ffab": {"direction": "none"}}, {}, [],
+			[{"id": "9c02e9e6b139ffab", "label": "", "state": "visto"}], []).size() == 1)
+
+	# El layout de Pantallas aporta el lado/posición (alias por nombre) para unir la
+	# ficha de pantalla con la identidad física aunque el equipo esté apagado.
+	var with_alias = GM.members({
+		"9c02e9e6b139ffab": {"direction": "west", "along": 0.6825},
+		"redmi": {"direction": "west", "along": 0.6825},
+	}, {}, [{"id": "redmi", "label": "redmi", "peer": "redmi"}], [], [])
+	check("pantalla + alias derivado unifican en el hid",
+		with_alias.size() == 1 and String(with_alias[0].id) == "9c02e9e6b139ffab"
+		and String(with_alias[0].name) == "redmi")
+
 	# N9: conectores entre el centro y los pares con relación activa.
 	var peers = [
 		{"key": "he", "peer_name": "he", "kind": "both", "direction": "out", "state": "active",
